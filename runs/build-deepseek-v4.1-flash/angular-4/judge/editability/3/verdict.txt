@@ -1,0 +1,140 @@
+I've now read the whole app (`app/src` is small: 6 pages, a shared card/not-found, a core API/catalog service, format helpers, a static file server). It's Angular v22 (current stable per the bundled skill, which states Signal Forms are stable in v22+ and recommends the latest line), standalone components with `input()`/`computed`/`toSignal`, OnPush everywhere, new control-flow templates — modern and idiomatic. The editability story is good at the seams (one card component, one ApiService) but weak where three pages copy the same card-list pipeline.
+
+```json
+{
+  "dimension": "editability",
+  "criteria": {
+    "removability": {
+      "score": 4,
+      "evidence": [
+        "app/src/app/app.routes.ts:13 — abilities is exactly one route line next to its component import",
+        "app/src/app/pages/ability-page.ts:1-116 — the whole feature lives in three sibling files (ts/html/css) with no other module importing it",
+        "app/src/app/app.html:7-10 — nav only links Pokémon and Types, so no nav edit is needed",
+        "app/src/app/pages/pokemon-page.html:67-81 — the Abilities section with inbound /abilities links is the one dependent to remove",
+        "app/src/app/shared/pokemon-card.ts:17 — hiddenAbility input exists solely for the ability page and would be dead residue after removal"
+      ],
+      "rationale": "Removing Abilities is delete-three-files plus a route line and one legitimately-dependent section on the Pokémon page; only leftover dead weight is the card's hiddenAbility input."
+    },
+    "changeability": {
+      "score": 4,
+      "evidence": [
+        "app/src/app/shared/pokemon-card.ts:30 — spriteUrl computed + app/src/app/core/api.service.ts:46-49 — spriteFor(): the sprite rule lives in one shared component, so one fix covers home, move, ability and type card lists",
+        "app/src/app/shared/pokemon-card.ts:34-45 — onImageError fallback already centralises the per-Pokémon sprite lookup",
+        "app/src/app/pages/move-page.ts:66-80, app/src/app/pages/ability-page.ts:58-72, app/src/app/pages/type-page.ts:65-81 — the dedupe/alternate-forms (>10000)/id-sort pipeline is copy-pasted in three pages, so that bug class needs three edits",
+        "app/src/app/pages/pokemon-page.ts:88-93 — defaultVariety() is private to this page, so a variety-aware sprite fix would need it lifted rather than reused"
+      ],
+      "rationale": "The headline sprite bug is a genuine one-place fix shared by every card list, but a neighbouring bug class (alternate-form filtering, ordering) is triplicated across pages."
+    },
+    "coupling": {
+      "score": 4,
+      "evidence": [
+        "app/src/app/core/api.service.ts:5-17 — client reads the injected base URL through a declared global; server.mjs:12-15 injects it, so server and client are cleanly separated",
+        "app/src/app/shared/pokemon-card.ts:22,34-45 — the leaf UI card injects ApiService and performs an HTTP fallback fetch itself, the one place a presentational component reaches into the data layer",
+        "app/src/app/pages/home-page.ts:55-57 — parseQuery(params as unknown as Map<string, string>) double-cast papers over QueryParamMap instead of typing the seam",
+        "app/src/app/core/catalog.service.ts:87-137 — shared state is explicit, built in one injectable service, consumed read-only by pages"
+      ],
+      "rationale": "Pages depend on narrow, injectable services and input-driven shared components; the only tangles are the card's direct HTTP access and one cast hack."
+    },
+    "abstraction_design": {
+      "score": 3,
+      "evidence": [
+        "app/src/app/shared/pokemon-card.ts:14-19 — the card abstraction stretches well via optional types/hiddenAbility inputs rather than boolean-flag creep",
+        "app/src/app/core/format.ts:1-60 — humanize/englishName/flavor helpers are properly factored and reused",
+        "app/src/app/core/catalog.service.ts:94-95,128 — Catalog.speciesById is built and exported but unused, while move-page.ts:42, ability-page.ts:37 and type-page.ts:42 each rebuild the identical map locally",
+        "app/src/app/pages/move-page.ts:34-45 — paramMap→optional fetch→title effect→tri-state template scaffolding is inlined per page (same in ability, type, pokemon), so a new Items/Moves-shaped page copies ~half its code"
+      ],
+      "rationale": "The card component and format helpers are good, but the card-list-from-Pokémon-refs transformation was copy-pasted three times and the intended catalog abstraction (speciesById) was never wired in, so similar-but-different cases mean copy-paste."
+    }
+  },
+  "overall": 4,
+  "findings": [
+    {
+      "severity": "medium",
+      "location": "app/src/app/pages/move-page.ts:66",
+      "issue": "The Pokémon-refs-to-cards pipeline (filter id>10000, dedupe, map id→species name, sort by id) is duplicated verbatim in move-page (66-80), ability-page (58-72) and type-page (65-81); a change to alternate-form rules or ordering needs three edits.",
+      "suggestion": "Add a CatalogService helper (e.g. speciesCardsFor(refs: NamedRef[])) that all card lists call; it can also own the speciesById lookup."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/app/core/api.service.ts:27",
+      "issue": "Response caching rules are spread over ApiService (Map + shareReplay, line 20-33), CatalogService (shareReplay at 48/69/85/137) and PokemonPage (shareReplay at 205/212/249/304); changing cache policy (TTL, invalidation, refCount) means touching three files.",
+      "suggestion": "Centralise caching in ApiService.get() (it already caches the underlying Observables) and document that derived streams rely on it, or add a single cached()/shareReplay helper all streams use."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/app/core/catalog.service.ts:94",
+      "issue": "Catalog.speciesById is computed and exported but never consumed; every page rebuilds the same id→species map locally.",
+      "suggestion": "Either consume it from the catalog in the pages or delete it from the Catalog interface."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/app/pages/move-page.html:1",
+      "issue": "The tri-state loading condition (undefined=loading / null=not found) plus the @else not-found branch is duplicated in four page templates (move, ability, type, pokemon), easy to get subtly wrong in the next page.",
+      "suggestion": "Extract a shared pattern (e.g. a PageState wrapper component or an httpResource/resource-based resolver) that normalises the loading/error/loaded states."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/app/shared/pokemon-card.ts:22",
+      "issue": "A presentational card injects ApiService and performs its own fallback HTTP fetch, with a mutable triedFallback flag that won't reset if pokemonId input changes on component reuse.",
+      "suggestion": "Make the triedFallback reset via an effect on pokemonId(), or move the fallback resolution into a computed that takes the fetched sprite via an optional input/service signal."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/app/pages/home-page.ts:55",
+      "issue": "parseQuery(params as unknown as Map<string, string>) double-casts QueryParamMap, hiding the real type of the URL seam.",
+      "suggestion": "Type parseQuery against ParamMap (it only calls .get()) and drop the cast."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/app/core/api.service.ts:16",
+      "issue": "The default API base URL is duplicated: client fallback 'http://localhost:9000' here and again in server.mjs:9.",
+      "suggestion": "Keep a single default (e.g. const in a shared module imported by both, or let the client treat the injected value as mandatory)."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/app/pages/move-page.ts:83",
+      "issue": "The title-setting effect (setTitle with '– Pokédex' formatting) is repeated in four detail pages.",
+      "suggestion": "Extract a small helper (e.g. pokedexTitle(name) and/or a route-data title strategy) so the formatting rule lives once."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/app/app.routes.ts:10",
+      "issue": "All routes are eagerly imported; bundle is one initial chunk (budgets at angular.json confirm), so a new section grows the initial payload.",
+      "suggestion": "Use loadComponent for detail pages once the app grows beyond one screenful of routes."
+    }
+  ],
+  "summary": "Well-structured Angular 22 code: page/shared/core separation, DI'd services, one shared card component and one ApiService make the highest-traffic changes (sprites, media URLs, base URL) one-place fixes. The main editability cost is the Pokémon-card-list pipeline copy-pasted across three pages and caching rules spread over three files. A PR reviewer would ask for the card-list helper and the unused catalog.speciesById to be resolved, then approve.",
+  "scenarios": [
+    {
+      "change": "Remove the Abilities pages and every link to them",
+      "files": ["app/src/app/app.routes.ts", "app/src/app/pages/ability-page.ts", "app/src/app/pages/ability-page.html", "app/src/app/pages/ability-page.css", "app/src/app/pages/pokemon-page.html"],
+      "difficulty": 4,
+      "notes": "Delete three sibling files and one route line; nav has no ability link. The Abilities section on pokemon-page.html:67-81 is the only inbound link source; PokemonCard's hiddenAbility input (pokemon-card.ts:17) becomes dead code afterwards."
+    },
+    {
+      "change": "Fix wrong sprite for species whose default Pokémon has a different name (e.g. Deoxys)",
+      "files": ["app/src/app/shared/pokemon-card.ts", "app/src/app/core/api.service.ts"],
+      "difficulty": 5,
+      "notes": "Every list of cards (home, move, ability, type) renders app-pokemon-card, and sprite URL construction is one computed (pokemon-card.ts:30) over ApiService.spriteFor (api.service.ts:46) with an existing fallback fetch, so one edit covers all lists. Only caveat: if the fix needs the default-variety lookup, defaultVariety() is currently private to pokemon-page.ts:88 and must be lifted."
+    },
+    {
+      "change": "Add sorting by name to every list of Pokémon cards",
+      "files": ["app/src/app/pages/home-page.ts", "app/src/app/pages/move-page.ts", "app/src/app/pages/ability-page.ts", "app/src/app/pages/type-page.ts"],
+      "difficulty": 2,
+      "notes": "Each page sorts its own copy of the card list by id (home-page.ts:96, move-page.ts:79, ability-page.ts:72, type-page.ts:81), so the same comparator change lands in four files — exactly the duplication a CatalogService card helper would eliminate."
+    },
+    {
+      "change": "Add an Items section (/items, /items/:name) shaped like Moves",
+      "files": ["app/src/app/app.routes.ts", "app/src/app/core/models.ts", "app/src/app/core/api.service.ts", "app/src/app/pages/move-page.ts", "app/src/app/pages/move-page.html", "app/src/app/pages/type-list-page.ts", "app/src/app/pages/type-list-page.html"],
+      "difficulty": 3,
+      "notes": "ApiService, format helpers, NotFoundComponent and panel/section conventions are directly reusable, but the per-page scaffolding (paramMap→optional fetch at move-page.ts:34-45, title effect at 83, tri-state template at move-page.html:1) has no abstraction, so roughly half of move-page and type-list-page would be copied and adapted."
+    },
+    {
+      "change": "Change the API base URL and caching rules",
+      "files": ["app/src/app/core/api.service.ts", "app/server.mjs", "app/src/app/core/catalog.service.ts", "app/src/app/pages/pokemon-page.ts"],
+      "difficulty": 3,
+      "notes": "Base URL is well centralised (client reads it in one place, api.service.ts:14-17; server injects the global at server.mjs:12-15), though the 'http://localhost:9000' default is duplicated in both. Caching rules live in three places: ApiService's Map (api.service.ts:20-33), CatalogService's four shareReplays (48/69/85/137) and PokemonPage's four (205/212/249/304)."
+    }
+  ]
+}
+```

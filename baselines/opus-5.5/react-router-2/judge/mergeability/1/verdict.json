@@ -1,0 +1,129 @@
+{
+  "dimension": "mergeability",
+  "criteria": {
+    "idiomatic": {
+      "score": 4,
+      "evidence": [
+        "app/app/routes.ts:1-9 — typed route config via `@react-router/dev/routes` with index/route/splat, exactly the documented framework shape",
+        "app/app/routes/type.tsx:21-22 and app/app/lib/api.server.ts:69-72 — missing resources handled with `throw data(\"Not found\", { status: 404 })`, the current docs' 404 pattern, giving real 404 responses under SSR",
+        "app/app/root.tsx:9-53 — root `Layout` export wrapping App and ErrorBoundary, `Meta`/`Links`/`Scripts`/`ScrollRestoration`, exactly the recommended root route",
+        "app/app/lib/api.server.ts:1 — server-only module with the `.server.ts` suffix keeps the API/cache boundary out of the client bundle",
+        "app/app/routes/home.tsx:37-54 — filter state parsed from the URL in the loader, per the framework's \"search/filter in the loader\" guidance",
+        "app/app/routes/home.tsx:58-160 — deviation: uncontrolled inputs + refs + two sync effects instead of `useSearchParams`/`<Form>`; home-grown but carefully built",
+        "app/app/routes/home.tsx:172, app/app/routes/pokemon.tsx:56 — `<title>` rendered in components instead of the canonical `meta` export (works via React 19 hoisting, but bypasses the framework's meta pipeline)",
+        "app/app/routes/not-found.tsx:6-10 — splat route whose component renders `null`, with the real UI living in root's ErrorBoundary — an odd indirection"
+      ],
+      "rationale": "This reads like the framework's own examples: typed route modules, loader-side URL parsing, data-thrown 404s, `.server.ts` boundaries, and a docs-matching Express adapter setup. The deviations (JSX `<title>` instead of `meta`, ref-driven filter state, the null-rendering catch-all) are deliberate and work, but a reviewer following the docs would ask for the canonical primitives."
+    },
+    "correctness_risks": {
+      "score": 4,
+      "evidence": [
+        "app/app/lib/api.server.ts:12-20 — promise-level cache with rejection eviction avoids caching failed requests and unhandled rejections; expired entries are only lazily dropped (memory bounded by the fixed API's resource count, but never pruned proactively)",
+        "app/app/routes/home.tsx:86-92 — pre-hydration input handling: compares DOM values against loader data on mount and reconciles with a replace-navigation; thoughtful SSR edge case",
+        "app/app/routes/home.tsx:50-52 — out-of-range `page` is clamped to the last page but the stale `page=999` stays in the URL, a minor URL/content mismatch",
+        "app/app/routes/pokemon.tsx:158-162 — the second mount effect resets the select to the old server `game` before the pre-hydration navigation lands, causing a transient flicker before the correct value re-syncs",
+        "app/app/lib/api.server.ts:112-121 — `pokemonCards` dedupes by first occurrence, so a Pokémon listed with both a normal and a hidden instance of an ability would keep whichever hidden flag came first",
+        "app/app/routes/pokemon.tsx:81-86 — one fetch per move detail for the selected game (up to ~100 concurrent) per cold request; bounded by the cache and local API, but a bursty fan-out",
+        "app/app/routes/MoveTable.tsx:39-49 — null handling in sorting correctly puts missing values last in both directions; `sign * compare(...) || tiebreak` relies on 0 being falsy, which is correct but subtle"
+      ],
+      "rationale": "No serious bugs found: 404 handling is comprehensive, caching failures evict properly, no SSR/CSR mismatches (uncontrolled inputs, sort state starts null), no leaked listeners, and sorting/missing-value edge cases match the spec. What remains are cosmetic-level races and a cache that never prunes, all low-risk for this data."
+    },
+    "global_abstractions": {
+      "score": 4,
+      "evidence": [
+        "app/app/lib/api.server.ts — one server data module owning cache, index building, and card view-models; the `.server.ts` suffix keeps the boundary clean, and loaders in all routes consume it uniformly (routes/move.tsx:10, routes/ability.tsx:4, routes/type.tsx:4)",
+        "app/app/lib/types.ts — tiny shared view-model types (Card, TypeInfo) rather than a god types file; API response shapes are declared per-route, which duplicates `Move` across app/app/routes/pokemon.tsx:43-51 and app/app/routes/move.tsx:8-18",
+        "app/app/root.tsx:56-66 plus app/app/routes/not-found.tsx:6-10 — two not-found implementations (root `NotFound` component and a splat route that renders null); React Router already auto-404s unmatched paths into the root boundary, so the splat route is dead weight",
+        "app/app/components/Section.tsx:7-11 — a single, well-scoped abstraction (aria-labelledby section) used consistently across every route",
+        "app/app/lib/format.ts — small pure helpers, no hidden state"
+      ],
+      "rationale": "Abstractions are few and earn their keep: one server data module with a clear server/client boundary, one Section component, pure format helpers. The only untangling needed later is the duplicated not-found plumbing and the repeated inline API-shape types."
+    },
+    "readability": {
+      "score": 5,
+      "evidence": [
+        "app/app/lib/api.server.ts:97-99 — comment explains what the Index aggregates and why; loader sections carry why-comments (\"Version groups in which this Pokémon learns moves…\", pokemon.tsx:59)",
+        "app/app/routes/home.tsx:87-93 — comments explain the two sync effects (pre-hydration input, back/forward without clobbering typing) — exactly the kind of why a future maintainer needs",
+        "app/app/lib/format.ts:6-40 — tiny named pure functions with docstrings and spec-quoted examples (`mr-mime` → `Mr Mime`)",
+        "Consistent file layout: routes/, components/, lib/, one concern per file; components are all under 120 lines",
+        "app/app/routes/pokemon.tsx:126-149 — small presentational subcomponents (EvolutionList, StatBar) extracted within the route file rather than over-modularized"
+      ],
+      "rationale": "A new teammate would find their way in minutes: naming matches the spec's vocabulary, loaders are sectioned with why-comments, and the pre-hydration and sync effects — the trickiest code in the repo — are precisely the parts that carry explanatory comments."
+    },
+    "review_cost": {
+      "score": 4,
+      "evidence": [
+        "app/app/routes/not-found.tsx:6-10 — the null-rendering catch-all is the one thing I'd require clarification/rework on before approving",
+        "app/app/routes/home.tsx:58-160 — ref-and-effects filter plumbing would prompt a \"why not useSearchParams/controlled state?\" question, though it's defensible",
+        "app/app/components/MoveTable.tsx:88 — row key includes the array index (`${row.name}-${row.level ?? \"\"}-${i}`), an easy self-serve fix",
+        "app/package.json:18 — `isbot` is a template leftover the app never imports",
+        "app/server.mjs:1-19 — production server matches the official adapter docs (immutable /assets, Express 5 splat, top-level build import); nothing to change"
+      ],
+      "rationale": "Approve with nits: the null-rendering not-found route, title-vs-meta choice, and a couple of key/index nits are the only things I'd ask for, and none require significant rework."
+    }
+  },
+  "overall": 4,
+  "findings": [
+    {
+      "severity": "medium",
+      "location": "app/app/routes/not-found.tsx:6-10",
+      "issue": "The catch-all route's loader throws a 404 and its component renders `null`, so the real not-found UI lives in root.tsx's ErrorBoundary (`NotFound` export) — an indirect flow that duplicates not-found plumbing and surprises readers.",
+      "suggestion": "Either delete the splat route (React Router already routes unmatched paths into the root ErrorBoundary with a 404 ErrorResponse) or render the UI in the route itself and drop the root `NotFound` export."
+    },
+    {
+      "severity": "low",
+      "location": "app/app/routes/home.tsx:58-160",
+      "issue": "Filter state is managed with uncontrolled inputs, refs, and two sync effects rather than the framework's `useSearchParams`/`<Form>` primitives.",
+      "suggestion": "Drive the controls from `useSearchParams` (controlled), keeping the pre-hydration reconciliation effect; it would remove the manual DOM syncing and be closer to the documented pattern."
+    },
+    {
+      "severity": "low",
+      "location": "app/app/routes/home.tsx:172",
+      "issue": "`<title>` is rendered in JSX instead of a `meta` export; correct per React 19 hoisting, but bypasses the framework's typed meta pipeline and the `Meta` component.",
+      "suggestion": "Move titles to `meta` exports (same for pokemon.tsx, move.tsx, ability.tsx, type.tsx, types.tsx, root.tsx)."
+    },
+    {
+      "severity": "low",
+      "location": "app/app/routes/home.tsx:50-52",
+      "issue": "An out-of-range `page` query (e.g. `?page=999`) is clamped to the last page for rendering but the URL keeps the stale value.",
+      "suggestion": "Redirect to the clamped page's URL in the loader when `requested` differs from the effective page."
+    },
+    {
+      "severity": "low",
+      "location": "app/app/routes/pokemon.tsx:150-162",
+      "issue": "On mount, the second effect resets the game `<select>` to the server's value before a pre-hydration pick's navigation lands, causing a transient wrong-selection flicker.",
+      "suggestion": "Skip the value-reset effect on first mount (or gate it on a mounted ref) so it only syncs on subsequent loader updates."
+    },
+    {
+      "severity": "low",
+      "location": "app/app/lib/api.server.ts:112-121",
+      "issue": "`pokemonCards` dedupes by first occurrence, so a Pokémon listed with both a normal and a hidden instance of the same ability keeps whichever flag appeared first.",
+      "suggestion": "When merging duplicates, prefer the non-hidden entry (or set the flag from any hidden entry) deterministically."
+    },
+    {
+      "severity": "low",
+      "location": "app/app/routes/pokemon.tsx:43-51",
+      "issue": "The `Move` API shape (and `Translated`/`NamedResource` response shapes generally) is declared independently in pokemon.tsx and move.tsx.",
+      "suggestion": "Move API record types to `lib/types.ts` next to `Card` so the two definitions can't drift."
+    },
+    {
+      "severity": "low",
+      "location": "app/app/components/MoveTable.tsx:88",
+      "issue": "Row keys embed the array index (`${row.name}-${row.level ?? \"\"}-${i}`), defeating React's reconciliation on sort.",
+      "suggestion": "Key by move name plus level (or method+name+level) without the index."
+    },
+    {
+      "severity": "low",
+      "location": "app/app/lib/api.server.ts:10-20",
+      "issue": "Expired cache entries are only discarded when next read; the map never proactively prunes, so stale values linger for the process lifetime.",
+      "suggestion": "Fine at this data scale; optionally sweep expired entries on write."
+    },
+    {
+      "severity": "low",
+      "location": "app/package.json:18",
+      "issue": "`isbot` is listed as a dependency but never imported (it's a template leftover for a custom entry.server the app doesn't have).",
+      "suggestion": "Remove `isbot` from dependencies."
+    }
+  ],
+  "summary": "A genuinely idiomatic React Router v8 framework-mode app: typed route modules, loader-side URL parsing, docs-prescribed data-thrown 404s, a clean `.server.ts` data boundary, and a docs-matching Express adapter setup, with comments that explain the trickiest SSR/sync decisions. The main merge frictions are the null-rendering catch-all route, JSX titles instead of `meta` exports, and ref-driven filter state instead of `useSearchParams` — all addressable as nits. I'd approve after one round of minor changes."
+}

@@ -1,0 +1,121 @@
+{
+  "dimension": "mergeability",
+  "criteria": {
+    "idiomatic": {
+      "score": 4,
+      "evidence": [
+        "app/nuxt.config.ts:1-17 — correct Nuxt 4 config (srcDir app/, css, htmlAttrs lang, nitro node-server preset)",
+        "app/app/pages/index.vue:101-103 — useFetch/useAsyncData with reactive getters and URL-as-state (router.push/replace), the documented pattern",
+        "app/app/pages/pokemon/[name].vue:101-103 — reactive URL + query with useFetch; watch override is redundant (URL/query auto-refetch via reactive key) but harmless",
+        "app/server/api/app/pokemon/[name].get.ts:2-6 — Nitro server routes + getRouterParam/getQuery/setResponseStatus idiomatic API layer",
+        "app/app/pages/types/[name].vue:2 — NotFoundPage rendered inline in 4 pages instead of throw createError({statusCode:404}) + error.vue, a home-grown workaround where a framework feature exists"
+      ],
+      "rationale": "Structurally and composable-wise this reads like the Nuxt 4 docs examples; the only non-idiomatic spot is the hand-rolled inline 404 rendering instead of the framework error path."
+    },
+    "correctness_risks": {
+      "score": 4,
+      "evidence": [
+        "app/app/pages/index.vue:104-115 — search debounce timer never cleared on unmount; pending router.replace('/') can fire after the user has navigated to a Pokémon page, yanking them back to home",
+        "app/server/utils/pokeapi.ts:354 — move-detail fetches via unbounded Promise.all (no mapLimit like pokeapi.ts:186); ~200+ moves for a learnset-heavy Pokémon fan out simultaneously",
+        "app/app/pages/moves/[name].vue:2 — any non-404 upstream failure (500/network) renders as the 'Not found' page because data is null on error",
+        "app/server/utils/pokeapi.ts:27 — rawCache/preparedMoves Maps never evict; acceptable here because the API snapshot is fixed, but unbounded by design",
+        "app/server/utils/pokeapi.ts:186-190 — first dex request blocks on ~1,100 upstream fetches (cold-start latency)"
+      ],
+      "rationale": "A few minor fragilities — a debounce/navigation race, unbounded fetch fan-out, and error/404 conflation — but no serious bug found after checking against current framework behavior."
+    },
+    "global_abstractions": {
+      "score": 3,
+      "evidence": [
+        "app/server/utils/pokeapi.ts:226-527 — single 550-line god data module every page flows through, returning page/presentation-shaped payloads",
+        "app/server/utils/pokeapi.ts:27-31 — hidden module-level caches (rawCache, dexIndexPromise, preparedMoves) shared across all handlers",
+        "app/server/utils/pokeapi.ts:161,230,282,442 — identical typeLabel Map construction duplicated in four functions",
+        "app/app/components/MoveTables.vue:132 — displayNumber duplicated from app/app/pages/moves/[name].vue:55"
+      ],
+      "rationale": "The server-only data layer has a clean server/client boundary and earns its keep with caching, but it's one oversized module with internal duplication and hidden global caches that will need splitting as the app grows."
+    },
+    "readability": {
+      "score": 4,
+      "evidence": [
+        "app/app/components/PokemonCard.vue:9-24 — small, well-named, typed components; consistent structure across pages",
+        "app/server/utils/pokeapi.ts:1-4 — the only real comments in the codebase; tricky fallbacks like englishName's name||genus (pokeapi.ts:45-49) are unexplained",
+        "app/app/components/MoveTables.vue:71,114,132 — pervasive any-typed parameters throughout components and server utils",
+        "app/app/pages/index.vue:64-68 — any-typed filter lambdas despite a typed SpeciesSummary existing in the data layer"
+      ],
+      "rationale": "A new teammate finds their way quickly: naming, file organization and component size are all good; rough spots are the pervasive any typing and near-zero comments on non-obvious logic."
+    },
+    "review_cost": {
+      "score": 3,
+      "evidence": [
+        "app/app/pages/index.vue:107 — timer cleanup on unmount would be a required fix",
+        "app/server/utils/pokeapi.ts:354 — concurrency cap for move fan-out requested before merge",
+        "app/server/utils/pokeapi.ts:267 — untyped page payloads defeat typed $fetch inference; typing handlers is a round of changes",
+        "app/app/pages/index.vue:53 — full 1025-species index (with sprite URLs per species) serialized into __NUXT_DATA__ on every home load"
+      ],
+      "rationale": "Approve-with-changes: one real round of fixes (timer race, fetch fan-out, handler return types, payload weight), plus nits on duplication — no architectural rework needed."
+    }
+  },
+  "overall": 4,
+  "findings": [
+    {
+      "severity": "medium",
+      "location": "app/app/pages/index.vue:107",
+      "issue": "Search-debounce setTimeout is never cancelled on unmount; if the user types then clicks a card within 250ms, router.replace('/') fires after navigation and pulls them back to the home page",
+      "suggestion": "Clear searchTimer in onBeforeUnmount/onScopeDispose, or check that the route is still '/' before replacing"
+    },
+    {
+      "severity": "medium",
+      "location": "app/server/utils/pokeapi.ts:354",
+      "issue": "Move-detail fetches run via unbounded Promise.all — a Pokémon with a large learnset for the selected game fans out hundreds of simultaneous upstream requests",
+      "suggestion": "Reuse the existing mapLimit helper (pokeapi.ts:107) with a modest concurrency cap, as done for the dex index"
+    },
+    {
+      "severity": "medium",
+      "location": "app/app/pages/index.vue:53",
+      "issue": "The full ~1025-species dex index, including a sprite URL per species, is fetched via useAsyncData and serialized into the __NUXT_DATA__ payload on every home-page load, inflating HTML weight",
+      "suggestion": "Serve only what the list page renders (server-side filter/pagination), or slim the species summary (e.g. relative sprite paths, ids instead of label objects)"
+    },
+    {
+      "severity": "low",
+      "location": "app/app/pages/moves/[name].vue:2",
+      "issue": "Any non-404 upstream failure (500, network error) leaves data null and the page renders as 'Not found', conflating server errors with missing resources",
+      "suggestion": "Distinguish error from not-found via the useFetch error ref (or throw createError) and show a real error state"
+    },
+    {
+      "severity": "low",
+      "location": "app/server/utils/pokeapi.ts:226",
+      "issue": "pokeapi.ts is a 550-line god data module: all five page shapes, three hidden caches, and duplicate typeLabel construction (lines 161, 230, 282, 442) in one file",
+      "suggestion": "Split per resource (dex, pokemon, move, ability, type), share a typeLabel lookup helper, and keep the caches in one small client module"
+    },
+    {
+      "severity": "low",
+      "location": "app/server/api/app/pokemon/[name].get.ts:6",
+      "issue": "Handlers return untyped payloads (Promise<any|null>), so Nuxt 4's typed $fetch/useFetch inference yields any on the client and every component re-declares props loosely with any",
+      "suggestion": "Type the handler return values (the SpeciesSummary/TypeMeta types already exist) to get end-to-end types in the pages"
+    },
+    {
+      "severity": "low",
+      "location": "app/app/pages/pokemon/[name].vue:103",
+      "issue": "watch: [game] is redundant — the reactive URL getter and query are auto-refetched via the computed key (verified against Nuxt 4.6 docs/source), and it's inconsistent with the sibling move/ability/type pages that pass no watch",
+      "suggestion": "Drop the watch override and rely on the reactive URL+query, matching the other detail pages"
+    },
+    {
+      "severity": "low",
+      "location": "app/app/pages/moves/[name].vue:55",
+      "issue": "displayNumber duplicated verbatim in MoveTables.vue:132",
+      "suggestion": "Extract a shared helper (auto-imported from app/utils) or a tiny module"
+    },
+    {
+      "severity": "low",
+      "location": "app/server/utils/pokeapi.ts:186",
+      "issue": "Cold start: the first request to any dex-backed page blocks on ~1,100 upstream fetches at concurrency 48, giving a multi-second first hit",
+      "suggestion": "Warm the index on server boot (a Nitro plugin) or cache the built index to disk if acceptable under the spec's live-data rule"
+    },
+    {
+      "severity": "low",
+      "location": "app/app/pages/types/[name].vue:2",
+      "issue": "NotFoundPage is rendered inline via v-if in four detail pages, duplicating the not-found branch instead of using the framework's error path",
+      "suggestion": "throw createError({ statusCode: 404 }) when data is not found and render a single error.vue; this also sets the HTTP status consistently"
+    }
+  ],
+  "summary": "A well-structured, genuinely idiomatic Nuxt 4 app: correct v4 layout, a sensible server-side aggregation/caching layer over the chatty PokeAPI, and clean small components. The main review items are a debounce/navigation race, an unbounded move-detail fetch fan-out, a heavyweight serialized dex payload, and a 550-line untyped god data module. I'd merge after one modest round of fixes."
+}

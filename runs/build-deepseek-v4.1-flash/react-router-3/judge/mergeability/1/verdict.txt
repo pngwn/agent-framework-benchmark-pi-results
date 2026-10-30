@@ -1,0 +1,142 @@
+I've now read every source file, verified the framework guidance (React Router 8.5.1 is the current stable line; the app is on it), and checked the documented patterns for 404s, root `Layout`, `ScrollRestoration`, and route-module types against what this app actually does.
+
+## Assessment
+
+**What's good.** This is recognisably a framework-mode app, not a fight against the framework: `routes.ts` uses the current `RouteConfig`/`index`/`route` API with a splat catch-all (`app/app/routes.ts:1-9`); filtering/pagination/game selection is URL-driven and parsed in the loader (`app/app/routes/home.tsx:21-107`); `meta` uses the v8-correct `loaderData` arg (`app/app/routes/pokemon.tsx:22`); API access is centralized in a server-only module via the `.server.ts` convention with a rejection-invalidated promise cache (`app/app/lib/data.server.ts:11-30`), which is a clean client/server boundary, not a leak. Client state is seeded from loader data, so there are no hydration mismatches (`app/app/routes/home.tsx:111-112`), the search debounce cleans up its timer (`app/app/routes/home.tsx:127-141`), and there are no unescaped-HTML or XSS vectors anywhere.
+
+**What I'd ask to change.**
+1. The app-wide 404 convention is home-grown: loaders return `{ notFound: true }` and each component/meta re-checks it (`app/app/routes/pokemon.tsx:144`, `:27`, `:20`, `:31`), instead of the documented `throw data("Not Found", { status: 404 })` → `ErrorBoundary` pattern (reactrouter.com/8.5.1/how-to/status). It works deterministically, but it also means missing resources are served with HTTP 200 and the protocol is duplicated five ways.
+2. The root `Layout` export is used only for the document shell; the site chrome lives in `App`, so when any loader throws, the root `ErrorBoundary` renders a page with no banner, navigation or footer (`app/app/root.tsx:86-108`) — precisely the duplication the `Layout` export exists to prevent, and a landmark loss the spec requires on every page.
+3. ~70 `any` annotations sit exactly at the seams the framework's typegen is designed to type: `loader({ request }: any)` and `Home({ loaderData }: any)` (`app/app/routes/home.tsx:21`, `:110`), when `Route.LoaderArgs`/`Route.ComponentProps`/`Route.MetaArgs` from `./+types/*` are one import away. Strict mode on (`app/tsconfig.json:22`) is undermined by this.
+4. Smaller nits: `HashScroller` reimplements hash scrolling that `<ScrollRestoration />` already performs, with magic double timers (`app/app/root.tsx:33-50`); `isbot` is a dead dependency since there's no custom `entry.server` (`app/package.json:14`); dex padding is duplicated instead of reusing `dexNumber` (`app/app/components/ui.tsx:52` vs `app/app/lib/format.ts:28`); `species.genera.find(... entry.language.name ...)` is unguarded against odd data (`app/app/routes/pokemon.tsx:273`); and an unknown `?type=` leaves the select showing "All types" while the list is empty (`app/app/routes/home.tsx:196-203`).
+
+**Abstractions** are, on balance, a strength: one data module with a clear server-only boundary, pure format helpers, and small composable card/badge components. The only globally-problematic pattern is the `notFound` protocol above. **Readability** is good (files map 1:1 to routes, spec vocabulary in naming) but zero comments across 879 LOC leaves the clever bits (cache invalidation, scroll timers, method sort order) unexplained, and `pokemon.tsx` at 430 lines mixes a ~150-line loader with three view components.
+
+Overall: solid, current-generation framework code I'd be comfortable owning, but with one round of changes requested before approving.
+
+```json
+{
+  "dimension": "mergeability",
+  "criteria": {
+    "idiomatic": {
+      "score": 3,
+      "evidence": [
+        "app/app/routes.ts:1-9 — current RouteConfig/index/route API with splat catch-all; correct v8 usage",
+        "app/app/lib/data.server.ts:1-30 — '.server.ts' server-only module with rejection-invalidated promise cache; idiomatic client/server boundary",
+        "app/app/routes/pokemon.tsx:144 — 'return { notFound: true }' home-grown 404 protocol instead of documented 'throw data(\"Not Found\", { status: 404 })' → ErrorBoundary (how-to/status)",
+        "app/app/routes/home.tsx:21 — 'loader({ request }: any)' bypasses generated Route.LoaderArgs; same at pokemon.tsx:142, move.tsx:22, type.tsx:26",
+        "app/app/root.tsx:33-50 — HashScroller reimplements hash scrolling that <ScrollRestoration/> already provides",
+        "app/app/root.tsx:86 — hand-typed '{ error: unknown }' instead of Route.ErrorBoundaryProps from ./+types/root"
+      ],
+      "rationale": "Core framework usage (route config, URL-driven loaders, meta with loaderData, .server modules, Layout export) is current and correct, but three of the framework's flagship mechanisms — 404-throw pattern, route typegen, built-in hash scrolling — are worked around by hand."
+    },
+    "correctness_risks": {
+      "score": 3,
+      "evidence": [
+        "app/app/root.tsx:86-108 — thrown loader errors render a page with no banner/navigation/contentinfo (spec requires them on every page); Layout exists to prevent exactly this",
+        "app/app/routes/pokemon.tsx:273 — 'entry.language.name' dereferenced unguarded in genera find; a TypeError there lands on the chrome-less root boundary",
+        "app/app/routes/home.tsx:67-68 — out-of-range ?page= is clamped for display but the URL keeps the stale value",
+        "app/app/routes/home.tsx:196-203 — unknown ?type= value leaves select visually on 'All types' while loader empties the list (home.tsx:43-47)",
+        "app/app/routes/home.tsx:111-141 — debounce cleanup and loader-seeded local state: no hydration mismatch or stale-timer race found",
+        "app/app/lib/data.server.ts:14-21 — failed promises are evicted from the cache; cache keys are bounded by dataset size"
+      ],
+      "rationale": "No serious bugs, but the error path silently drops the site chrome and a few minor fragilities (unguarded property access, stale URL on clamped page, inconsistent select state) would surface in production."
+    },
+    "global_abstractions": {
+      "score": 4,
+      "evidence": [
+        "app/app/lib/data.server.ts:11-30 — single server-only data layer with explicit cache; clean boundary, sanctioned by spec",
+        "app/app/lib/format.ts:4-31 — pure, single-purpose formatting helpers",
+        "app/app/components/ui.tsx:16-78 — small composable TypeBadge/PokemonCard/PokemonCardList; no god component",
+        "app/app/routes/pokemon.tsx:144 — 'notFound' flag is an implicit cross-route protocol duplicated in 4 loaders, 4 components and 4 meta functions"
+      ],
+      "rationale": "Abstractions are few and earn their keep; the only globally-costly pattern is the hand-rolled not-found protocol that will need untangling when someone adds a route and forgets to re-implement it."
+    },
+    "readability": {
+      "score": 4,
+      "evidence": [
+        "app/app/routes/*.tsx — one file per page, names mirror spec vocabulary (genus, flavorText, moveTables: pokemon.tsx:281-291)",
+        "app/app/lib/format.ts — one home per formatting rule (humanize, dexNumber, statLabel)",
+        "app/app/lib/data.server.ts:14-21 — subtle rejection-invalidation logic with no comment; 0 comment lines across 879 LOC",
+        "app/app/routes/pokemon.tsx:142-425 — ~150-line loader plus three view components in one 430-line module; MoveTable (:80) would split out",
+        "app/app/components/ui.tsx:52 — dex padding duplicated instead of reusing format.ts:28 dexNumber (also pokemon.tsx:317)"
+      ],
+      "rationale": "A new teammate finds their way quickly thanks to consistent naming and structure; rough spots are the total absence of 'why' comments on the clever parts and the oversized pokemon.tsx."
+    },
+    "review_cost": {
+      "score": 3,
+      "evidence": [
+        "app/app/routes/pokemon.tsx:144 — 404-throw migration touches 4 routes, their components and 4 meta functions",
+        "app/app/routes/home.tsx:21,110 — typing the loader/component seams is mechanical but touches every route file",
+        "app/app/root.tsx:86 — moving site chrome from App into Layout is a small, contained change",
+        "app/package.json:14 — dropping unused isbot and root.tsx:33-50 removing HashScroller are trivial deletes"
+      ],
+      "rationale": "Approvable after one focused round: adopt the framework's 404 pattern, type the route seams, relocate the app shell into Layout, and delete the redundant hash scroller and dead dependency — all mechanical, no rework."
+    }
+  },
+  "overall": 3,
+  "findings": [
+    {
+      "severity": "medium",
+      "location": "app/app/routes/pokemon.tsx:144",
+      "issue": "Home-grown 'notFound: true' return protocol in four loaders (pokemon.tsx:144, move.tsx:27, ability.tsx:20, type.tsx:31) plus matching component and meta special-cases, instead of the documented 'throw data(\"Not Found\", { status: 404 })' → ErrorBoundary flow; missing resources also respond with HTTP 200.",
+      "suggestion": "Throw data(...) with status 404 from loaders and render the shared NotFound UI from route ErrorBoundaries (or a single shared boundary); delete the flag checks from components and meta functions."
+    },
+    {
+      "severity": "medium",
+      "location": "app/app/root.tsx:86",
+      "issue": "Root ErrorBoundary renders without the site banner, navigation and footer because the app shell lives in App rather than Layout — any thrown loader error produces a chrome-less page that violates the spec's landmark requirements on every page.",
+      "suggestion": "Move the header/nav/footer/main scaffolding into the exported Layout so App, ErrorBoundary and HydrateFallback all render inside it, per the root.tsx Layout documentation."
+    },
+    {
+      "severity": "medium",
+      "location": "app/app/routes/home.tsx:21",
+      "issue": "~70 ': any' annotations at exactly the seams the framework's typegen is designed to type (loader args, ComponentProps, MetaArgs) despite strict mode and the 'react-router typegen' script being wired up.",
+      "suggestion": "Import Route.LoaderArgs / Route.ComponentProps / Route.MetaArgs from './+types/<route>' in each route module and let the generated types flow through; keep 'any' only for raw API JSON if desired."
+    },
+    {
+      "severity": "low",
+      "location": "app/app/root.tsx:33",
+      "issue": "HashScroller reimplements hash scrolling that <ScrollRestoration /> already performs, using two magic setTimeout calls (0 ms and 100 ms) whose rationale is unexplained.",
+      "suggestion": "Delete HashScroller and rely on ScrollRestoration's built-in hash scrolling; if a special case remains (e.g. late-rendered content), keep the component but comment the why."
+    },
+    {
+      "severity": "low",
+      "location": "app/package.json:14",
+      "issue": "isbot is declared as a dependency but no entry.server exists to use it; dead weight from the scaffold.",
+      "suggestion": "Remove the dependency, or add a custom entry.server if custom streaming/isbot handling is ever wanted."
+    },
+    {
+      "severity": "low",
+      "location": "app/app/components/ui.tsx:52",
+      "issue": "Dex-number padding is duplicated inline here and at routes/pokemon.tsx:317 while format.ts:28 already exports dexNumber.",
+      "suggestion": "Call dexNumber(card.id) / dexNumber(loaderData.dexId) in both places and drop the inline copies."
+    },
+    {
+      "severity": "low",
+      "location": "app/app/routes/pokemon.tsx:273",
+      "issue": "'entry.language.name' is dereferenced without an optional chain inside the genera find; a malformed entry throws a TypeError that escapes to the chrome-less root boundary.",
+      "suggestion": "Use entry?.language?.name (as done consistently elsewhere, e.g. move.tsx:32) or centralize English-name lookup in format.englishName."
+    },
+    {
+      "severity": "low",
+      "location": "app/app/routes/home.tsx:196",
+      "issue": "With an unknown '?type=' API name the loader empties results (home.tsx:43-47) but the select still displays 'All types', so the control contradicts the URL and the empty list.",
+      "suggestion": "Either reset the select to the default and clear the query param, or render the raw value; pick one source of truth for filter state."
+    },
+    {
+      "severity": "low",
+      "location": "app/app/routes/home.tsx:67",
+      "issue": "Out-of-range '?page=' is clamped for rendering (page = min(requestedPage, totalPages)) while the URL keeps the stale value, so pagination links and address bar disagree.",
+      "suggestion": "Redirect (or replace) to the clamped page so URL, display and pagination controls stay consistent."
+    },
+    {
+      "severity": "low",
+      "location": "app/app/routes/pokemon.tsx:142",
+      "issue": "Single 430-line module mixing a ~150-line loader with three view components (EvolutionList, MoveTable, Pokemon), lowering reviewability of the densest logic in the app.",
+      "suggestion": "Extract MoveTable (+ its sort helpers) and EvolutionList into components/ and consider splitting loader helper steps, keeping zero comments in mind for the tricky spots."
+    }
+  ],
+  "summary": "A solid, genuinely current React Router v8.5 framework app: URL-driven loaders, meta, server-only data module and clean components, with no serious bugs found. The merge blockers are an app-wide home-grown 404 protocol that fights the framework's documented throw/ErrorBoundary flow, pervasive 'any' at the seams typegen exists to type, and an error boundary that drops the site chrome. Approve after one focused round of mechanical changes."
+}
+```

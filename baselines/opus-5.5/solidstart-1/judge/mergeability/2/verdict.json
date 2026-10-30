@@ -1,0 +1,113 @@
+{
+  "dimension": "mergeability",
+  "criteria": {
+    "idiomatic": {
+      "score": 5,
+      "evidence": [
+        "app/src/lib/queries.ts:3-45 — query() + \"use server\" wrappers, exactly the documented data-API shape",
+        "app/src/routes/index.tsx:33-37 and app/src/routes/pokemon/[name].tsx:17-20 — route.preload with satisfies RouteDefinition, mirroring the router docs",
+        "app/src/routes/index.tsx:41 — createAsync keyed off URL search params; filters are URL state, not local state",
+        "app/src/components/NotFound.tsx:2-10 — HttpStatusCode 404 for missing resources, the documented pattern",
+        "app/src/entry-server.tsx:9-20 — createHandler(..., { mode: \"async\" }), a documented option, with a comment explaining why",
+        "app/src/routes/index.tsx:69-73 — 150 ms debounced setParams({q, page: undefined}, {replace: true}); option names match the router v1 API"
+      ],
+      "rationale": "This reads like the framework's own examples: file routes, query/createAsync/preload for data, search params as filter state, and SSR mode chosen deliberately. The only non-docs addition (the in-memory PokeAPI cache) is a server-side concern the framework doesn't cover and the spec explicitly permits."
+    },
+    "correctness_risks": {
+      "score": 3,
+      "evidence": [
+        "app/src/app.tsx:33 — the only async boundary is a bare <Suspense>; there is no ErrorBoundary anywhere, though the router docs prescribe one around createAsync",
+        "app/src/routes/moves/[name].tsx:20 — the nested Show pattern renders nothing while pending and nothing forever if the query rejects (same in pokemon/[name].tsx:55, abilities/[name].tsx:19, types/[name].tsx:19)",
+        "app/src/lib/server/pokeapi.ts:13,51 — a Map cache that only replaces entries on re-request; expired entries are never evicted, so a long-lived server accumulates every species/pokemon/move JSON it has ever touched",
+        "app/src/lib/server/pokeapi.ts:53 — rejected promises are correctly dropped from the cache (good)",
+        "app/src/lib/server/model.ts:129-137 — page is clamped server-side, but app/src/routes/index.tsx:119-131 still renders links derived from the unclamped URL page, so ?page=999 shows \"Page 3 of 3\" with a mismatched URL",
+        "app/src/lib/server/pokeapi.ts:18-28 — fetch fan-out is capped at 24 with a queue, and duplicate URLs share one promise; the worst case (a Pokémon's whole move list, model.ts:231-236) is bounded"
+      ],
+      "rationale": "404 handling, dedup, and concurrency are done properly, but any upstream API failure is an unhandled rejection: on the client the route renders blank forever, on the server it becomes an unhandled 500, and the process-wide cache grows without a size bound."
+    },
+    "global_abstractions": {
+      "score": 4,
+      "evidence": [
+        "app/src/lib/types.ts:1-64 — view-model types shared by both sides; the client never sees raw PokeAPI shapes, so the server/client boundary is explicit",
+        "app/src/lib/server/model.ts:1-340 — a single view-model module, but internally sectioned (Home / Pokémon / Move, ability, type) with clear helper names",
+        "app/src/routes/moves/[name].tsx:20, app/src/routes/abilities/[name].tsx:19, app/src/routes/types/[name].tsx:19, app/src/routes/pokemon/[name].tsx:55 — the same three-state pending/null/not-found nested Show copy-pasted four times instead of one component",
+        "app/src/routes/index.tsx:10-11 and app/src/routes/pokemon/[name].tsx:13 — two near-identical param-coercion helpers (param / gameParam) for the string|string[] search-param shape",
+        "app/src/lib/server/model.ts:100-137 — homeData rebuilds the full type/species index and re-ships the static type/generation option lists on every filter combination"
+      ],
+      "rationale": "The layering is genuinely good — thin routes, presentational components, one server model, one shared type contract, no utils soup. What will need untangling later is the four-times duplicated pending/null/error idiom and the per-request index rebuild, both small and local."
+    },
+    "readability": {
+      "score": 5,
+      "evidence": [
+        "app/src/lib/server/pokeapi.ts:1-3 — module header states the caching and concurrency contract in one line",
+        "app/src/routes/index.tsx:44-45 — comment explains why the search box keeps its own signal",
+        "app/src/entry-server.tsx:3-5 — comment explains the choice of async SSR mode in terms of #fragment links",
+        "app/src/lib/server/model.ts:28-39 — helpers (english, cleanText, latestFlavorText) are named after the spec's own definitions",
+        "app/src/components/Section.tsx:1-11 — five-line component that encodes the spec's 'section' contract once"
+      ],
+      "rationale": "Consistent naming, small files, comments that explain intent rather than mechanics, and view-model field names that track the spec's vocabulary; a new teammate would find their way in minutes. The main blemish is the untyped `any` PokeAPI layer in model.ts."
+    },
+    "review_cost": {
+      "score": 3,
+      "evidence": [
+        "app/src/app.tsx:33 — an ErrorBoundary with a fallback would be required before approving",
+        "app/src/lib/server/pokeapi.ts:13 — a size cap or LRU on the cache would be required before approving",
+        "app/src/routes/moves/[name].tsx:20 — extracting the repeated pending/null pattern into one component (and giving errors a visible state)",
+        "app/src/lib/server/model.ts:129-137 — clamping the URL page or deriving pagination links from the clamped value"
+      ],
+      "rationale": "Nothing structural would be reworked: the review comments are an error boundary, a bounded cache, one extracted component, and a small pagination consistency fix. That's one round of modest changes, not nits and not rework."
+    }
+  },
+  "overall": 4,
+  "findings": [
+    {
+      "severity": "medium",
+      "location": "app/src/app.tsx:33",
+      "issue": "No ErrorBoundary exists, so a failed query (API 500, network blip) is an unhandled rejection: the route renders blank on the client and throws on the server. The router docs prescribe an ErrorBoundary around createAsync.",
+      "suggestion": "Wrap the Suspense in an ErrorBoundary with a fallback (e.g. 'Could not load this page' plus a retry link to '/'), inside the root layout or per route."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/lib/server/pokeapi.ts:13",
+      "issue": "The promise cache never evicts expired entries and has no size cap; a long-running server accumulates every unique URL's JSON (species details alone are ~1k large payloads), so memory grows monotonically with traffic.",
+      "suggestion": "Add a max-entry count and evict oldest/expired entries on set (or use an LRU), rather than only replacing on re-request."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/routes/moves/[name].tsx:20",
+      "issue": "The pending/null distinction via nested Show is duplicated in four route files and silently renders nothing forever when the query rejects (undefined from a thrown fetch is indistinguishable from in-flight).",
+      "suggestion": "Extract one component, e.g. <AsyncData data={move()} notFound={<NotFound/>}>{...}</AsyncData>, using Switch on the resource state so pending, null and error are three distinct branches."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/routes/index.tsx:119",
+      "issue": "Pagination links are built from the raw URL page while the server clamps it, so a URL like /?page=999 shows 'Page 3 of 3' with Previous pointing at page 998.",
+      "suggestion": "Use the clamped home().page when building searchFor links (the value is already in the returned data), or normalize the page in the URL after loading."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/routes/pokemon/[name].tsx:13",
+      "issue": "gameParam duplicates the search-param coercion already written as param in app/src/routes/index.tsx:10-11, both needed because useSearchParams values can be string|string[]. ",
+      "suggestion": "Move a single `searchParam(value)` helper into app/src/lib (or lib/router.ts) and use it in both routes."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/lib/server/model.ts:100",
+      "issue": "Every distinct filter combination re-derives the whole species/type/generation index and ships the static type and generation option lists in each response; typing 'cha' issues several full index builds.",
+      "suggestion": "Cache the derived index (speciesNames/typesOf/generations) separately with the same TTL, and serve the static option lists from their own query key so filter changes return only cards and counts."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/lib/queries.ts:6",
+      "issue": "Each server function re-imports model.ts dynamically inside the body; the lib/server/ directory plus the \"use server\" compilation already keeps that code out of the client bundle, so the indirection is defensive noise repeated seven times.",
+      "suggestion": "Import the model functions statically at the top of queries.ts (the compiler hoists \"use server\" bodies into the server module), or add a one-line comment explaining why dynamic import is needed if there is a bundling reason."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/lib/server/model.ts:51",
+      "issue": "The PokeAPI response layer is effectively untyped (`detail: any`, `as any[]` casts in pokemonData/typeData), so typos in field names fail only at runtime even though the view models in types.ts are well typed.",
+      "suggestion": "Add minimal response interfaces for the handful of resources actually read (species, pokemon, type, move, ability, generation) and drop the casts."
+    }
+  ],
+  "summary": "A well-built, current-generation SolidStart app: file routes, query/createAsync/preload data loading, URL-driven filter state, and a clean server/client split with a shared view-model contract, all matching the v2 docs. The merge blockers are small but real: no ErrorBoundary anywhere, an unbounded in-process cache, a pending/null/error idiom copy-pasted across four routes, and a pagination link that disagrees with the server-clamped page. I'd approve after one round of modest changes."
+}

@@ -1,0 +1,160 @@
+I've reviewed the app thoroughly. The measured facts are confirmed: `app/` contains **zero tests of its own** — no test files (`tests.files: 0`), no test script in `app/package.json` (only `dev`/`build`/`start`), no test runner among devDependencies, and no lint/typecheck script. All quality gating came from the acceptance suite in `tests/`, which is not the app's work.
+
+The app itself is reasonably structured, but it contains a substantial amount of exactly the kind of logic that deserves tests: pure formatting helpers (`app/lib/format.ts`), a memoizing data layer with failure semantics (`app/lib/api.ts`), filtering/pagination/URL-sync (`app/components/HomeBrowser.tsx`), and table sorting (`app/components/MovesSection.tsx`), plus a ~70-line data transformation assembling the moves tables (`app/app/pokemon/[name]/page.tsx:104-171`). None of it is pinned by anything the app owns.
+
+Notably, the data layer has a latent bug no existing test would catch: `apiFetch` resolves **any** non-ok response (including a transient 500) to `null`, and `cached` memoizes resolved values for the process lifetime (`app/lib/api.ts:26-33`) — one flaky API response would permanently render "Not found" for that resource until the server restarts.
+
+```json
+{
+  "dimension": "tests",
+  "criteria": {
+    "coverage_of_risk": {
+      "score": 1,
+      "evidence": [
+        "app/lib/format.ts:12-58 — pure spec-critical helpers (humanize, dexNumber padStart, latestEnglishFlavor whitespace collapse, idFromUrl, displayValue em dash) with zero tests",
+        "app/components/HomeBrowser.tsx:38-59 — filter predicate + page clamping + slicing, untested",
+        "app/app/pokemon/[name]/page.tsx:104-171 — largest transformation in the app (game dedup, method ordering, default sort) untested",
+        "app/lib/api.ts:16-33 — promise memoization and null-on-non-ok failure semantics untested"
+      ],
+      "rationale": "No tests exist at all, and the riskiest logic (formatting, filtering, pagination, sorting, caching) is exactly the kind that unit tests would cover cheaply. Scored on what would be caught today: nothing."
+    },
+    "behaviour_not_implementation": {
+      "score": 1,
+      "evidence": [
+        "app/package.json:6-9 — scripts are dev/build/start only; no test runner, no test files anywhere in app/"
+      ],
+      "rationale": "No tests to evaluate; per the dimension rules this scores at the bottom."
+    },
+    "regression_power": {
+      "score": 1,
+      "evidence": [
+        "tests/specs/home.spec.mjs, pokemon.spec.mjs, details.spec.mjs — acceptance suite covers behaviour but is not the app's and runs only at review time",
+        "app/lib/api.ts:26 — transient 500 resolves to null and is cached forever; no test would catch this failure mode even today"
+      ],
+      "rationale": "Once the acceptance suite is no longer the only guard, any refactor of format.ts, HomeBrowser, MovesSection or the moves-table assembly has zero protection. A currently latent bug (null-caching of failed responses) would also sail through."
+    },
+    "signal_to_noise": {
+      "score": 3,
+      "evidence": [
+        "app/ — no test files exist, so there is no noise, but also no signal"
+      ],
+      "rationale": "No tests: neutral score per the rubric. There is no maintenance cost, but nothing earns its keep either."
+    }
+  },
+  "overall": 1,
+  "findings": [
+    {
+      "severity": "high",
+      "location": "app/lib/api.ts:26-33",
+      "issue": "apiFetch resolves any non-ok response (including transient 5xx) to null, and cached() memoizes resolved nulls for the process lifetime; one flaky API response permanently breaks that resource's page until restart. Nothing tests failure or cache-invalidation paths.",
+      "suggestion": "Only cache successful fetches (or delete the cache entry on null), and add unit tests for the cache: success memoization, rejection eviction, and 404-vs-500 handling."
+    },
+    {
+      "severity": "high",
+      "location": "app/lib/format.ts:12-58",
+      "issue": "The pure helpers encode the spec's trickiest formatting rules (mr-mime → 'Mr Mime', padStart(4), \\s+ collapse of \\n/\\f flavor text, idFromUrl regex, '—' for missing) with no tests; a one-character regex or radix regression would silently corrupt every page.",
+      "suggestion": "Add a plain unit test file for format.ts — it has no dependencies and is the highest value-per-line test target in the repo."
+    },
+    {
+      "severity": "high",
+      "location": "app/components/HomeBrowser.tsx:38-59",
+      "issue": "Filtering (case-insensitive substring on humanized name, type/generation match), pagination math and page clamping are untested; off-by-one errors in the slice bounds or matching the wrong field would only be caught by slow e2e runs.",
+      "suggestion": "Extract the filter/paginate computation into a pure function and unit-test it: empty q, case insensitivity, combined filters, page clamp when results shrink, 48-per-page boundary."
+    },
+    {
+      "severity": "high",
+      "location": "app/app/pokemon/[name]/page.tsx:104-171",
+      "issue": "The moves-table assembly — default game = highest version-group order, row dedup key, method ordering (level-up/machine/egg/tutor then alphabetical), default sort with MAX_SAFE_INTEGER for missing levels — is the app's most complex transformation and has no characterization tests.",
+      "suggestion": "Factor the row/table-building into a testable module and pin down: default game selection, method order, Level Up level-then-name ordering, and dedup behaviour."
+    },
+    {
+      "severity": "medium",
+      "location": "app/components/MovesSection.tsx:52-79",
+      "issue": "compareRows/sortedRows implement missing-values-last-in-both-directions, numeric vs localeCompare ordering, and the ascending/descending toggle — pure logic that would be trivial to test but isn't.",
+      "suggestion": "Unit-test compareRows across all seven sort keys, both directions, and mixed missing values; also test the toggle direction-flip state transition."
+    },
+    {
+      "severity": "medium",
+      "location": "app/app/page.tsx:64-72",
+      "issue": "Invalid URL params (bogus type/generation, non-numeric or out-of-range page) are silently coerced to defaults — a defined but untested behaviour; a future refactor could turn silent coercion into a crash or an unfiltered view.",
+      "suggestion": "Add tests for URL parsing edge cases: ?type=notatype, ?generation=bogus, ?page=0, ?page=abc, ?page=99999."
+    },
+    {
+      "severity": "medium",
+      "location": "app/app/pokemon/[name]/page.tsx:139-142",
+      "issue": "Unknown ?game= values fall back to the default game; this fallback path is untested and easy to break when touching the selection logic.",
+      "suggestion": "Test that ?game=nonexistent renders the default (highest-order) game rather than empty tables or a crash."
+    },
+    {
+      "severity": "medium",
+      "location": "app/app/moves/[name]/page.tsx:38-56",
+      "issue": "Alternate-form exclusion relies on the implicit invariant 'default pokemon id == species id, and forms (>10000) are absent from the species index', repeated across three pages via speciesById maps; nothing pins this invariant, so a data-layer refactor could reintroduce Mega forms into lists silently.",
+      "suggestion": "Extract a shared speciesFromPokemon helper and test it against fixtures including a form ID and a duplicate entry."
+    },
+    {
+      "severity": "low",
+      "location": "app/components/HomeBrowser.tsx:67-76",
+      "issue": "URL sync uses window.history.replaceState(window.history.state, ...), which is the correct Next App Router pattern, but back/forward and refresh-with-filters behaviour is unverified by the app.",
+      "suggestion": "Add one e2e-ish smoke test (or Playwright component test) asserting the URL after filter changes and after browser back."
+    },
+    {
+      "severity": "low",
+      "location": "app/package.json:6-9",
+      "issue": "No test script, runner, typecheck or lint script exists — there is no infrastructure for future tests to hang from, so the cost of adding tests later stays high.",
+      "suggestion": "Add a minimal setup now: 'test' script, vitest or playwright test, and a typecheck script, so early refactors are done against executable expectations."
+    }
+  ],
+  "summary": "The app ships with zero tests of its own: no test files, no runner, and no test/typecheck script in package.json — every behaviour is guarded only by the externally-owned acceptance suite. The untested surface includes exactly the code most likely to rot: pure formatting helpers, filter/pagination logic, move-table sorting, and a memoizing data layer with a latent bug (transient API failures are cached as permanent not-founds). Unit-testing lib/format.ts, HomeBrowser's filtering, and the moves-table assembly would be cheap and would cover most of the real regression risk.",
+  "wroteTests": false,
+  "testCount": 0,
+  "valuableTests": [],
+  "lowValueTests": [],
+  "untested": [
+    {
+      "area": "Data-layer caching and failure semantics (app/lib/api.ts:16-33)",
+      "risk": "high",
+      "likelyBug": "A transient 500 or blip resolves to null and is memoized forever, permanently rendering Not Found for that resource until server restart; also retry/eviction behaviour regresses silently."
+    },
+    {
+      "area": "Pure formatting helpers (app/lib/format.ts: humanize, dexNumber, latestEnglishFlavor, idFromUrl, displayValue)",
+      "risk": "high",
+      "likelyBug": "Whitespace-collapse regex or padStart width regression corrupts dex numbers and flavor text on every page; idFromUrl regex change breaks species/type joins."
+    },
+    {
+      "area": "Home list filtering, pagination and URL-state sync (app/components/HomeBrowser.tsx:38-76)",
+      "risk": "high",
+      "likelyBug": "Matching against the slug instead of the humanized name, off-by-one in page slice bounds, page not clamped when filters shrink results, or default params no longer omitted from the URL."
+    },
+    {
+      "area": "Moves table assembly on the Pokémon page (app/app/pokemon/[name]/page.tsx:104-171)",
+      "risk": "high",
+      "likelyBug": "Default game no longer the highest-order version group, row dedup collapsing distinct rows, method order drifting from level-up/machine/egg/tutor, missing level no longer sorted last."
+    },
+    {
+      "area": "Column sorting comparator and direction toggle (app/components/MovesSection.tsx:52-79,116-124)",
+      "risk": "medium",
+      "likelyBug": "Missing values sort first in descending, numeric columns compared as strings ('9' > '80'), or second click no longer flips direction."
+    },
+    {
+      "area": "URL query param parsing and fallbacks (app/app/page.tsx:64-72, app/app/pokemon/[name]/page.tsx:138-142)",
+      "risk": "medium",
+      "likelyBug": "Bogus type/generation/page/game values crash the render or are echoed into the UI instead of falling back to defaults."
+    },
+    {
+      "area": "Alternate-form exclusion invariant shared by move/ability/type pages (speciesById lookups)",
+      "risk": "medium",
+      "likelyBug": "A data-layer refactor reintroduces IDs above 10000 (Mega/forms) into Learned by / Pokémon / type lists, or duplicates a species listed under two slots."
+    },
+    {
+      "area": "Evolution chain nested-list rendering (app/app/pokemon/[name]/page.tsx:47-80)",
+      "risk": "low",
+      "likelyBug": "Branching chains (Eevee) flatten into a single list or lose nesting depth during a component refactor."
+    },
+    {
+      "area": "Height/weight formatting and stat total (app/app/pokemon/[name]/page.tsx:229-243,181-190)",
+      "risk": "low",
+      "likelyBug": "Rounding (toFixed) dropped or Total row summing effort instead of base_stat."
+    }
+  ]
+}
+```

@@ -1,0 +1,125 @@
+I've reviewed the app against the spec, the current Qwik/Qwik City stable release (1.20.3, verified on npm/GitHub — 2.0 is still at rc), and the framework's documented patterns. Summary of what I verified:
+
+- **Architecture matches the official starter**: `src/root.tsx`, `entry.ssr.tsx` (with `containerAttributes: { lang: "en" }`), `entry.node-server.tsx` using `createQwikCity` + `node:http`, `adapters/node-server/vite.config.ts` with `nodeServerAdapter` + `extendConfig`, all runtime deps in `devDependencies` (Qwik's documented recommendation), `eslint-plugin-qwik` wired up.
+- **Data loading** is entirely `routeLoader$` with URL-driven state (`routes/index.tsx:13`, `routes/pokemon/[name]/index.tsx:16`, `routes/team/index.tsx:9`), `useNavigate` for filter/game changes, `resolveValue` for `DocumentHead`, catchall 404 route — all per the current routing/route-loader docs.
+- **State**: `useSignal`/`useTask$`/`isBrowser` from `@builder.io/qwik/build`; the team store is a hand-rolled cookie helper, but Qwik City has no client cookie API (the open feature request #2927 confirms this), and the cookie choice is what makes the SSR-correct first paint the FEATURE requires.
+
+```json
+{
+  "dimension": "mergeability",
+  "criteria": {
+    "idiomatic": {
+      "score": 5,
+      "evidence": [
+        "app/src/routes/index.tsx:13 — filters live in the URL, routeLoader$ + useNavigate, exactly the documented pattern",
+        "app/src/routes/pokemon/[name]/index.tsx:163 — DocumentHead via resolveValue(usePokemon), per current docs",
+        "app/src/entry.ssr.tsx:16 — containerAttributes lang: \"en\", the documented way to set <html lang>",
+        "app/src/routes/[...catchall]/index.tsx:7 — catch-all route with status(404), per routing docs",
+        "app/src/index.tsx:0 — deps all in devDependencies and bundler config per Qwik's deployment guidance",
+        "app/src/lib/team.ts:1-3 — hand-rolled document.cookie store, justified: Qwik City has no client cookie API (issue #2927 still open)"
+      ],
+      "rationale": "Reads like the framework's own examples: file-based routing, routeLoader$ for all server data, URL as the source of truth for filters, signals for local state, official node adapter and lint setup. The one home-grown piece (the cookie store) is a reasonable workaround for a gap the framework genuinely has."
+    },
+    "correctness_risks": {
+      "score": 4,
+      "evidence": [
+        "app/src/routes/index.tsx:44-48 — applyFilters reads type/generation from home.value.filters, which can be stale while a previous navigation's loader is still in flight; rapid filter changes can drop one",
+        "app/src/lib/api.ts:20 — fetch with no timeout/AbortController; a hung API hangs the request",
+        "app/src/lib/api.ts:17 — module-level Map cache with no eviction; caching the whole pokemon/move snapshot can hold tens of MB per process",
+        "app/src/lib/api.ts:44-52 — background refresh sets hit.refreshing=true and on non-404 failure resets it, but a 404 mid-refresh deletes the entry while callers still hold the stale value; acceptable for a fixed snapshot",
+        "app/src/lib/data.ts:66-70 — parseInt with isFinite clamp and type/generation validated against real options: bad query params degrade gracefully",
+        "app/src/lib/data.ts:255 — game falls back to the highest-order version group when ?game is unknown: no crash on bad input"
+      ],
+      "rationale": "Careful look found only minor issues: a small stale-read race between rapid filter changes, no fetch timeout, and a memory-heavy (but API-bounded) cache. No XSS, no SSR/CSR mismatch, 404s and invalid params are all handled."
+    },
+    "global_abstractions": {
+      "score": 4,
+      "evidence": [
+        "app/src/lib/data.ts:1-417 — one module holds every page's data builder (home, pokemon, move, ability, type, team); coherent today but it is the app's god data module",
+        "app/src/lib/data.ts:216-223 — default-variety → pokemon → sorted types resolution duplicated almost verbatim at app/src/lib/data.ts:385-390",
+        "app/src/lib/team.ts:1 — module mixes cookie DOM I/O with pure coverage math and shared types; boundaries are commented but the file serves three roles",
+        "app/src/lib/format.ts:1 — pure helpers cleanly shared between server and client; good boundary",
+        "app/src/lib/api.ts:1-2 — server-only fetch/cache layer kept out of client code entirely"
+      ],
+      "rationale": "Abstractions are few and mostly earn their keep (api/format/data/team is a sensible server/client split), but data.ts is on its way to becoming a god module and the variety/type resolution is duplicated between the pokemon and team builders."
+    },
+    "readability": {
+      "score": 4,
+      "evidence": [
+        "app/src/lib/api.ts:8,24 — get<T = any>/find<T = any> default everything to any, so app/src/lib/data.ts:226-234's ~16 any casts leave the whole data layer untyped despite strict:true",
+        "app/src/routes/index.tsx:41-48 — comments explain intent (\"Typing replaces the history entry; picking a filter adds one\")",
+        "app/src/components/ui.tsx:37-42 — small, focused, well-named components with a documented Section/region landmark helper",
+        "app/package.json:8,14 — starter boilerplate noise left in: an engines-annotation about sharp (no sharp anywhere) and an unused undici:\"*\" wildcard dep"
+      ],
+      "rationale": "Naming, file layout and comments are genuinely good — a new teammate would find their way fast. The weak spot is the untyped API boundary, which forces readers to consult PokeAPI docs instead of the types."
+    },
+    "review_cost": {
+      "score": 4,
+      "evidence": [
+        "app/src/lib/api.ts:8 — would ask for real API resource interfaces (Species, Pokemon, Move, Type) before merging a data layer this size",
+        "app/package.json:7-20 — no test script and zero app-owned tests; coverageRows/sortRows logic is only covered by acceptance tests",
+        "app/src/lib/data.ts:190-206,249-271 — move/version-group plumbing is correct but subtle enough that I'd want at least a couple of unit tests"
+      ],
+      "rationale": "Approve-with-nits territory: I'd ask for typed API shapes and a test script, but nothing needs rework — structure, idioms and correctness are all in good shape for a team codebase."
+    }
+  },
+  "overall": 4,
+  "findings": [
+    {
+      "severity": "medium",
+      "location": "app/src/lib/api.ts:8",
+      "issue": "get/find default to Promise<any>, so the entire data layer in data.ts (~16 explicit anys) is untyped despite strict mode; build.types gives almost no safety against PokeAPI shape changes",
+      "suggestion": "Define interfaces for the API resources (Species, Pokemon, Move, Ability, Type, VersionGroup) and parameterize every get<T>() call site"
+    },
+    {
+      "severity": "medium",
+      "location": "app/package.json:7",
+      "issue": "No test script and zero app-owned tests; the trickiest logic (coverageRows multipliers, sortRows missing-values-last, cookie normalization, filter clamping) has no coverage if the acceptance tests are removed",
+      "suggestion": "Add vitest plus a couple of unit tests for lib/team.ts, lib/api.ts and the move-table sorting"
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/routes/index.tsx:44",
+      "issue": "applyFilters reads type/generation from home.value.filters, which lags behind while a prior navigation's loader is still resolving; changing two filters quickly can silently drop one",
+      "suggestion": "Read current select values from the DOM (like the inputs already do for q) or merge the pending change into a single client-side filter signal"
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/lib/api.ts:17",
+      "issue": "Module-level cache Map with no eviction or size cap; caching every pokemon/move/species record (the pokemon records are large) can hold tens of MB per process",
+      "suggestion": "Cap the entry count (simple LRU) or stop caching the biggest resources; the 30s SWR freshness already covers correctness"
+    },
+    {
+      "severity": "low",
+      "location": "app/src/lib/data.ts:216",
+      "issue": "Default-variety → pokemon → slot-sorted types resolution is duplicated between pokemonPage and teamPage (data.ts:385)",
+      "suggestion": "Extract a shared resolveDefaultPokemon(species) helper"
+    },
+    {
+      "severity": "low",
+      "location": "app/src/routes/team/index.tsx:22",
+      "issue": "Loader data is copied into three signals and re-synced by useTask$, duplicating state; the useTask that resyncs is dead weight in the common case",
+      "suggestion": "Render from loaded.value and keep a single local overlay for removals, or expose the team as a shared context store"
+    },
+    {
+      "severity": "low",
+      "location": "app/src/lib/api.ts:20",
+      "issue": "fetchJson has no timeout/AbortController, so a hung upstream API hangs the route request indefinitely",
+      "suggestion": "Add AbortSignal.timeout(...) to the fetch calls"
+    },
+    {
+      "severity": "low",
+      "location": "app/package.json:14",
+      "issue": "Unused dependency undici:\"*\" (nothing imports it) and a stale engines-annotation about sharp, left over from starter boilerplate",
+      "suggestion": "Remove undici and the annotation"
+    },
+    {
+      "severity": "low",
+      "location": "app/src/lib/data.ts:357",
+      "issue": "Type-page moves are sorted by the humanized label rather than the API name the spec specifies (\"sorted alphabetically by name\")",
+      "suggestion": "Sort by m.name and keep the label for display"
+    }
+  ],
+  "summary": "A genuinely idiomatic Qwik City app on the current stable release: starter-shaped project config, routeLoader$-driven data, URL-owned filter state, and a justified cookie-based team store for a gap the framework has. The costs of merging are minor: an untyped any-heavy data layer, no app-owned tests, a small stale-filters race, and a cache with no eviction. I'd merge after one light round of typed API shapes and a test script."
+}
+```

@@ -1,0 +1,116 @@
+I've reviewed the full app, the feature diff, and verified current Next.js 16 guidance (async `params`/`searchParams`, `connection()` semantics, metadata API, caching models). Final assessment:
+
+**Idiomatic:** This reads like current Next.js App Router documentation. Async `params`/`searchParams` (`app/src/app/page.tsx:25`), `await connection()` to opt into request-time rendering per Next 16 docs (`app/src/app/page.tsx:26`), `generateMetadata` with the documented Props type (`app/src/app/moves/[name]/page.tsx:15-19`), React `cache` to dedup metadata/page fetches (`app/src/app/pokemon/[name]/page.tsx:45`), `notFound()` for missing resources, `server-only` guards on the data layer (`app/src/lib/api.ts:1`), metadata title template in the root layout (`app/src/app/layout.tsx:8`). The one home-grown area is the ~70-line custom fetch cache/concurrency queue (`app/src/lib/api.ts:17-89`) where `fetch` with `revalidate` or Cache Components' `use cache` would be the framework-native answer — justified here by the "live data at request time" spec constraint, but a reviewer would ask.
+
+**Correctness:** Careful work — promise-dedup with cache eviction on failure, bounded LRU (`app/src/lib/api.ts:76-89`), clamped pagination (`app/src/app/page.tsx:50`), debounced search with back/forward sync via `lastPushed` (`app/src/app/filters.tsx:33-39`), SSR cookie read so the team button never flashes (`app/src/app/pokemon/[name]/page.tsx:71`, `app/src/components/team-button.tsx:12`). Two gaps: `decodeURIComponent` on already-decoded `params` can throw `URIError` and 500 on malformed URLs like `/pokemon/%zz` (`app/src/app/pokemon/[name]/page.tsx:47`, `app/src/app/types/[name]/page.tsx:23`), and there's no `error.tsx`, so an API 500/network failure renders Next's default error page with none of the required landmarks (`app/src/lib/api.ts:61` throws; no boundary defined).
+
+**Abstractions:** `lib/api.ts` is a single module mixing transport, API types and view models that everything imports — cohesive and sectioned, fine at this size, but the first thing to split as the app grows. Two small duplicated helpers: filter-query serialization (`app/src/app/page.tsx:17-24` vs `app/src/app/filters.tsx:11-17`) and default-variety resolution (`app/src/app/pokemon/[name]/page.tsx:48` vs `app/src/app/team/page.tsx:31-40`).
+
+```json
+{
+  "dimension": "mergeability",
+  "criteria": {
+    "idiomatic": {
+      "score": 4,
+      "evidence": [
+        "app/src/app/page.tsx:25 — awaits searchParams as a Promise, the Next 15/16 signature",
+        "app/src/app/page.tsx:26 — `await connection()` to opt into request-time rendering, per current next/server docs",
+        "app/src/app/pokemon/[name]/page.tsx:45 — React `cache` dedupes the species fetch between generateMetadata and the page",
+        "app/src/app/layout.tsx:8 — metadata title template with `{ absolute: 'Pokédex' }` override on the home page (app/src/app/page.tsx:9)",
+        "app/src/lib/api.ts:1 — 'server-only' guard keeps the data layer off the client",
+        "app/src/lib/api.ts:17-89 — ~70-line hand-rolled fetch cache/LRU/concurrency queue where framework caching (fetch revalidate, or `use cache`) is the native answer; defensible given the live-data spec but a reviewer would ask"
+      ],
+      "rationale": "Uses current Next 16 primitives correctly and consistently across all routes; the only non-native piece is the custom request cache, which is justified by the spec's live-data requirement."
+    },
+    "correctness_risks": {
+      "score": 4,
+      "evidence": [
+        "app/src/app/pokemon/[name]/page.tsx:47 — decodeURIComponent on params Next already decodes; malformed escapes (e.g. /pokemon/%zz) throw URIError → 500 instead of the required Not found page (same in types/[name]/page.tsx:23, moves and abilities pages)",
+        "app/src/lib/api.ts:61 — non-404 API errors throw with no error.tsx anywhere, so failures lose all required landmarks and the h1",
+        "app/src/lib/api.ts:76-89 — cache is bounded, dedups concurrent requests and evicts failed entries: no unbounded cache or fan-out",
+        "app/src/app/filters.tsx:33-39 — debounce/back-forward race handled via lastPushed; timer cleared on unmount (filters.tsx:44)",
+        "app/src/app/page.tsx:50 — requested page clamped to [1, totalPages]",
+        "app/src/components/team-button.tsx:12-18 — state-sync-during-render pattern keeps the label correct after refresh; server cookie read prevents a flash"
+      ],
+      "rationale": "Race conditions, caching and SSR/CSR consistency are handled with unusual care; the remaining issues (double-decode crash on malformed URLs, missing error boundary) are minor and untested by the suite."
+    },
+    "global_abstractions": {
+      "score": 4,
+      "evidence": [
+        "app/src/lib/api.ts — one 300-line module holding transport, API types, resource accessors and view models (getSpeciesIndex, pokemonCards, TypeInfo); every route imports it",
+        "app/src/app/page.tsx:17-24 — pageHref duplicates the query serialization in app/src/app/filters.tsx:11-17",
+        "app/src/app/pokemon/[name]/page.tsx:48 — default-variety resolution duplicated in app/src/app/team/page.tsx:31-40",
+        "app/src/lib/team.ts:30-38 — shared server/client module with `typeof document` guards; guarded, and team-server.ts keeps the server boundary behind server-only"
+      ],
+      "rationale": "Abstractions are few and cohesive at this size; the api.ts god-module and two duplicated helpers will need untangling only as the app grows."
+    },
+    "readability": {
+      "score": 5,
+      "evidence": [
+        "app/src/lib/api.ts:57-59 — comment explains *why* the 404 body is drained (Next's fetch tee) — exactly the kind of why-comment worth keeping",
+        "app/src/app/abilities/[name]/page.tsx:20-27 — the loadX → generateMetadata → page pattern is identical across all four resource routes",
+        "app/src/components/section.tsx:1-13 — 13-line components with single clear jobs throughout components/",
+        "app/src/lib/format.ts — small, pure, well-named helpers with examples in JSDoc",
+        "app/src/app/pokemon/[name]/page.tsx:196-240 — movesFor is the densest spot (~45 lines of shaping + sorting in the page file) and would be the first extraction"
+      ],
+      "rationale": "Consistent conventions, precise naming, and why-comments make the code navigable in minutes; only the pokemon page's helper density keeps it from being entirely effortless."
+    },
+    "review_cost": {
+      "score": 4,
+      "evidence": [
+        "app/src/app/pokemon/[name]/page.tsx:47 — drop the redundant decodeURIComponent and route malformed names to notFound()",
+        "app/src/app/page.tsx:17-24 — dedupe query serialization shared with filters.tsx",
+        "missing app/src/app/error.tsx — add an error boundary so API failures keep the required landmarks",
+        "app/src/app/pokemon/[name]/game-select.tsx:30 — router.replace drops the #moves fragment; preserve the hash"
+      ],
+      "rationale": "I'd approve after one small round: fix the decode issue, add an error boundary, and dedupe two helpers. Nothing structural needs rework."
+    }
+  },
+  "overall": 4,
+  "findings": [
+    {
+      "severity": "medium",
+      "location": "app/src/app/pokemon/[name]/page.tsx:47",
+      "issue": "decodeURIComponent re-decodes params Next has already decoded; malformed escapes (e.g. /pokemon/%zz) throw URIError and 500 instead of showing the required Not found page",
+      "suggestion": "Remove decodeURIComponent (Next decodes params) and treat unresolvable/invalid names as null → notFound()"
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/lib/api.ts:61",
+      "issue": "Non-404 API failures (500, network) throw with no error.tsx, so the user gets Next's default error page with no landmarks, h1 or footer",
+      "suggestion": "Add app/src/app/error.tsx that renders the standard layout with a friendly message; consider mapping fetch failures to notFound() where the data is optional"
+    },
+    {
+      "severity": "low",
+      "location": "app/src/lib/api.ts:17-89",
+      "issue": "Hand-rolled in-memory cache, TTL, LRU and concurrency queue duplicate capabilities the framework provides (fetch revalidate, or Cache Components' `use cache`)",
+      "suggestion": "Either replace with fetch's revalidate/use cache, or keep it and document why the built-in data cache is unsuitable (live-data test constraint)"
+    },
+    {
+      "severity": "low",
+      "location": "app/src/app/page.tsx:17-24",
+      "issue": "pageHref duplicates the filter→query-string serialization already in app/src/app/filters.tsx:11-17",
+      "suggestion": "Extract one shared buildQueryString(filters, page?) helper into lib or filters and reuse it"
+    },
+    {
+      "severity": "low",
+      "location": "app/src/app/team/page.tsx:31-40",
+      "issue": "Default-variety → Pokémon resolution duplicated from app/src/app/pokemon/[name]/page.tsx:48",
+      "suggestion": "Move a loadSpeciesWithDefault helper into lib/api.ts and use it in both places"
+    },
+    {
+      "severity": "low",
+      "location": "app/src/app/pokemon/[name]/game-select.tsx:30",
+      "issue": "router.replace with a bare pathname drops the #moves fragment the user navigated to",
+      "suggestion": "Preserve the hash in the replace URL (or use scroll: false with the full href including #moves)"
+    },
+    {
+      "severity": "low",
+      "location": "app/src/components/team-button.tsx:20-29",
+      "issue": "TeamButton keeps local state derived from the cookie; in a second tab the label can diverge from the actual team until a reload",
+      "suggestion": "Acceptable for a browser-owned feature, but re-reading on focus (or calling router.refresh after toggle) would keep it consistent"
+    }
+  ],
+  "summary": "This is confident, current-idiom Next.js 16: async params, connection(), generateMetadata with React cache, clean server/client boundaries, and unusually careful handling of caching, debounce races and SSR-consistent team state. The only merge-blocking-ish items are a params double-decode that can 500 on malformed URLs and the absence of an error boundary; the rest are small dedupe and polish nits. I'd merge after one light round of review comments."
+}
+```

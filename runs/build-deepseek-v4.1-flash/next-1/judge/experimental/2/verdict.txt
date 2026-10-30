@@ -1,0 +1,70 @@
+## Review
+
+**Context confirmed:** The app runs `next@16.4.3` (`app/package.json:7-13`), which is the latest stable release as of 2026-10-30 (16.4.3 shipped 2026-10-23; Next.js 16 is Active LTS, per endoflife.date/nextjs and nextjs.org release pages). Next.js 17 does not exist yet, so 16.4.x is the correct "current stable" baseline.
+
+**What the code actually uses:**
+
+- App Router conventions only: `layout.tsx`, `page.tsx`, `not-found.tsx`, `[...slug]/page.tsx` catch-all, `[name]` dynamic routes (`app/app/layout.tsx:24`, `app/app/not-found.tsx:3`, `app/app/[...slug]/page.tsx:1`). All stable since the 13/14 era.
+- Async `params`/`searchParams` as Promises (`app/app/page.tsx:12-16`, `app/app/pokemon/[name]/page.tsx:27-28`, `app/app/types/[name]/page.tsx:11`). This is the *required* API in Next 16 — sync access was fully removed (nextjs.org/docs/app/guides/upgrading/version-16), so it's stable-and-mandatory, not experimental. Note it does *not* use the newer `PageProps<'/route'>` typegen helpers, i.e. it picked the older-stable typing style.
+- Route segment config `dynamic = 'force-dynamic'`, `revalidate = 0`, `fetchCache = 'force-no-store'` (`app/app/layout.tsx:4-6`, repeated per-route, e.g. `app/app/page.tsx:4-5`). All long-stable segment configs. `fetchCache` is redundant belt-and-braces on top of `force-dynamic`, and these configs are exactly the ones that need rework if/when the app migrates to Cache Components (`cacheComponents`, PPR) — but that migration is opt-in in 16, so no risk today.
+- `next/link` everywhere, `next/navigation#useRouter` in one client component (`app/components/MovesSection.tsx:3-4`), `Metadata`/`generateMetadata` (`app/app/layout.tsx:8`, `app/app/pokemon/[name]/page.tsx:24`). All long-stable.
+- Zero `unstable_`/`experimental_` identifiers, zero config flags — `app/next.config.mjs:1-4` is an empty config; grep for `unstable_|experimental_|cacheComponents|use cache|cacheLife|updateTag|proxy|experimental_ppr|useOptimistic|useActionState` returned nothing.
+- Deliberately avoids the "new" stack of Next 16 entirely: no Cache Components/`use cache`, no `next/image` (plain `<img>` via `PokemonCard`), no Turbopack-specific config, no React Compiler (`reactCompiler` is stable-but-off-by-default), no Server Actions, no `proxy.ts`. React usage is `useState`/`useMemo`/`useEffect` only (`app/components/HomeBrowser.tsx:4`).
+- Client-side URL sync uses raw `window.history.replaceState` (`app/components/HomeBrowser.tsx:82-86`) rather than any newer router API — plain DOM API, no framework surface.
+
+This is about as conservative a Next 16 app as you can write: the spec's "fetch everything at request time, treat the API as live" requirement is satisfied with the boring, long-stable no-store/dynamic configuration rather than reaching for the new Cache Components model. The trade-off is that if the team later adopts Cache Components (where `force-dynamic`/`fetchCache` are no longer valid idioms), the per-route config block is repeated in 6+ files and would need mechanical rework — a small containment nit, not an experimentalness problem.
+
+```json
+{
+  "dimension": "experimentalness",
+  "criteria": {
+    "reach": {
+      "score": 1,
+      "evidence": [
+        "app/package.json:7-13 — pinned to next 16.4.3 / react 19.3.1, both current stable (16.4.3 released 2026-10-23)",
+        "app/next.config.mjs:1-4 — empty config object: no experimental or preview flags at all",
+        "app/app/layout.tsx:4-6 — only long-stable segment configs (dynamic/revalidate/fetchCache)",
+        "app/app/pokemon/[name]/page.tsx:27-28 — Promise params/searchParams, the required (not experimental) API in Next 16",
+        "app/components/MovesSection.tsx:3-5 — next/link, useRouter, useEffect/useState only"
+      ],
+      "rationale": "Zero experimental, preview, RC or canary APIs; even the recently-stable Next 16 features (Cache Components, proxy.ts, updateTag, React Compiler, next/image changes) are all avoided in favor of APIs that have been stable since the 13/14/15 era."
+    },
+    "containment": {
+      "score": 5,
+      "evidence": [
+        "app/next.config.mjs:1-4 — nothing to contain; config carries no flags",
+        "app/lib/api.ts:20-38 — all data access funnels through one apiFetch/cached module, so nothing framework-novel leaks into routes",
+        "app/app/layout.tsx:4-6 and app/app/page.tsx:4-5 — the only 'modernization risk' is the repeated force-dynamic/no-store block, a 3-line idiom duplicated per route"
+      ],
+      "rationale": "There are no experimental APIs to contain; the single non-trivial choice (no-store fetch behavior required by SPEC.md) is centralized in lib/api.ts and one repeated config block."
+    },
+    "justification": {
+      "score": 5,
+      "evidence": [
+        "app/lib/api.ts:24-28 — fetch with cache:'no-store' satisfies the spec's 'live data at request time' requirement without reaching for Cache Components",
+        "app/app/layout.tsx:4-6 — force-dynamic/no-store used because SPEC.md forbids build-time prerendering, a legitimate need",
+        "app/components/HomeBrowser.tsx:82-86 — window.history.replaceState keeps URL state in sync using plain DOM history instead of any newer router primitive"
+      ],
+      "rationale": "No experimental APIs are used, and the conservative choices are each justified by the spec's live-data and SSR requirements; nothing reads as novelty for its own sake."
+    }
+  },
+  "overall": 1,
+  "findings": [
+    {
+      "severity": "low",
+      "location": "app/app/layout.tsx:6",
+      "issue": "fetchCache = 'force-no-store' is redundant on top of dynamic = 'force-dynamic', and the whole dynamic/revalidate/fetchCache block is duplicated across every route (app/app/page.tsx:4-5, app/app/types/page.tsx:4-5, app/app/[...slug]/page.tsx:4-5, app/app/pokemon/[name]/page.tsx:24, app/app/types/[name]/page.tsx:9)",
+      "suggestion": "Set the behavior once in the root layout (or in lib/api.ts, which already passes cache:'no-store' per request) and drop the per-route repetition; note these segment configs are superseded if the team later opts into Next 16's cacheComponents, so keeping them in one place lowers future migration cost"
+    },
+    {
+      "severity": "low",
+      "location": "app/app/page.tsx:12-16",
+      "issue": "params/searchParams are typed by hand as Promise<Record<...>> instead of the PageProps typegen helpers Next 15.5+/16 provides",
+      "suggestion": "Optional modernization only: use PageProps<'/'> and PageProps<'/pokemon/[name]'> via npx next typegen for route-checked typing; the current form is still fully stable"
+    }
+  ],
+  "summary": "This is a deliberately conservative Next.js 16 app: the only framework surfaces touched are the long-stable App Router basics — Link, useRouter, Metadata/generateMetadata, Promise params/searchParams, and the classic dynamic/no-store segment configs — with an empty next.config and no unstable_/experimental_ identifiers anywhere. None of Next 16's newer features (Cache Components, proxy.ts, updateTag, React Compiler, next/image patterns) are used; the one place modernization would bite is the duplicated force-dynamic/fetchCache block that a future cacheComponents migration would rewrite. Experimentalness is effectively zero, which for a spec that mandates live request-time data is the right call.",
+  "experimentalApis": [],
+  "count": 0
+}
+```

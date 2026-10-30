@@ -1,0 +1,128 @@
+{
+  "dimension": "mergeability",
+  "criteria": {
+    "idiomatic": {
+      "score": 5,
+      "evidence": [
+        "app/server/utils/data.ts:1,20 — imports types via #shared/types/pokedex, the documented Nuxt 4 client/server contract",
+        "app/app/pages/pokemon/[name].vue:18-21 — useFetch with reactive URL + reactive { query: { game } } getters, the recommended data-loading primitive",
+        "app/app/components/NotFound.vue:3-4 — useRequestEvent/setResponseStatus 404, matching the current Nuxt docs example verbatim",
+        "app/package.json:6-9,10 — start script overrides runtime config via NUXT_PUBLIC_API_BASE; deps (nuxt/vue/vue-router) match the official install set; nuxt ^4.6.2 is current stable",
+        "app/nuxt.config.ts:11-15 — public runtimeConfig.apiBase is the documented way to make the API base configurable",
+        "app/app/components/PageSection.vue:3-5 — useId() for section heading ids, current Vue 3.5 idiom",
+        "app/app/app.vue:2-4 — useHead titleTemplate for the '<h1> – Pokédex' title rule",
+        "app/app/pages/[...slug].vue:1-3 — catch-all page so unmatched URLs still render the app shell with a 404 status"
+      ],
+      "rationale": "Reads like the framework's own examples: Nuxt 4 app/server/shared layout, useFetch with reactive getters, URL-driven state, shared/ auto-imports, runtimeConfig override, and the docs-recommended setResponseStatus 404 pattern."
+    },
+    "correctness_risks": {
+      "score": 3,
+      "evidence": [
+        "app/server/utils/pokeapi.ts:12,23,33 — TTL is checked on read but expired entries are never evicted; every URL's full JSON payload stays resident for process lifetime (1025 Pokémon details alone is ~100MB)",
+        "app/server/utils/pokeapi.ts:54-67 — mapLimit keeps firing upstream fetches in the background after the first rejection; subsequent errors are silently discarded",
+        "app/app/components/PokemonCard.vue:5 — useRuntimeConfig() called lazily inside a computed; Nuxt context-dependent composables should be called once in setup",
+        "app/app/pages/index.vue:33-35 — out-of-range ?page= is clamped in the view but the URL keeps the stale value; Number.parseInt silently accepts '2abc'",
+        "app/app/pages/index.vue:68-72 — debounce timer is correctly cleared on unmount, no leaked listener here"
+      ],
+      "rationale": "One moderate issue (unbounded retention in the otherwise-TTL cache) plus several minor fragilities; no XSS, no fan-out explosion (concurrency is capped at 32 and alternate forms are filtered before any fetch), and SSR/client data is consistent."
+    },
+    "global_abstractions": {
+      "score": 4,
+      "evidence": [
+        "app/server/utils/data.ts:16-46 — pure formatting helpers (englishName/collapse/latestFlavorText) mixed into the same module as async data access (speciesNames/allTypes/speciesCards)",
+        "app/server/utils/pokeapi.ts:12 — module-level cache is hidden global state, but it is deliberate, commented and server-only",
+        "app/shared/types/pokedex.ts:1-14 — explicit DTO contract shared by both bundles keeps the app/server boundary clean",
+        "app/app/components/CardList.vue:1-11, PokemonCard.vue — small, reusable presentation components with a single job each",
+        "app/app/components/NotFound.vue:1-6 — one 404 rendering used by four pages plus the catch-all, instead of duplicated markup"
+      ],
+      "rationale": "Abstractions are few and mostly earn their keep (server data module, DTO contract, small components); the only untangling needed later is splitting data.ts's pure helpers from its fetchers and trimming the cache's global footprint."
+    },
+    "readability": {
+      "score": 5,
+      "evidence": [
+        "app/server/utils/pokeapi.ts:1-2,54 — comments explain why (short-TTL cache, bounded concurrency), not what",
+        "app/server/utils/data.ts:60-62 — doc comment states the alternate-form rule; MAX_SPECIES_ID named constant",
+        "app/app/components/MovesTable.vue:58-61 — 'missing values sort last in both directions' comment documents the non-obvious comparator",
+        "app/app/pages/index.vue:51-60 — buildQuery centralises the 'omit empty/default' URL rule in one readable place",
+        "app/app/assets/main.css:1-45 — CSS grouped by concern with section comments and design tokens throughout",
+        "app/shared/types/pokedex.ts:41 — TypeRef reused for the games list is the only misleading name found"
+      ],
+      "rationale": "Small files, consistent naming, why-comments at every non-obvious decision, and a page tree that mirrors the routes; a new teammate can navigate in minutes."
+    },
+    "review_cost": {
+      "score": 4,
+      "evidence": [
+        "app/server/utils/pokeapi.ts:12-37 — the one substantive ask: evict expired entries and cap cache size",
+        "app/app/components/PokemonCard.vue:5 — one-line move of useRuntimeConfig into setup",
+        "app/app/error.vue:7-21 — duplicate of app/app/app.vue:5-17 header/footer; extract AppHeader/AppFooter",
+        "app/app/pages/pokemon/[name].vue:84-87 — hand-rolled section because PageSection lacks an id prop",
+        "app/shared/types/pokedex.ts:41 — rename the games-list type away from TypeRef"
+      ],
+      "rationale": "One small real change (cache eviction) and a round of nits; the structure itself needs no rework."
+    }
+  },
+  "overall": 4,
+  "findings": [
+    {
+      "severity": "medium",
+      "location": "app/server/utils/pokeapi.ts:12",
+      "issue": "The in-memory cache checks a 60s TTL on read but never removes expired entries, so every URL ever fetched keeps its full parsed JSON resident for the life of the process; walking all Pokémon/move details can retain 100MB+ despite the nominal TTL.",
+      "suggestion": "Delete the entry when a read finds it expired, and cap the map (simple LRU or max-size with random/proactive eviction)."
+    },
+    {
+      "severity": "low",
+      "location": "app/server/utils/pokeapi.ts:54",
+      "issue": "mapLimit continues firing upstream fetches in the background after the first item rejects, and the remaining workers' errors are swallowed while partially-filled results are discarded.",
+      "suggestion": "Check a shared failure flag inside the worker loop (or collect per-item errors and reject with an aggregate) so failures stop the fan-out."
+    },
+    {
+      "severity": "low",
+      "location": "app/app/components/PokemonCard.vue:5",
+      "issue": "useRuntimeConfig() is invoked lazily inside a computed getter rather than once in setup, relying on the Nuxt context being available during render.",
+      "suggestion": "Hoist it: const config = useRuntimeConfig() in setup, then use config.public.apiBase inside the computed."
+    },
+    {
+      "severity": "low",
+      "location": "app/app/pages/index.vue:33",
+      "issue": "An out-of-range ?page= is clamped for display but the URL keeps the bogus value, and Number.parseInt accepts values like '2abc'.",
+      "suggestion": "Normalise (router.replace to the clamped page or drop the param) and validate the parsed integer."
+    },
+    {
+      "severity": "low",
+      "location": "app/app/error.vue:7",
+      "issue": "Header/footer landmarks are copy-pasted between error.vue and app.vue (with plain <a> vs NuxtLink inconsistency), so future shell changes must be made twice.",
+      "suggestion": "Extract AppHeader/AppFooter components and reuse them in both roots."
+    },
+    {
+      "severity": "low",
+      "location": "app/app/components/PageSection.vue:2",
+      "issue": "PageSection has no id prop, forcing the Moves section to be hand-rolled in app/app/pages/pokemon/[name].vue:84 instead of reusing the component.",
+      "suggestion": "Add an optional id prop to PageSection and use it for the moves section."
+    },
+    {
+      "severity": "low",
+      "location": "app/server/utils/data.ts:16",
+      "issue": "data.ts mixes pure formatters (englishName, collapse, latestFlavorText) with async data access (speciesNames, allTypes, speciesCards), and allTypes/typeLabels re-fetch all 21 type payloads on every request (masked by the short cache).",
+      "suggestion": "Split pure helpers into their own module (or shared/utils) and memoise the type-label map per request/process."
+    },
+    {
+      "severity": "low",
+      "location": "app/shared/types/pokedex.ts:41",
+      "issue": "TypeRef (a type reference) is reused as the shape of the games list, which misleads readers about what the data means.",
+      "suggestion": "Define a generic NamedOption { name, label } (or NamedRef) and use it for games."
+    },
+    {
+      "severity": "low",
+      "location": "app/server/api/species.get.ts:4",
+      "issue": "The index endpoint's cold path performs ~30 upstream fetches (21 types, 9 generations, species list) and rebuilds 1025 entries whenever the 60s cache lapses; no server-side caching of the endpoint itself.",
+      "suggestion": "Wrap the handler in Nitro's defineCachedEventHandler (or a route rule) with a short maxAge so the cold cost isn't paid per lapse."
+    },
+    {
+      "severity": "low",
+      "location": "app/package.json:6",
+      "issue": "The app has no typecheck/lint script (and devDependencies is empty), even though the server layer leans on inline casts against any-typed upstream payloads (e.g. app/server/api/pokemon/[name].get.ts:33).",
+      "suggestion": "Add a `typecheck` script running vue-tsc/nuxi typecheck and typed interfaces for the PokeAPI payloads used."
+    }
+  ],
+  "summary": "A genuinely idiomatic Nuxt 4 codebase: clean app/server/shared split, DTO-typed BFF endpoints, reactive useFetch with URL-driven state, and docs-matching 404 handling. The only substantive concern is the in-memory PokeAPI cache's unbounded retention of expired entries; the rest are nits (duplicated shell markup, lazy composable call, one reused type name). I'd merge after a small cache-eviction change plus a nits round."
+}

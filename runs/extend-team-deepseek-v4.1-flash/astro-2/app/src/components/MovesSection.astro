@@ -1,0 +1,210 @@
+---
+import Section from './Section.astro';
+import TypeBadge from './TypeBadge.astro';
+import { api } from '../lib/api';
+import { DASH, englishName, getTypeLabels, humanize } from '../lib/pokedex';
+
+interface Props {
+  pokemon: any;
+  game: string | null;
+}
+const { pokemon, game: requestedGame } = Astro.props;
+
+type Detail = { level_learned_at: number; version_group: { name: string }; move_learn_method: { name: string } };
+type PokemonMove = { move: { name: string }; version_group_details: Detail[] };
+const learned: PokemonMove[] = pokemon.moves ?? [];
+
+// Version groups in which the Pokémon learns moves, ordered by the version group's `order`.
+const groupNames = [...new Set(learned.flatMap((m) => m.version_group_details.map((d) => d.version_group.name)))];
+const groupRecords = await Promise.all(groupNames.map((name) => api(`version-group/${name}`)));
+const groups = groupNames
+  .map((name, i) => ({ name, order: groupRecords[i]?.order ?? Number.MAX_SAFE_INTEGER }))
+  .sort((a, b) => a.order - b.order || a.name.localeCompare(b.name));
+
+const selected =
+  groups.find((g) => g.name === requestedGame)?.name ?? groups[groups.length - 1]?.name ?? null;
+
+type Row = { move: string; method: string; level: number };
+const rows: Row[] = [];
+const seen = new Set<string>();
+for (const m of learned) {
+  for (const d of m.version_group_details) {
+    if (d.version_group.name !== selected) continue;
+    const key = `${d.move_learn_method.name}|${m.move.name}|${d.level_learned_at}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    rows.push({ move: m.move.name, method: d.move_learn_method.name, level: d.level_learned_at });
+  }
+}
+
+const moveNames = [...new Set(rows.map((r) => r.move))];
+const [moveRecords, typeLabel] = await Promise.all([
+  Promise.all(moveNames.map((name) => api(`move/${name}`))),
+  getTypeLabels(),
+]);
+const moves = new Map(moveNames.map((name, i) => [name, moveRecords[i]]));
+
+const METHOD_ORDER = ['level-up', 'machine', 'egg', 'tutor'];
+const methodRank = (m: string) => {
+  const i = METHOD_ORDER.indexOf(m);
+  return i === -1 ? METHOD_ORDER.length : i;
+};
+const methods = [...new Set(rows.map((r) => r.method))].sort(
+  (a, b) => methodRank(a) - methodRank(b) || humanize(a).localeCompare(humanize(b)),
+);
+
+const tables = methods.map((method) => {
+  const entries = rows
+    .filter((r) => r.method === method)
+    .map((r) => {
+      const record = moves.get(r.move);
+      return {
+        level: r.level,
+        name: r.move,
+        label: record ? englishName(record) : humanize(r.move),
+        type: record?.type?.name as string | undefined,
+        category: record?.damage_class?.name ? humanize(record.damage_class.name) : null,
+        power: (record?.power ?? null) as number | null,
+        accuracy: (record?.accuracy ?? null) as number | null,
+        pp: (record?.pp ?? null) as number | null,
+      };
+    })
+    .sort((a, b) => (method === 'level-up' ? a.level - b.level : 0) || a.label.localeCompare(b.label));
+  return { method, label: humanize(method), entries };
+});
+
+const columns = (method: string) => [
+  ...(method === 'level-up' ? [{ key: 'level', label: 'Level', numeric: true }] : []),
+  { key: 'move', label: 'Move', numeric: false },
+  { key: 'type', label: 'Type', numeric: false },
+  { key: 'category', label: 'Category', numeric: false },
+  { key: 'power', label: 'Power', numeric: true },
+  { key: 'accuracy', label: 'Accuracy', numeric: true },
+  { key: 'pp', label: 'PP', numeric: true },
+];
+const show = (v: number | string | null) => (v === null || v === undefined ? DASH : String(v));
+const sortValue = (v: number | string | null) => (v === null || v === undefined ? '' : String(v));
+---
+
+<Section title="Moves" id="moves">
+  <div id="moves-content" data-moves>
+    {
+      groups.length === 0 ? (
+        <p>{DASH}</p>
+      ) : (
+        <>
+          <form class="game-picker" method="get" action="#moves">
+            <label for="game-select">Game</label>
+            <select id="game-select" name="game">
+              {groups.map((g) => (
+                <option value={g.name} selected={g.name === selected}>
+                  {humanize(g.name)}
+                </option>
+              ))}
+            </select>
+            <noscript>
+              <button type="submit">Show</button>
+            </noscript>
+          </form>
+          {tables.map((table) => (
+            <div class="table-scroll">
+              <table class="moves-table" data-sortable>
+                <caption>{table.label}</caption>
+                <thead>
+                  <tr>
+                    {columns(table.method).map((col) => (
+                      <th scope="col" data-numeric={col.numeric ? '' : undefined}>
+                        <button type="button" class="sort-button">
+                          {col.label}
+                        </button>
+                      </th>
+                    ))}
+                  </tr>
+                </thead>
+                <tbody>
+                  {table.entries.map((e) => (
+                    <tr>
+                      {table.method === 'level-up' && <td data-sort={e.level}>{e.level}</td>}
+                      <td data-sort={e.label}>
+                        <a href={`/moves/${e.name}`}>{e.label}</a>
+                      </td>
+                      <td data-sort={e.type ? typeLabel(e.type) : ''}>
+                        {e.type ? <TypeBadge name={e.type} label={typeLabel(e.type)} /> : DASH}
+                      </td>
+                      <td data-sort={sortValue(e.category)}>{show(e.category)}</td>
+                      <td data-sort={sortValue(e.power)}>{show(e.power)}</td>
+                      <td data-sort={sortValue(e.accuracy)}>{show(e.accuracy)}</td>
+                      <td data-sort={sortValue(e.pp)}>{show(e.pp)}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          ))}
+        </>
+      )
+    }
+  </div>
+</Section>
+
+<script>
+  function sortTable(table: HTMLTableElement, th: HTMLTableCellElement) {
+    const headers = [...table.tHead!.rows[0].cells];
+    const index = headers.indexOf(th);
+    const direction = th.getAttribute('aria-sort') === 'ascending' ? 'descending' : 'ascending';
+    for (const h of headers) h.removeAttribute('aria-sort');
+    th.setAttribute('aria-sort', direction);
+
+    const numeric = th.hasAttribute('data-numeric');
+    const body = table.tBodies[0];
+    const rows = [...body.rows].map((row, i) => {
+      row.dataset.index ??= String(i);
+      return { row, value: row.cells[index]?.dataset.sort ?? '', original: Number(row.dataset.index) };
+    });
+    const sign = direction === 'ascending' ? 1 : -1;
+    rows.sort((a, b) => {
+      const aMissing = a.value === '';
+      const bMissing = b.value === '';
+      if (aMissing || bMissing) return aMissing && bMissing ? a.original - b.original : aMissing ? 1 : -1;
+      const cmp = numeric ? Number(a.value) - Number(b.value) : a.value.localeCompare(b.value);
+      return cmp * sign || a.original - b.original;
+    });
+    body.append(...rows.map((r) => r.row));
+  }
+
+  document.addEventListener('click', (event) => {
+    const button = (event.target as Element).closest?.('table[data-sortable] th .sort-button');
+    if (!button) return;
+    const th = button.closest('th')!;
+    sortTable(th.closest('table')!, th);
+  });
+
+  let controller: AbortController | undefined;
+  let lastSearch = location.search;
+  document.addEventListener('change', async (event) => {
+    const select = event.target;
+    if (!(select instanceof HTMLSelectElement) || select.id !== 'game-select') return;
+    const url = new URL(location.href);
+    url.searchParams.set('game', select.value);
+    history.pushState(null, '', url);
+    lastSearch = location.search;
+    controller?.abort();
+    controller = new AbortController();
+    try {
+      const res = await fetch(url.pathname + url.search, { signal: controller.signal });
+      const doc = new DOMParser().parseFromString(await res.text(), 'text/html');
+      const next = doc.getElementById('moves-content');
+      const current = document.getElementById('moves-content');
+      if (next && current) {
+        current.replaceWith(next);
+        document.getElementById('game-select')?.focus();
+      }
+    } catch (err) {
+      if ((err as Error).name !== 'AbortError') location.assign(url);
+    }
+  });
+
+  window.addEventListener('popstate', () => {
+    if (location.search !== lastSearch) location.reload();
+  });
+</script>

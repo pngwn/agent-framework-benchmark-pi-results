@@ -1,0 +1,118 @@
+I have everything I need. Confirming the facts: `app/` contains **zero tests** — `app/package.json` has no `test` script, and a grep across `app/` finds no `*.test.*`, `*.spec.*` or test-runner imports. The measured facts agree (`tests.files: 0`, `runner: []`). All four criteria therefore anchor to the no-tests case, and the review's value is in cataloguing the untested risk.
+
+The riskiest logic is substantial and entirely hand-rolled: filtering/pagination/URL-state on the home route (`app/src/routes/(home).js:53-84`), client-side debounced search with an HTML-fragment swap and race guard (`app/src/routes/(home).client.js:30-52`), table sorting with missing-values handling in the client script (`app/src/routes/pokemon/[name].client.js:6-33`), evolution-tree recursion (`app/src/routes/pokemon/[name].js:41-62`), and a pile of data-shaping helpers in `app/src/lib/api.js` (`idFromUrl`, `uniqueSpeciesFromPokemonReferences`, `latestEnglishFlavorText`, type/generation maps). Notably, I found a latent spec violation in the untested sorting code — missing values are flipped to sort *first* on a descending sort (`compareRows` returns ±1 inside `result`, which is then negated for descending, `app/src/routes/pokemon/[name].client.js:19-33`), despite the spec requiring "missing values sort last in both directions" (`SPEC.md:186`). Also, any API error on a Pokémon page is conflated with 404 (`app/src/routes/pokemon/[name].js:265-269`), so a 500 shows "Not found". These are exactly the bugs a handful of pure-function tests would have caught.
+
+```json
+{
+  "dimension": "tests",
+  "criteria": {
+    "coverage_of_risk": {
+      "score": 1,
+      "evidence": [
+        "app/package.json:6-10 — no test script, no test runner dependency",
+        "app/src/routes/(home).js:53-84 — filter/pagination logic (search, type, generation, 48/page, page clamp) entirely untested",
+        "app/src/lib/api.js:59-63,85-95,226-241 — idFromUrl, latestEnglishFlavorText, alternate-form exclusion all untested"
+      ],
+      "rationale": "The app contains substantial hand-rolled data transformation, filtering, pagination and URL-state logic and not a single test covers any of it."
+    },
+    "behaviour_not_implementation": {
+      "score": 1,
+      "evidence": ["app/package.json:6-10 — no tests exist, so nothing asserts behaviour or implementation"],
+      "rationale": "No tests at all; the criterion defaults to 1."
+    },
+    "regression_power": {
+      "score": 1,
+      "evidence": [
+        "app/src/routes/pokemon/[name].client.js:19-33 — compareRows negates its missing-value result for descending, so missing values sort first, violating SPEC.md:186; nothing would catch this regression",
+        "app/src/lib/api.js:104-108 — getSpeciesIndex sort/filter by id < 10000; a change here silently reintroduces alternate forms with no failing test"
+      ],
+      "rationale": "With zero tests, any regression — including an existing spec violation in the sorting code — sails through undetected."
+    },
+    "signal_to_noise": {
+      "score": 3,
+      "evidence": ["app/ — zero test files, so there is no noise"],
+      "rationale": "No tests means no low-value tests; per the anchor this is a 3, though the absence is captured in the other criteria."
+    }
+  },
+  "overall": 1,
+  "findings": [
+    {
+      "severity": "high",
+      "location": "app/package.json:6-10",
+      "issue": "The app ships with zero tests and no test tooling, despite containing ~880 lines of untested filtering, pagination, sorting and data-mapping logic.",
+      "suggestion": "Add Vitest (already on the Vite toolchain) with unit tests for the pure helpers in src/lib/api.js and the route-handler transforms, plus a Playwright smoke test per page."
+    },
+    {
+      "severity": "high",
+      "location": "app/src/routes/pokemon/[name].client.js:19-33",
+      "issue": "compareRows handles missing values inside `result` before the direction flip, so on a descending sort missing Power/Accuracy/PP sort first, violating the spec's 'missing values sort last in both directions'. The acceptance suite never caught it and no test would.",
+      "suggestion": "Return early for missing values without negating, and add a unit test with mixed missing/numeric rows asserting missing-last in both directions."
+    },
+    {
+      "severity": "high",
+      "location": "app/src/routes/pokemon/[name].js:265-269",
+      "issue": "The catch block maps every error — including 5xx API failures and network faults — to a 404 'Not found' page, masking real outages as 'resource does not exist'.",
+      "suggestion": "Distinguish ApiError.status 404 from other errors; render Not found only for 404 and a 500 page otherwise. Add tests for both paths."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/routes/(home).client.js:38-52",
+      "issue": "Live filtering re-fetches the full page HTML and swaps in getElementById('home-results'); the race guard and the hard-coded element id are untested, and a template refactor that renames the id silently kills live search with no failing test.",
+      "suggestion": "Extract the request-id guard and fragment swap into a small tested module, or assert the id exists at build time; test stale-response ordering."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/routes/(home).js:27-38",
+      "issue": "homeHref and the handler's page clamping (min(positiveInteger(page), totalPages), default-omission rules) implement the URL-state contract entirely untested; an off-by-one or an omitted-default regression breaks deep links like /?type=fire&generation=generation-i&page=2.",
+      "suggestion": "Unit-test homeHref against the spec's URL cases (empty q, page 1, invalid page, unknown type/generation values)."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/lib/api.js:85-95",
+      "issue": "latestEnglishFlavorText encodes two spec rules (last English entry, whitespace collapsed to one space); swapping the reverse iteration for .find() or dropping the \\s+ replace would pass review unnoticed.",
+      "suggestion": "Table-driven unit tests with \\n/\\f runs and non-English trailing entries."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/lib/api.js:226-241",
+      "issue": "uniqueSpeciesFromPokemonReferences performs dedupe, alternate-form exclusion (id >= 10000) and dex-number sort for three different pages; a change to idFromUrl's regex (api.js:59-63) or the filter would silently drop or add species on ability/type/move pages.",
+      "suggestion": "Unit tests covering ids 10001+, duplicate references, and unordered input."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/routes/pokemon/[name].js:41-62",
+      "issue": "Evolution rendering is recursive (buildEvolutionTree/renderEvolutionNode); branching chains like Eevee and empty/missing chain nodes are exercised only by manual browsing.",
+      "suggestion": "Unit-test buildEvolutionTree against a branching fixture (Eevee) and a species with no chain."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/lib/api.js:37-48",
+      "issue": "The in-memory promise cache (set-then-catch-delete) is untested; a refactor could cache rejected promises or never evict failures, turning one transient API hiccup into a permanently broken page.",
+      "suggestion": "Test that a failed getJson can be retried successfully and that concurrent calls share one fetch."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/routes/(home).js:8",
+      "issue": "The BUILDING() env-guard pattern (returning {} at build time) is repeated in every route handler and interacts with Gracile's prerender step; nothing verifies the production build actually skips fetching.",
+      "suggestion": "One build-time assertion or test that `npm run build` completes without hitting the API."
+    }
+  ],
+  "summary": "The agent wrote no tests of its own — no runner, no script, no test files — leaving ~880 lines of hand-rolled filtering, pagination, URL-state, sorting and data-mapping logic guarded only by the acceptance suite. That suite already misses real issues: descending sort puts missing values first (a spec violation) and any API error on a Pokémon page renders as 404. Pure-function tests for src/lib/api.js and the route transforms would have caught both and are the cheapest insurance this codebase could get.",
+  "wroteTests": false,
+  "testCount": 0,
+  "valuableTests": [],
+  "lowValueTests": [],
+  "untested": [
+    { "area": "Home filtering/pagination (search substring, type+generation filters, 48-per-page slicing, page clamp, Page n of total, prev/next hrefs) — app/src/routes/(home).js:53-84", "risk": "high", "likelyBug": "Off-by-one in slice bounds, page=0/negative/oversized handling, or a filter that stops matching after a data-layer refactor; deep links like /?type=fire&generation=generation-i&page=2 break silently." },
+    { "area": "Client-side live search: debounce, history push/replace, page reset, HTML-fragment swap, request-id race guard — app/src/routes/(home).client.js:30-52", "risk": "high", "likelyBug": "Stale response overwrites newer results after the debounce/timer logic changes, or a renamed #home-results id makes typing appear dead while the URL still updates." },
+    { "area": "Move table sorting in the browser, including missing-values-last in both directions and aria-sort toggling — app/src/routes/pokemon/[name].client.js:6-33", "risk": "high", "likelyBug": "Descending sort places missing Power/Accuracy first (already the case today, violating SPEC.md:186); numeric-vs-text compare regressions make levels sort as 1,10,2." },
+    { "area": "Error/not-found paths: Pokemon route conflates all errors with 404 (app/src/routes/pokemon/[name].js:265-269); home route swallows errors into an empty 500 shell ((home).js:87-105)", "risk": "high", "likelyBug": "An API outage shows 'Not found' for valid Pokémon, and future refactors can't distinguish 404 from 500; nobody notices until a real incident." },
+    { "area": "Alternate-form exclusion and dedupe in uniqueSpeciesFromPokemonReferences and getSpeciesIndex (id >= 10000 filter) — app/src/lib/api.js:104-108,226-241", "risk": "high", "likelyBug": "Mega/forms reappear in every card list, or a changed idFromUrl regex drops valid species; counts like '<count> Pokémon' drift with no failing test." },
+    { "area": "Data-shaping helpers: latestEnglishFlavorText (last English entry + whitespace collapse), humanize, englishName/genus/effect, dexNumber padding — app/src/lib/api.js:66-99", "risk": "medium", "likelyBug": "Flavor text reverts to the first entry or keeps raw \\n/\\f; Mr. Mime shows as 'Mr-mime'; dex numbers lose zero-padding." },
+    { "area": "Evolution chain recursion and nested-list rendering — app/src/routes/pokemon/[name].js:41-62", "risk": "medium", "likelyBug": "Branching chains (Eevee) collapse to a single branch, or a null node in the chain throws and the whole page 404s via the catch-all." },
+    { "area": "Moves-section assembly: version-group ordering, default game = highest order, method ordering (Level Up, Machine, Egg, Tutor, then alphabetical), ?game= param round-trip — app/src/routes/pokemon/[name].js:184-220", "risk": "medium", "likelyBug": "Default game off-by-one (games[games.length-1] assumes ascending sort holds), unknown method names sort wrong, or ?game=... is ignored after a refactor." },
+    { "area": "In-memory API promise cache, including failure eviction — app/src/lib/api.js:37-48", "risk": "medium", "likelyBug": "A rejected promise gets cached, so one transient API failure permanently breaks a route until restart; or the delete-on-catch is lost and retry never happens." },
+    { "area": "Build-time guards (BUILDING() returning {} in every handler) — app/src/routes/(home).js:8, app/src/routes/pokemon/[name].js:22", "risk": "low", "likelyBug": "`npm run build` starts fetching the live API (which the spec forbids) or crashes on empty props after a Gracile upgrade changes prerender behavior." }
+  ]
+}
+```

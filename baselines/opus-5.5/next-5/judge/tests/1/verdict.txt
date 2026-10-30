@@ -1,0 +1,163 @@
+## Review — Dimension: test quality
+
+**The facts on the ground:** `app/` contains **zero tests**. There is no test runner in `app/package.json` (`app/package.json:6-9` — only `dev`, `build`, `start`), no test dependencies beyond types (`app/package.json:12-17`), no spec/test files anywhere under `app/src/`, and static analysis confirms `tests: 0 files, 0 cases`. The acceptance suite in `tests/` is the only guard, and it isn't owned by this app.
+
+**Why that matters here specifically:** this app is unusually rich in exactly the kind of logic that unit tests are cheap for and that the acceptance Playwright suite exercises only through full-page snapshots:
+
+- **Pure helpers, fully testable, fully untested** — `humanize`, `dexNumber` padding, `cleanText` whitespace collapse, `latestEnglishFlavorText` ("last en entry"), `orMissing`, `idFromUrl` regex (`app/src/lib/format.ts:7-45`). A one-line refactor of the `en.at(-1)` selection in `latestEnglishFlavorText` would pass every compile check and could silently regress the effect text on dozens of pages.
+- **Data-layer shape coercion** — `cardsFor` drops alternate forms (`id > MAX_SPECIES_ID`), dedupes by species id, and sorts by dex number (`app/src/lib/cards.ts:15-30`). This is the spec's most explicit correctness rule, and dedup-vs-order bugs (Map insertion order + `sort`) are classic silent regressions.
+- **URL state** — `readFilters` clamps NaN/negative/garbage `page` and `toQuery` decides when `q`/`page` get serialized (`app/src/app/HomeView.tsx:25-52`); page clamping `Math.min(filters.page, pageCount)` and the "searching → page 1" interplay (`app/src/app/HomeView.tsx:107-109`) are easy to break with an innocent edit. The acceptance suite covers a few happy URL shapes (`tests/specs/home.spec.mjs:54,66,108`) but not out-of-range pages, mixed query/URL races, or the `lastWritten` ref debounce dance (`app/src/app/HomeView.tsx:60-78`).
+- **The API cache** — TTL eviction, failed-promise eviction, `NotFoundError` on 404, and the fragile-looking re-rooting of absolute URLs via `path.indexOf('/api/v2/')` (`app/src/lib/api.ts:44-60`). `indexOf` returning `-1` for an off-shape URL would silently produce a wrong path (`slice(-1+8)` → wrong offset); a regression here poisons every page.
+- **Move-table sorting** — missing-values-last regardless of sort direction (`app/src/app/pokemon/[name]/MovesSection.tsx:54-56`), `compareMethods` with `Infinity` sentinels (`:47-52`), and the composite row key `${move}-${level}-${rows.length}` (`:140`) that can collide/duplicate under refactors.
+
+**Latent bug an app-level test would catch and the acceptance suite won't:** each dynamic route runs `decodeURIComponent(name)` on the raw param (`app/src/app/pokemon/[name]/page.tsx:40`, same pattern in moves/abilities/types pages). A malformed percent sequence (`/pokemon/%zz`) throws `URIError` *before* `notFound()` is reached, so the user gets a 500 crash page, not "Not found" — the acceptance 404 tests only use well-formed names (`tests/specs/details.spec.mjs:159-163`). Likewise there is no `error.tsx` anywhere, so a non-404 API failure is entirely unguarded and untested.
+
+Scores follow the anchored scale for an app with no tests: `coverage_of_risk` and `regression_power` at 1 (nothing would be caught by app-owned tests), `behaviour_not_implementation` at 1 (no tests), `signal_to_noise` at 3 (no noise, per the scale's no-tests default).
+
+```json
+{
+  "dimension": "tests",
+  "criteria": {
+    "coverage_of_risk": {
+      "score": 1,
+      "evidence": [
+        "app/package.json:6-9 — no test script, no runner, no test deps",
+        "app/src/lib/cards.ts:15-30 — untested: alternate-form filtering, id dedup, dex-number sort",
+        "app/src/app/HomeView.tsx:25-52 — untested: readFilters page clamping, toQuery serialization",
+        "app/src/lib/api.ts:44-60 — untested: TTL cache, 404 mapping, absolute-URL re-rooting",
+        "app/src/lib/format.ts:27-45 — untested: latest-English flavor text, whitespace collapse, idFromUrl regex"
+      ],
+      "rationale": "No tests exist in app/ at all, and the app's riskiest logic (data shaping, URL state, caching) has zero coverage beyond the borrowed acceptance suite."
+    },
+    "behaviour_not_implementation": {
+      "score": 1,
+      "evidence": ["app/src/ — no test files exist anywhere under the app"],
+      "rationale": "Nothing to evaluate; the scale places 'no tests' at 1."
+    },
+    "regression_power": {
+      "score": 1,
+      "evidence": [
+        "app/src/lib/api.ts:54 — indexOf('/api/v2/') re-rooting would silently break with -1 and no test would fail",
+        "app/src/app/pokemon/[name]/MovesSection.tsx:54-56 — missing-value sort direction regression would go unnoticed",
+        "app/src/app/pokemon/[name]/page.tsx:40 — decodeURIComponent throws before notFound() on malformed input; only well-formed 404s are acceptance-tested (tests/specs/details.spec.mjs:160)"
+      ],
+      "rationale": "With zero app-owned tests, breaking any behaviour in the data layer or URL-state code would not fail a single test."
+    },
+    "signal_to_noise": {
+      "score": 3,
+      "evidence": ["app/src/ — no test files, so no padding or noise either"],
+      "rationale": "The scale's stated default for a codebase with no tests."
+    }
+  },
+  "overall": 1,
+  "findings": [
+    {
+      "severity": "high",
+      "location": "app/package.json:6-9",
+      "issue": "No test runner, test script, or test dependencies; the app ships with zero tests of its own",
+      "suggestion": "Add vitest for the pure modules (lib/format.ts, lib/cards.ts, URL-state helpers) plus a couple of Playwright component/route tests; these are cheap given how much logic is already extracted into pure functions"
+    },
+    {
+      "severity": "high",
+      "location": "app/src/lib/cards.ts:15-30",
+      "issue": "cardsFor implements the spec's most error-prone rules (drop IDs > 10000, dedup by species id, sort by dex number) with no coverage",
+      "suggestion": "Unit-test with refs containing alternate forms, duplicate species and out-of-order IDs"
+    },
+    {
+      "severity": "high",
+      "location": "app/src/app/HomeView.tsx:25-52",
+      "issue": "URL-state logic (page NaN/negative clamping, q trimming, toQuery omitting defaults, searching→page-1 reset at :107-109) is untested",
+      "suggestion": "Extract filters/params logic and unit-test edge cases: ?page=0, ?page=99999, combined q+type+generation, rapid typing vs debounce"
+    },
+    {
+      "severity": "high",
+      "location": "app/src/lib/api.ts:44-60",
+      "issue": "In-memory cache's subtle behaviour (TTL eviction, failed-promise cleanup at :56-58, NotFoundError on 404, re-rooting via indexOf at :46) has no regression guard; indexOf -1 silently corrupts the path",
+      "suggestion": "Unit-test with a stubbed fetch: 404→NotFoundError, rejection evicts cache entry, absolute URLs with and without /api/v2/ prefix, TTL expiry"
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/app/pokemon/[name]/page.tsx:40",
+      "issue": "decodeURIComponent(name) throws URIError on malformed percent sequences before notFound() runs, turning /pokemon/%zz into a 500 instead of the not-found page (same pattern in moves/abilities/types pages)",
+      "suggestion": "Wrap decode in try/catch returning '' or validate the name before decoding; add a route test for malformed-encoding URLs"
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/lib/format.ts:27-45",
+      "issue": "latestEnglishFlavorText, cleanText, idFromUrl, dexNumber are pure spec-critical helpers with no tests",
+      "suggestion": "Table-driven unit tests covering \\f/\\n collapsing, no-en-entry fallback, non-numeric URLs, id 25 → #0025"
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/app/pokemon/[name]/MovesSection.tsx:47-56",
+      "issue": "Sort comparators (missing-values-last ignoring sort direction, compareMethods Infinity sentinels) and the composite row key at :140 are untested",
+      "suggestion": "Unit-test the sort function with null power/accuracy mixed with numbers, and both sort directions"
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/app/page.tsx:26-50",
+      "issue": "Type-per-slot and generation-by-id map building (server-side data transformation over 18 type records × 1025 species) is untested",
+      "suggestion": "Extract into lib/ and unit-test slot ordering, missing types, and generation fallback to ''"
+    },
+    {
+      "severity": "low",
+      "location": "app/src/app/HomeView.tsx:60-78",
+      "issue": "The lastWritten-ref/debounce sync between the input and the URL is stateful and easy to break; no test pins the observable behaviour",
+      "suggestion": "Playwright test typing then backspacing quickly, asserting both results and final URL"
+    },
+    {
+      "severity": "low",
+      "location": "app/src/app/",
+      "issue": "No error.tsx anywhere; a non-404 API failure surfaces as an unhandled 500 with no tested fallback",
+      "suggestion": "Add an app-level error boundary and a test simulating API 500s"
+    }
+  ],
+  "summary": "The app ships zero tests of its own — no runner, script, or dependency — leaving its substantial pure-logic layer (name/formatting rules, alternate-form filtering, URL-state parsing, move sorting, a 30s TTL cache) guarded only by the acceptance suite. That suite is behavioural and reasonably broad, but it exercises happy-path URLs only, so a refactor of the data layer or a subtle cache/parse bug (e.g. decodeURIComponent throwing before notFound()) would slip through. Ironically the code is well-structured for testing — most risk already lives in pure, easily-testable functions — which makes the absence of any tests a clear miss rather than a structural limitation.",
+  "wroteTests": false,
+  "testCount": 0,
+  "valuableTests": [],
+  "lowValueTests": [],
+  "untested": [
+    {
+      "area": "cardsFor alternate-form filtering, dedup and dex ordering (app/src/lib/cards.ts:15-30)",
+      "risk": "high",
+      "likelyBug": "A refactor reintroduces Mega/form Pokémon into lists or drops/duplicates species, silently violating the spec's forms rule"
+    },
+    {
+      "area": "URL-state parsing and serialization in HomeView (page clamping, q trim, default-omitting toQuery)",
+      "risk": "high",
+      "likelyBug": "Edge URLs like ?page=0, ?page=abc, ?page=99999 render an empty or wrong page instead of clamping; filter changes stop resetting the page"
+    },
+    {
+      "area": "API client cache semantics (TTL, 404→NotFoundError, failed-promise eviction, absolute-URL re-rooting) in app/src/lib/api.ts",
+      "risk": "high",
+      "likelyBug": "Cache poisoning on rejected requests, or URLs lacking /api/v2/ re-rooted via indexOf(-1) to a wrong endpoint, breaking whole sections"
+    },
+    {
+      "area": "Pure formatting helpers: latestEnglishFlavorText, cleanText, humanize, dexNumber, orMissing, idFromUrl",
+      "risk": "medium",
+      "likelyBug": "Flavor-text selection stops taking the last en entry or \\f stops collapsing; dex padding or em-dash rendering regresses"
+    },
+    {
+      "area": "Move-table sorting (missing-last direction, method ordering) and composite row keys in MovesSection",
+      "risk": "medium",
+      "likelyBug": "Null power/accuracy sorts to the wrong end when descending; duplicate React keys cause dropped rows"
+    },
+    {
+      "area": "Malformed route params: decodeURIComponent throws before notFound() on /pokemon/%zz etc.",
+      "risk": "medium",
+      "likelyBug": "500 crash page instead of the not-found page; acceptance tests only cover well-formed missing names"
+    },
+    {
+      "area": "Home-page server-side aggregation (typesById slot ordering, generationById fallback) in app/src/app/page.tsx",
+      "risk": "medium",
+      "likelyBug": "Type slot order wrong for dual-type species or missing generation leaves blank filters that mismatch the URL"
+    },
+    {
+      "area": "Non-404 API failure handling (no error.tsx; load() throws raw Error) in app/src/lib/api.ts:37-39",
+      "risk": "low",
+      "likelyBug": "API outage yields an unstyled default 500 with no recovery link, undetected until production"
+    }
+  ]
+}
+```

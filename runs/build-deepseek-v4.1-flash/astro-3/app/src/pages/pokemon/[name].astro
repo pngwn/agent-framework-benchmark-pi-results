@@ -1,0 +1,529 @@
+---
+import Base from '../../layouts/Base.astro';
+import NotFound from '../../components/NotFound.astro';
+import MoveTable from '../../components/MoveTable.astro';
+import {
+  defaultPokemonReference,
+  getEvolutionChain,
+  getMoveRows,
+  getPokemon,
+  getSpecies,
+  getVersionGroupsForPokemon,
+  absoluteApiUrl,
+} from '../../lib/api.js';
+import {
+  DAMAGE_CLASS_LABELS,
+  STAT_LABELS,
+  dexNumber,
+  englishName,
+  formatMetric,
+  humanize,
+  latestEnglishFlavorText,
+} from '../../lib/format.js';
+
+function escapeHtml(value) {
+  return String(value)
+    .replaceAll('&', '&amp;')
+    .replaceAll('<', '&lt;')
+    .replaceAll('>', '&gt;')
+    .replaceAll('"', '&quot;')
+    .replaceAll("'", '&#39;');
+}
+
+function renderEvolutionNode(node) {
+  const children = node.evolves_to || [];
+  const name = node.species?.name || '';
+  const childHtml = children.length > 0
+    ? `<ul>${children.map(renderEvolutionNode).join('')}</ul>`
+    : '';
+  return `<li><a href="/pokemon/${encodeURIComponent(name)}">${escapeHtml(humanize(name))}</a>${childHtml}</li>`;
+}
+
+export const prerender = false;
+
+const { name } = Astro.params;
+const species = await getSpecies(name);
+
+let notFound = !species;
+let heading = 'Not found';
+let pokemon = null;
+let genus = '';
+let flavor = '';
+let artwork = '';
+let pokemonTypes = [];
+let abilities = [];
+let stats = [];
+let totalStats = 0;
+let evolutionRoot = null;
+let gameGroups = [];
+let selectedGame = null;
+let moveTables = [];
+let height = '—';
+let weight = '—';
+
+if (species) {
+  heading = englishName(species, species.name);
+  genus = species.genera?.find((entry) => entry.language?.name === 'en')?.genus || '';
+  flavor = latestEnglishFlavorText(species.flavor_text_entries);
+
+  const reference = defaultPokemonReference(species);
+  pokemon = reference ? await getPokemon(reference.name) : null;
+
+  if (!pokemon) {
+    notFound = true;
+    heading = 'Not found';
+  } else {
+    artwork =
+      pokemon.sprites?.other?.['official-artwork']?.front_default ||
+      pokemon.sprites?.front_default ||
+      absoluteApiUrl(`/media/sprites/pokemon/${pokemon.id}.png`);
+
+    pokemonTypes = [...(pokemon.types || [])]
+      .sort((a, b) => a.slot - b.slot)
+      .map((entry) => ({ name: entry.type.name, label: humanize(entry.type.name) }));
+
+    abilities = [...(pokemon.abilities || [])]
+      .sort((a, b) => a.slot - b.slot)
+      .map((entry) => ({
+        name: entry.ability.name,
+        label: humanize(entry.ability.name),
+        hidden: entry.is_hidden,
+      }));
+
+    stats = (pokemon.stats || []).map((entry) => ({
+      label: STAT_LABELS[entry.stat.name] || humanize(entry.stat.name),
+      value: entry.base_stat,
+    }));
+    totalStats = stats.reduce((sum, stat) => sum + stat.value, 0);
+
+    height = formatMetric(pokemon.height);
+    weight = formatMetric(pokemon.weight);
+
+    const chainResource = species.evolution_chain?.url
+      ? await getEvolutionChain(species.evolution_chain.url)
+      : null;
+    evolutionRoot = chainResource?.chain || {
+      species: { name: species.name, url: species.url },
+      evolves_to: [],
+    };
+
+    gameGroups = await getVersionGroupsForPokemon(pokemon);
+    const requestedGame = Astro.url.searchParams.get('game');
+    selectedGame =
+      gameGroups.find((group) => group.name === requestedGame) ||
+      gameGroups.at(-1) ||
+      null;
+    if (selectedGame) {
+      moveTables = await getMoveRows(pokemon, selectedGame.name);
+    }
+  }
+}
+
+if (notFound) Astro.response.status = 404;
+const title = notFound ? 'Not found – Pokédex' : `${heading} – Pokédex`;
+---
+
+<Base title={title}>
+  {notFound ? (
+    <NotFound />
+  ) : (
+    <>
+      <div class="pokemon-summary">
+        <div class="artwork-column">
+          <div class="artwork-wrap">
+            <img class="artwork" src={artwork} alt={heading} width="288" height="288" />
+          </div>
+          <div class="summary-dex">{dexNumber(species.id)}</div>
+        </div>
+
+        <div class="summary-body">
+          <h1>{heading}</h1>
+          {genus && <p class="genus">{genus}</p>}
+
+          <div class="summary-types">
+            {pokemonTypes.map((type) => (
+              <a
+                class="type-badge"
+                style={`--badge-color: var(--type-${type.name})`}
+                href={`/types/${type.name}`}
+              >{type.label}</a>
+            ))}
+          </div>
+
+          <dl class="measurements">
+            <div>
+              <dt>Height</dt>
+              <dd>{height} m</dd>
+            </div>
+            <div>
+              <dt>Weight</dt>
+              <dd>{weight} kg</dd>
+            </div>
+          </dl>
+
+          {flavor && <p class="flavor">{flavor}</p>}
+        </div>
+      </div>
+
+      <section class="panel" aria-labelledby="stats-heading">
+        <h2 id="stats-heading">Base stats</h2>
+        <table class="stats-table">
+          <tbody>
+            {stats.map((stat) => (
+              <tr>
+                <th scope="row">{stat.label}</th>
+                <td>
+                  <div class="stat-cell">
+                    <span class="stat-track" aria-hidden="true">
+                      <span class="stat-fill" style={`width: ${Math.max(1, (stat.value / 255) * 100)}%`}></span>
+                    </span>
+                    <span class="stat-number">{stat.value}</span>
+                  </div>
+                </td>
+              </tr>
+            ))}
+            <tr class="total-row">
+              <th scope="row">Total</th>
+              <td>
+                <div class="stat-cell total-cell">
+                  <span class="stat-number">{totalStats}</span>
+                </div>
+              </td>
+            </tr>
+          </tbody>
+        </table>
+      </section>
+
+      <section class="panel" aria-labelledby="abilities-heading">
+        <h2 id="abilities-heading">Abilities</h2>
+        <ul class="abilities">
+          {abilities.map((ability) => (
+            <li>
+              <a href={`/abilities/${ability.name}`}>{ability.label}</a>
+              {ability.hidden && <span class="hidden-label"> (hidden)</span>}
+            </li>
+          ))}
+        </ul>
+      </section>
+
+      <section class="panel" aria-labelledby="evolution-heading">
+        <h2 id="evolution-heading">Evolution</h2>
+        <ul class="evolution-tree" set:html={renderEvolutionNode(evolutionRoot)}></ul>
+      </section>
+
+      <section class="panel moves-panel" id="moves" aria-labelledby="moves-heading">
+        <h2 id="moves-heading">Moves</h2>
+
+        {gameGroups.length > 0 && (
+          <div class="game-field">
+            <label for="game-select">Game</label>
+            <select id="game-select">
+              {gameGroups.map((group) => (
+                <option value={group.name} selected={group.name === selectedGame?.name}>
+                  {group.label}
+                </option>
+              ))}
+            </select>
+          </div>
+        )}
+
+        {moveTables.map((table) => <MoveTable table={table} />)}
+      </section>
+    </>
+  )}
+</Base>
+
+<style>
+  .pokemon-summary {
+    display: grid;
+    grid-template-columns: var(--artwork-size) minmax(0, 1fr);
+    gap: var(--space-6);
+    align-items: start;
+    margin-bottom: var(--space-6);
+  }
+
+  .artwork-column {
+    min-width: 0;
+  }
+
+  .artwork-wrap {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: var(--artwork-size);
+    height: var(--artwork-size);
+    padding: var(--space-3);
+    background: var(--color-surface);
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius-md);
+  }
+
+  .artwork {
+    width: 100%;
+    height: 100%;
+    object-fit: contain;
+  }
+
+  .summary-dex {
+    margin-top: var(--space-2);
+    color: var(--color-text-muted);
+    font-size: var(--text-sm);
+    text-align: center;
+  }
+
+  .summary-body {
+    padding-top: var(--space-1);
+  }
+
+  .summary-body h1 {
+    margin-bottom: var(--space-1);
+  }
+
+  .genus {
+    margin-bottom: var(--space-2);
+    color: var(--color-text-muted);
+  }
+
+  .summary-types {
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--space-1);
+    margin-bottom: var(--space-3);
+  }
+
+  .measurements {
+    display: flex;
+    gap: var(--space-5);
+    margin: var(--space-3) 0;
+  }
+
+  .measurements dt {
+    font-size: var(--text-xs);
+  }
+
+  .measurements dd {
+    font-size: var(--text-base);
+  }
+
+  .flavor {
+    max-width: 54rem;
+    margin: 0;
+  }
+
+  .stats-table {
+    width: 100%;
+    border-collapse: collapse;
+  }
+
+  .stats-table th,
+  .stats-table td {
+    padding: 0.375rem 0;
+    border-bottom: 1px solid var(--color-border);
+    text-align: left;
+    font-weight: var(--weight-normal);
+  }
+
+  .stats-table th {
+    width: 5rem;
+    white-space: nowrap;
+  }
+
+  .stats-table .total-row th,
+  .stats-table .total-row td {
+    border-bottom: 0;
+    font-weight: var(--weight-semibold);
+  }
+
+  .stat-cell {
+    display: flex;
+    align-items: center;
+    gap: var(--space-3);
+  }
+
+  .stat-track {
+    flex: 1;
+    height: 0.5rem;
+    overflow: hidden;
+    background: var(--color-stat-track);
+    border-radius: var(--radius-pill);
+  }
+
+  .stat-fill {
+    display: block;
+    height: 100%;
+    background: var(--color-stat-bar);
+    border-radius: var(--radius-pill);
+  }
+
+  .stat-number {
+    width: 2.75rem;
+    flex: none;
+    text-align: right;
+    font-variant-numeric: tabular-nums;
+  }
+
+  .total-cell {
+    justify-content: flex-end;
+  }
+
+  .abilities,
+  .evolution-tree {
+    margin: 0;
+    padding-left: 1.25rem;
+  }
+
+  .abilities li,
+  .evolution-tree li {
+    padding-block: 0.125rem;
+  }
+
+  .evolution-tree ul {
+    margin: 0.125rem 0;
+    padding-left: 1.5rem;
+  }
+
+  .hidden-label {
+    color: var(--color-text-muted);
+  }
+
+  .moves-panel {
+    scroll-margin-top: var(--space-3);
+  }
+
+  .game-field {
+    display: flex;
+    align-items: center;
+    gap: var(--space-3);
+    margin-bottom: var(--space-5);
+  }
+
+  .game-field label {
+    color: var(--color-text-muted);
+    font-size: var(--text-sm);
+  }
+
+  .game-field select {
+    width: min(100%, 17rem);
+    height: 2.5rem;
+    padding: 0 var(--space-3);
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius-sm);
+    background: var(--color-surface);
+    color: var(--color-text);
+    font: inherit;
+  }
+
+  .game-field select:focus {
+    outline: 2px solid var(--color-focus);
+    outline-offset: 1px;
+  }
+
+  :global(.table-wrap) {
+    margin-bottom: var(--space-5);
+    overflow-x: auto;
+  }
+
+  :global(.move-table) {
+    width: 100%;
+    min-width: 42rem;
+    border-collapse: collapse;
+    font-size: var(--text-sm);
+  }
+
+  :global(.move-table caption) {
+    padding-bottom: var(--space-3);
+    text-align: left;
+    font-size: var(--text-base);
+    font-weight: var(--weight-semibold);
+  }
+
+  :global(.move-table th),
+  :global(.move-table td) {
+    padding: var(--space-2) var(--space-3);
+    border-top: 1px solid var(--color-border);
+    text-align: left;
+    font-weight: var(--weight-normal);
+  }
+
+  :global(.move-table th) {
+    color: var(--color-text-muted);
+    font-size: var(--text-sm);
+    white-space: nowrap;
+  }
+
+  :global(.move-table th button) {
+    margin: 0;
+    padding: 0;
+    border: 0;
+    background: transparent;
+    color: inherit;
+    font: inherit;
+    cursor: pointer;
+  }
+
+  :global(.move-table th button:focus-visible) {
+    outline: 2px solid var(--color-focus);
+    outline-offset: 2px;
+  }
+
+  @media (max-width: 640px) {
+    .pokemon-summary {
+      grid-template-columns: 1fr;
+      gap: var(--space-4);
+    }
+
+    .artwork-column {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+    }
+  }
+</style>
+
+<script>
+  function cellSortValue(row, index, header) {
+    const cell = row.cells[index];
+    if (!cell || cell.dataset.missing === 'true') return null;
+    const raw = cell.dataset.sort ?? cell.textContent.trim();
+    if (raw === '' || raw === '—') return null;
+    if (header.dataset.type === 'number') {
+      const value = Number(raw);
+      return Number.isNaN(value) ? null : value;
+    }
+    return raw.toLocaleLowerCase();
+  }
+
+  for (const table of document.querySelectorAll('table[data-sortable]')) {
+    const headers = [...table.tHead.rows[0].cells];
+    headers.forEach((header, index) => {
+      const button = header.querySelector('button');
+      button?.addEventListener('click', () => {
+        const direction = header.getAttribute('aria-sort') === 'ascending' ? 'descending' : 'ascending';
+        for (const other of headers) other.setAttribute('aria-sort', 'none');
+        header.setAttribute('aria-sort', direction);
+
+        const body = table.tBodies[0];
+        const rows = [...body.rows];
+        rows.sort((a, b) => {
+          const aValue = cellSortValue(a, index, header);
+          const bValue = cellSortValue(b, index, header);
+          if (aValue === null && bValue === null) return 0;
+          if (aValue === null) return 1;
+          if (bValue === null) return -1;
+          const comparison = typeof aValue === 'number'
+            ? aValue - bValue
+            : String(aValue).localeCompare(String(bValue), undefined, { numeric: true, sensitivity: 'base' });
+          return direction === 'ascending' ? comparison : -comparison;
+        });
+        for (const row of rows) body.appendChild(row);
+      });
+    });
+  }
+
+  const gameSelect = document.getElementById('game-select');
+  gameSelect?.addEventListener('change', () => {
+    const url = new URL(window.location.href);
+    url.searchParams.set('game', gameSelect.value);
+    window.location.assign(`${url.pathname}${url.search}${url.hash}`);
+  });
+</script>

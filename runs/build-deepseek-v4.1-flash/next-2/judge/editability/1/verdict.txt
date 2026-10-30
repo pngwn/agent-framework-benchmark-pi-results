@@ -1,0 +1,140 @@
+## Review: editability of `app/`
+
+**Structure.** The app is a clean App Router tree (`app/app/**/page.jsx`) with a narrow data layer (`app/lib/api.js`), pure formatting helpers (`app/lib/format.js`), one card-assembly helper (`app/lib/cards.js`), and five small components. Server/client split is explicit (`'use client'` only in `app/components/Filters.jsx:1` and `app/components/MovesSection.jsx:1`); every page is a server component that correctly awaits the promised `params`/`searchParams` (Next 15+/16 contract, e.g. `app/app/page.jsx:24`, `app/app/pokemon/[name]/page.jsx:99`). All API knowledge — base URL via env, media-URL templates, `cache: 'no-store'`, the in-memory promise cache — is confined to `lib/api.js` (`apiBase` at `lib/api.js:7` is the only reader of `API_BASE_URL`).
+
+**Main wart.** The home page bypasses `buildPokemonCards` and re-implements card assembly inline (`app/app/page.jsx:70-92`): sprite fallback logic at `app/app/page.jsx:73-75` duplicates `lib/cards.js:33`, and the type→English mapping at `app/app/page.jsx:86-92` duplicates `app/app/pokemon/[name]/page.jsx:152-158`. Because the home list needs per-card types, the shared helper was forked instead of extended — so the "Deoxys sprite" class of fix lands in two places, not one. Similar micro-duplication: `single()` defined twice (`app/app/page.jsx:21`, `app/app/pokemon/[name]/page.jsx:29`), and the abilities page re-implements `idFromUrl` with an inline regex (`app/app/abilities/[name]/page.jsx:32`) instead of importing `lib/format.js:46`.
+
+**Abstractions.** `buildPokemonCards`/`uniquePokemonRefs` (`lib/cards.js:12-41`) genuinely cover three of four card lists and would stretch to an Items-like resource; the Moves detail page (`app/app/moves/[name]/page.jsx`) is the natural template for `/items/:name` but must be copied since no "resource page" seam exists — that's within normal Next per-route idiom. `Section`/`NotFound`/`TypeBadge` are reusable; `TypeBadge` just lives in the wrong file (`app/components/PokemonCard.jsx:3`), forcing `MovesSection` to import a badge from a card component.
+
+**Minor current-practice note.** `export const dynamic = 'force-dynamic'` is repeated in all 7 pages; Next 16 recommends `await connection()` and per-page `dynamic` exports are the legacy spelling — fine today, but a future shift to `cacheComponents` touches every page file.
+
+```json
+{
+  "dimension": "editability",
+  "criteria": {
+    "removability": {
+      "score": 4,
+      "evidence": [
+        "app/app/abilities/[name]/page.jsx — self-contained route; deleting the directory removes the feature",
+        "app/app/pokemon/[name]/page.jsx:249-258 — Abilities section links must be excised by hand from the Pokémon page",
+        "app/app/layout.jsx:17-19 — nav has no Abilities link, so no layout edit needed; app/app/[...slug]/page.jsx still renders Not found for stale links"
+      ],
+      "rationale": "Deleting the abilities route plus one section in the Pokémon page removes the feature; no nav, helper or lib code becomes dead (buildPokemonCards is shared by three other pages), but the dangling section means it's not a pure directory delete."
+    },
+    "changeability": {
+      "score": 3,
+      "evidence": [
+        "app/app/page.jsx:73-75 and app/lib/cards.js:33 — card sprite fallback logic exists in two implementations, so a Deoxys-style sprite fix must land twice",
+        "app/app/page.jsx:86-92 and app/app/pokemon/[name]/page.jsx:152-158 — type slot-sort + English-name mapping duplicated",
+        "app/app/page.jsx:21 and app/app/pokemon/[name]/page.jsx:29 — identical single() query-param helper defined in both pages",
+        "app/app/abilities/[name]/page.jsx:32 — inline regex re-implements idFromUrl from app/lib/format.js:46"
+      ],
+      "rationale": "Formatting helpers are well centralised in lib/format.js, but the home page's forked card assembly means the exact bug class the spec calls out (wrong sprite for differently-named default Pokémon) would need two coordinated edits rather than one."
+    },
+    "coupling": {
+      "score": 4,
+      "evidence": [
+        "app/lib/api.js:7,34,47 — only module that knows API_BASE_URL, request URLs and cache keying; pages never touch fetch",
+        "app/lib/format.js — pure, dependency-free helpers consumed by both server pages and client MovesSection",
+        "app/components/MovesSection.jsx:5 — client component imports TypeBadge from components/PokemonCard.jsx:3, a misplaced seam",
+        "app/app/page.jsx:72 — home page bypasses lib/cards.js and calls getDefaultPokemon/spriteUrlForId directly, duplicating the data layer's card contract"
+      ],
+      "rationale": "Pages depend on narrow lib functions and dumb components, and server/client boundaries are explicit; the only tangles are the home page reaching around buildPokemonCards and TypeBadge's odd home."
+    },
+    "abstraction_design": {
+      "score": 3,
+      "evidence": [
+        "app/lib/cards.js:12-41 — uniquePokemonRefs/buildPokemonCards is a real reusable seam reused by moves, abilities and types pages",
+        "app/app/page.jsx:70-92 — home list needed per-card types, so the helper was forked instead of extended (a withTypes option would have fit)",
+        "app/app/moves/[name]/page.jsx:1-90 — resource detail page is a monolith to copy for /items/:name; generateMetadata + fetch + NotFound pattern repeated in all four detail pages",
+        "app/components/MovesSection.jsx:80-87 — column list is data-driven, stretches to similar tables without flag creep"
+      ],
+      "rationale": "The card and section abstractions cover real variation well, but the home-page fork shows the seams stop at the first case that differs, and adding an Items resource means copying the Moves page rather than composing helpers."
+    }
+  },
+  "overall": 4,
+  "findings": [
+    {
+      "severity": "medium",
+      "location": "app/app/page.jsx:70-92",
+      "issue": "Home page re-implements card assembly (sprite fallback, species→default-pokemon join, type mapping) instead of reusing buildPokemonCards, so card-level fixes must land twice",
+      "suggestion": "Extend buildPokemonCards in lib/cards.js with an options object (e.g. withTypes) or a decorate callback, and have the home page consume it"
+    },
+    {
+      "severity": "medium",
+      "location": "app/app/abilities/[name]/page.jsx:32",
+      "issue": "Inline regex re-parses Pokémon IDs, duplicating idFromUrl from lib/format.js",
+      "suggestion": "Import idFromUrl from '@/lib/format' and delete the local regex"
+    },
+    {
+      "severity": "low",
+      "location": "app/app/page.jsx:86-92",
+      "issue": "Type slot-sort plus English-name lookup duplicated from app/app/pokemon/[name]/page.jsx:152-158",
+      "suggestion": "Add a displayTypes(pokemon, typeData) helper to lib/format.js or lib/cards.js and use it in both pages"
+    },
+    {
+      "severity": "low",
+      "location": "app/app/page.jsx:21",
+      "issue": "single() query-param helper defined identically in two pages (also app/app/pokemon/[name]/page.jsx:29)",
+      "suggestion": "Move single() into a shared module (e.g. lib/format.js) and import it"
+    },
+    {
+      "severity": "low",
+      "location": "app/components/PokemonCard.jsx:3",
+      "issue": "TypeBadge lives inside PokemonCard.jsx, so MovesSection.jsx:5 and three pages import a badge from a card component",
+      "suggestion": "Extract TypeBadge into its own file (components/TypeBadge.jsx)"
+    },
+    {
+      "severity": "low",
+      "location": "app/components/MovesSection.jsx:16-17",
+      "issue": "compareRows hardcodes '—' as the missing-value marker, silently duplicating the displayValue contract in lib/format.js:40",
+      "suggestion": "Keep raw values and a missing flag in each row instead of comparing against the rendered em dash"
+    },
+    {
+      "severity": "low",
+      "location": "app/app/pokemon/[name]/page.jsx:27",
+      "issue": "export const dynamic = 'force-dynamic' is repeated in all 7 pages; Next 16 favours await connection() per page, and a future cacheComponents migration touches every page file",
+      "suggestion": "Centralise the rendering-mode decision (e.g. in the root layout or a shared route-segment config) or switch to connection()"
+    },
+    {
+      "severity": "low",
+      "location": "app/app/pokemon/[name]/page.jsx:211",
+      "issue": "Stat bar width uses unexplained magic constant (value / 180) * 100 with zero comments or JSDoc anywhere in the app (2 comment lines total)",
+      "suggestion": "Name the constant (MAX_BASE_STAT) with a one-line comment explaining the 180 cap"
+    }
+  ],
+  "summary": "A small, well-layered App Router app: all API and base-URL knowledge sits in lib/api.js, helpers are pure, and the server/client split is explicit, so most cross-cutting changes are one-file edits. The main editability cost is the home page forking the shared card builder instead of extending it, which duplicates sprite and type logic and makes card-level bug fixes two-places fixes. Secondary duplication (single(), idFromUrl regex, TypeBadge placement) is minor but easy to fix before more pages copy the pattern.",
+  "scenarios": [
+    {
+      "change": "Remove the Abilities pages and every link to them",
+      "files": ["app/app/abilities/[name]/page.jsx", "app/app/pokemon/[name]/page.jsx", "app/app/layout.jsx"],
+      "difficulty": 4,
+      "notes": "Delete the abilities directory, then remove the Abilities section (app/app/pokemon/[name]/page.jsx:249-258) so no dead links remain; layout.jsx:7 description string mentions abilities but is cosmetic. Nothing shared becomes dead code."
+    },
+    {
+      "change": "Fix wrong sprite for species whose default Pokémon has a different name (e.g. Deoxys)",
+      "files": ["app/lib/cards.js", "app/app/page.jsx"],
+      "difficulty": 3,
+      "notes": "Sprite resolution exists twice — lib/cards.js:33 (moves/abilities/types lists) and app/app/page.jsx:73-75 (home list) — so one fix does not cover every list; both must be updated in lockstep."
+    },
+    {
+      "change": "Add sorting by name to every list of Pokémon cards",
+      "files": ["app/lib/cards.js", "app/app/page.jsx"],
+      "difficulty": 4,
+      "notes": "Sorting in uniquePokemonRefs (lib/cards.js:17) covers the move, ability and type lists in one edit; the home list is ordered by species ID from getSpeciesList and paginated by dex number, so including it needs a separate edit plus spec-mandated dex ordering."
+    },
+    {
+      "change": "Add an Items section (/items, /items/:name) shaped like Moves",
+      "files": ["app/app/items/page.jsx", "app/app/items/[name]/page.jsx", "app/lib/api.js", "app/lib/format.js"],
+      "difficulty": 3,
+      "notes": "Section, NotFound, PokemonCard, TypeBadge and format helpers reuse directly and an getItem() in api.js mirrors getMove; but the Moves detail page (moves/[name]/page.jsx) must be copied and adapted since there is no shared resource-page abstraction."
+    },
+    {
+      "change": "Change the API base URL and caching rules",
+      "files": ["app/lib/api.js"],
+      "difficulty": 5,
+      "notes": "apiBase() is the sole reader of API_BASE_URL (lib/api.js:7) and all URL templates (mediaUrl, spriteUrlForId, resourcePath, requestJson) plus cache:'no-store' (lib/api.js:26) and the promise cache live in this one file; only the per-page force-dynamic exports would need revisiting if the rendering/caching model itself changed."
+    }
+  ]
+}
+```

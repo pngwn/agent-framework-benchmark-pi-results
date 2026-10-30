@@ -1,0 +1,122 @@
+{
+  "dimension": "mergeability",
+  "criteria": {
+    "idiomatic": {
+      "score": 4,
+      "evidence": [
+        "app/package.json:13-18 — vite ^8.3.5 / typescript ^7.0.2, both current stable (Vite 8 GA 2026-03-12, TS 7 GA 2026-07-08)",
+        "app/vite.config.ts:1-3 — minimal defineConfig, no fighting the tool",
+        "app/src/api.ts:5-6 — import.meta.env with types: [\"vite/client\"] (app/tsconfig.json:11), correct env typing",
+        "app/index.html:8 — request-time meta injection of API base URL instead of build-time baking, matching the spec's live-API rule",
+        "app/src/main.ts:99-110 — standard pushState/popState interception with modifier-key handling, the accepted vanilla pattern"
+      ],
+      "rationale": "Uses current-stable Vite 8 + TS 7 exactly as their docs describe; the hand-rolled router and DOM helper are the normal choice for a frameworkless Vite app, with only minor home-grown pieces where platform APIs (e.g. the Chromium-only Navigation API) also exist."
+    },
+    "correctness_risks": {
+      "score": 3,
+      "evidence": [
+        "app/src/pages/home.ts:132 — debounce setTimeout is never cancelled on navigation; applyFilters (home.ts:120-126) can history.replaceState a stale home URL over the page the user navigated to",
+        "app/src/pages/pokemon.ts:197 — reads live location.href instead of ctx.url, so a rapid in-page navigation can select the wrong game",
+        "app/src/main.ts:93 — result.ready errors are swallowed with .catch(() => {}) and never logged; the moves section fails silently",
+        "app/src/api.ts:132-133 — NotFoundError promises stay cached forever, contradicting the spec's 'treat the API as live' (overlay-added species stay 404 until reload)",
+        "app/server.mjs:63 — fs.createReadStream(file).pipe(res) has no stream 'error' handler; a mid-stream read failure is an uncaught error",
+        "app/server.mjs:33-36 — sendIndex writes a body for HEAD requests"
+      ],
+      "rationale": "Several minor issues — a stale-timer URL clobber, a context-bypassing URL read, and swallowed async errors — but the navigation race guards, XSS-safe DOM building and escaped server injection show the serious classes were handled."
+    },
+    "global_abstractions": {
+      "score": 3,
+      "evidence": [
+        "app/server.mjs:31 vs app/src/main.ts:22 — the route table is maintained twice; adding a page requires editing both or the server starts answering 404 for a working page",
+        "app/src/pages/team.ts:14-19 — loadMember re-implements the default-variety resolution already in app/src/pages/pokemon.ts:20-23",
+        "app/src/pages/pokemon.ts:26, app/src/pages/types.ts:28, app/src/pages/team.ts:71 — type-label resolution is done three different ways (typeNames fetch, inline Map from allTypes, inline Map from allTypes)",
+        "app/src/api.ts:114 — single well-bounded in-memory cache behind a typed data-access module; good boundary"
+      ],
+      "rationale": "Module boundaries are otherwise clean and each abstraction earns its keep, but the duplicated server/client route table will drift, and two small helpers are copy-pasted rather than shared."
+    },
+    "readability": {
+      "score": 4,
+      "evidence": [
+        "app/src/api.ts:113, app/src/team.ts:1, app/src/components.ts:41-43 — comments explain why (caching, storage key, alternate-form exclusion), not what",
+        "app/src/pages/pokemon.ts:138-140 — sections marked with banner comments; consistent helper naming (orDash, humanize, englishName) across files",
+        "app/src/main.ts:14-18 — PageContext contract documents the isCurrent invariant pages must respect",
+        "app/src/main.ts:46 — renderNotFound is exported but never imported elsewhere (dead export); pages/pokemon.ts:73 stray double blank line"
+      ],
+      "rationale": "A new teammate can find their way quickly: pages mirror URL routes, helpers are small and consistently named, and the why-comments are genuinely useful. Only trivial blemishes."
+    },
+    "review_cost": {
+      "score": 3,
+      "evidence": [
+        "app/src/pages/home.ts:128-132 — needs debounce teardown or an isCurrent guard before approving",
+        "app/server.mjs:31 — needs dedup or a sync note with app/src/main.ts:22",
+        "app/src/pages/pokemon.ts:197 — one-line fix to use ctx.url",
+        "app/src/main.ts:93 — log the swallowed error"
+      ],
+      "rationale": "One round of small, concrete changes — no rework, but each is the kind of latent bug a reviewer should insist on fixing before merge."
+    }
+  },
+  "overall": 4,
+  "findings": [
+    {
+      "severity": "medium",
+      "location": "app/server.mjs:31",
+      "issue": "The route regex table duplicates app/src/main.ts:22; the two lists must be kept in sync by hand or the server will answer 404 for pages the client router happily renders.",
+      "suggestion": "Export the route patterns from one module (e.g. src/routes.ts) and import into server.mjs, or at minimum add a cross-referencing comment in both files."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/pages/home.ts:132",
+      "issue": "The 150 ms search debounce is never cancelled when the page is torn down; typing then clicking a card within the window runs applyFilters and replaceState's the stale home URL over the newly navigated page.",
+      "suggestion": "Check ctx.isCurrent() inside the timeout (ctx is currently unused in renderHome), or return a cleanup hook PageResult can expose and have the router cancel it."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/pages/pokemon.ts:197",
+      "issue": "setupMoves reads new URL(location.href) instead of the ctx.url the router handed in, so a navigation during the awaited fetch can apply the wrong ?game= value.",
+      "suggestion": "Use ctx.url for the initial read (and keep location only in the change handler, which is genuinely current-page)."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/main.ts:93",
+      "issue": "result.ready rejections are caught and discarded with no logging, so a failure building the Moves section leaves a silent blank area (contrast the console.error in the render error path at main.ts:83).",
+      "suggestion": "console.error the caught reason, or render an inline error message in the moves container."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/api.ts:132",
+      "issue": "NotFoundError promises are cached forever (only non-404 errors are evicted), which contradicts the spec's requirement to treat the API as live — a species added server-side stays 'Not found' until reload — and the cache (api.ts:114) is unbounded.",
+      "suggestion": "Don't cache 404s (or give them a short TTL), and consider evicting or capping the cache if the app grows."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/pages/team.ts:14",
+      "issue": "loadMember re-implements the species → default-variety → pokemon resolution that renderPokemon does inline (app/src/pages/pokemon.ts:20-23).",
+      "suggestion": "Extract a shared defaultPokemon(species) helper in api.ts and use it from both pages."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/pages/types.ts:28",
+      "issue": "Type-label lookup is done three different ways across pages: typeNames() fetch (pokemon.ts:26), and two hand-built Maps from allTypes() (types.ts:28, team.ts:71).",
+      "suggestion": "Add a single label lookup on top of allTypes() in api.ts and use it everywhere."
+    },
+    {
+      "severity": "low",
+      "location": "app/server.mjs:33",
+      "issue": "sendIndex writes the HTML body even for HEAD requests, violating HTTP semantics (the file branch at server.mjs:62 handles HEAD correctly).",
+      "suggestion": "In sendIndex, skip res.end(body) when req.method === 'HEAD'."
+    },
+    {
+      "severity": "low",
+      "location": "app/server.mjs:63",
+      "issue": "fs.createReadStream(file).pipe(res) has no 'error' handler; a read failure mid-stream emits an uncaught error that can crash the server.",
+      "suggestion": "Attach stream.on('error', handler) that destroys the response with a 500."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/main.ts:46",
+      "issue": "renderNotFound is exported but never imported anywhere; it also mixes router concerns into the entry module alongside the dead-export risk.",
+      "suggestion": "Drop the export keyword (or move renderNotFound/renderError into a small notFound.ts) to keep main.ts purely routing."
+    }
+  ],
+  "summary": "A genuinely well-built vanilla Vite 8 / TS 7 SPA with clean module boundaries, race-aware routing, XSS-safe rendering and strong accessibility — current on toolchain and idiomatic throughout. The real merge blockers are small and cross-cutting: a duplicated server/client route table, an uncancellable search-debounce that can clobber the URL after navigation, and a couple of swallowed-error paths. I'd merge after one round of those fixes."
+}

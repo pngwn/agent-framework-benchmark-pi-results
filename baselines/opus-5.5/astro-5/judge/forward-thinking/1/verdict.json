@@ -1,0 +1,168 @@
+{
+  "dimension": "forward-thinking",
+  "criteria": {
+    "latest_apis": {
+      "score": 4,
+      "evidence": [
+        "app/package.json:9-10 — astro ^7.4.2 and @astrojs/node ^11.1.9, both the current stable versions as of 2026-10",
+        "app/astro.config.mjs:8 — `session: false` is the new Astro 7.2 (Aug 2026) opt-out that tree-shakes the session runtime; a choice most training-data-era code would not know",
+        "app/src/pages/pokemon/[name].astro:37,31 — `Astro.response.status = 404` and `Astro.params`, both current per Astro 7's context.d.ts",
+        "app/src/components/EvolutionNode.astro:19 — recursive `Astro.self`, current documented API",
+        "app/src/lib/api.ts:4 — `process.env.API_BASE_URL` instead of `astro:env`/`getSecret()`, which Astro's docs explicitly recommend over `process.env` for adapter portability",
+        "app/src/lib/api.ts:5-36 — hand-rolled stale-while-revalidate cache + semaphore duplicates Astro 7's newly stabilized route caching (`cache`/`routeRules`)"
+      ],
+      "rationale": "Consistently on the current generation, including post-training-cutoff APIs (`session: false`, Astro 7.4). It just misses two current primitives: `astro:env` for the API base URL and Astro 7's stabilized route caching for the request-time PokeAPI fetching."
+    },
+    "platform": {
+      "score": 4,
+      "evidence": [
+        "app/src/pages/index.astro:102-114 — fetch + DOMParser + importNode for partial updates, no framework router, no polyfills",
+        "app/src/pages/index.astro:52-63 — native form controls with `method=\"get\"` and a `<noscript>` submit fallback (index.astro:48) — progressive enhancement, zero JS required",
+        "app/src/lib/pokedex.ts:26-27 — `.at(-1)`, `flatMap`, `Map`/`Set`, `padStart` (line 19) used throughout",
+        "app/src/styles/global.css:4-9,68-71 — CSS custom properties everywhere plus logical properties (`padding-inline`, `margin-block`) and `aspect-ratio` (pokemon/[name].astro:179)",
+        "app/src/pages/index.astro:100-101 — superseded requests are discarded by a `latest` counter, not aborted; no `AbortController` anywhere in the app"
+      ],
+      "rationale": "Platform-first overall: fetch, URLSearchParams, FormData iteration, DOMParser, native form semantics, modern CSS. The one gap is not using `AbortController` for the incremental-search and game-select fetch races, leaving superseded requests in flight."
+    },
+    "dependencies": {
+      "score": 5,
+      "evidence": [
+        "app/package.json:8-11 — exactly two dependencies, both first-party and at the current stable versions",
+        "app/src/pages/index.astro:86-128 — filter/sort/partial-navigation implemented in plain TS instead of pulling a client framework or utility library",
+        "app/astro.config.mjs:5-7 — `@astrojs/node` standalone adapter is the minimal correct choice for a self-served SSR app; no CSS framework per the spec"
+      ],
+      "rationale": "Minimal and modern: the framework, its Node adapter, and nothing else — no client-framework island, no lodash, no CSS library. Nothing to remove."
+    },
+    "churn_resistance": {
+      "score": 4,
+      "evidence": [
+        "app/src/lib/api.ts — all HTTP access, caching and URL-building behind one module; pages never build API URLs themselves",
+        "app/src/lib/pokedex.ts:1-165 — shared domain helpers (`humanize`, `englishName`, `cardsForPokemon`, `moveInfo`) with exported types (`SpeciesIndex`, `Card`, `MoveInfo`) reused across all pages",
+        "app/src/lib/pokedex.ts:153 — `moveInfo(record: any)` and `app/src/lib/api.ts:55` `api<T = any>`: the API record boundary is untyped; `app/src/pages/pokemon/[name].astro:44-67` annotates nearly every record as `any`",
+        "app/tsconfig.json:2 — extends `astro/tsconfigs/base`, the laxer preset; `strict`/`strictest` are the current recommended defaults for new projects",
+        "app/src/components/TypeBadge.astro:10 and app/src/pages/types/index.astro:13-15 — the `--type-color: var(--type-<name>)` mapping is duplicated in two places instead of one component"
+      ],
+      "rationale": "Data access is well centralized and an Astro upgrade would touch very few files; the main weakness is `any` at the API-response boundary, so PokeAPI schema changes surface as runtime breakage across pages rather than type errors. Strict TS would catch much of that for free."
+    }
+  },
+  "overall": 4,
+  "findings": [
+    {
+      "severity": "medium",
+      "location": "app/src/lib/api.ts:4",
+      "issue": "Reads `process.env.API_BASE_URL` at module scope. Astro's current env-variable guidance (`astro:env` reference, stable since 5.0) recommends `getSecret()` or an `envField` schema over `process.env`, because the implementation is adapter-provided and portable across runtimes (e.g. it would break on the Cloudflare adapter).",
+      "suggestion": "Define the schema in `astro.config.mjs` with `envField.string({ context: 'server', access: 'secret', default: 'http://localhost:9000' })` and import `API_BASE_URL` from `astro:env/server`."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/lib/api.ts:5-36",
+      "issue": "Hand-rolled stale-while-revalidate cache plus a custom semaphore (~35 lines). Astro 7 stabilized route caching (`cache: { provider: memoryCache() }` with `routeRules` supporting `maxAge`/`swr`), which is the framework's current answer to exactly this \"fetch a live API on every request\" problem.",
+      "suggestion": "Either adopt the stable `cache`/`routeRules` config for page-level caching, or keep the data-level cache (it is finer-grained) but note why in a comment, and consider whether the semaphore is still needed."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/pages/pokemon/[name].astro:44-76",
+      "issue": "The PokeAPI `species`/`pokemon` records are handled as `any` (`(s: any)`, `(m: any)`, `(v: any)`), as is `moveInfo(record: any)` in `app/src/lib/pokedex.ts:153` and `api<T = any>` in `app/src/lib/api.ts:55`. The single most important boundary — the API response shape — is untyped, so schema drift becomes runtime breakage spread over five page files.",
+      "suggestion": "Declare interfaces for the API records (`Species`, `Pokemon`, `Move`, `Ability`, `Type`) in `src/lib/pokedex.ts` and type `api<T>()` against them; drop the default `any`."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/pages/index.astro:96-101",
+      "issue": "Fetch races are managed by a `latest` counter, so superseded requests aren't cancelled (and each keystroke parses a full HTML document). Same pattern in `app/src/pages/pokemon/[name].astro:223-235`.",
+      "suggestion": "Store an `AbortController` per request and call `abort()` when a newer one starts; the platform covers this."
+    },
+    {
+      "severity": "low",
+      "location": "app/tsconfig.json:2",
+      "issue": "Extends `astro/tsconfigs/base` rather than the `strict` (or `strictest`) preset that current Astro docs recommend for new projects, which weakens the value of the typed frontmatter and the `Props` interfaces that are already used.",
+      "suggestion": "Extend `astro/tsconfigs/strict` and add `astro check` to CI."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/pages/types/index.astro:13-15",
+      "issue": "The `--type-color: var(--type-<name>)` inline style duplicates the mapping in `app/src/components/TypeBadge.astro:10`; the two can drift if the token scheme changes.",
+      "suggestion": "Let the type list render through `TypeBadge` (or extract the color mapping to one helper) so the convention lives in one place."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/styles/global.css:69",
+      "issue": "`-webkit-text-size-adjust` prefix is dead weight given the spec targets latest Chromium only.",
+      "suggestion": "Drop the prefixed line."
+    }
+  ],
+  "summary": "This app ages well: it is on Astro 7.4 with the matching current Node adapter, uses only two first-party dependencies, and reaches for several post-training-cutoff APIs like the Astro 7.2 `session: false` opt-out. The client layer is platform-first vanilla TS over server-rendered pages with a graceful no-JS fallback. The main forward-looking gaps are `process.env` where `astro:env` is now the recommended portable API, a hand-rolled cache that Astro 7's newly stabilized route caching largely covers, and `any` at the API boundary where stricter typing would prevent schema drift from rippling through the pages.",
+  "apis": [
+    {
+      "api": "output: 'server'",
+      "location": "app/astro.config.mjs:4",
+      "status": "current",
+      "replacement": ""
+    },
+    {
+      "api": "node adapter, standalone mode",
+      "location": "app/astro.config.mjs:5",
+      "status": "current",
+      "replacement": ""
+    },
+    {
+      "api": "session: false",
+      "location": "app/astro.config.mjs:8",
+      "status": "current",
+      "replacement": ""
+    },
+    {
+      "api": "security.checkOrigin",
+      "location": "app/astro.config.mjs:9",
+      "status": "current",
+      "replacement": ""
+    },
+    {
+      "api": "devToolbar.enabled",
+      "location": "app/astro.config.mjs:7",
+      "status": "current",
+      "replacement": ""
+    },
+    {
+      "api": "Astro.response.status = 404",
+      "location": "app/src/pages/pokemon/[name].astro:37",
+      "status": "current",
+      "replacement": ""
+    },
+    {
+      "api": "Astro.self (recursive component)",
+      "location": "app/src/components/EvolutionNode.astro:19",
+      "status": "current",
+      "replacement": ""
+    },
+    {
+      "api": "Astro.params / Astro.url.searchParams",
+      "location": "app/src/pages/index.astro:8",
+      "status": "current",
+      "replacement": ""
+    },
+    {
+      "api": "processed/bundled <script> with TS",
+      "location": "app/src/pages/index.astro:64",
+      "status": "current",
+      "replacement": ""
+    },
+    {
+      "api": "process.env.API_BASE_URL",
+      "location": "app/src/lib/api.ts:4",
+      "status": "legacy",
+      "replacement": "`astro:env` schema with `envField`/`getSecret()` (stable since Astro 5.0, recommended over `process.env` for adapter portability)"
+    }
+  ],
+  "dependencies": [
+    {
+      "name": "astro",
+      "verdict": "modern",
+      "note": "^7.4.2 — current stable major (7.0 released 2026-06-22, 7.x is latest line); pin matches the current release."
+    },
+    {
+      "name": "@astrojs/node",
+      "verdict": "modern",
+      "note": "^11.1.9 — the latest version (published 2026-10-19) and the correct peer for astro ^7.2.1."
+    }
+  ]
+}

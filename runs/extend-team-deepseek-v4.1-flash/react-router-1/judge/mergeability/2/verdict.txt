@@ -1,0 +1,120 @@
+I've reviewed the app against React Router v8.5.0 (the installed stable) and its framework-mode guidance. The app is a well-built SSR framework-mode React Router app: route config in `app/routes.ts:1`, route modules with generated `./+types/*` types throughout, `data()` 404 throws (`app/app/lib/api.server.ts:36`), search params parsed in loaders (`app/app/routes/home.tsx:41`), a custom express server matching the deployment docs (`app/server.mjs:13-17`), and a clean server/client boundary via the `.server.ts` filename convention (`app/app/lib/api.server.ts`, imported only by loaders). The team feature is correctly integrated: cookie-read in the root loader so the button renders SSR-correct with no flash (`app/app/root.tsx:46`), and it follows existing conventions. The main friction points are hand-rolled filter-control plumbing in `home.tsx` where `useSearchParams`/`<Form>` would be the framework primitive, a cache that never evicts, and a slightly confusing catch-all 404 arrangement (route renders `null`, UI lives in `root.tsx`).
+
+```json
+{
+  "dimension": "mergeability",
+  "criteria": {
+    "idiomatic": {
+      "score": 4,
+      "evidence": [
+        "app/app/routes.ts:1-10 — route config with index/route, current @react-router/dev API",
+        "app/app/routes/pokemon.tsx:4 — Route.LoaderArgs from ./+types/<route>, current typegen convention",
+        "app/app/lib/api.server.ts:36 — apiOr404 throws data(\"Not found\", {status: 404}), exactly the documented pattern",
+        "app/app/routes/home.tsx:41-52 — search params parsed and validated in the loader, per framework-mode docs",
+        "app/server.mjs:13-17 — @react-router/express createRequestHandler custom server, matches deployment docs",
+        "app/app/root.tsx:9-44 — root Layout export with Links/Meta/Scripts/ScrollRestoration, canonical shell",
+        "app/app/routes/home.tsx:86-95 — uncontrolled inputs + refs + manual activeElement-check sync instead of useSearchParams/controlled inputs",
+        "app/app/lib/team.tsx:36-49 — hand-rolled cookie parse/write instead of createCookie (defensible since client also writes it)"
+      ],
+      "rationale": "Reads like the framework's own examples for routing, loaders, 404s and the server shell; the home filter controls and team cookie handling are the two spots where framework primitives exist but were hand-rolled."
+    },
+    "correctness_risks": {
+      "score": 4,
+      "evidence": [
+        "app/app/lib/api.server.ts:10-20 — cache Map never evicts expired entries; bounded by the API's dataset cardinality but stale promises linger indefinitely",
+        "app/app/lib/api.server.ts:17 — rejected loads delete their cache entry, no unhandled rejections or thundering-herd",
+        "app/app/routes/home.tsx:55-56 — page number clamped to [1, totalPages]; bad type/generation params silently ignored (graceful)",
+        "app/app/routes/home.tsx:78-95 — deliberate pre-hydration input handling and DOM sync effects; brittle-looking but reasoned",
+        "app/app/root.tsx:54 — error only console.error'd in DEV; production errors surface as generic boundary UI with no server-side logging",
+        "app/app/components/MoveTable.tsx:81 — row key includes array index, harmless but weak",
+        "app/app/routes/team.tsx:30-34 — team page re-derives members from client state over loader data, so removals are instant and cookie/SSR stay consistent"
+      ],
+      "rationale": "No serious bugs found: errors and 404s funnel to the boundary, the in-flight fetch cache deduplicates correctly, and SSR/hydration values are consistent. Remaining risks are minor: no cache eviction, swallowed production error detail, and fragile manual DOM-sync effects."
+    },
+    "global_abstractions": {
+      "score": 4,
+      "evidence": [
+        "app/app/lib/api.server.ts:1-2 — .server.ts naming keeps the data layer server-only; no component imports it (verified by grep)",
+        "app/app/lib/api.server.ts:63-138 — getIndex() is a cached global index, justified by the spec's shared-dataset requirement",
+        "app/app/lib/format.ts — small, pure, narrowly scoped helpers; not a junk-drawer utils module",
+        "app/app/routes/pokemon.tsx:47-57 — Move type re-declared, near-duplicating app/app/routes/move.tsx:12-22",
+        "app/app/lib/team.tsx:36-49 — parseTeamCookie duplicated in root and team loaders rather than shared via loader data"
+      ],
+      "rationale": "Abstractions are few with clear server/client boundaries; the shared cached index earns its keep. Two duplications (the Move type, the cookie parse) will need light untangling if the API shape changes."
+    },
+    "readability": {
+      "score": 4,
+      "evidence": [
+        "app/app/lib/api.server.ts:100-104 — comment explains why alternate forms are filtered via speciesById",
+        "app/app/routes/home.tsx:78 — comment explains the pre-hydration effect's purpose",
+        "app/app/components/Section.tsx:1-16 — small, self-explanatory presentational components throughout",
+        "app/app/routes/not-found.tsx:9-12 — catch-all route renders null while the 404 UI lives in root.tsx, surprising ownership for a new reader",
+        "app/app/routes/pokemon.tsx:68-136 — loader is ~100 lines but linear and easy to follow"
+      ],
+      "rationale": "Consistent organization, good why-comments, small components. The only real stumbling block is the indirect 404 arrangement and the two DOM-sync effects that demand careful reading."
+    },
+    "review_cost": {
+      "score": 4,
+      "evidence": [
+        "app/app/lib/api.server.ts:10-20 — would ask for TTL sweep or size cap",
+        "app/app/routes/not-found.tsx:9 — would ask to move the 404 UI into the catch-all route",
+        "app/app/routes/home.tsx:86-95 — would ask to reconsider useSearchParams + controlled inputs",
+        "app/app/routes/pokemon.tsx:47-57 — would ask to dedupe the Move type"
+      ],
+      "rationale": "Approve after a round of nits: nothing structural, all changes localized, and the framework usage is already aligned so refactors would be small."
+    }
+  },
+  "overall": 4,
+  "findings": [
+    {
+      "severity": "medium",
+      "location": "app/app/lib/api.server.ts:10-20",
+      "issue": "The response cache Map only overwrites entries on re-request and never sweeps expired ones; memory is bounded by the API's URL cardinality (~2k URLs) today, but any new endpoint or growth makes it a slow leak, and expired-plus-never-revisited entries retain their payloads forever.",
+      "suggestion": "Add a periodic sweep or simple LRU cap (e.g. evict oldest when size exceeds a few thousand) alongside the existing TTL."
+    },
+    {
+      "severity": "medium",
+      "location": "app/app/routes/home.tsx:76-95",
+      "issue": "Filter state is managed with uncontrolled inputs, three refs, a shared debounce ref and two mount/update effects that hand-sync DOM values with the URL (including a document.activeElement check), instead of useSearchParams with controlled inputs.",
+      "suggestion": "Use useSearchParams as the source of truth with controlled inputs and derive the query string from it; keep only the debounce as custom code. The pre-hydration-input edge case can be handled with a small, isolated effect."
+    },
+    {
+      "severity": "low",
+      "location": "app/app/routes/not-found.tsx:9-12",
+      "issue": "The catch-all route's component returns null and its loader throws so the root ErrorBoundary renders the 404 UI, which is exported from root.tsx; a reader can't find the not-found UI where they expect it, and genuine loader errors are visually indistinguishable from 404s in code flow.",
+      "suggestion": "Render the NotFound UI in the catch-all route's default export (with its own <title>), and keep the root ErrorBoundary for unexpected errors; or at least add a comment in not-found.tsx pointing at root.tsx."
+    },
+    {
+      "severity": "low",
+      "location": "app/app/routes/pokemon.tsx:47-57",
+      "issue": "The Move shape is declared twice, here and in routes/move.tsx:12-22, with overlapping fields; they will drift when the API shape changes.",
+      "suggestion": "Extract a shared Move type into lib/types.ts alongside Card/TypeInfo."
+    },
+    {
+      "severity": "low",
+      "location": "app/app/root.tsx:54",
+      "issue": "The ErrorBoundary logs the error only when import.meta.env.DEV, so production errors vanish with no trace on the server.",
+      "suggestion": "console.error unconditionally in the boundary (or log in the loader/fetch layer) so server-side incidents are diagnosable in production."
+    },
+    {
+      "severity": "low",
+      "location": "app/app/routes/team.tsx:14",
+      "issue": "parseTeamCookie is invoked in both the root loader and the team loader, so the cookie-reading convention exists in two places.",
+      "suggestion": "Have the team loader consume the already-parsed team from root loader data via useRouteLoaderData, or keep one server helper and add a comment linking the two uses."
+    },
+    {
+      "severity": "low",
+      "location": "app/app/components/MoveTable.tsx:80-81",
+      "issue": "Row keys append the array index (row.name-level i), which weakens React reconciliation and masks duplicate-row bugs; also the sorted useMemo omits the derived columns dependency.",
+      "suggestion": "Key by row.name (or name+level when needed) and add columns to the memo dependency list."
+    },
+    {
+      "severity": "low",
+      "location": "app/app/routes/pokemon.tsx:70-74",
+      "issue": "versionGroupOrders() triggers ~30 parallel version-group fetches outside the shared index cache on first visit to any Pokémon page.",
+      "suggestion": "Fold version-group orders into the cached getIndex() so cold-start fan-out happens once with the rest of the index."
+    }
+  ],
+  "summary": "A clean, current-idiom React Router v8 framework-mode app: proper route modules, generated types, loader-side search params, data() 404s, and a correct custom express server, with the server data layer properly isolated via the .server.ts convention. The team feature integrates well, using a cookie read in the root loader so the UI is SSR-correct with no flash. It merges after a round of small changes: evict cache entries, replace hand-rolled ref/DOM-sync filter plumbing with useSearchParams, and untangle the not-found route arrangement."
+}
+```

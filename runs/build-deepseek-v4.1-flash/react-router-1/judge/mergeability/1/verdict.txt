@@ -1,0 +1,132 @@
+I've reviewed the app against the current React Router v8.5.1 guidance (confirmed as the latest stable release) and the framework-mode skill reference. Summary of what I found before scoring:
+
+- **Structure** is genuine framework mode: `app/routes.ts` config, route modules with `loader`/`meta`, `root.tsx` with `Links/Meta/Outlet/Scripts/ScrollRestoration`, CSS via `links`, server-only data in `lib/api.server.ts` (proper `.server` boundary).
+- **Deviations**: 404s handled by returning `{ notFound: true }` sentinels and rendering inline, instead of the documented `throw data("Not Found", { status: 404 })` + route `ErrorBoundary` pattern (so no HTTP 404 either); no `ErrorBoundary` anywhere, so any non-404 API failure surfaces the framework's default error screen; loaders/meta/components typed `any` instead of generated `Route.LoaderArgs`/`Route.ComponentProps`; filtering done entirely client-side with the full 1025-species dataset serialized to the client and re-fetched on every keystroke (no `shouldRevalidate`, no loader-side search-param parsing, both of which the current docs/skill call out).
+- **Data layer** is a 500+ line god module with module-scope eager promise caches — locally reasonable, server-only, spec-legal, but will need untangling.
+- Pagination, sorting, aria-sort, dedupe, page clamping, and URL-state handling are all correct and careful; no SSR/CSR mismatch risks spotted.
+
+```json
+{
+  "dimension": "mergeability",
+  "criteria": {
+    "idiomatic": {
+      "score": 3,
+      "evidence": [
+        "app/app/routes.ts:1-15 — clean framework-mode route config with index/route and a splat not-found route",
+        "app/app/routes/pokemon.tsx:7-11 — returns { notFound: true } sentinel; skill reference says missing records should be `throw data(\"Not Found\", { status: 404 })` + route ErrorBoundary",
+        "app/app/routes/pokemon.tsx:42 — component typed `{ loaderData }: any` instead of Route.ComponentProps from ./+types/<route>",
+        "app/app/routes/home.tsx:64-79 — all filtering client-side; framework reference recommends parsing search params in the loader for shareable URLs",
+        "app/app/root.tsx:17-19 — root meta/links/Outlet structure matches the framework's own examples"
+      ],
+      "rationale": "Recognisably idiomatic framework mode with correct route modules, loaders, meta and server-only boundaries, but it skips the documented 404-throw/ErrorBoundary pattern and generated route types, and does filter state in the component where the framework offers loader-side search-param handling."
+    },
+    "correctness_risks": {
+      "score": 3,
+      "evidence": [
+        "app/app/root.tsx:1-59 — no ErrorBoundary export anywhere in the tree; a PokeAPI 500/network error thrown from a loader renders the framework default error screen",
+        "app/app/routes/home.tsx:49-64 — every keystroke calls setSearchParams, triggering loader revalidation that re-serializes the full 1025-species HomeData payload; no shouldRevalidate or debounce",
+        "app/app/lib/api.server.ts:65-96 — top-level IIFE promises start fetching at import; a startup API failure rejects before any loader awaits, risking unhandled rejections",
+        "app/app/routes/home.tsx:82-86 — requested page is clamped to [1, totalPages], good",
+        "app/app/routes/pokemon.tsx:199-240 — sort with missing-values-last and stable tie-breaks handled carefully, no mismatch risks"
+      ],
+      "rationale": "A few minor risks: missing error boundary, per-keystroke full-dataset revalidation, and eager module-scope promises; no serious bugs — pagination, sorting and 404-by-name all behave correctly."
+    },
+    "global_abstractions": {
+      "score": 3,
+      "evidence": [
+        "app/app/lib/api.server.ts:15-43 — hidden module-scope Map cache for all API responses",
+        "app/app/lib/api.server.ts:65-258 — five module-scope eager index promises (types, generations, species, version groups, home) shared by every route",
+        "app/app/lib/api.server.ts:265-425 — getPokemonPage alone builds stats, abilities, moves tables, evolution: one module maps data for all six page types",
+        "app/app/components.tsx:12-31 — Section/TypeBadge/PokemonGrid are small, well-bounded shared components",
+        "app/app/lib/format.ts:1-41 — pure, tiny helpers with clear ownership"
+      ],
+      "rationale": "The api.server.ts god data module (500+ lines, cache + indexes + all per-page mappers) is locally convenient and server-only, but is the one abstraction that will need splitting as the app grows; everything else earns its keep."
+    },
+    "readability": {
+      "score": 3,
+      "evidence": [
+        "app/app/routes/pokemon.tsx:42-90 — `data` is `any`, so the loaderData shape is invisible at usage sites and must be cross-checked against api.server.ts",
+        "app/app/lib/api.server.ts:234-258 — clear sectioned comments (List page / Pokémon page / Move, ability and type pages) help navigation of the big module",
+        "app/app/routes/home.tsx:27-34 — previousQ ref + document.activeElement guard is subtle and undocumented by a comment",
+        "app/app/components.tsx:66-79 — EvolutionList recursion is small and self-explanatory",
+        "app/app/routes/move.tsx:20-55 — flat, straightforward component"
+      ],
+      "rationale": "Names and file organisation are good and consistent (one route per page, shared components in one file), but pervasive `any` in four of seven routes hides data shapes and the home page's URL-sync dance needs a comment."
+    },
+    "review_cost": {
+      "score": 3,
+      "evidence": [
+        "app/app/routes/pokemon.tsx:7-11 — reviewer must ask for thrown 404 + ErrorBoundary instead of the notFound sentinel",
+        "app/app/root.tsx:1-59 — an ErrorBoundary has to be added before this merges into a long-lived codebase",
+        "app/app/routes/home.tsx:7-9,49-64 — revalidation behaviour on the home route needs a shouldRevalidate or loader-side filtering decision",
+        "app/app/routes/pokemon.tsx:42 — typing pass over loader/meta/component args"
+      ],
+      "rationale": "One round of changes before approving: 404/error handling, route typing, and the home-route revalidation strategy; the rest is solid enough to merge with nits."
+    }
+  },
+  "overall": 3,
+  "findings": [
+    {
+      "severity": "high",
+      "location": "app/app/routes/pokemon.tsx:7-11",
+      "issue": "404s are returned as { notFound: true } and rendered inline (same in move.tsx:6, ability.tsx:6, type-detail.tsx:6); the framework's documented pattern is to throw a 404 Response/data() and render a route ErrorBoundary, which also gives the HTTP 404 the spec encourages.",
+      "suggestion": "In each loader, `throw data(\"Not Found\", { status: 404 })` and render one shared ErrorBoundary that shows the Not found UI; keep the splat route for unknown paths."
+    },
+    {
+      "severity": "high",
+      "location": "app/app/root.tsx:1-59",
+      "issue": "No ErrorBoundary is exported anywhere; a thrown fetch error (API 500/network) from api.server.ts:35 leaves the user on the framework's default error screen.",
+      "suggestion": "Add a root ErrorBoundary with a friendly fallback and a link home; add route-level ones where useful."
+    },
+    {
+      "severity": "medium",
+      "location": "app/app/routes/home.tsx:49-64",
+      "issue": "Each keystroke navigates via setSearchParams, revalidating the loader and re-serializing the full 1025-species HomeData (~200KB) to the client per keystroke.",
+      "suggestion": "Either parse q/type/generation/page in the loader (framework-recommended) so payloads stay page-sized, or add `shouldRevalidate` to skip refetching when only search params change (the dataset is cached server-side anyway)."
+    },
+    {
+      "severity": "medium",
+      "location": "app/app/routes/pokemon.tsx:42",
+      "issue": "loader, meta and component args are typed `any` (also move.tsx:5-20, ability.tsx, type-detail.tsx), bypassing the framework's generated route types.",
+      "suggestion": "Use `Route.LoaderArgs`, `Route.MetaArgs` and `Route.ComponentProps` from ./+types/<route> (or at least `typegen`-typed interfaces), and move the inferred-loaderData pattern already used in home.tsx/types.tsx everywhere."
+    },
+    {
+      "severity": "medium",
+      "location": "app/app/lib/api.server.ts:15-258",
+      "issue": "Single 500+ line god data module: response cache, five module-scope index promises and all per-page mappers live together; any page change touches this file.",
+      "suggestion": "Keep the fetch/cache core and shared indexes, but split per-page mapping (home, pokemon, move, ability, type) into their own modules or colocate the mapping in each route's loader."
+    },
+    {
+      "severity": "low",
+      "location": "app/app/lib/api.server.ts:65-96",
+      "issue": "Top-level IIFE promises eagerly fire requests at import time; a startup API failure rejects before any loader awaits them (unhandled-rejection risk) and the results cache forever with no invalidation.",
+      "suggestion": "Wrap in lazily-initialised memoised functions (like getHomeData already is) with a `.catch` guard, so failures surface through loaders/Route error handling."
+    },
+    {
+      "severity": "low",
+      "location": "app/app/routes/home.tsx:88-95",
+      "issue": "Two URL-update idioms on the same page: select filters use setSearchParams while pagination builds query strings by hand into `/?...`.",
+      "suggestion": "Build pagination hrefs with a single param-helper (or use setSearchParams-free `<Link>` built from the same helper used by navigateWithParam) to keep param encoding in one place."
+    },
+    {
+      "severity": "low",
+      "location": "app/app/routes/home.tsx:11-13",
+      "issue": "Home route meta returns the same 'Pokédex' title as the root meta (app/root.tsx:17-19); redundant duplication of the default.",
+      "suggestion": "Delete the home meta export and rely on the root's title."
+    },
+    {
+      "severity": "low",
+      "location": "app/app/lib/api.server.ts:82-94",
+      "issue": "Generation options are emitted in raw API list order with no explicit ordering field, so 'Generation I … IX in that order' depends on the API's list order holding.",
+      "suggestion": "Sort generation infos by `record.id` (or a generation ordinal) before exposing them."
+    },
+    {
+      "severity": "low",
+      "location": "app/app/routes/home.tsx:27-34",
+      "issue": "Search state sync via previousQ ref plus a document.activeElement guard is subtle: back/forward while the input is focused leaves the visible query desynced from the URL.",
+      "suggestion": "Add a brief comment explaining the guard, or drive the input value from searchParams with a small controlled-state helper (e.g. React's useFormState/useOptimistic-style or a tiny custom hook) so the URL is the single source of truth."
+    }
+  ],
+  "summary": "A competent, genuinely framework-mode React Router app on the current stable version with correct routing, careful URL state, and clean server-only data boundaries. The main gaps are the hand-rolled 404 sentinel pattern instead of thrown 404s plus ErrorBoundaries, pervasive `any` where generated route types exist, and a home page that re-serializes the whole dataset to the client on every keystroke. I'd ask for one round of changes before merging, but nothing structural needs rework."
+}
+```

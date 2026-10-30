@@ -1,0 +1,116 @@
+{
+  "dimension": "mergeability",
+  "criteria": {
+    "idiomatic": {
+      "score": 5,
+      "evidence": [
+        "app/src/dom.ts:22 — h() DOM builder: createElement/textContent everywhere, no innerHTML, so no escaping problem exists by construction",
+        "app/src/api.ts:123-136 — typed fetch layer with a promise cache and explicit NotFoundError; spec-sanctioned in-memory caching",
+        "app/src/main.ts:60-95 — hand-rolled router with navigation token + isCurrent() guard; appropriate for the mandated no-framework Vite setup",
+        "app/server.mjs:8-18 — runtime API_BASE_URL injection into index.html, keeping env out of the build; ROUTES list gives real 404 statuses",
+        "app/package.json:9-11 — vite 8.3.5 + typescript 7.0.2 (current stable Oct 2026), build = tsc --noEmit && vite build",
+        "app/src/api.ts:4-9 — import.meta.env fallback with meta-tag override; correct Vite env idiom"
+      ],
+      "rationale": "Reads like good current-era vanilla+Vite: minimal config, typed modules per page, DOM APIs used properly, and the custom server exists only because vite preview can't do runtime env injection."
+    },
+    "correctness_risks": {
+      "score": 3,
+      "evidence": [
+        "app/src/pages/home.ts:128-132 — 150 ms debounce timer keeps running after SPA navigation; applyFilters(true) then history.replaceState's the home URL over whatever page the user navigated to (URL and content diverge until reload)",
+        "app/src/main.ts:93 — await result.ready?.catch(() => {}) swallows move-table failures",
+        "app/src/pages/pokemon.ts:181-195 — on fetch failure show() rejects: tables stays aria-busy and empty on first load, and 'void show()' on select change becomes an unhandled rejection",
+        "app/src/api.ts:128-135 — a 404 rejection stays cached for the page lifetime, so a resource that appears later (the live-data overlay adds one) never retries",
+        "app/src/pages/team.ts:96-102 — a stored species that fails to load yields readTeam().length > 0 alongside 'Your team is empty', and stale entries can't be removed from the UI",
+        "app/src/main.ts:119 — history.scrollRestoration = 'manual' with no restore on popstate (main.ts:100) means back/forward always lose scroll position"
+      ],
+      "rationale": "Several minor issues and one real (if narrow) race that corrupts the URL after navigation; none are catastrophic, and the common paths are guarded by the isCurrent() token."
+    },
+    "global_abstractions": {
+      "score": 4,
+      "evidence": [
+        "app/src/pages/pokemon.ts:20-22 — species→default-variety resolution duplicated verbatim at app/src/pages/team.ts:26-28",
+        "app/src/pages/team.ts:44 — local typeNames(types: Type[]) collides by name with api.ts:113 typeNames(names: Iterable<string>) with different semantics; app/src/pages/types.ts:25 and home.ts build the same label map inline",
+        "app/src/components.ts:51-65 — cardsFromPokemon does data munging (species-name mapping) inside the components module, blurring the data/presentation line slightly",
+        "app/src/pages/pokemon.ts:147-155 — 'numeric' flag on COLUMNS is dead config; compareValues at :176 relies on typeof instead"
+      ],
+      "rationale": "The layering (api/dom/format/components/pages) is genuinely good and boundaries are clear; the duplication is small but will multiply as pages are added."
+    },
+    "readability": {
+      "score": 4,
+      "evidence": [
+        "app/src/api.ts:111 — '/** Fetches a resource by API name; names in URLs are user input, so encode them. */' — comments explain why, not what",
+        "app/src/components.ts:33-34 — EAGER_CARDS constant documented inline; constants (PAGE_SIZE 48 at home.ts:5, MAX_STAT at pokemon.ts:17) named and visible",
+        "app/src/pages/pokemon.ts:107 — '// ---- Moves ----' sectioning keeps the 280-line file navigable; functions stay small",
+        "app/src/pages/home.ts:103-125 — update() body is mis-indented (fragment arguments not re-aligned), the only formatting rough patch in the repo"
+      ],
+      "rationale": "A new teammate finds their way in minutes; nits only (indentation glitch, the typeNames name collision, one dead field)."
+    },
+    "review_cost": {
+      "score": 4,
+      "evidence": [
+        "app/src/pages/home.ts:128-132 — the one change I'd require before merging: guard applyFilters with the page's isCurrent() (or clear the timer on navigation)",
+        "app/src/main.ts:93 — second ask: don't swallow ready() rejections; render an error state in the moves body",
+        "app/src/pages/pokemon.ts:20 and app/src/pages/team.ts:26 — third ask: extract the default-variety helper into api.ts"
+      ],
+      "rationale": "Approve after a small, well-localised round: one behavioral fix plus two refactors, all under ~20 lines."
+    }
+  },
+  "overall": 4,
+  "findings": [
+    {
+      "severity": "medium",
+      "location": "app/src/pages/home.ts:128",
+      "issue": "The debounced search timer survives SPA navigation; if the user types and clicks a card within 150 ms, applyFilters(true) runs history.replaceState with the home URL, replacing the new page's history entry (URL shows /?q=… while the Pokémon page is displayed).",
+      "suggestion": "Pass ctx.isCurrent() into the handlers (or clear the timer in a cleanup hook) and bail out of applyFilters when the page is no longer current."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/main.ts:93",
+      "issue": "result.ready rejections are silently swallowed, and app/src/pages/pokemon.ts:195 fires show() with void, so a move-fetch failure leaves an empty, permanently aria-busy Moves section and an unhandled rejection on select changes.",
+      "suggestion": "Catch inside show() and render a retry/error message in the moves body instead of relying on the caller to swallow."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/api.ts:133",
+      "issue": "Only non-NotFound rejections evict the cached promise, so a resource that returned 404 once is dead for the whole session even though the API is meant to be treated as live data.",
+      "suggestion": "Evict NotFoundError rejections too (or add a short TTL for negative results)."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/pages/team.ts:96",
+      "issue": "If a stored species fails to load, the empty branch renders '<n> of 6' from readTeam().length alongside 'Your team is empty', with no way to remove the stale entries.",
+      "suggestion": "Drop failed members from storage when loadMember returns null, or render a 'could not load' row with its own remove button."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/pages/pokemon.ts:20",
+      "issue": "Species→default-variety resolution is duplicated verbatim in app/src/pages/team.ts:26.",
+      "suggestion": "Add a defaultPokemon(species) helper next to the Species interface in api.ts and use it in both pages."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/pages/team.ts:44",
+      "issue": "Local helper typeNames(types: Type[]) shadows the imported api.ts:113 typeNames(names: Iterable<string>) with different semantics; the same label map is also built inline in types.ts:25 and home.ts.",
+      "suggestion": "Rename the local one (e.g. typeLabelMap) or move a single canonical helper into api.ts."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/pages/pokemon.ts:148",
+      "issue": "The 'numeric' flag on COLUMNS is declared and populated but never read; compareValues uses typeof instead.",
+      "suggestion": "Either use the flag in compareValues or delete it."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/main.ts:119",
+      "issue": "history.scrollRestoration = 'manual' combined with render(false) on popstate means back/forward never restore scroll position.",
+      "suggestion": "Either leave scroll restoration to the browser, or snapshot/restore scrollY per history entry alongside the navigation token."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/pages/home.ts:103",
+      "issue": "The fragment(...) block inside results.replaceChildren is mis-indented, making the update() body harder to scan than the rest of the file.",
+      "suggestion": "Re-indent the block (or hoist it into a small pagination helper)."
+    }
+  ],
+  "summary": "A well-layered, fully typed vanilla TS + Vite app on current toolchain (Vite 8.3.5, TypeScript 7), with clean routing, safe DOM construction and a justified custom static server; the team-builder feature was folded in following the existing conventions exactly. The blocking issue is a debounce timer on the home page that can rewrite the URL after the user has navigated away, plus swallowed async errors in the Moves section. I'd merge after that small round of fixes."
+}

@@ -1,0 +1,124 @@
+I've reviewed the full app: routes, configs, server data layer, all page components, the team feature diff, and the shared modules, and checked the guidance in the Angular skill (`data-resolvers.md`, `creating-services.md`, `server-side-rendering.md`) plus the CLI's current tsconfig template to verify the strict-mode observation.
+
+Assessment in brief: this is a genuinely modern Angular 22 codebase — `@Service()`, signal inputs, `linkedSignal` used exactly for its intended "resettable state linked to a source" purpose, route resolvers feeding `withComponentInputBinding`, per-request `RenderMode.Server`, hydration with event replay and `TransferState`, `RESPONSE_INIT` for 404s, control-flow templates throughout, `NgOptimizedImage` with LCP priority hints. The server-builds-compact-VMs architecture gives clean SSR/CSR boundaries (no hydration mismatch risk: team state in a cookie, VMs keyed in TransferState). The notable weak spots: `strict`/`strictTemplates` were hand-removed from the CLI scaffold (the strict-gated linter flags remain, so the removal was deliberate), resolver/API failures have no user-visible handling or timeout, the client-side VM cache never evicts, and adding a page requires touching routes, the `loadPageData` switch, and (for titles) the title strategy — an implicit three-file contract. The hand-rolled scroll manager in `App` replaces the router's own scrolling features, but for a justified reason (scroll-to-top on page-change but not on filter-change, which `withInMemoryScrolling` cannot express) and it's commented.
+
+```json
+{
+  "dimension": "mergeability",
+  "criteria": {
+    "idiomatic": {
+      "score": 4,
+      "evidence": [
+        "app/src/app/data/team-store.ts:24 — @Service() with private signal + asReadonly(), exactly the documented pattern",
+        "app/src/app/app.routes.ts:14-25 — route resolvers with withComponentInputBinding feeding input.required, the skill's 'modern' resolver pattern",
+        "app/src/app/app.routes.server.ts:5 — RenderMode.Server for live data; app/src/app/app.config.ts:15 — provideClientHydration(withEventReplay())",
+        "app/src/app/pages/pokemon/move-table.ts:78-83 — linkedSignal sort state that resets when the table input changes; textbook linkedSignal",
+        "app/src/app/pages/not-found/not-found.ts:9-12 — RESPONSE_INIT status 404, the documented SSR status API",
+        "app/src/app/shared/pokemon-card.ts:9-13 — NgOptimizedImage with width/height, priority for first cards",
+        "app/src/app/app.ts:28-46 — hand-rolled scroll handling instead of withInMemoryScrolling (justified by filter-vs-page semantics, but a from-scratch router-scroll replacement)",
+        "app/src/app/data/page-data.ts:18-27 — bespoke fetch cache instead of HttpClient/httpResource/transfer cache"
+      ],
+      "rationale": "Uses current v22 primitives almost everywhere it should; the deviations (custom scroll manager, custom fetch pipeline + /_data endpoint) are commented and motivated, but they are still framework features reimplemented by hand."
+    },
+    "correctness_risks": {
+      "score": 3,
+      "evidence": [
+        "app/tsconfig.json:5-14 — 'strict' and 'strictTemplates' hand-removed from the CLI scaffold (the strict-gated flags noImplicitOverride/strictInjectionParameters remain, so the removal was deliberate), leaving null-safety and template type errors unchecked",
+        "app/src/app/data/page-data.ts:15-27 — clientCache grows unbounded in long SPA sessions (entries never evicted on expiry, only on rejection); contrast the server's 4000-entry cap at app/src/server/api-client.ts:56",
+        "app/src/server.ts:22-29 — a single failed upstream API fetch bubbles to next(err) → Express default 500; no retry or timeout on app/src/server/api-client.ts:30",
+        "app/src/app/app.config.ts:11-17 — no withNavigationErrorHandler; a failed /_data fetch during client navigation silently leaves the user on the old page",
+        "app/src/app/data/team-store.ts:50-56 — cookie shared by SSR and browser keeps server/client renders consistent (hydration-safe, a risk this codebase actively avoided)"
+      ],
+      "rationale": "No XSS, hydration-mismatch, or 404-handling problems — those are handled carefully — but strict type-checking was turned off, the client cache is unbounded, and upstream API failures have no timeout, retry, or user-visible error path."
+    },
+    "global_abstractions": {
+      "score": 4,
+      "evidence": [
+        "app/src/app/shared/models.ts:1 — a single explicit view-model contract between server loaders and components; clean leak-free boundary",
+        "app/src/server/loaders.ts:1-440 — one ~440-line module holding all raw API interfaces, helpers and eight page loaders; cohesive but monolithic",
+        "app/src/server/loaders.ts:440-463 — loadPageData's switch must mirror the path strings built in app/src/app/app.routes.ts:12-24; adding a page touches routes, this switch, and app/src/app/page-title-strategy.ts:16-19 (which also relies on the 'vm === null means not found' convention)"
+      ],
+      "rationale": "The VM boundary earns its keep and the /_data endpoint keeps payloads small, but the loaders module is a proto-god data module and the routes↔loader↔title-strategy path-string convention is an implicit three-file contract that will trip future contributors."
+    },
+    "readability": {
+      "score": 5,
+      "evidence": [
+        "app/src/app/pages/* — one folder per page with small components; shared/ holds the few genuinely shared pieces (card, badge, format)",
+        "app/src/app/app.ts:21-23 — comment explains the non-obvious scroll policy ('keep the position when only a filter changes')",
+        "app/src/server/api-client.ts:1-4 and app/src/server/loaders.ts:1-4 — module headers explain the caching and VM strategy; README.md repeats the architecture",
+        "app/src/styles.css:1-120 — sectioned, BEM-named global CSS; consistent with tokens.css",
+        "app/src/app/shared/team.ts:13-27 — pure, documented helpers (normalizeTeam, coverageRows) with the multipliers spelled out"
+      ],
+      "rationale": "A new teammate finds their way in minutes: structure mirrors the pages, names are precise, and the why-comments cover every non-obvious decision (cookie choice, transfer-state reuse, scroll policy)."
+    },
+    "review_cost": {
+      "score": 3,
+      "evidence": [
+        "app/tsconfig.json:5 — restoring strict/strictTemplates is a blocking ask whose fallout (template type errors under strictTemplates) is unknown",
+        "app/src/server.ts:22-29 — reviewer must ask for an error/timeout path on API failures (both server 500s and silent client nav failures)",
+        "app/src/app/data/page-data.ts:15 — reviewer should ask for a size cap on the client cache",
+        "app/src/app/pages/home/home.ts:28-34 — the pushedQ/linkedSignal search-input dance is correct but subtle enough that a reviewer will want a comment or a second opinion"
+      ],
+      "rationale": "Approve-quality code overall, but the disabled strict flags plus the missing error handling make this a round-of-changes rather than a nits-only review."
+    }
+  },
+  "overall": 4,
+  "findings": [
+    {
+      "severity": "medium",
+      "location": "app/tsconfig.json:5",
+      "issue": "'strict' and 'strictTemplates' were removed from the CLI's strict scaffold while the strict-gated linter flags (noImplicitOverride, strictInjectionParameters, …) remain — almost certainly to silence compiler errors; null-safety and template type errors are now unchecked in a codebase whose types lean heavily on nullability.",
+      "suggestion": "Restore strict and strictTemplates and fix the underlying type errors; the code style already assumes strict mode."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/server.ts:22",
+      "issue": "Any upstream API failure during a page render becomes an Express 500 (default error handler), and on the client a failed /_data fetch during navigation silently strands the user on the old page; there is no timeout, retry, or withNavigationErrorHandler.",
+      "suggestion": "Add a fetch timeout/retry in api-client, a small error view (withNavigationErrorHandler) for client navigations, and an explicit 500 page server-side."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/app/data/page-data.ts:15",
+      "issue": "The browser's page-data cache never evicts expired entries (only rejected promises are removed), so a long browsing session retains every VM visited — pokemon VMs are large; the server-side cache caps itself at 4000 entries but this one has no cap.",
+      "suggestion": "Evict expired entries on access and cap the map size (LRU or periodic sweep) like api-client does."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/app/app.ts:28-46",
+      "issue": "The router's built-in scrollPositionRestoration/anchorScrolling are disabled and re-implemented via router.events + afterNextRender with manual previous-URL diffing — the most fragile code in the app.",
+      "suggestion": "Consider a custom RouterScrollHandling or at least add unit coverage for the scroll matrix (popstate, anchor, page-change, filter-change)."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/app/app.routes.ts:14",
+      "issue": "Route definitions build data-path strings that app/src/server/loaders.ts:440 parses back, and page-title-strategy.ts:16 keys off the 'vm === null' resolver convention — adding a page is an implicit three-file change.",
+      "suggestion": "Derive the loader kind from the route (e.g. a route data field consumed by one resolver factory) and document the vm/title contract in one place."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/server/loaders.ts:1",
+      "issue": "One ~440-line module holds every raw API interface plus all eight page loaders; locally fine, but it will become the file everyone touches.",
+      "suggestion": "Split per page (loaders/pokemon.ts, loaders/team.ts, …) with shared raw-API types in their own file."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/app/pages/home/home.ts:28",
+      "issue": "The pushedQ/linkedSignal search-input synchronisation is clever and correct but hard to verify at a glance.",
+      "suggestion": "Extract the debounced URL-syncing search into a small tested helper or expand the comment to state the invariant ('input wins until the URL reflects what the input pushed')."
+    },
+    {
+      "severity": "low",
+      "location": "app/package.json:17",
+      "issue": "@angular/forms is declared as a dependency but never imported anywhere.",
+      "suggestion": "Remove the unused dependency."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/app/shared/format.spec.ts:1",
+      "issue": "The only unit tests cover the three format helpers; the genuinely tricky pure logic (coverageRows multipliers, normalizeTeam, loadPageData path parsing) is untested.",
+      "suggestion": "Add vitest cases for coverageRows (e.g. Fire/Flying vs Ice = 1) and for loadPageData's routing rules."
+    }
+  ],
+  "summary": "A polished, current-Angular-22 codebase that would be easy to own: resolvers + compact server-built VMs + TransferState give clean SSR/hydration, and signals/@Service/linkedSignal are used the way the docs teach. The blocking items are config and robustness rather than structure: strict/strictTemplates were silently stripped from the scaffold, upstream API failures lack timeout, retry, or any user-visible error path, and the client VM cache never evicts. Fix those and it's an easy approve."
+}
+```

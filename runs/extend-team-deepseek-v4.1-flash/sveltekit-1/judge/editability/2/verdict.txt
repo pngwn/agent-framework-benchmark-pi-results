@@ -1,0 +1,148 @@
+I've reviewed the whole app. Quick note on the framework baseline: `app/package.json` pins SvelteKit 3, Svelte 5.57, Vite 8, TS 6, and the code uses the Kit 3 idioms (`#lib` subpath imports, config in `vite.config.ts`, `error()` without `throw`, `$props`/`$derived`/`@render`) — I verified against the Oct 2026 SvelteKit 3 release notes, so nothing here is judged against stale conventions.
+
+## Scenario walkthroughs
+
+**1. Remove Abilities** — delete `app/src/routes/abilities/[name]/` (2 files), remove `getAbilityPage` + `ApiAbility` from `pokedex.ts` (~20 lines), and the Abilities `<Section>` + link + `.abilities` CSS in the Pokémon page. Three files, all reachable by grepping `/abilities`; no nav link exists, so no other references. Clean but not a one-directory delete.
+
+**2. Sprite bug (Deoxys-class)** — every card's sprite comes from `spriteUrl(id)` at `app/src/lib/server/pokedex.ts:90`, and all three card builders call it (`:142` via `cardsFor`, `:185` home page, `:376` team page). One fix covers every list. The caveat: if the fix required resolving the default *variety* rather than the species ID, the fix would still land in `spriteUrl`, but the three duplicated card-construction sites would each need the variety plumbed in — the triplication is the real fragility here.
+
+**3. Sort by name on every card list** — four of the five lists (home, move, ability, type) render through `CardList` → `PokemonCard`, so a sort in `CardList.svelte` covers them; but the team page re-implements the card-list markup in `team/+page.svelte:37-45` (because it needs a per-item remove button and `CardList` has no per-item seam), and the home page's server-side pagination (`pokedex.ts:183-185`) means a "true" name sort must also touch `getPokemonList`. Not one edit.
+
+**4. Items section** — append `getItemPage` to `pokedex.ts` (reuses `get`/`getOrThrow`, `englishName`, `latestFlavorText`, `cardsFor`), copy the 10-line load-with-404 pattern (`moves/[name]/+page.server.ts:1-9`), and write a page reusing `Section`, `CardList`, `pageTitle`, `orDash`. The move page's facts `<dl>` (`moves/[name]/+page.svelte:17-45`) is inline, so ~30 lines get copied/adapted rather than shared, but the data layer and components are largely reusable.
+
+**5. Change data source** — base URL, TTL and cache size are all in `app/src/lib/server/api.ts:5-7` and used only via `get()`/`apiBase`. One file; `pokedex.ts` doesn't re-construct URLs (except sprites, which go through the exported `apiBase`). Exemplary.
+
+## Strengths
+
+- Server/client split is enforced by discipline: only `*.server.ts` files import `#lib/server` (verified by grep), loads are thin wrappers (`routes/+page.server.ts:1-11`), and shared shapes live in `lib/types.ts`.
+- `cardsFor` with the `extra` mapper (`pokedex.ts:133-145`) is designed around the app's real variation (hidden-ability flag on ability cards) instead of boolean flags.
+- `MoveTable`'s data-driven column config (`MoveTable.svelte:9-20`) makes the sortable-table behavior extensible to new columns.
+- `Section` (title/id/children snippet) and `format.ts` pure helpers give every page a uniform skeleton.
+
+## Weaknesses
+
+- `pokedex.ts` is a 425-line module for all six resources. It's clearly sectioned, but resource additions all funnel into one file.
+- Card-object construction is triplicated (`pokedex.ts:142`, `:185`, `:376`).
+- The team feature syncs cookie state to the server via `$effect(() => { team = [...data.team] })` (`pokemon/[name]/+page.svelte:24-26`, `team/+page.svelte:16-18`) — state writes inside effects are the pattern Svelte's own guidance says to avoid, and it exists only because `toggleTeam` mutates the cookie without invalidating the load.
+
+```json
+{
+  "dimension": "editability",
+  "criteria": {
+    "removability": {
+      "score": 4,
+      "evidence": [
+        "app/src/routes/abilities/[name]/+page.server.ts:5 — entire route is a self-contained 2-file directory",
+        "app/src/lib/server/pokedex.ts:331-345 — getAbilityPage + ApiAbility type are the only other ability code",
+        "app/src/routes/pokemon/[name]/+page.svelte:111-120 — Abilities section/link is the sole inbound reference",
+        "app/src/routes/+layout.svelte:14-18 — nav has no Abilities link, so nothing to untangle"
+      ],
+      "rationale": "Removing Abilities means deleting a route directory plus one function block and one page section across three files; every edit is grep-findable and leaves no dead code, but it's more than a directory delete."
+    },
+    "changeability": {
+      "score": 4,
+      "evidence": [
+        "app/src/lib/server/pokedex.ts:90 — spriteUrl is the single sprite-URL construction point",
+        "app/src/lib/server/pokedex.ts:142,185,376 — but the Card object itself is built in three places, so a Card-shape change needs 3 edits",
+        "app/src/lib/server/pokedex.ts:147-195 — all home-page filter/pagination logic in one function",
+        "app/src/lib/format.ts:1-21 — humanize/dexNumber/orDash centralized, used everywhere"
+      ],
+      "rationale": "Most fixes land in one obvious place (spriteUrl, getPokemonList, format helpers, MoveTable sort), but the three card-construction sites are a genuine fix-it-N-times risk for any change to what a card contains."
+    },
+    "coupling": {
+      "score": 4,
+      "evidence": [
+        "app/src/lib/types.ts:1-17 — components share narrow typed shapes (Card, TypeRef, MoveRow) not internals",
+        "app/src/routes/+page.server.ts:1-11 — loads are thin wrappers; grep confirms only *.server.ts imports #lib/server",
+        "app/src/lib/components/Section.svelte:3-6 — pages compose via snippets, no prop-drilling",
+        "app/src/routes/pokemon/[name]/+page.svelte:24-26 — team state mirrored into local $state via an effect, a subtle coupling between cookie mutation and load data",
+        "app/src/lib/components/MoveTable.svelte:99-101 — '+ :global(.move-table)' sibling selector relies on parent DOM order"
+      ],
+      "rationale": "Server/client boundaries and component seams are clean and consistently enforced; deductions for the team-state effect-sync and one DOM-order-dependent :global selector."
+    },
+    "abstraction_design": {
+      "score": 4,
+      "evidence": [
+        "app/src/lib/server/pokedex.ts:133-145 — cardsFor's extra-mapper absorbs real variation (hidden-ability cards) without flags",
+        "app/src/lib/components/MoveTable.svelte:9-20 — column config stretches to new columns without flag params",
+        "app/src/lib/components/CardList.svelte:5 — showTypes boolean prop duplicated on CardList and PokemonCard is mild flag creep",
+        "app/src/routes/team/+page.svelte:37-45 — team page copies the card-list grid instead of CardList growing a per-item snippet",
+        "app/src/routes/moves/[name]/+page.svelte:17-45 — facts dl is inline, so an Items page copies rather than reuses it"
+      ],
+      "rationale": "Abstractions mostly stretch instead of being copied or flag-parameterized, but the per-item-list seam is missing (team page rolls its own) and the facts-list pattern would be duplicated for Items."
+    }
+  },
+  "overall": 4,
+  "findings": [
+    {
+      "severity": "medium",
+      "location": "app/src/lib/server/pokedex.ts:142",
+      "issue": "Card objects are constructed in three places (cardsFor:142, home page:185, team page:376), so changes to card shape or sprite resolution must be made three times.",
+      "suggestion": "Extract a makeCard(id, name, extra) helper (or make cardsFor the only builder) so all lists share one construction path."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/routes/pokemon/[name]/+page.svelte:24",
+      "issue": "$effect writing state to mirror data.team (also team/+page.svelte:16) is the state-in-effect anti-pattern, and only exists because toggleTeam mutates the cookie without invalidating the load.",
+      "suggestion": "Call invalidateAll() after saveTeam() and derive team from data, or track membership via $derived; drop the effect."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/lib/server/pokedex.ts:1",
+      "issue": "All six resources' data builders plus API shapes live in one 425-line module; additions (e.g. Items) keep appending to it.",
+      "suggestion": "Keep the shared api.ts/format helpers but split per-resource builders into lib/server/<resource>.ts once the file grows further."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/routes/team/+page.svelte:37",
+      "issue": "Team page re-implements the card grid and duplicates CardList's grid CSS because CardList has no per-item slot.",
+      "suggestion": "Add an optional 'item' snippet prop to CardList so pages can attach buttons under a card."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/lib/components/MoveTable.svelte:77",
+      "issue": "Each-block key includes the loop index ('${row.name}-${row.level}-${i}'), so keys aren't stable identifiers.",
+      "suggestion": "Key by a stable per-row id assigned when rows are built in pokedex.ts."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/lib/components/CardList.svelte:5",
+      "issue": "showTypes is threaded through two components as a boolean flag and Card carries optional types/hidden fields, a small flag-creep smell.",
+      "suggestion": "Acceptable as-is; if a third variant appears, switch to named snippets or variant props."
+    }
+  ],
+  "summary": "This is a well-structured SvelteKit 3 app: thin route loads, one API client owning the base URL and cache, centralized format helpers, and narrow typed components make most changes land in one obvious place. The main editability risks are the triplicated card construction, the 425-line pokedex.ts monolith, and the team feature's effect-based state sync. Overall this is code a team can happily extend.",
+  "scenarios": [
+    {
+      "change": "Remove the Abilities pages and every link to them",
+      "files": ["app/src/routes/abilities/[name]/+page.svelte", "app/src/routes/abilities/[name]/+page.server.ts", "app/src/lib/server/pokedex.ts", "app/src/routes/pokemon/[name]/+page.svelte"],
+      "difficulty": 4,
+      "notes": "Delete the route dir, one function + type block in pokedex.ts, and the Abilities section/CSS in the Pokémon page; no nav link or other references exist, so no dead code."
+    },
+    {
+      "change": "Fix wrong sprite for species whose default Pokémon differs (e.g. Deoxys)",
+      "files": ["app/src/lib/server/pokedex.ts"],
+      "difficulty": 4,
+      "notes": "The fix lands in spriteUrl (pokedex.ts:90), which every card builder calls, so one fix covers every list; only if variety resolution is needed do the three card-construction sites need plumbing."
+    },
+    {
+      "change": "Add sorting by name to every list of Pokémon cards",
+      "files": ["app/src/lib/components/CardList.svelte", "app/src/routes/team/+page.svelte", "app/src/lib/server/pokedex.ts"],
+      "difficulty": 3,
+      "notes": "CardList covers home/move/ability/type lists, but the team page renders its own card grid, and the home page's server-side pagination means a true cross-page name sort also touches getPokemonList."
+    },
+    {
+      "change": "Add an Items section (/items, /items/:name) shaped like Moves",
+      "files": ["app/src/lib/server/pokedex.ts", "app/src/routes/items/[name]/+page.server.ts", "app/src/routes/items/[name]/+page.svelte", "app/src/routes/+layout.svelte"],
+      "difficulty": 4,
+      "notes": "Data helpers (get/getOrThrow, englishName, latestFlavorText, cardsFor), Section/CardList and the 404 load pattern are all reusable; only the move page's inline facts <dl> gets copied (~30 lines)."
+    },
+    {
+      "change": "Change the API base URL and caching rules",
+      "files": ["app/src/lib/server/api.ts"],
+      "difficulty": 5,
+      "notes": "API_BASE_URL, TTL_MS, MAX_ENTRIES and the cache live entirely in api.ts:5-53; pokedex.ts only consumes get/apiBase, so nothing else knows about the data source."
+    }
+  ]
+}
+```

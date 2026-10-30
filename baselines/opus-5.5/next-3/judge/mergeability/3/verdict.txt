@@ -1,0 +1,130 @@
+I've reviewed the full app, the spec, and verified the framework context (the app pins Next 16.4.3; as of that release Vercel recommends the Cache Components model for all new apps, while the legacy `dynamic`/`no-store` model it uses remains supported and is only removed in Next 17 — `github.com/vercel/next.js` v16.0.0 route-segment-config version history and the Next 16.4 blog post).
+
+Key observations that shaped the scores:
+
+- **Server/client boundary is done properly**: `import "server-only"` guards in `app/lib/api.ts:1` and `app/lib/data.ts:1`, and client components only cross via `import type` (e.g. `app/components/TypeBadge.tsx:2`, `app/components/PokemonCards.tsx:2`), so the guard never trips.
+- **Async params/searchParams, `generateMetadata` title template, `notFound()`, `error.tsx`/`not-found.tsx`** are all current App Router conventions (`app/app/layout.tsx:11`, `app/app/pokemon/[name]/page.tsx:24-36`).
+- The search-as-you-type race in `app/components/Filters.tsx:38-50` is handled thoughtfully with a `sentQuery` ref; the promise cache in `app/lib/api.ts:28-51` dedups concurrent fetches, evicts failures, and is size-bounded.
+- Main structural critique: a hand-rolled TTL cache plus `force-dynamic` plus `cache: "no-store"` is a bespoke caching strategy stacked on top of the framework's own — fine today, but a second caching layer a maintainer must untangle, and it's on the legacy model slated for removal in Next 17.
+
+```json
+{
+  "dimension": "mergeability",
+  "criteria": {
+    "idiomatic": {
+      "score": 4,
+      "evidence": [
+        "app/app/pokemon/[name]/page.tsx:22 — params/searchParams as Promises per Next 15+ async-props convention",
+        "app/app/layout.tsx:11 — Metadata title template '%s – Pokédex' with default, exactly the documented pattern",
+        "app/lib/api.ts:1 — 'server-only' guard; client components use import type only (app/components/TypeBadge.tsx:2)",
+        "app/app/layout.tsx:7 — export const dynamic = 'force-dynamic': legacy route-segment config; Next 16.4 recommends Cache Components for new apps and removes 'dynamic' under it",
+        "app/lib/api.ts:20 — fetch(url, { cache: 'no-store' }): redundant under the current default-uncached fetch, and part of the old model",
+        "app/components/PokemonCards.tsx:12 — raw <img> with eslint-disable instead of next/image (defensible: runtime-configurable API origin, but not the documented primitive)"
+      ],
+      "rationale": "Recognisably the framework's own style: correct App Router conventions throughout, with the main gap being that it builds on the previous caching model rather than the Cache Components model Next 16.4+ now recommends for greenfield apps."
+    },
+    "correctness_risks": {
+      "score": 4,
+      "evidence": [
+        "app/components/Filters.tsx:26-36 — sentQuery ref prevents a slow navigation from clobbering user input; careful race handling",
+        "app/lib/api.ts:29-33 — promise-cache deletes failed entries and is size-bounded, avoiding unbounded growth and poisoned caches",
+        "app/app/page.tsx:41-42 — page number clamped to [1, totalPages]; NaN page falls back to 1",
+        "app/components/MoveTable.tsx:63-66 — missing values sort last in both directions, matching spec, with aria-sort handled correctly",
+        "app/app/pokemon/[name]/page.tsx:182 — fetches every version-group record and every move detail (up to ~100 requests) on first render of a Pokémon; bounded by the 60s TTL cache but a fan-out",
+        "app/components/GameSelect.tsx:23 — router.replace drops the #moves hash when changing game, kicking the user out of the anchor",
+        "app/app/error.tsx:6 — error object destructure-typed but never logged, swallowing diagnostics"
+      ],
+      "rationale": "No serious bugs found; the race-prone spots (URL sync, caching, pagination) are handled deliberately. Remaining issues are minor: a per-render fetch fan-out, hash loss on select, and unlogged errors."
+    },
+    "global_abstractions": {
+      "score": 4,
+      "evidence": [
+        "app/lib/api.ts — clean transport + types module; the module-level Map cache (line 14-16) is a hidden global but commented, TTL'd and bounded",
+        "app/lib/data.ts:62-96 — cardsForPokemon/getSpeciesIndex are well-shaped derived-data helpers, no N+1 card fetching",
+        "app/lib/format.ts — pure, small shared module; every helper earns its keep",
+        "app/components/MoveTable.tsx:31 — MISSING constant duplicates lib/format.ts:5",
+        "app/lib/api.ts:14 — a second caching layer parallel to the framework's fetch/route caching that a maintainer must reason about alongside it"
+      ],
+      "rationale": "Abstractions are few with clear server/client boundaries; the only global concern is the bespoke in-memory cache stacked on top of the framework's own caching machinery, which will need untangling if the app ever adopts use cache or fetch-level caching."
+    },
+    "readability": {
+      "score": 4,
+      "evidence": [
+        "app/lib/api.ts:3-5 — header comment explains the TTL tradeoff; comments explain why elsewhere too (Filters.tsx:24)",
+        "app/app/moves/[name]/page.tsx vs app/app/abilities/[name]/page.tsx — identical page shape (getX helper + generateMetadata + notFound), highly consistent",
+        "app/components/Section.tsx:6 — slug regex uses invisible combining characters ([̀-ͯ]) instead of \\u0300-\\u036f escapes; unreadable and fragile in source",
+        "app/app/pokemon/[name]/page.tsx:178-245 — getMoves mixes substantial data-shaping logic into the page file alongside three components"
+      ],
+      "rationale": "Consistent, well-named and commented; a new teammate would find their way quickly. Warts: an invisible-character regex and data logic living in a page file."
+    },
+    "review_cost": {
+      "score": 4,
+      "evidence": [
+        "app/components/PokemonCards.tsx:12 — eslint-disable comments but no ESLint installed or configured anywhere in app/package.json",
+        "app/app/pokemon/[name]/page.tsx:134 — fake ChainLink with url: \"\" as a defensive fallback; slightly hacky",
+        "app/lib/format.ts:5 — duplicated MISSING constant",
+        "app/components/GameSelect.tsx:23 — hash-dropping replace is a one-line fix"
+      ],
+      "rationale": "I would approve with nits: add a lint setup, clean up the slug regex, log errors in error.tsx, and note the eventual Cache Components migration. Nothing requires structural rework."
+    }
+  },
+  "overall": 4,
+  "findings": [
+    {
+      "severity": "medium",
+      "location": "app/app/layout.tsx:7",
+      "issue": "Built on the legacy caching model (force-dynamic + fetch no-store in lib/api.ts:20) instead of Cache Components, which Next.js 16.4+ recommends for every new app; route-segment config 'dynamic' is removed under that model and is slated for removal in Next 17.",
+      "suggestion": "Either enable cacheComponents/partialPrefetching and drop 'dynamic' (all fetches stay dynamic by default, satisfying the live-data requirement), or add a comment recording the deliberate choice and a migration note."
+    },
+    {
+      "severity": "medium",
+      "location": "app/app/pokemon/[name]/page.tsx:45",
+      "issue": "No loading.tsx or Suspense boundary anywhere; a Pokémon page blocks on the full data fan-out (pokemon, chain, all version groups, then all move details) before any HTML streams.",
+      "suggestion": "Add a loading.tsx route file (and consider wrapping the Moves section in Suspense) so navigation gives immediate feedback on heavy dynamic renders."
+    },
+    {
+      "severity": "low",
+      "location": "app/app/pokemon/[name]/page.tsx:197",
+      "issue": "Fetch fan-out: every move in the selected version group is fetched individually (plus every version-group record at line 182), so a cold first render of e.g. Pikachu fires 100+ upstream requests.",
+      "suggestion": "Acceptable for a local API behind the 60s TTL cache, but consider precomputing a move-name → {type, category, power} summary keyed per version group, or a longer cacheLife for immutable move records."
+    },
+    {
+      "severity": "low",
+      "location": "app/components/PokemonCards.tsx:12",
+      "issue": "eslint-disable comments reference @next/next/no-img-element, but the app has no ESLint dependency, config, or lint script, so the rules never run and the comments are misleading.",
+      "suggestion": "Add an ESLint flat config with eslint-config-next (next lint is gone in Next 16; run eslint directly) or remove the dead disable comments."
+    },
+    {
+      "severity": "low",
+      "location": "app/components/Section.tsx:6",
+      "issue": "slug() strips diacritics with a regex containing literal invisible combining characters (/[̀-ͯ]/g), which is unreadable in review and easily corrupted by editors/diffs.",
+      "suggestion": "Rewrite as /[\\u0300-\\u036f]/g with a short comment."
+    },
+    {
+      "severity": "low",
+      "location": "app/app/error.tsx:6",
+      "issue": "The error boundary receives the error but never logs it, so server/API failures are silent for operators.",
+      "suggestion": "console.error(error) (or report to the team's logger) in the component body per Next's error.tsx guidance."
+    },
+    {
+      "severity": "low",
+      "location": "app/components/GameSelect.tsx:23",
+      "issue": "Changing the game select does router.replace to a query-only URL, dropping any hash such as #moves that the user navigated to.",
+      "suggestion": "Preserve window.location.hash in the replace URL (or re-append the #moves anchor after navigation)."
+    },
+    {
+      "severity": "low",
+      "location": "app/components/MoveTable.tsx:31",
+      "issue": "MISSING constant duplicated from lib/format.ts:5 instead of importing it.",
+      "suggestion": "Import MISSING from '@/lib/format'."
+    },
+    {
+      "severity": "low",
+      "location": "app/app/pokemon/[name]/page.tsx:134",
+      "issue": "When evolution_chain is null, a synthetic ChainLink with url: \"\" is constructed to reuse EvolutionTree — a fake record shape that could mislead future readers.",
+      "suggestion": "Handle the no-chain case with a direct single-link render or a null-render branch in EvolutionTree."
+    }
+  ],
+  "summary": "A clean, consistent App Router implementation that follows current conventions (async params, metadata templates, notFound, server-only boundaries) and handles the tricky parts — URL-synced filters, caching, 404s — with visible care. The main strategic gap is that it builds on the legacy force-dynamic/no-store caching model rather than the Cache Components model Next 16.4 now recommends, and it lacks any loading state for its heavy dynamic renders. I'd merge it with nits: lint setup, error logging, and a couple of small cleanups."
+}
+```

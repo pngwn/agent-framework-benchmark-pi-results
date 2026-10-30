@@ -1,0 +1,164 @@
+## Review
+
+The app is a coherent, idiomatic TanStack Start codebase: all API access lives behind `createServerFn` wrappers in `app/src/lib/queries.ts:1-27`, with server-only shaping in `app/src/lib/data.server.ts` — a split that matches the framework's own recommended `*.functions.ts` / `*.server.ts` organization. Loaders call server fns; components are pure renderers of view-model DTOs; the route tree is plugin-generated and auto-updates on file changes. That gives it genuinely good seams and a strong server/client boundary.
+
+Where it costs editability is at the route layer and in repeated list-shaping. "Not found" is hand-rolled as `{ notFound: true }` union types (`app/src/lib/data.server.ts:371-373`, `:655`) plus per-route `if (data.notFound)` checks and head ternaries in all four detail routes, instead of the framework's `notFound()` throw + `notFoundComponent`, which the current docs present as the standard mechanism for missing resources. The shared page chrome (`Page`, header/footer) is a component each route must remember to wrap rather than a root-route layout, so every new page re-copies the same boilerplate. And the "card list" concern — sprite derivation, type-label maps, dex ordering — is repeated across `getMovePageData`, `getAbilityPageData` and `getTypePageData` rather than shared, though always inside one file, so it's findable.
+
+```json
+{
+  "dimension": "editability",
+  "criteria": {
+    "removability": {
+      "score": 3,
+      "evidence": [
+        "app/src/routes/abilities.$name.tsx:6-15 — the route itself is a clean single-file deletion",
+        "app/src/lib/queries.ts:20-27 — loadAbilityPage must be removed separately from the route",
+        "app/src/lib/data.server.ts:150-151 and 655-691 — getAbility + AbilityPageData + getAbilityPageData live in the shared data module, not with the feature",
+        "app/src/routes/pokemon.$name.tsx:119-130 — the Abilities section on the Pokémon page links to /abilities/$name and must be edited too",
+        "app/src/styles/global.css:593 — CSS for move and ability pages shares one comment block, so cleanup is manual",
+        "app/src/routeTree.gen.ts:1 — generated, so route removal propagates automatically (a plus)"
+      ],
+      "rationale": "Every deletion point is clean and obvious, but the Abilities feature is smeared across five files: route, server-fn wrapper, data functions in the shared module, a link-bearing section on another page, and CSS. That's the definition of 'a handful of scattered edits'."
+    },
+    "changeability": {
+      "score": 3,
+      "evidence": [
+        "app/src/lib/data.server.ts:218-226 — speciesCard() is the single sprite factory for move/ability/type cards (default param derives the URL)",
+        "app/src/lib/data.server.ts:322 — getHomeData duplicates the sprite fallback inline (pokemon.sprites.front_default ?? mediaSprite), so a sprite-rule fix touches two spots",
+        "app/src/lib/data.server.ts:636, 683, 755 — cards.sort((a, b) => a.id - b.id) repeated in three page-data functions",
+        "app/src/lib/data.server.ts:195, 267, 742 — type name→label map built three different ways (getTypeLabelMap, inline in getHomeData, inline in getTypePageData) despite getTypeLabelMap existing",
+        "app/src/routes/index.tsx:14-27, 50-73, 76-84 — the q/type/generation/page param-building logic is written three times (validateSearch, update, linkSearch)",
+        "app/src/lib/format.ts:1-48 — names, dex numbers, flavor text and em-dash fallbacks all centralized here (a strong counter-example)"
+      ],
+      "rationale": "Domain formatting and API access are excellently centralized (format.ts, one data module), but the specific bug classes you'd actually ship — sprite derivation, card ordering, type labels, home filter params — each live in 2-3 duplicated places. All inside one or two files, so findable, but fixing is not one-edit."
+    },
+    "coupling": {
+      "score": 4,
+      "evidence": [
+        "app/src/lib/queries.ts:9-27 — every route talks to the API only through server fns; loaders in routes/ never fetch directly",
+        "app/src/lib/data.server.ts:10, 102-104 — API origin, URL building and the response cache are private to one module",
+        "app/src/components/PokemonCard.tsx:1-4 — components consume only the CardData DTO, no server internals leak into the view layer",
+        "app/src/routes/pokemon.$name.tsx:11 — routes depend on queries.ts and DTO types only; no component reaches into data.server at runtime",
+        "app/src/components/MoveTable.tsx:3 — MoveTable and PokemonCard type-import CardData/MoveRow from a server-only module; the contract lives in lib/data.server.ts rather than a shared types module",
+        "app/src/components/PokemonCard.tsx:6-12 — TypeBadge, used by four routes and MoveTable, is exported from PokemonCard.tsx rather than its own module",
+        "app/src/components/Layout.tsx:33-41 + app/src/routes/__root.tsx:28-31 — page chrome is an opt-in Page component instead of a root-route layout around Outlet"
+      ],
+      "rationale": "Server and client code are cleanly separated with narrow DTO interfaces, and shared state is entirely explicit (URL search params). Only nits: the view-model contract types live inside the .server.ts module (type-only imports, so harmless, but a shared types file would be the cleaner seam), TypeBadge has an odd home, and Page is a manual convention rather than an enforced one."
+    },
+    "abstraction_design": {
+      "score": 3,
+      "evidence": [
+        "app/src/components/PokemonCard.tsx:26-41 — PokemonCardList + CardData genuinely stretches across four different lists via optional fields (types for home, hiddenAbility for abilities) — designed around real variation",
+        "app/src/components/MoveTable.tsx:48, 99 — column variation handled with a hasLevel boolean flag on table data, mild but acceptable",
+        "app/src/lib/data.server.ts:371-373, 655-662 — not-found modeled as a union return type per page-data function instead of the framework's notFound()/notFoundComponent, forcing every new detail route to copy the union + the head ternary + the component check (app/src/routes/abilities.$name.tsx:10-20, moves.$name.tsx:8-14)",
+        "app/src/routes/moves.$name.tsx:18-55 vs abilities.$name.tsx:19-37 — the detail-page skeleton (h1 + dl facts + panel sections + count + card list) is inlined per route with no shared section primitive, so an Items section is largely copied",
+        "app/src/lib/data.server.ts:165-191 — getAllTypeRecords/getAllGenerationRecords share a hand-rolled memoize-and-reset-cache pattern rather than a small helper"
+      ],
+      "rationale": "The card and table abstractions are well-shaped and stretch to new cases, but the route/page layer has no reusable structure: not-found handling, page chrome and section markup are per-route boilerplate, so adding a sibling section means copying the Moves route, its loader wrapper and its not-found union rather than reusing code."
+    }
+  },
+  "overall": 3,
+  "findings": [
+    {
+      "severity": "medium",
+      "location": "app/src/lib/data.server.ts:371-373",
+      "issue": "Missing resources are signaled by { notFound: true } union return types, which every route must thread through a component check and a head() ternary (app/src/routes/abilities.$name.tsx:10-20, moves.$name.tsx:8-14, types.$name.tsx:8-15, pokemon.$name.tsx:19-23) — four copies of plumbing the framework already provides via notFound() + notFoundComponent, and the URL-query-splat route ($.tsx) handles unmatched paths with a different mechanism entirely.",
+      "suggestion": "Throw notFound() from the loaders (or server fns) and declare a notFoundComponent (or a root defaultNotFoundComponent) once; delete the notFound unions from the page-data types."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/routes/index.tsx:50-84",
+      "issue": "The home filter search-param shape is encoded three times — validateSearch (:14-27), update's cleaned-object building (:50-73) and linkSearch (:76-84) — plus loaderDeps (:28-33) and HomeFilters in data.server.ts, so adding a fourth filter (e.g. sort) touches ~6 places with a real chance of drift.",
+      "suggestion": "Extract a single toHomeSearch(partial) helper used by validateSearch, update and linkSearch, so the param set is declared once."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/lib/data.server.ts:636",
+      "issue": "Card-list shaping (dex sort at :636, :683, :755; type-label map at :267 and :742 duplicating getTypeLabelMap at :195; sprite fallback at :322 duplicating speciesCard's default at :220) is repeated across getMovePageData/getAbilityPageData/getTypePageData/getHomeData, so a change to how cards are ordered, labelled or illustrated lands in up to four functions.",
+      "suggestion": "Route all non-home card lists through one buildCardList(speciesRefs, opts) helper that owns sorting, labels and sprites; reuse getTypeLabelMap everywhere."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/components/Layout.tsx:33",
+      "issue": "Banner, navigation, main wrapper and contentinfo landmark are opt-in per route via a Page component (wrapped in all 7 route files) instead of being enforced by the root route around <Outlet/> (app/src/routes/__root.tsx:28-31 renders only Outlet), so a new page that forgets <Page> silently loses the required landmarks and footer.",
+      "suggestion": "Move SiteHeader/SiteFooter and the <main> wrapper into the root route component (or a pathless layout route) so every route inherits them for free."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/lib/data.server.ts:127-129",
+      "issue": "Card sprites are synthesized from the species id (mediaSprite) rather than taken from the API's front_default, bypassing the API's null signal for unshipped sprite sets; a broken-image rule or a sprite-source change must be fixed in two places (speciesCard :220 and getHomeData :322), and speciesCard's sync signature blocks a proper fix that needs the Pokémon record.",
+      "suggestion": "Make sprite derivation a single helper that prefers the Pokémon record's front_default and returns null when absent; have all card builders use it."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/lib/data.server.ts:165-191",
+      "issue": "Two coexisting caching mechanisms — a per-URL promise cache (:102-104) plus two hand-rolled module-level memo promises with identical reset-on-error logic (:165-191) — mean a caching-rule change must be reconciled across both patterns.",
+      "suggestion": "Wrap the memoize-with-invalidation-on-error pattern in a small remember(key, factory) helper, or fold these into apiGet's cache."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/components/MoveTable.tsx:3",
+      "issue": "Client components type-import their view-model contract (CardData, MoveRow, EvolutionNode at pokemon.$name.tsx:11) from the server-only module lib/data.server.ts; type-only imports are erased so nothing leaks at runtime, but the client/server contract lives in the server file and a future non-type import would break the build confusingly.",
+      "suggestion": "Move the exported DTO types (CardData, MoveRow, MoveTableData, EvolutionNode, page-data unions) to a shared lib/types.ts imported by both sides."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/components/PokemonCard.tsx:6",
+      "issue": "TypeBadge is exported from PokemonCard.tsx but is a cross-cutting primitive used by MoveTable (:4), types.index.tsx (:5), types.$name.tsx (:5) and moves.$name.tsx (:3), so removing the Pokémon card feature would drag the type badge along with it.",
+      "suggestion": "Move TypeBadge to its own components/TypeBadge.tsx."
+    }
+  ],
+  "summary": "A well-structured TanStack Start app with an exemplary server/client seam: all PokeAPI access sits behind server functions in one module, and the framework's file-routing and generated route tree keep structural changes cheap. The costs are concentrated in the route and list layers, where not-found unions, the Page wrapper, card ordering, type-label maps and sprite derivation are copied per page instead of shared. Solid and pleasant to read, but adding a sibling section or changing card rendering means copying rather than reusing.",
+  "scenarios": [
+    {
+      "change": "Remove the Abilities pages and every link to them",
+      "files": [
+        "app/src/routes/abilities.$name.tsx",
+        "app/src/lib/queries.ts",
+        "app/src/lib/data.server.ts",
+        "app/src/routes/pokemon.$name.tsx",
+        "app/src/styles/global.css"
+      ],
+      "difficulty": 3,
+      "notes": "Each edit is a clean deletion and routeTree.gen.ts regenerates itself, but the feature is smeared over five files: the route, the server-fn wrapper, getAbility/AbilityPageData in the shared data module, the Abilities section on the Pokémon page, and shared CSS."
+    },
+    {
+      "change": "Fix the card sprite for species whose default Pokémon differs (e.g. Deoxys)",
+      "files": [
+        "app/src/lib/data.server.ts"
+      ],
+      "difficulty": 4,
+      "notes": "speciesCard() (:218-226) is the single factory behind the move, ability and type card lists, so one change covers three of four lists; only getHomeData (:322) duplicates the sprite logic. Caveat: speciesCard is sync and builds the URL from the species id, so a fix that needs the Pokémon record means making it (or a helper) async — still one file."
+    },
+    {
+      "change": "Add sorting by name to every list of Pokémon cards",
+      "files": [
+        "app/src/components/PokemonCard.tsx",
+        "app/src/lib/data.server.ts"
+      ],
+      "difficulty": 3,
+      "notes": "If done client-side, PokemonCardList (:26-41) is the single rendering point and one sort covers all lists. If ordering is treated as a data-layer concern, the dex sort is duplicated in getHomeData, getMovePageData (:636), getAbilityPageData (:683) and getTypePageData (:755), so you'd touch four functions — the shared factory called for in finding 3 would make this a one-liner."
+    },
+    {
+      "change": "Add an Items section (/items, /items/:name) shaped like Moves",
+      "files": [
+        "app/src/routes/items.index.tsx (new)",
+        "app/src/routes/items.$name.tsx (new)",
+        "app/src/lib/queries.ts",
+        "app/src/lib/data.server.ts",
+        "app/src/styles/global.css"
+      ],
+      "difficulty": 3,
+      "notes": "The plumbing is fully reusable — apiGet, format helpers, CardData/PokemonCardList, the server-fn pattern in queries.ts, and the not-found splat ($.tsx) catch unknown items automatically. But the Moves page's skeleton (facts dl, Effect/Learned-by sections, head ternary, not-found union) is inlined in routes/moves.$name.tsx:8-55, so ~70 lines of route and ~40 lines of page-data get copied rather than reused."
+    },
+    {
+      "change": "Change the API base URL and caching rules",
+      "files": [
+        "app/src/lib/data.server.ts"
+      ],
+      "difficulty": 5,
+      "notes": "API_ORIGIN (:10), URL construction (:106), the response cache (:102-104) and both memo promises (:165-191) are private to one module; queries.ts and the routes never learn where data comes from. Only caveat: two caching mechanisms coexist, so a rule change must be applied to both."
+    }
+  ]
+}
+```

@@ -1,0 +1,125 @@
+{
+  "dimension": "mergeability",
+  "criteria": {
+    "idiomatic": {
+      "score": 3,
+      "evidence": [
+        "app/vite.config.ts:9-11 — current plugin set and order (tanstackStart before viteReact, nitro from nitro/vite)",
+        "app/src/lib/queries.ts:9 — uses the current canonical .validator() on createServerFn, called from route loaders per docs",
+        "app/src/routes/index.tsx:30-47 — validateSearch + loaderDeps drive URL filter state, exactly the recommended pattern",
+        "app/src/lib/data.server.ts:363 — hand-rolled { notFound: true } union instead of throw notFound() + notFoundComponent, repeated across all detail routes",
+        "app/src/router.tsx:5-10 — getRouter() matches the official example but registers no defaultNotFoundComponent/defaultErrorComponent",
+        "app/src/lib/queries.ts:9-10 — identity validator ((data) => data) rather than any real validation"
+      ],
+      "rationale": "Data loading, routing and head handling read like the framework's own examples against the current stable APIs, but the 404 story is a consistent home-grown reimplementation of the documented notFound()/notFoundComponent pipeline, duplicated across five routes."
+    },
+    "correctness_risks": {
+      "score": 4,
+      "evidence": [
+        "app/src/lib/data.server.ts:102-117 — module-level promise cache, unbounded in principle but dataset-bounded, failures evicted, and explicitly permitted by the spec",
+        "app/src/lib/data.server.ts:106 — fetch with no timeout or AbortController; a stalled API stalls the request indefinitely",
+        "app/src/lib/data.server.ts:531-541 — ~200 parallel move fetches per Pokémon page with no concurrency limit",
+        "app/src/routes/index.tsx:68-77 — debounce timer cleared on re-run; input re-synced from URL on back/forward",
+        "app/src/components/MoveTable.tsx:36-48 — sort state is client-only and deterministic, no SSR/CSR mismatch",
+        "app/src/lib/data.server.ts:419-430 — 404 vs other errors distinguished, non-404 rethrown"
+      ],
+      "rationale": "No bugs found after a careful read; the risks are fragility nits (no fetch timeout, no errorComponent so loader failures surface the raw router default, heavy uncapped fan-out) rather than defects."
+    },
+    "global_abstractions": {
+      "score": 3,
+      "evidence": [
+        "app/src/lib/data.server.ts:1-777 — single 777-line module holding the API client, cache, response types, card helpers and all six pages' data builders",
+        "app/src/components/PokemonCard.tsx:2 — client component imports types back out of the .server module (type-only, so erased, but it blurs the boundary)",
+        "app/src/lib/format.ts:45-57 — dead helpers trackable/formatHeight/formatWeight/compareText while the identical height/weight logic is inlined at data.server.ts:588-589",
+        "app/src/lib/data.server.ts:224-231 — speciesCard mutated post-construction (card.hiddenAbility = ...) in getAbilityPageData",
+        "app/src/lib/queries.ts:1-27 — thin, uniform serverFn wrappers give the server boundary a clean seam"
+      ],
+      "rationale": "The server/client boundary is real and well-placed, but data.server.ts is a god module every route depends on and the first refactor anyone will have to make; a few duplicated or dead helpers show the seams forming."
+    },
+    "readability": {
+      "score": 4,
+      "evidence": [
+        "app/src/components/MoveTable.tsx:22-43 — small named helpers, columns as data, sorting logic easy to follow",
+        "app/src/lib/format.ts:1-10 — tiny, well-named pure helpers",
+        "app/src/routes/pokemon.$name.tsx:49-195 — long but flat, one landmark per section, consistent aria-labelledby pattern with other routes",
+        "app/src/routes/index.tsx:73 — eslint-disable-next-line react-hooks/exhaustive-deps with no note on why the extra deps are needed",
+        "app/src/lib/data.server.ts:707 — one of only ~6 comments; the module mostly reads fine without them but the type casts in buildEvolutionNode (data.server.ts:354-361) deserve one"
+      ],
+      "rationale": "Naming, file layout and component structure are consistent and a new teammate would find their way quickly; the rough spots are the size of data.server.ts and a couple of unexplained casts/suppressions."
+    },
+    "review_cost": {
+      "score": 3,
+      "evidence": [
+        "app/src/routes/$.tsx:5 — splat route plus four hand-rolled notFound branches to be replaced by notFoundComponent",
+        "app/src/routes/moves.$name.tsx:11-15 — duplicated not-found title logic in every head function",
+        "app/src/lib/data.server.ts:1 — module split (api client / types / per-page builders) requested before it grows further",
+        "app/src/lib/format.ts:45-57 — delete dead helpers and use them instead of the inlined duplicates"
+      ],
+      "rationale": "Nothing needs rejecting, but I'd ask for one real round: adopt the framework's notFound handling, split the data module, and drop the dead helpers — that's a bit more than nits."
+    }
+  },
+  "overall": 3,
+  "findings": [
+    {
+      "severity": "medium",
+      "location": "app/src/lib/data.server.ts:363",
+      "issue": "Missing resources are modelled as a { notFound: true } union returned from loaders and checked per-component, instead of TanStack Router's documented throw notFound() + notFoundComponent/defaultNotFoundComponent pipeline; this also forfeits the encouraged HTTP 404 and leaves no error boundary for non-404 API failures.",
+      "suggestion": "Throw notFound({ routeId: rootRouteId }) in the loaders (or beforeLoad), register defaultNotFoundComponent and defaultErrorComponent on createRouter, and delete the union types and the four per-route notFound branches."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/lib/data.server.ts:1",
+      "issue": "777-line module mixes the API client, response cache, domain types, shared card helpers and the data builders for all six pages; every route depends on it and it will only grow.",
+      "suggestion": "Split into api.ts (fetch + cache), types.ts (shared view types such as CardData/MoveRow), and one module per page's data builder; keep the queries.ts serverFn layer as the boundary."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/components/PokemonCard.tsx:2",
+      "issue": "Client components type-import shared view types from the .server module (also MoveTable.tsx:3, routes/pokemon.$name.tsx:5); it erases at build today but any future value import will break or leak server code.",
+      "suggestion": "Move CardData, MoveRow, MoveTableData and EvolutionNode into a plain lib/types.ts that both sides import."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/router.tsx:5",
+      "issue": "No defaultErrorComponent is registered, so any non-404 loader error (API down, 500) renders the router's unstyled default error screen.",
+      "suggestion": "Register a defaultErrorComponent (and defaultPendingComponent if desired) on createRouter."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/lib/data.server.ts:106",
+      "issue": "fetch has no timeout or AbortSignal, so a stalled API request hangs the server render indefinitely.",
+      "suggestion": "Add AbortSignal.timeout(...) (or a small withTimeout helper) to apiGet and evict the cache entry on abort."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/lib/format.ts:45",
+      "issue": "trackable, formatHeight, formatWeight and compareText are dead code, while the identical height/weight formatting is inlined at data.server.ts:588-589.",
+      "suggestion": "Delete the unused helpers or use them in getPokemonPageData; pick one."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/lib/queries.ts:9",
+      "issue": "Identity validators ((data) => data) give the server functions no runtime validation; they exist only to satisfy the type.",
+      "suggestion": "Either accept the input via a real validator (zod/valibot) or restructure so the loaders pass already-typed deps and drop the validator."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/routes/index.tsx:73",
+      "issue": "eslint-disable-next-line react-hooks/exhaustive-deps with no comment explaining why the debounce effect depends on type/generation.",
+      "suggestion": "Note the reason (the effect must not re-fire navigation on unrelated filter changes) or restructure to depend only on query/search.q."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/lib/data.server.ts:531",
+      "issue": "Move tables fan out one request per unique move (hundreds for a modern game) with no concurrency cap or batching.",
+      "suggestion": "Cap parallelism with a small pooled helper, or fetch lazily per column need; fine against the local snapshot API but fragile against a slow upstream."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/routes/$.tsx:5",
+      "issue": "The splat /$ route serves the not-found page at HTTP 200; the spec encourages a 404 status where the architecture allows it.",
+      "suggestion": "Once notFoundComponent is in place, respond with a 404 status (e.g. via the router's not-found handling on the server) instead of a splat route."
+    }
+  ],
+  "summary": "A well-executed, current-API TanStack Start app: loaders, server functions, head handling and URL-driven filter state all follow the framework's documented patterns, and I found no correctness bugs. The one systematic deviation is a hand-rolled notFound union across all detail routes where the framework provides notFound()/notFoundComponent, plus a 777-line god data module. I'd request one round of changes — adopt the framework's 404 pipeline and split the data layer — then merge."
+}

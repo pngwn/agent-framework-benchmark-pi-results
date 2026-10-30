@@ -1,0 +1,130 @@
+## Review
+
+**Structure & framework use.** This is a recognisably modern, current-stable Qwik City app (`@builder.io/qwik@^1.20.3`, matching the actual latest stable, 1.20.3, Oct 2026; Qwik 2.0 is still rc). Data loading uses `routeLoader$` with server-only `lib/api.ts`, `DocumentHead` uses the documented `resolveValue` pattern (`app/src/routes/pokemon/[name]/index.tsx:96`), a `[...slug]` catch-all handles 404, and the official node-server adapter serves the build. Client interactivity (move-table sorting) uses `useSignal` handlers — idiomatic. The server/client boundary is respected: components only pull types from `~/lib/api` via `import type` (`app/src/components/MoveTables.tsx:3`, `app/src/components/ui.tsx:2`).
+
+**The main wart is home-page URL state.** `app/src/routes/index.tsx` bypasses Qwik City's router entirely: raw `history.replaceState`/`pushState` (lines 69, 86, 108, 141, 158) plus its own `popstate` listener (lines 35–41), while Qwik's SPA router *also* handles popstate and re-runs loaders. It works, but two navigation models coexist in the codebase (the Pokémon page's `Game` select uses `useNavigate` at `pokemon/[name]/index.tsx:118`), and back/forward on the home page means the router and the app's listener both fire. Deriving signals from `useLocation().url` in a `useTask$`/`useComputed$` and updating via `navigate()` would be cleaner and router-consistent.
+
+**Abstractions.** `lib/api.ts` is a ~450-line god data module every route imports — types, the cache, formatting helpers, and five page loaders. Locally fine, but it's the file every future feature touches. `components/ui.tsx` is a junk drawer: `HomeCards` and `PokemonCards` are near-duplicates, and `typeClassName` (line 52) is dead code that duplicates the `type-${name}` pattern inlined in four other places.
+
+**Correctness.** Careful work overall: 404-aware loader with `status(404)`, cache entries evicted on failure (`api.ts:81-85`), invalid `?game=` values rejected (`api.ts:359-361`), alternate forms filtered at `id > 10000` throughout, missing values rendered as em dashes. Risks are minor: unbounded `Promise.all` fan-out for move details (`api.ts:391` — a TM-machine-heavy Pokémon in scarlet-violet fires 150–200 concurrent fetches on first load), 404 responses cached as `null` forever (`api.ts:75`), and no fetch timeout. Nothing I'd block on.
+
+```json
+{
+  "dimension": "mergeability",
+  "criteria": {
+    "idiomatic": {
+      "score": 4,
+      "evidence": [
+        "app/src/routes/pokemon/[name]/index.tsx:7-15 — routeLoader$ with status(404) + typed notFound union; canonical Qwik City data loading",
+        "app/src/routes/pokemon/[name]/index.tsx:96-99 — DocumentHead via resolveValue(usePokemonPage), exactly the documented pattern",
+        "app/src/routes/[...slug]/index.tsx:1-19 — catch-all 404 route with status(404) in the loader",
+        "app/src/components/MoveTables.tsx:56-110 — client sorting with useSignal, $-suffixed handlers, conditional aria-sort",
+        "app/src/entry.node-server.tsx:36-44 — official node adapter pipeline (staticFile → router → notFound)",
+        "app/src/routes/index.tsx:69,86,141,158 — raw history.pushState/replaceState + own popstate listener instead of useNavigate/useLocation derivation",
+        "app/package.json:43-44 — @builder.io/qwik ^1.20.3, matches the actual current stable (1.20.3, Oct 2026)"
+      ],
+      "rationale": "Data loading, routing, head management and server/client boundaries all follow current docs; only the home page's hand-rolled URL-state handling deviates from what the router already provides."
+    },
+    "correctness_risks": {
+      "score": 3,
+      "evidence": [
+        "app/src/lib/api.ts:391 — unbounded Promise.all fan-out fetching every move detail for the selected game (150+ concurrent requests on first load of e.g. Mew)",
+        "app/src/lib/api.ts:75-81 — 404 responses are cached as null for the process lifetime, so a resource appearing later stays broken until restart",
+        "app/src/lib/api.ts:73 — fetch has no timeout/AbortSignal; a hung API hangs the request",
+        "app/src/routes/index.tsx:35-41 vs Qwik City's own popstate handling — two listeners for the same event; stale page param not rewritten when clamped (index.tsx:75-77)",
+        "app/src/routes/index.tsx:112-136 — pagination links preventDefault and pushState without informing the router, leaving router state stale"
+      ],
+      "rationale": "No serious bug found — error paths, 404s, form/default handling are done carefully — but unbounded fetch fan-out, permanent null-caching of 404s and a duplicated popstate model add avoidable fragility."
+    },
+    "global_abstractions": {
+      "score": 3,
+      "evidence": [
+        "app/src/lib/api.ts:1-450 — single god data module (cache, formatting helpers, types, all five page loaders) imported by every route",
+        "app/src/lib/api.ts:303-310 — second, redundant cache layer for version groups duplicating fetchJson's cache (api.ts:60-90)",
+        "app/src/components/ui.tsx:39-70 — HomeCards and PokemonCards are near-identical card lists",
+        "app/src/components/ui.tsx:52-53 — unused typeClassName duplicates the inline `type-${name}` pattern used at pokemon/[name]/index.tsx:71, MoveTables.tsx:103, moves/[name]/index.tsx:31",
+        "app/src/lib/api.ts:60-62 vs 303-306 — two different globalThis-cache conventions (__pokedexApiCache literal vs VERSION_GROUP_CACHE_KEY constant)"
+      ],
+      "rationale": "Boundaries between server and client are clean, but lib/api.ts is a god module everything depends on, ui.tsx is a junk drawer with duplicated card components, and there are two parallel caching mechanisms to untangle."
+    },
+    "readability": {
+      "score": 4,
+      "evidence": [
+        "app/src/lib/format.ts:1-12 — small, well-named pure helpers",
+        "app/src/routes/types/[name]/index.tsx — short, consistent page components matching sibling routes",
+        "app/src/lib/api.ts:392-410 — METHOD_ORDER sorting and STAT_LABELS make move-table ordering intent explicit",
+        "app/src/lib/api.ts:432-470 — getPokemonPage is a ~90-line function doing fetch, mapping and shaping for four sections; many `(x: any)` casts (api.ts:449, 458, 462) despite typed shapes"
+      ],
+      "rationale": "A new teammate finds their way quickly: consistent route structure, descriptive names, obvious data flow. Only api.ts's length and pervasive `any` casts cost some confidence."
+    },
+    "review_cost": {
+      "score": 3,
+      "evidence": [
+        "app/src/routes/index.tsx:69-160 — I would ask for URL updates via the router (navigate/useLocation-derived signals) instead of six manual history call sites",
+        "app/src/lib/api.ts:1-450 — I would ask to split per resource (pokemon/moves/types/home) before it grows",
+        "app/src/components/ui.tsx:39-70 — I would ask to merge the two card components and delete typeClassName",
+        "app/src/lib/api.ts:303-310 — I would ask to delete the redundant version-group cache"
+      ],
+      "rationale": "Approve-able logic throughout, but the structural items (god module, duplicated navigation model, duplicate components) add up to one real round of changes before merge."
+    }
+  },
+  "overall": 3,
+  "findings": [
+    {
+      "severity": "medium",
+      "location": "app/src/routes/index.tsx:69",
+      "issue": "Home page manages the URL by hand (replaceState/pushState at 5 call sites plus its own popstate listener at lines 35-41) while Qwik City's SPA router also handles popstate, so back/forward triggers both mechanisms and leaves router state stale after pagination clicks.",
+      "suggestion": "Derive filter signals from useLocation().url (useTask$/useComputed$) and update the URL with navigate(); keep a single URL-building helper. Alternatively centralise the history sync in one composable."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/lib/api.ts:1",
+      "issue": "lib/api.ts is a ~450-line god data module: cache, global caches, formatting helpers, type defs and all five page loaders; every route and component imports it.",
+      "suggestion": "Split into lib/cache.ts, lib/format.ts (already exists), and per-resource modules (species.ts, moves.ts, types.ts, home.ts) with the route loaders importing only what they need."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/lib/api.ts:391",
+      "issue": "Unbounded Promise.all fan-out: first render of a Pokémon page in a TM-heavy game fires one fetch per learnable move (100-200 concurrent requests), similar patterns at api.ts:112 and api.ts:134.",
+      "suggestion": "Add a small concurrency limiter (e.g. a pooled map of limit 8-16) around fetchJson fan-outs."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/lib/api.ts:75",
+      "issue": "404 responses are cached as a null promise for the process lifetime, so a resource that later appears in the 'live' API stays not-found until restart.",
+      "suggestion": "Don't cache null results (only re-set the cache entry on success), or give the cache an entry TTL."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/lib/api.ts:303",
+      "issue": "getVersionGroup implements a second global cache on top of fetchJson's own cache, with a different globalThis-key convention than the cache at api.ts:61.",
+      "suggestion": "Delete the version-group cache layer; fetchJson already memoises."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/components/ui.tsx:39",
+      "issue": "HomeCards and PokemonCards are near-identical card lists; typeClassName (line 52) is dead code duplicating the inline `type-${name}` pattern used in three other files.",
+      "suggestion": "One PokemonCard component with an optional types slot; delete typeClassName and use it consistently or drop the inline class literals."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/lib/api.ts:73",
+      "issue": "fetchJson has no timeout or AbortSignal; a hung API call hangs the request thread indefinitely.",
+      "suggestion": "Wrap fetch in AbortSignal.timeout(ms) and surface a 502-ish error."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/lib/api.ts:449",
+      "issue": "Pervasive `any` plus redundant `as number` casts (api.ts:239-246, 421) weaken the otherwise typed loader contracts; components re-annotate mapped items as any (routes/pokemon/[name]/index.tsx:70, routes/types/[name]/index.tsx:28).",
+      "suggestion": "Define minimal interfaces for the API payloads and drop the casts so routeLoader$ return types flow into the components."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/routes/index.tsx:77",
+      "issue": "A page param beyond the last page (/?page=999) is displayed clamped but the URL keeps the stale page value, so pagination links and URL disagree.",
+      "suggestion": "Clamp page.value during initialisation or rewrite the URL when the computed page differs."
+    }
+  ],
+  "summary": "A solid, current-stable Qwik City implementation: routeLoader$-based data loading, resolveValue heads, a catch-all 404, and a clean server/client boundary would all survive review unchanged. The two things I'd insist on changing are the home page's hand-rolled history/popstate handling that runs in parallel with Qwik's own SPA router, and the 450-line god data module every route depends on. Everything else — duplicate card components, a redundant cache layer, unbounded fetch fan-out — is a normal round of nits on otherwise careful code."
+}
+```

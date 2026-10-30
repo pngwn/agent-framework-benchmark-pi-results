@@ -1,0 +1,166 @@
+## Test quality review
+
+The app contains **no tests of its own**. `app/package.json` defines only `dev`/`build`/`start` scripts and a single devDependency (`vite`) — no runner, no `test` script, no spec files anywhere under `app/` (confirmed by `find`/`grep`; the measured facts agree: 0 test files, 0 cases). Everything passes today only because the harness's acceptance suite in `tests/` exercises the rendered pages; the moment someone refactors the data layer, nothing in `app/` will catch a regression.
+
+That's a notable miss because the codebase is unusually testable: `app/src/api.js` and `app/src/data.js` are pure, dependency-light modules with exported functions (`humanize`, `extractId`, `latestEnglishFlavor`, `buildSpeciesTypeMap`, `speciesIdsFromPokemonRefs`), and even the riskier UI logic in `main.js` is factored into named functions (`sortRows`, `defaultRows`, `readHomeFilters`, `homeUrl`, `prepareMoves`, `loadRowsForGame`) that could be unit-tested with plain fixtures. Adding vitest (a 10-line config against the existing Vite setup) would have covered the spec's trickiest rules — alternate-form exclusion, 48-per-page slicing, missing-values-last sorting, default-game-by-highest-order — at near-zero cost.
+
+While reading for the `untested` list I also found two latent bugs that tests would have caught:
+
+- **Game-select race** — `app/src/main.js:424-441`: the `change` handler mutates shared `state.selected` and then awaits `loadRowsForGame`. Two rapid selections run concurrently; the slower (older) fetch can resolve last, clobber `state.rowsByMethod`, and render rows for the wrong game. The `renderToken` guard only protects against route changes, not against this handler.
+- **Error path conflates failure with not-found** — `app/src/main.js:816-824`: every non-ApiError-404 failure (network error, API 500, malformed JSON) renders the `Not found` page, so a transient API outage looks like a missing Pokémon with no retry or message.
+
+```json
+{
+  "dimension": "tests",
+  "criteria": {
+    "coverage_of_risk": {
+      "score": 1,
+      "evidence": [
+        "app/package.json:6-9 — scripts are dev/build/start only; no test script, no runner dependency",
+        "app/src/data.js:62-85 — buildSpeciesTypeMap (alternate-form exclusion, slot ordering, dedupe) has zero tests",
+        "app/src/main.js:131-166 — filtering, 48-per-page slicing, page clamping and pagination links untested",
+        "app/src/main.js:317-336 — sortRows (missing-values-last in both directions, tie-breaks) untested"
+      ],
+      "rationale": "No tests exist, and the uncovered code is exactly the risky kind: data-transformation, filtering/pagination, URL state and sort semantics. All protection currently comes from the harness's acceptance suite, not the app."
+    },
+    "behaviour_not_implementation": {
+      "score": 1,
+      "evidence": [
+        "app/ — no *.spec.*, *.test.* or __tests__ anywhere (grep for describe/test/assert finds only source matches)"
+      ],
+      "rationale": "There are no tests at all, so the criterion cannot be met; the exported pure functions in api.js/data.js would have made behavioural unit tests cheap."
+    },
+    "regression_power": {
+      "score": 1,
+      "evidence": [
+        "app/src/api.js:17-56 — resolveApiUrl, api() promise caching, extractId have no guard against regressions",
+        "app/src/main.js:465-515 — loadRowsForGame grouping/dedupe and method-table ordering would break silently on refactor",
+        "app/src/main.js:522-560 — prepareMoves default-game (highest order) and ?game= override untested"
+      ],
+      "rationale": "With zero tests in app/, any refactor of the data layer or sort/filter helpers can regress behaviour with nothing failing locally until the acceptance suite runs."
+    },
+    "signal_to_noise": {
+      "score": 3,
+      "evidence": [
+        "app/ — zero test files, so there is no noise to assess (rubric: no tests = 3)"
+      ],
+      "rationale": "No low-value tests because no tests; the absence itself is the problem, not padding."
+    }
+  },
+  "overall": 1,
+  "findings": [
+    {
+      "severity": "high",
+      "location": "app/package.json:6-9",
+      "issue": "No test infrastructure whatsoever: no test script, no test runner devDependency (only vite), no spec files in app/.",
+      "suggestion": "Add vitest (reuses the Vite config) plus a `test` script, and unit-test the pure modules in src/api.js and src/data.js first."
+    },
+    {
+      "severity": "high",
+      "location": "app/src/data.js:62-99",
+      "issue": "Alternate-form exclusion (id >= 10000), slot ordering and dedupe in buildSpeciesTypeMap/speciesIdsFromPokemonRefs are the most regression-prone logic in the app and have no tests.",
+      "suggestion": "Table-driven tests with fixture type/entry payloads: an alternate form, a two-type Pokémon with slots 2/1, duplicate entries."
+    },
+    {
+      "severity": "high",
+      "location": "app/src/main.js:131-166",
+      "issue": "Home filtering and pagination math (48-per-page slice bounds, page clamp to totalPages, count text, prev/next omission) is untested.",
+      "suggestion": "Extract the filter/slice computation into a pure function and test boundary cases: 0 matches, exactly 48, page beyond range, combined filters."
+    },
+    {
+      "severity": "high",
+      "location": "app/src/main.js:317-347",
+      "issue": "sortRows/defaultRows implement spec-sensitive semantics (missing values last in both directions, level-then-name, aria-sort emission at main.js:340-346) with no tests.",
+      "suggestion": "Unit-test sortRows per column and direction with null power/accuracy rows; assert tie-break by move name and that missing rows sort last both ways."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/main.js:424-441",
+      "issue": "Game-select change handler awaits loadRowsForGame on shared state with only a route-token guard; two rapid selections race and the slower fetch can render the wrong game's rows.",
+      "suggestion": "Guard with a per-selection sequence number and ignore stale resolutions; a test that flips the select twice quickly would catch this."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/main.js:522-560",
+      "issue": "prepareMoves default-game selection (highest version-group order), invalid ?game= fallback and method grouping are untested.",
+      "suggestion": "Unit-test against a trimmed pokemon payload: groups sorted by order, default = last group, ?game=unknown falls back, empty groups yield the 'No moves found' panel."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/main.js:816-824",
+      "issue": "renderRoute's catch renders the Not found page for network errors, 5xx and JSON failures, conflating outages with missing resources; untested error path.",
+      "suggestion": "Distinguish 404 from transient failure (render an error/retry message), and add a test that a 500 from the API does not show 'Not found'."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/api.js:17-56",
+      "issue": "resolveApiUrl prefix handling, extractId's trailing-slash regex and the promise cache (including concurrent rejections of the same URL) are untested.",
+      "suggestion": "Unit-test URL resolution for bare paths, /api/v2/ paths and absolute URLs; test that a failed request is not cached for the next caller."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/main.js:237-256",
+      "issue": "Search debounce/URL replaceState interplay with pagination navigation (typing then clicking a link within the 200 ms window) has no coverage; only the renderToken check protects it.",
+      "suggestion": "Add a test that types, immediately clicks Next, and asserts the URL and rendered page stay consistent."
+    },
+    {
+      "severity": "low",
+      "location": "app/server.mjs:26-95",
+      "issue": "Static server (path-traversal guard, SPA fallback, __API_BASE_URL__ injection ordering) is untested.",
+      "suggestion": "A few node:http tests asserting 404 for traversal, index.html for deep routes and correct MIME types would lock in the deployment contract."
+    }
+  ],
+  "summary": "The app ships with zero tests of its own: no runner, no test script, no spec files, so all quality gates are the external acceptance suite. This is an avoidable miss because api.js, data.js and the sort/filter helpers in main.js are pure, exported functions that vitest could cover in an afternoon. Until then, any refactor of the data layer, pagination math or move-table sorting can regress silently — and two latent bugs (a game-select fetch race and transient errors rendered as 'Not found') are exactly what those tests would have caught.",
+  "wroteTests": false,
+  "testCount": 0,
+  "valuableTests": [],
+  "lowValueTests": [],
+  "untested": [
+    {
+      "area": "Alternate-form exclusion and type slot ordering (app/src/data.js:62-99)",
+      "risk": "high",
+      "likelyBug": "Dropping or loosening the id >= 10000 filter floods every list with Mega/regional forms and inflates the '<count> Pokémon' text; reversing slot order shows types backwards on home cards."
+    },
+    {
+      "area": "Home filtering, search and pagination math (app/src/main.js:131-166, 237-256)",
+      "risk": "high",
+      "likelyBug": "Off-by-one in the 48-item slice (last item dropped or duplicated), 'Page n of total' off by one, Next link shown on the last page, or filter changes not resetting to page 1."
+    },
+    {
+      "area": "Move table sorting semantics and aria-sort (app/src/main.js:317-347)",
+      "risk": "high",
+      "likelyBug": "Missing power/accuracy sorting first when flipping to descending, numeric columns compared as strings ('100' < '99'), or aria-sort left on all headers after re-render."
+    },
+    {
+      "area": "Moves panel state machine: game selection, per-method grouping, sort persistence (app/src/main.js:419-560)",
+      "risk": "high",
+      "likelyBug": "Default game not the highest-order group, duplicate rows for the same move, rows rendered for the previously selected game due to the unguarded await at main.js:431-435, or sort state lost when switching games."
+    },
+    {
+      "area": "URL query state round-trip (app/src/main.js:107-129)",
+      "risk": "medium",
+      "likelyBug": "Default parameters (page=1, empty filters) not omitted, or an invalid ?page=abc/999 producing NaN slices and a blank list."
+    },
+    {
+      "area": "API client: URL resolution, response caching, ID extraction (app/src/api.js:17-56)",
+      "risk": "medium",
+      "likelyBug": "Double /api/v2/ prefix or missing slash producing 404s for every detail fetch; a rejected promise cached and served to concurrent callers after the network recovers."
+    },
+    {
+      "area": "Error and not-found paths (app/src/main.js:610-611, 816-824)",
+      "risk": "medium",
+      "likelyBug": "A transient API outage or 500 rendered as 'Not found' with no retry, and an evolution-chain fetch failure silently collapsing to a single-species chain."
+    },
+    {
+      "area": "Rendering helpers in ui.js: card list, panels, type badges (app/src/ui.js:15-38)",
+      "risk": "low",
+      "likelyBug": "Broken hrefs or unescaped names after a refactor of the species ref shape; HTML-escaping regressions letting API text inject markup."
+    },
+    {
+      "area": "Production server: SPA fallback, traversal guard, API base injection (app/server.mjs:26-95)",
+      "risk": "low",
+      "likelyBug": "Deep links 404ing after a fallback change, path traversal serving files outside dist, or __API_BASE_URL__ injected after the module script so the app points at localhost:9000 in production."
+    }
+  ]
+}
+```

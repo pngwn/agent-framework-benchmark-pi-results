@@ -1,0 +1,124 @@
+I've reviewed the app end-to-end, checked the Angular 22 guidance in the official skill references, and verified current-version facts (e.g., `@Service()` is the v22-recommended decorator, `withIncrementalHydration` is deprecated because incremental hydration/event replay are now defaults, resolvers + `withComponentInputBinding` remain the documented data-loading pattern). Here's my assessment.
+
+## What I see
+
+**Strengths.** The component/reactivity/routing layer reads like current Angular 22 documentation: `@Service()` (`app/src/app/data/team-store.ts:11`), signal inputs bound from resolved data via `withComponentInputBinding` (`app/src/app/app.routes.ts` + `app/src/app/pages/home/home.ts:26`), `toSignal(..., {requireSync: true})`, `computed`/`linkedSignal` throughout, control-flow templates, `provideAppInitializer`, `REQUEST`/`RESPONSE_INIT` used with the documented nullability (`app/src/app/pages/not-found/not-found.ts:10-14` sets a real 404), `RenderMode.Server` server routes (correct, since data is live), and the vitest unit-test builder in `angular.json`. Comments consistently explain *why*, and `app/README.md` documents the architecture. The team feature was added following existing conventions (store in `data/`, VM in `models.ts`, loader case, resolver) — a clean fit.
+
+**Main reservations.** The data layer is a hand-rolled protocol: server-side loaders build compact view models (`app/src/server/loaders.ts`), handed to the browser via a custom `TransferState` scheme (`app/src/app/data/page-data.ts:36-46`) and a custom `/_data` endpoint (`app/src/server.ts:11-19`), with raw `fetch` and two hand-rolled caches on either side. This is coherent and payload-efficient (a Pokémon page needs dozens of huge API docs but ships a few KB), and the SSR docs do sanction "separate browser and server providers behind one application-owned token" — but it bypasses the framework's HTTP stack entirely (`provideHttpClient` never appears; no transfer-cache defaults, no `resource`/`httpResource`), and the stringly-typed page-data path (`/pokemon/<name>?game=...`) is a contract duplicated across `routes.ts`, `loaders.ts`, and the team query built twice (`app/src/app/app/routes.ts:15-19` vs `app/src/app/pages/team/team-page.ts:70-71`). Correctness-wise I found only edge cases: cookie/localStorage divergence can produce a hydration mismatch (`team-store.ts:63-68` — server renders from cookie, client from `localStorage`; only the non-empty branch re-syncs the cookie at `team-store.ts:34-36`), and a failed resolver/fetch on client navigation has no global handler, silently stranding the user on the old page (`page-data.ts:20`, no `withNavigationErrorHandler`). `allowedHosts: ['*']` at `app/src/server.ts:9-11` deviates from the SSR guidance against wildcards, though the comment explains why, and the team page implements a manual `effect` + `loadId` race guard (`team-page.ts:44-67`) where `resource()` is the documented primitive.
+
+```json
+{
+  "dimension": "mergeability",
+  "criteria": {
+    "idiomatic": {
+      "score": 4,
+      "evidence": [
+        "app/src/app/data/team-store.ts:11 — @Service() decorator, v22's recommended service form, with signal state and .asReadonly()",
+        "app/src/app/routes.ts:16 — ResolveFn + withComponentInputBinding + input.required, exactly the documented resolver pattern",
+        "app/src/app/pages/pokemon/move-table.ts:88-95 — linkedSignal to reset sort state when source changes; modern reactivity used well",
+        "app/src/app/data/page-data.ts — hand-rolled fetch + TransferState data protocol instead of HttpClient/transfer-cache defaults or resource/httpResource the skill recommends",
+        "app/src/app/app.config.ts:16 — withEventReplay() passed explicitly, redundant since v22 defaults include it (verified in v22 docs)"
+      ],
+      "rationale": "Components, routing, reactivity and SSR config read like current v22 docs; the one real deviation is a deliberate, documented view-model data layer that skips the framework's HTTP/resource primitives entirely."
+    },
+    "correctness_risks": {
+      "score": 4,
+      "evidence": [
+        "app/src/app/data/team-store.ts:63-68 — server renders the team from a 1-year cookie while the client reads localStorage; if they diverge (storage cleared, cookie left) the SSR DOM won't match the hydrated button label (pokemon-page.html:30-33) and the team resolver path (app.routes.ts:15-19) misses TransferState → hydration mismatch",
+        "app/src/app/data/page-data.ts:20 — non-404 fetch errors reject the resolver; no withNavigationErrorHandler, so a client-side navigation failure leaves the user on the stale page with no feedback",
+        "app/src/app/pages/team/team-page.ts:44-52 — effect triggers async reload with a loadId race guard; correct, but manual where resource() would manage the race",
+        "app/src/server/api-client.ts:45-62 — fetch fan-out is well-guarded: TTL cache, MAX_ENTRIES eviction, rejected promises evicted; no unbounded growth found"
+      ],
+      "rationale": "Careful look found only low-probability, gracefully-degrading issues: one hydration-mismatch edge case and missing navigation error handling; no races in the heavy fetch paths."
+    },
+    "global_abstractions": {
+      "score": 4,
+      "evidence": [
+        "app/src/app/data/page-data.ts:36-46 — the `page:<path>` TransferState handoff is a clean, single-place server/browser seam",
+        "app/src/server/loaders.ts:317-345 — stringly-typed page-data path switch: adding a page requires coordinated edits here, in models.ts, routes.ts and the component",
+        "app/src/app/routes.ts:15-19 and app/src/app/pages/team/team-page.ts:70-71 — the team `names=` query is built twice, near-identically",
+        "app/src/app/page-title-strategy.ts:16-22 — title strategy reaches into route data's `vm` shape; small leaky coupling but contained"
+      ],
+      "rationale": "Abstractions are few and purposeful (shared card/badge components, VM contract, two justified caches); the main long-term tax is the custom page-data protocol that every new page must be wired into in four places."
+    },
+    "readability": {
+      "score": 4,
+      "evidence": [
+        "app/src/app/data/team-store.ts:22 — comments explain constraints (\"Keep the cookie the server reads in sync…\"), and why-comments appear throughout",
+        "app/README.md:11-17 — architecture is documented, including the reasoning for the /_data endpoint",
+        "app/src/app/pages/home/home.ts:36-41 — the searchText linkedSignal/pushedQ sync trick is the one spot needing a second read to trust",
+        "app/src/server/loaders.ts:40-113 — small, well-named helpers with a clear page-section layout"
+      ],
+      "rationale": "A new teammate finds their way quickly: intent-based v20+ naming, tiny files, why-comments and a README; the home search-sync logic and title strategy are the only dense spots."
+    },
+    "review_cost": {
+      "score": 4,
+      "evidence": [
+        "app/src/server.ts:9-11 — allowedHosts wildcard contradicts SSR guidance ('do not use a wildcard'), albeit with a reasoned comment",
+        "app/package.json:12 — @angular/forms declared but never imported anywhere in src",
+        "app/src/app/pages/team/team-page.ts:44-67 — effect + loadId + linkedSignal reload could be a resource()",
+        "app/src/app/app.routes.ts:24-37 — resolver, runGuardsAndResolvers and preserveFragment game handling are exactly right first time"
+      ],
+      "rationale": "One round of nits (wildcard hosts, duplicated team-query builder, unused dependency, nav error handler) — nothing requiring structural rework; I'd approve after those are addressed or acknowledged."
+    }
+  },
+  "overall": 4,
+  "findings": [
+    {
+      "severity": "medium",
+      "location": "app/src/server.ts:9",
+      "issue": "allowedHosts: ['*'] deviates from Angular SSR guidance, which says not to use a wildcard unless a trusted proxy validates forwarded headers.",
+      "suggestion": "Configure an explicit host list from the environment (or document the trusted-proxy assumption); the comment shows awareness, so at minimum make it configurable."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/app/data/team-store.ts:63",
+      "issue": "Server state comes from a 1-year cookie, client state from localStorage; when they diverge (localStorage cleared, cookie kept), SSR DOM differs from the hydrated render (team button label, team page content) causing a hydration mismatch error.",
+      "suggestion": "On first browser load, sync the cookie unconditionally (overwrite even when the stored team is empty), or accept a `withNoHttpTransferCache`-style re-render path for the team page."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/app/data/page-data.ts:20",
+      "issue": "A failed fetch rejects the route resolver; with no withNavigationErrorHandler the failed client-side navigation silently leaves the previous page rendered.",
+      "suggestion": "Add a global navigation error handler that shows an error state or retries, per the data-resolvers guidance."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/app/routes.ts:15",
+      "issue": "The `names=` query string for the team page-data path is built twice (resolver and team-page.ts load()), so the two can drift.",
+      "suggestion": "Extract a single teamPath(names) helper next to the VM definition."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/app/pages/team/team-page.ts:44",
+      "issue": "Manual effect + loadId race guard + linkedSignal seeding re-implements what resource() (params: team names, loader: PageData) provides with built-in abort/status handling.",
+      "suggestion": "Model the team view model as a resource, or keep the manual version but note why resource() wasn't used (initial input seeding from the resolver)."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/app/app.config.ts:16",
+      "issue": "withEventReplay() is redundant in Angular 22: provideClientHydration() enables event replay and incremental hydration by default.",
+      "suggestion": "Drop the argument (provideClientHydration()) — it also removes a stale-looking reference that will need cleanup."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/app/app.ts:19",
+      "issue": "Scroll restoration is hand-rolled (subscription + previous-URL tracking + afterNextRender) instead of withInMemoryScrolling defaults; correct, but it's custom state the router could own if defaults allowed query-only navigations to keep position.",
+      "suggestion": "Keep it, but document the specific router behavior being worked around, or track the upstream router option that fixes it."
+    },
+    {
+      "severity": "low",
+      "location": "app/package.json:12",
+      "issue": "@angular/forms is a declared dependency but never imported.",
+      "suggestion": "Remove it from dependencies."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/app/data/page-data.ts:14",
+      "issue": "Module-level clientCache is hidden global state with a TTL but no size bound; fine in practice, but it's invisible to anyone debugging stale data.",
+      "suggestion": "Either bound it like the server cache (MAX_ENTRIES) or move it behind the PAGE_DATA_LOADER provider with a comment describing the TTL semantics."
+    }
+  ],
+  "summary": "A polished, current-with-Angular-22 app: signal-based components, resolver-plus-input-binding data flow, correct SSR/hydration wiring, good a11y and naming, with why-comments and a README that explain the architecture. The main trade-off to own as a team is the custom view-model data layer (server loaders + /_data + TransferState) that bypasses HttpClient/resource in exchange for small payloads, plus a handful of minor edge-case risks. I'd merge after one round of nits; nothing requires structural rework."
+}
+```

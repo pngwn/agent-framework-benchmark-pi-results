@@ -1,0 +1,132 @@
+## Review: Pokédex app (Next.js 16.4.3 App Router)
+
+**Structure & idioms.** This is recognisably a *current-generation* Next.js app: `params`/`searchParams` are awaited as Promises (`app/src/app/pokemon/[name]/page.tsx:16`), `viewport`/`themeColor` live in the `viewport` export (`app/src/app/layout.tsx:9`), the title uses the `%s – Pokédex` template (`app/src/app/layout.tsx:6`), 404s go through `notFound()` (`app/src/app/moves/[name]/page.tsx:18`), and dynamic rendering is opted into with `await connection()` inside the data layer (`app/src/lib/api.ts:40`) — exactly what the current `useSearchParams` docs recommend. `next.config.ts` correctly sets `turbopack.root` and `compress:false` for the sub-app/reverse-proxy setup. Two things are hand-rolled where framework features exist: a 30s TTL `Map` cache over `fetch(..., { cache: 'no-store' })` (`app/src/lib/api.ts:16-58`) instead of `fetch`'s `next: { revalidate }`, and client URL state driven by raw `window.history.pushState/replaceState` plus manually `preventDefault`-ed `<a>` tags (`app/src/app/HomeView.tsx:65,87,134-140`, `app/src/app/pokemon/[name]/MovesSection.tsx:134`) rather than `Link`/`useRouter`. The history approach is documented as supported shallow routing, so it's a judgement call — but one spot leans on it harder than the framework guarantees (below).
+
+**Correctness risks.** The sharpest one: `MovesSection` derives the selected game *solely* from `useSearchParams()` and updates the URL with native `replaceState` (`app/src/app/pokemon/[name]/MovesSection.tsx:126,134`). There are long-standing open Next issues where `replaceState` does not sync `useSearchParams` (#72322, #80528), plus a Next-16.4-specific report of exactly this; if that holds, selecting a game changes the URL but the tables snap back. `HomeView` degrades more gracefully because the rendered list follows local `query` state, not the hook. Second: the Pokémon page fetches the full record of *every* move the Pokémon knows across *all* games (`app/src/app/pokemon/[name]/page.tsx:70`) when only one game's moves are rendered — ~250 concurrent fetches for Mew per view. Third: `decodeURIComponent(name)` in all four `[name]` pages (e.g. `app/src/app/pokemon/[name]/page.tsx:23`) throws a `URIError` on `/pokemon/%zz`, turning a "not found" URL into a 500. Otherwise the risky bits are handled well: the cache is bounded and evicts failed promises (`app/src/lib/api.ts:23-33,56-58`), 404s become `NotFoundError`→`notFound()`, and there are no hydration mismatches (no date/random rendering, routes dynamic via `connection()`).
+
+**Abstractions.** `lib/api.ts` (fetch + cache + shared lookups), `lib/cards.ts` (species-card mapping), and `lib/format.ts` (pure, shared across the server/client boundary by design) are few, cohesive, and the `Section` component (`app/src/components/Section.tsx`) conveniently enforces the spec's `region`-with-labelled-heading convention. Minor untangling later: the near-identical `getX + generateMetadata` triplets repeated on all four detail pages, and `apiBase` threaded as a prop through three layers.
+
+**Readability / review cost.** Names, file layout and why-comments are good (e.g. `app/src/lib/cards.ts:7-10`, `app/src/app/HomeView.tsx:53`). Rough spots: the positional `IndexEntry` tuple read as `e[1]/e[2]/e[3]` (`app/src/app/HomeView.tsx:13`, `app/src/app/page.tsx:56-59`), a dependency-less `useEffect` for the debounce (`app/src/app/HomeView.tsx:61`), and pervasive `any` for API payloads. Approving would need one focused round: fix the game-select URL sync, cut the move fan-out, guard malformed names, add `error.tsx`/`loading.tsx`.
+
+```json
+{
+  "dimension": "mergeability",
+  "criteria": {
+    "idiomatic": {
+      "score": 4,
+      "evidence": [
+        "app/src/lib/api.ts:40 — `await connection()` to force request-time rendering, the pattern the current useSearchParams docs recommend",
+        "app/src/app/layout.tsx:6-13 — metadata title template + separate `viewport` export with themeColor (current API)",
+        "app/src/app/moves/[name]/page.tsx:16-18 — async `params` prop + `notFound()` for missing resources",
+        "app/src/next.config.ts — turbopack.root for the sub-app workspace and compress:false for the reverse proxy",
+        "app/src/lib/api.ts:16-58 — hand-rolled 30s TTL promise cache over `cache:'no-store'` fetch instead of fetch's `next:{revalidate}`",
+        "app/src/app/HomeView.tsx:87,134-140 — native history.pushState + preventDefaulted <a> instead of Link/useRouter for pagination"
+      ],
+      "rationale": "Reads like the App Router docs (async params, connection(), metadata/viewport, notFound) with two deliberate framework-feature re-implementations: an in-memory fetch cache and hand-managed client URL state."
+    },
+    "correctness_risks": {
+      "score": 3,
+      "evidence": [
+        "app/src/app/pokemon/[name]/MovesSection.tsx:126,134 — selected game derives only from useSearchParams while the URL is updated with native replaceState; open Next issues (#72322, #80528) and Next-16.4 reports say replaceState does not reliably re-sync the hook",
+        "app/src/app/pokemon/[name]/page.tsx:70 — fetches every move record across all games (~250 fetches for Mew) though only the selected game is rendered",
+        "app/src/app/pokemon/[name]/page.tsx:23 — decodeURIComponent throws on /pokemon/%zz → 500 instead of the Not found page (same pattern in moves/abilities/types pages)",
+        "app/src/app/HomeView.tsx:81 — page clamped to pageCount but URL keeps the out-of-range ?page= value, so URL and 'Page x of y' disagree",
+        "no error.tsx/loading.tsx anywhere — an API failure or slow response surfaces Next's default error/blank page",
+        "app/src/lib/api.ts:23-33,56-58 — cache is bounded (MAX_ENTRIES) and evicts rejected promises, avoiding unbounded growth and poisoned 404s"
+      ],
+      "rationale": "404 handling, cache bounds and hydration are done carefully, but the game-select URL-state coupling is genuinely fragile on the current release, and the move fan-out plus a 500-on-malformed-name are real bugs the tests didn't cover."
+    },
+    "global_abstractions": {
+      "score": 4,
+      "evidence": [
+        "app/src/lib/api.ts — single cohesive data layer: fetch, bounded cache, and the few shared lookups (getTypes/getSpeciesNames)",
+        "app/src/lib/cards.ts:7-15 — one place maps Pokémon references to species cards, reused by move/ability/type pages",
+        "app/src/lib/format.ts:1 — pure helpers explicitly shared across the server/client boundary",
+        "app/src/components/Section.tsx:8-14 — small component that enforces the labelled-region a11y convention everywhere",
+        "app/src/app/moves/[name]/page.tsx:11-18, abilities:11-18, types:20-27, pokemon:22-28 — four near-identical getX+generateMetadata triplets that could be one helper"
+      ],
+      "rationale": "Few, well-bounded abstractions with no god modules or hidden global state; the only untangling ahead is the four duplicated resource-loader triplets and apiBase prop-threading."
+    },
+    "readability": {
+      "score": 4,
+      "evidence": [
+        "app/src/lib/cards.ts:7-10 — comment explains the Pokémon-vs-species subtlety at the point of use",
+        "app/src/lib/api.ts:3-5 — comment states why the short-TTL cache exists",
+        "app/src/app/HomeView.tsx:13 — positional tuple IndexEntry read as e[1]/e[2]/e[3] in page.tsx:56-59 and HomeView.tsx:128",
+        "app/src/app/HomeView.tsx:61-70 — dependency-less useEffect for the debounce, correct but non-obvious",
+        "pervasive `any` for API payloads (app/src/app/pokemon/[name]/page.tsx:55-91, abilities/[name]/page.tsx:27-29)"
+      ],
+      "rationale": "Clear naming, small functions, why-comments and conventional file layout make it easy to navigate; the tuple-typed index entries and untyped API payloads are the main rough spots."
+    },
+    "review_cost": {
+      "score": 3,
+      "evidence": [
+        "app/src/app/pokemon/[name]/MovesSection.tsx:126-134 — needs a rework of how the game selection reads and writes the URL (own state + popstate sync, or router.replace)",
+        "app/src/app/pokemon/[name]/page.tsx:70 — restrict move fetches to the requested game",
+        "app/src/app/pokemon/[name]/page.tsx:23 — guard malformed percent-encoded names",
+        "missing error.tsx/loading.tsx — add route-level boundaries",
+        "app/src/app/HomeView.tsx:143 / components/Section.tsx — a11y conventions, focus styles and cache bounds are already right, so most of the file is approve-as-is"
+      ],
+      "rationale": "The skeleton, a11y and data layer would merge untouched; approving requires one focused round for the URL-state sync, the move fan-out, and the malformed-name 500."
+    }
+  },
+  "overall": 4,
+  "findings": [
+    {
+      "severity": "medium",
+      "location": "app/src/app/pokemon/[name]/MovesSection.tsx:126-134",
+      "issue": "Game selection is read only from useSearchParams() and written with native window.history.replaceState; Next has open issues and 16.4-specific reports where replaceState does not re-sync useSearchParams, so the URL would show the new game while the select and tables snap back to the old one.",
+      "suggestion": "Keep the selected game in component state seeded from the server-rendered searchParams prop, sync it on popstate, and write the URL from that state (or use router.replace so the router owns the change)."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/app/pokemon/[name]/page.tsx:70",
+      "issue": "getMoves fetches the full record of every move the Pokémon knows in any game (e.g. ~250 for Mew) even though only one version group's moves are displayed.",
+      "suggestion": "Resolve the requested game from searchParams first (it's available server-side), then fetch move records only for that game's learns."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/app/pokemon/[name]/page.tsx:23",
+      "issue": "decodeURIComponent(name) throws a URIError for malformed input like /pokemon/%zz, producing a 500 instead of the spec's Not found page (same pattern in moves, abilities and types pages).",
+      "suggestion": "Wrap the decode in try/catch and fall through to notFound(), or validate the name before decoding."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/lib/api.ts:16-58",
+      "issue": "A hand-rolled TTL/promise Map cache re-implements what fetch's Data Cache (`next: { revalidate: 30 }`) provides, adding bespoke cache code a team must maintain.",
+      "suggestion": "Either switch to `fetch(url, { next: { revalidate: 30 } })` (dynamic rendering via connection() still guarantees no build-time fetching), or keep the cache but document why the framework cache was rejected."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/app/HomeView.tsx:87,134-140",
+      "issue": "Pagination uses preventDefault-ed <a> + window.history.pushState; entries created outside the router make back/forward a full page reload, and manual scrollTo replaces Link's default behavior.",
+      "suggestion": "Use <Link href> or router.push for pagination (entries are already client-side, so navigation stays cheap), or document the shallow-routing tradeoff at the call site."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/app/layout.tsx",
+      "issue": "No error.tsx or loading.tsx anywhere: an API failure renders Next's default error page and Pokémon pages (which await dozens of upstream fetches) show nothing until they resolve.",
+      "suggestion": "Add a root error boundary and a loading.tsx for /pokemon/[name] (and the list pages) so failures and slow responses look intentional."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/app/pokemon/[name]/page.tsx:55-91",
+      "issue": "API payloads are handled as `any` throughout (also abilities/[name]/page.tsx:27, types/[name]/page.tsx:65), so typos on field names won't be caught and readers must consult the API to know shapes.",
+      "suggestion": "Define minimal interfaces for the resources the app touches (species, pokemon, move, ability, type, version-group) and type api<T> at the call sites."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/app/HomeView.tsx:13",
+      "issue": "IndexEntry is a positional tuple ([id, name, types, generation]) consumed as e[1]/e[2]/e[3] in both page.tsx and HomeView, hurting readability and refactor safety.",
+      "suggestion": "Use a named-field object type for the serialized index entries."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/app/HomeView.tsx:81",
+      "issue": "An out-of-range ?page= value is clamped for display but left in the URL, so 'Page x of y' and the URL disagree after load.",
+      "suggestion": "When filters.page exceeds pageCount, replaceState to the clamped URL (or render the clamped number into the pagination links consistently)."
+    }
+  ],
+  "summary": "A clean, current-generation App Router codebase: dynamic rendering via connection(), async params, metadata/viewport exports, notFound-based 404s and small well-bounded lib/components with good why-comments. The main risks are client URL state managed with native history.replaceState where the hook's re-sync is not guaranteed on Next 16.4, plus a per-page fan-out that fetches every move record regardless of the selected game. I'd merge after one focused round fixing the game-select sync, the fan-out, and the malformed-name 500."
+}
+```

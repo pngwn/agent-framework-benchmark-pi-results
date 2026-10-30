@@ -1,0 +1,123 @@
+{
+  "dimension": "mergeability",
+  "criteria": {
+    "idiomatic": {
+      "score": 4,
+      "evidence": [
+        "app/src/lib/queries.ts:207-211, 315-320 — query() + \"use server\" + createAsync matches current SolidStart v2 data-fetching docs exactly",
+        "app/src/routes/index.tsx:45-52 — setParams merging with undefined-to-delete matches documented router useSearchParams semantics; filter state lives in the URL as spec'd",
+        "app/vite.config.ts:8-10 — solidStart() then nitro() matches the documented v2 vite.config.ts verbatim",
+        "app/src/components/NotFound.tsx:12 — HttpStatusCode code={404} per docs; [...404].tsx catch-all handles unrouted URLs",
+        "app/src/routes/index.tsx:126,74-76 — hand-rolled attr:value + ref + manual DOM write to sync the search input with the URL instead of a signal-driven value={searchText()}; a home-grown workaround where a framework primitive exists",
+        "app/src/routes/pokemon/[name].tsx:167-173 — manual hash-scroll effect; a reasonable workaround for async content the router doesn't auto-scroll to, but bespoke"
+      ],
+      "rationale": "Recognisably the framework's own documented patterns for routing, data loading, meta and 404 handling; the only fights-with-the-framework moments are the hand-synced search input and hash-scroll effect, both small and local."
+    },
+    "correctness_risks": {
+      "score": 2,
+      "evidence": [
+        "app/src/components/MoveTable.tsx:17 — rows indexed by column key, but MoveRowData (app/src/lib/queries.ts:54-83) has moveName/typeName/categoryName; keys 'move'/'type'/'category' (queries.ts:638-640) resolve to undefined, so every comparison hits the isMissing path and returns 0 — Move/Type/Category sorting is a silent no-op while aria-sort flips (MoveTable.tsx:47)",
+        "app/src/routes/index.tsx:68-77 — the URL-sync effect returns early while a debounce timer is pending, so a Previous/Next page click within the 250ms window leaves the timer armed; it later fires navigateWith (index.tsx:41-52) which sets page: undefined and bounces the user to page 1",
+        "app/src/lib/queries.ts:145-155 — fetchJson throws on any non-404 response, and there is no ErrorBoundary anywhere (app/src/app.tsx:28 has only Suspense), so one upstream 5xx yields an unhandled rejection / raw error page",
+        "app/src/lib/queries.ts:130 — jsonCache is a module-level Map with no eviction; bounded in practice by the fixed dataset but unbounded by design",
+        "app/src/entry-server.tsx:9 — references /favicon.ico but app/public is empty, so every page load makes a 404 request"
+      ],
+      "rationale": "One spec-required interaction (sorting three of seven columns) is shipped broken and lies to assistive tech about it, plus a URL-state race and no error boundary; the tests happen not to exercise any of these."
+    },
+    "global_abstractions": {
+      "score": 3,
+      "evidence": [
+        "app/src/lib/queries.ts:1-705 — one module owns the API client, five module-scope caches, species/type/generation/version-group indexes and all five page DTOs; every page imports from it",
+        "app/src/lib/queries.ts:314-327, 358-368, 439-461 — the same 'collect pokemon with id<=10000, map through the directory, sort by id' loop pasted three times",
+        "app/src/lib/queries.ts:371-375 and 441-445 — duplicated 'English short_effect || latest flavor || —' fallback",
+        "app/src/lib/queries.ts:208-217, 224-230, 237-243, 251-259, 486-496 — the same promise-cache-with-reset-on-failure boilerplate repeated five times",
+        "app/src/lib/format.ts:1-40 — small pure module, earns its keep; server/client boundary is clean (server-only derivation, typed DTOs out)"
+      ],
+      "rationale": "The single 705-line data module with five hand-rolled caches and thrice-pasted collection logic will need untangling before a second feature lands, but boundaries between server and client code are honest and the duplication is mechanical to extract."
+    },
+    "readability": {
+      "score": 4,
+      "evidence": [
+        "app/src/routes/moves/[name].tsx, abilities/[name].tsx, types/[name].tsx — four pages follow one identical, scannable XxxView + createAsync + double-Show pattern",
+        "app/src/lib/queries.ts:64-118 — DTO interfaces give every page's shape a readable contract",
+        "app/src/lib/queries.ts:519-534, 548-549, 649-668 — raw API records left as 'any' despite the strict tsconfig, undercutting the typed DTOs",
+        "app/src/routes/index.tsx:28-80 — the lastUrlSearch/debounceTimer/searchInput triple is the one genuinely hard-to-follow block; zero comments in the codebase to explain it"
+      ],
+      "rationale": "Consistent structure and good naming mean a new teammate finds their way quickly; the only rough spot is the home page's manual input/URL synchronisation, which needs a diagram to follow."
+    },
+    "review_cost": {
+      "score": 3,
+      "evidence": [
+        "app/src/components/MoveTable.tsx:17 — must fix the column-key/row-field mapping before merge; small change but a blocking correctness fix",
+        "app/src/routes/index.tsx:58-63 — debounce timer needs cancelling on param changes, not just on navigateWith/onCleanup",
+        "app/src/app.tsx:28 — an ErrorBoundary around Suspense is a standard ask",
+        "app/src/lib/queries.ts — reviewer will ask for the pokemon-collection and cache boilerplate helpers to be extracted, and possibly the module split per domain"
+      ],
+      "rationale": "Approve-with-changes: the fixes are all local and mechanical (a key map, a clearTimeout, one boundary, two extracted helpers), but there are enough of them that it's a real round of review, not nits."
+    }
+  },
+  "overall": 3,
+  "findings": [
+    {
+      "severity": "high",
+      "location": "app/src/components/MoveTable.tsx:17",
+      "issue": "sortRows indexes rows by the column key ('move', 'type', 'category'), but MoveRowData only has moveName/moveLabel/typeName/typeLabel/categoryName/categoryLabel (app/src/lib/queries.ts:54-83). Those three columns compare undefined vs undefined, return 0, and never reorder — while aria-sort still reports ascending/descent, so the spec's 'every column header is sortable' is broken and screen-reader users are told a sort happened. The acceptance test only checks aria-sort on the Move header, so it slipped through.",
+      "suggestion": "Map column key to a row value accessor (move→moveLabel, type→typeLabel, category→categoryLabel) or give MoveRowData fields named exactly like the column keys, and drop the 'as keyof MoveRowData' cast so TS catches mismatches."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/routes/index.tsx:68-77",
+      "issue": "The URL-sync effect bails out while a debounce timer is pending instead of cancelling it, so a Previous/Next page click made within ~250ms of typing leaves the timer armed; when it fires, navigateWith drops the page param and snaps the user back to page 1.",
+      "suggestion": "Clear the pending timer whenever params.q changes from outside (or on any URL change), e.g. clearTimeout(debounceTimer) at the top of the effect instead of returning early."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/lib/queries.ts:145-155",
+      "issue": "fetchJson throws on any non-404 response, but the app has no ErrorBoundary (app/src/app.tsx:28 wraps children only in Suspense), so an upstream 500/network failure becomes an unhandled rejection, a raw SSR error page, and an error on every client-side navigation to that route.",
+      "suggestion": "Add an ErrorBoundary (with a fallback page matching the site chrome) around the Suspense in app.tsx, and return a friendly error state (or a NotFound-style page) from the queries for fetch failures."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/lib/queries.ts:1-705",
+      "issue": "One 705-line module owns the API client, five module-scope promise caches, four derived indexes and all five pages' DTO builders; every route imports from it, making it the app's single point of evolution and review.",
+      "suggestion": "Split into lib/api.ts (fetchJson + cache), a small cache helper, and per-domain query modules (home/pokemon/move/ability/type) or at least per-resource builders."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/lib/queries.ts:314-327",
+      "issue": "The 'collect pokemon with id<=10000, resolve via directory, sort by id' loop is duplicated at queries.ts:358-368 (moves) and queries.ts:439-461 (abilities, with the hidden-flag wrinkle), and the English-effect fallback is duplicated at queries.ts:371-375 and 441-445.",
+      "suggestion": "Extract a collectDefaultForms(refs) helper and an englishShortEffectOrFlavor(record) helper next to format.ts and reuse them."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/lib/queries.ts:208-217",
+      "issue": "The same create-promise-or-reset-on-error cache boilerplate is repeated five times (lines 208-217, 224-230, 237-243, 251-259, 486-496), a maintenance hazard if eviction or TTL is ever needed.",
+      "suggestion": "Extract a small memoizePromise(factory) helper."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/routes/index.tsx:126",
+      "issue": "Search input is bound with attr:value and then re-synced by hand through a ref and a lastUrlSearch mirror (index.tsx:30, 68-77), a non-idiomatic three-piece sync when a signal-driven value={searchText()} plus the debounce would be one mechanism.",
+      "suggestion": "Make searchText the single source of truth with value={searchText()}, and keep only the debounce → setParams direction plus a params→signal sync in the effect."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/lib/queries.ts:519-534",
+      "issue": "Despite the strict tsconfig, the raw API records in the pokemon-page builder are handled as 'any' throughout (also 548-549, 649-668), undercutting the otherwise-good DTO typing and hiding typos like the MoveTable one.",
+      "suggestion": "Declare minimal interfaces for the API payloads (species, pokemon, move, ability, type, evolution-chain) and let TS check the derivation code."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/entry-server.tsx:9",
+      "issue": "The head links /favicon.ico but app/public is empty, so every page load issues a 404.",
+      "suggestion": "Add a favicon to public/ or drop the link."
+    },
+    {
+      "severity": "low",
+      "location": "app/package.json:6",
+      "issue": "nitro is pinned to an exact beta (3.0.260610-beta) while v3 has since moved to RC builds (3.0.261029-rc), so the app won't pick up fixes and upgrades require an explicit bump.",
+      "suggestion": "Move to the current RC (or a caret range on the v3 RC channel) when bumping dependencies; document why the exact pin if reproducibility is the goal."
+    }
+  ],
+  "summary": "A genuinely idiomatic SolidStart v2 app — documented query/\"use server\"/createAsync data loading, correct search-param semantics, clean server/client boundaries and consistent page structure — that I'd accept in a heartbeat structurally. It ships two real bugs the acceptance tests miss: Move/Type/Category column sorting is a silent no-op (column keys don't match row fields) while aria-sort claims otherwise, and a pending debounce timer can bounce a user off their pagination page. Add an ErrorBoundary and split the 705-line god data module, and this is a solid merge."
+}

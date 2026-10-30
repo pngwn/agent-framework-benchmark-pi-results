@@ -1,0 +1,162 @@
+I've reviewed the spec, the acceptance suite, and the full `app/` codebase. Confirmed facts: `app/` contains zero test files — no test script in `app/package.json:6-11` (only `dev`/`build`/`start`/`postinstall`), no test runner in devDependencies, and no test files anywhere under `app/`. The app is a Nuxt 4 SSR app with a Nitro server API layer (`app/server/api/`) that does substantial data transformation, plus client-side filtering, pagination, URL state, and table sorting.
+
+Since the agent wrote no tests, I've focused on what the untested code could hide:
+
+**Risky untested logic found:**
+- `app/app/pages/index.vue:21-45` — filter matching (case-insensitive humanized-name search, type/generation match), page clamping, 48-per-page slicing, and `buildQuery`'s "omit empty/default params" rule. A refactor here breaks deep links like `/?type=fire&generation=generation-i&page=2` with no safety net.
+- `app/app/components/MovesTable.vue:43-58` — a genuinely subtle comparator: missing-values-last in *both* directions, numeric vs. string columns, tie-breaks by move name, `aria-sort` flipping. Classic home of off-by-one/direction bugs.
+- `app/server/api/pokemon/[name]/moves.get.ts:11-68` — version-group ordering, default = highest `order`, dedup by `move:level`, method rank (`Level Up`, `Machine`, `Egg`, `Tutor`, then alphabetical), level nulled for non-level-up methods.
+- `app/server/api/species.get.ts:9-38` — builds a type index by scanning every type's Pokémon list, maps species→generation, sorts by dex id. Silently produces wrong lists if slots or IDs are mishandled.
+- `app/server/utils/pokeapi.ts:15-45` — 60s in-memory cache with shared in-flight promises and error eviction; also, non-error entries are never deleted from the `cache` Map (unbounded growth across 1000+ URLs per refresh — a latent memory leak no test would catch today).
+- `app/server/utils/data.ts:66-96` — alternate-form exclusion (`id > 10000`), species dedup, default-variety fallback; and pure helpers in `app/shared/utils/format.ts:2-12` that are ideal one-line unit tests but have none.
+
+```json
+{
+  "dimension": "tests",
+  "criteria": {
+    "coverage_of_risk": {
+      "score": 1,
+      "evidence": [
+        "app/package.json:6-11 — no test script, no test runner, no devDependencies",
+        "app/app/pages/index.vue:21-45 — untested filter/pagination/URL-query logic",
+        "app/app/components/MovesTable.vue:43-58 — untested multi-column sort comparator",
+        "app/server/api/pokemon/[name]/moves.get.ts:11-68 — untested version-group/method/dedup aggregation"
+      ],
+      "rationale": "No tests exist at all, so none of the app's riskiest logic — filtering, pagination, URL state, sorting, and the server-side data layer — is covered."
+    },
+    "behaviour_not_implementation": {
+      "score": 1,
+      "evidence": [
+        "app/package.json:6-11 — no test infrastructure of any kind"
+      ],
+      "rationale": "The criterion's scale explicitly assigns 1 when there are no tests."
+    },
+    "regression_power": {
+      "score": 1,
+      "evidence": [
+        "app/server/utils/pokeapi.ts:15-45 — cache/TTL/promise-sharing changes would go undetected",
+        "app/server/api/species.get.ts:9-38 — index-building refactor would silently corrupt every list page",
+        "app/app/pages/index.vue:38-45 — buildQuery default-omission rule unguarded"
+      ],
+      "rationale": "With zero tests, any behaviour can be broken without a failing test; once the acceptance suite is removed there is no guard whatsoever."
+    },
+    "signal_to_noise": {
+      "score": 3,
+      "evidence": [
+        "app/ — zero test files, so no noise either"
+      ],
+      "rationale": "Per the anchored scale, an app with no tests scores 3 on signal-to-noise: nothing low-value, but nothing earning its keep either."
+    }
+  },
+  "overall": 1,
+  "findings": [
+    {
+      "severity": "high",
+      "location": "app/package.json:6-11",
+      "issue": "The app ships with no test script, runner, or devDependencies; only the externally-provided acceptance suite guards behaviour.",
+      "suggestion": "Add Vitest (or @nuxt/test-utils) with a `test` script, and start with unit tests for the pure helpers and server aggregation functions, which need no browser."
+    },
+    {
+      "severity": "high",
+      "location": "app/app/pages/index.vue:21-45",
+      "issue": "Filter matching, page clamping, 48-per-page slicing, and the buildQuery 'omit empty/default params' rule are untested; a refactor breaks deep-linked filtered views and pagination silently.",
+      "suggestion": "Extract the matches/page/visible/buildQuery logic into a testable composable or plain function and unit-test edge cases: page beyond range, empty query params, filter change resetting to page 1, case-insensitive hyphenated search."
+    },
+    {
+      "severity": "high",
+      "location": "app/app/components/MovesTable.vue:43-58",
+      "issue": "The sort comparator handles missing-values-last in both directions, numeric vs. string keys, and tie-breaks — exactly the kind of logic that regresses subtly — with no tests.",
+      "suggestion": "Unit-test the sorting with rows containing null power/accuracy, mixed types, and direction flips, asserting the full rendered order and that nulls sort last both ascending and descending."
+    },
+    {
+      "severity": "high",
+      "location": "app/server/api/pokemon/[name]/moves.get.ts:11-68",
+      "issue": "Version-group ordering, default-game selection (highest `order`), per-method dedup by `move:level`, method rank ordering, and level-nulling for non-level-up methods are all untested.",
+      "suggestion": "Test the handler against a small fixture payload: assert game default, table order (Level Up, Machine, Egg, Tutor, then alphabetical), and that egg/machine rows have no level."
+    },
+    {
+      "severity": "high",
+      "location": "app/server/api/species.get.ts:9-38",
+      "issue": "The home-page data layer builds typesById by scanning all 18 type detail payloads and maps species→generation; any refactor (e.g. switching to per-pokemon fetches) can silently drop slot order or whole species.",
+      "suggestion": "Add a fixture-driven handler test asserting slot-ordered types per species, generation assignment, dex-id sorting, and exclusion of alternate forms."
+    },
+    {
+      "severity": "medium",
+      "location": "app/server/utils/pokeapi.ts:15-45",
+      "issue": "The caching layer (60s TTL, shared in-flight promises, error eviction) is untested, and stale successful entries are never removed from the Map, so it grows unboundedly across the whole species/type/move namespace.",
+      "suggestion": "Unit-test TTL expiry, 404→null, concurrent request sharing, and error eviction; add an eviction/size cap or a sweeper so the cache can't leak."
+    },
+    {
+      "severity": "medium",
+      "location": "app/server/utils/data.ts:66-96",
+      "issue": "speciesCards' alternate-form exclusion, one-card-per-species dedup, and the default-variety fallback in speciesWithPokemon are untested; a change here leaks Mega forms into every list.",
+      "suggestion": "Unit-test speciesCards with a mix of IDs ≤/> 10000 and duplicate Pokémon per species, and speciesWithPokemon with a species whose default variety ID differs."
+    },
+    {
+      "severity": "medium",
+      "location": "app/shared/utils/format.ts:2-12",
+      "issue": "humanize, dexNumber, and display are pure one-line functions used on every page (display names, #0000 padding, em-dash fallbacks) with no tests — the cheapest possible coverage was skipped.",
+      "suggestion": "Add trivial unit tests: 'mr-mime'→'Mr Mime', 25→'#0025', null/''/0→'—' (note display(0) returns '0', verify that's intended for power 0)."
+    },
+    {
+      "severity": "medium",
+      "location": "app/app/pages/pokemon/[name].vue:19-27",
+      "issue": "Not-found and error paths (404 from fetchResource surfacing as NotFound vs. the generic 'could not be loaded' branch) and the ?game= URL round-trip are untested.",
+      "suggestion": "Add route-level tests (or @nuxt/test-utils mount tests) for a bad Pokémon name, a failing API, and selecting a game updating the query while preserving the #moves hash."
+    },
+    {
+      "severity": "low",
+      "location": "app/server/api/pokemon/[name].get.ts:12-19",
+      "issue": "The recursive toNode evolution-chain transform and the nested EvolutionTree rendering (branching chains like Eevee) have no coverage.",
+      "suggestion": "Unit-test toNode with a branching chain fixture and assert the rendered nested-list structure once per chain shape."
+    }
+  ],
+  "summary": "The agent wrote no tests of its own — no runner, no script, zero test files — so every point of behavioural coverage comes from the externally-written acceptance suite, which won't survive a data-layer refactor. The untested code includes genuinely hazardous logic: URL-state-driven filtering and pagination, a multi-column sort comparator with missing-value rules, and heavy server-side aggregation endpoints. Pure helpers that would have been trivial to test were also left bare.",
+  "wroteTests": false,
+  "testCount": 0,
+  "valuableTests": [],
+  "lowValueTests": [],
+  "untested": [
+    {
+      "area": "Home-page filtering, pagination and URL query state (app/app/pages/index.vue:21-45)",
+      "risk": "high",
+      "likelyBug": "Off-by-one page slicing, page not clamped when filters shrink results, deep links like /?type=fire&page=3 rendering wrong views, filter changes keeping a stale page number"
+    },
+    {
+      "area": "Moves table sorting: direction flips, missing-values-last, aria-sort (app/app/components/MovesTable.vue:20-58)",
+      "risk": "high",
+      "likelyBug": "Nulls sorting first on descending, numeric columns compared as strings, tie-breaks reordering rows on every sort click, aria-sort left on the wrong column"
+    },
+    {
+      "area": "Server aggregation: species index (types/generation/dex order) and per-game moves tables (app/server/api/species.get.ts, app/server/api/pokemon/[name]/moves.get.ts)",
+      "risk": "high",
+      "likelyBug": "Type slot order lost, generation missing for some species, wrong default game, duplicate move rows per method, method tables in wrong order"
+    },
+    {
+      "area": "In-memory API cache: TTL, 404 handling, concurrent sharing, no eviction of stale entries (app/server/utils/pokeapi.ts:15-45)",
+      "risk": "medium",
+      "likelyBug": "Unbounded Map growth leaking memory in the long-running Nitro server; a failed request cached as resolved; 404s treated as hard errors after refactor"
+    },
+    {
+      "area": "Alternate-form exclusion, species dedup and default-variety fallback (app/server/utils/data.ts:66-96)",
+      "risk": "medium",
+      "likelyBug": "Mega/alternate forms leaking into 'Learned by'/'Pokémon of this type' lists, duplicate cards for one species, wrong Pokémon fetched when the default variety ID differs from the species ID"
+    },
+    {
+      "area": "Error and not-found paths across all pages, including the catch-all route and 404 status propagation (app/app/pages/[...slug].vue, app/server/utils/pokeapi.ts:44-49)",
+      "risk": "medium",
+      "likelyBug": "An API 500 rendering as 'Not found', or 404s rendering the generic error branch; unknown names of moves/abilities/types showing empty pages instead of the Not-found page"
+    },
+    {
+      "area": "Pure formatting helpers: humanize, dexNumber, display em-dash fallback (app/shared/utils/format.ts:2-12)",
+      "risk": "low",
+      "likelyBug": "Names like 'ho-oh' or 'nidoran-f' mis-humanized, dex padding wrong for IDs > 9999, falsy-but-valid values (power 0) rendered as em dash"
+    },
+    {
+      "area": "Evolution-chain transform and nested list rendering for branching chains (app/server/api/pokemon/[name].get.ts:12-19, app/app/components/EvolutionTree.vue)",
+      "risk": "low",
+      "likelyBug": "Branching chains like Eevee flattened into a single list, or children dropped when evolves_to is empty/undefined"
+    }
+  ]
+}
+```

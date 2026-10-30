@@ -1,0 +1,126 @@
+I've completed a thorough review against Gracile 0.11.0's current docs and engine internals (including verifying how the build pipeline prerenders route documents and strips/reinjects stylesheet tags at runtime — which mattered for judging `app/src/document.js`).
+
+Key verifications made:
+- `defineRoute({handler:{GET}, document, template})`, the Express adapter in `server.js`, the sibling `.client.js` asset convention, the special `404.js` route (Gracile sets `responseInit.status = 404` before falling back to `/404/`), and `trailingSlash: 'ignore'` (a real, documented option and the default) are all idiomatic per current docs.
+- At build time Gracile *does* invoke every route's `handler.GET` with a stub context (engine `routes/render.ts`), so the app's `GRACILE_BUILD` guard is a legitimate workaround for a framework gap — but it's duplicated 6× with no explanation.
+- The `new URL('./document.css', import.meta.url).pathname` link in `document.js` only works because the server build strips server-rendered `<link rel="stylesheet">` tags and re-injects hashed assets; in the SSR chunk it still resolves to an absolute filesystem path, so `npm run dev` (declared in package.json) would render unstyled.
+
+```json
+{
+  "dimension": "mergeability",
+  "criteria": {
+    "idiomatic": {
+      "score": 4,
+      "evidence": [
+        "app/src/routes/(home).js:33-114 — handler returns props, shared document(), lit-html template: exactly the documented defineRoute pattern",
+        "app/server.js:1-19 — Express adapter + express.static(gracile.getClientBuildPath()) matches the docs' server-mode example nearly verbatim",
+        "app/src/routes/404.js:5-15 — uses the special /404 route, and the framework sets the 404 status itself",
+        "app/src/routes/(home).client.js / [name].client.js — sibling client scripts, the documented co-located page-asset convention",
+        "app/vite.config.js:6 — trailingSlash:'ignore' is a valid documented option (though it's the default)",
+        "app/src/routes/(home).js:15,36 — home-grown GRACILE_BUILD env guard as a workaround for the build-time handler invocation; duplicated in 6 routes, uncommented"
+      ],
+      "rationale": "Routing, data loading, documents and client assets follow the current docs closely; only the build-time guard and the odd stylesheet reference deviate from documented practice."
+    },
+    "correctness_risks": {
+      "score": 4,
+      "evidence": [
+        "app/src/routes/(home).client.js:35-47 — debounced refresh is race-guarded with a request counter; failures fall back to server-rendered markup",
+        "app/src/lib/api.js:44-52 — promise-dedup cache with eviction on failure; keyed by URL so growth is bounded by the dataset",
+        "app/src/routes/(home).js:96-99 — page clamped to [1,totalPages]; invalid q/type/generation validated against known values",
+        "app/src/routes/moves/[name].js:46-47 — any upstream API failure (not just 404) becomes a 404 'Not found' page; same in pokemon:274, types/[name]:71, abilities:45",
+        "app/src/document.js:14 — CSS href resolves to a filesystem path in the SSR chunk (dist/server/chunk/document.js:14); only survives because Gracile strips stylesheet links in server builds — broken under `npm run dev`",
+        "app/src/routes/pokemon/[name].js:136 — unbounded Promise.all fan-out over every move in a game on first view (cached afterwards)"
+      ],
+      "rationale": "No race conditions or leaked listeners; the issues found (404 conflation for upstream outages, dev-only broken stylesheet link, refetch-per-keystroke) are minor and none affect the served production pages."
+    },
+    "global_abstractions": {
+      "score": 4,
+      "evidence": [
+        "app/src/lib/api.js:1-250 — single module every route imports; mixes fetch/caching with i18n helpers (humanize:61, englishName:71) and presentation (dexNumber:96, spriteUrl:245)",
+        "app/src/lib/components.js:1-55 — small, server-only shared card/badge templates with clear boundaries",
+        "app/src/routes/*.client.js — client scripts import nothing from src/, so no server/client boundary leak",
+        "app/src/lib/api.js:32-52 — module-global cache is hidden state, but scoped and dataset-bounded"
+      ],
+      "rationale": "Abstractions are few and earn their keep; the only real critique is that lib/api.js conflates data access with name/formatting helpers and carries dead exports."
+    },
+    "readability": {
+      "score": 3,
+      "evidence": [
+        "app/src/routes/* — consistent route layout (constants, helpers, handler, template) makes the tree predictable",
+        "app/src/routes/(home).js:15 and app/package.json:7 — the GRACILE_BUILD=1 coupling is repeated six times with zero explanation; the whole codebase has one comment ((home).client.js:52)",
+        "app/src/routes/404.js:14, pokemon/[name].js:287, abilities/[name].js:58, types/[name].js:84, moves/[name].js:60 — identical 'Not found' fragment pasted five times",
+        "app/src/features/ — empty directory, dead scaffolding"
+      ],
+      "rationale": "Naming and file organisation are good, but the least obvious constructs in the app (the build guard, the stylesheet URL trick) are completely uncommented, which is exactly where a new teammate gets stuck."
+    },
+    "review_cost": {
+      "score": 3,
+      "evidence": [
+        "app/src/routes/moves/[name].js:46-47 — needs 'treat upstream errors as 500, not 404' before approval",
+        "app/src/document.js:14 — needs the documented /src/... stylesheet form",
+        "app/src/routes/(home).js:15 etc. — needs the guard centralised and documented",
+        "app/src/lib/api.js:27,124-126,222-224 — unused getApiBase/byName/sortSpeciesById to delete"
+      ],
+      "rationale": "Approvable after one round of small, mechanical changes; nothing requires rework of the architecture."
+    }
+  },
+  "overall": 4,
+  "findings": [
+    {
+      "severity": "medium",
+      "location": "app/src/routes/moves/[name].js:47",
+      "issue": "Any upstream API failure (connection refused, 5xx) is rendered as a 404 'Not found' page with status 404; same pattern in pokemon/[name].js:274, types/[name].js:71, abilities/[name].js:45.",
+      "suggestion": "Branch on error.status === 404 for the not-found page; otherwise log and set responseInit.status = 500 with a simple error page."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/document.js:14",
+      "issue": "Stylesheet href built with new URL('./document.css', import.meta.url).pathname resolves to an absolute filesystem path in the SSR bundle; it only works because Gracile's server build strips <link rel=\"stylesheet\"> and re-injects hashed assets, and it leaves `npm run dev` unstyled.",
+      "suggestion": "Use the documented source-relative form (href=\"/src/document.css\") or import the stylesheet from the document module so Vite handles it in both dev and build."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/routes/(home).js:15",
+      "issue": "The GRACILE_BUILD guard is duplicated in all six route files and depends on an env var set only by the `build` npm script (app/package.json:7) — a bare `vite build` would fetch API data at build time, and none of this is explained.",
+      "suggestion": "Move one `isBuildTime()` helper into src/lib with a comment explaining that Gracile invokes handlers during the build to collect document assets."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/routes/(home).client.js:37-50",
+      "issue": "Every debounced keystroke refetches and re-parses the entire document, and a non-OK response is silently dropped leaving stale results.",
+      "suggestion": "Fetch a smaller partial (or the premises JSON) and surface a transient error state; at minimum note the current trade-off."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/routes/pokemon/[name].js:136",
+      "issue": "Unbounded Promise.all fan-out over all moves in a version group on first view; slow against the latency-injecting API even though the cache amortises later views.",
+      "suggestion": "Fetch move metadata with a concurrency-limited pool, or render tables progressively."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/routes/404.js:14",
+      "issue": "The 'Not found' heading/link markup is copy-pasted in five route files.",
+      "suggestion": "Extract a notFound() template into src/lib/components.js."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/lib/api.js:27",
+      "issue": "Dead code: getApiBase (27), sortSpeciesById (222) and the byName map (124) are never used.",
+      "suggestion": "Delete them or wait until a consumer exists."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/features/",
+      "issue": "Empty directory left over from scaffolding.",
+      "suggestion": "Remove it."
+    },
+    {
+      "severity": "low",
+      "location": "app/package.json:14",
+      "issue": "vite is listed as a runtime dependency (it's build-only), and the build script uses shell-only env assignment.",
+      "suggestion": "Move vite to devDependencies; the env-var script is acceptable for this Linux/Node harness."
+    }
+  ],
+  "summary": "This is a confident, idiomatic Gracile 0.11 codebase — handlers, documents, the Express adapter and co-located client scripts all match the current docs, and the fiddly spec details are handled carefully. The main merge blockers are small but real: upstream API failures are misreported as 404, the document stylesheet reference only works by accident of the build pipeline (and breaks in dev), and the undocumented GRACILE_BUILD guard is duplicated across every route. I'd approve after one round of mechanical fixes."
+}
+```

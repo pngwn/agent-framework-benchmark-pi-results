@@ -1,0 +1,133 @@
+I've reviewed the app, the spec, and verified the app's Gracile usage against the framework's current docs and official starter (`defineRoute` handler/document/template, `@gracile/gracile/hono` + `getClientBuildPath`, `src/document.ts`, `(home).client.ts`, `404.ts` — all match current 0.11 conventions). Here's my assessment.
+
+## Scenarios worked through
+
+1. **Remove Abilities** — delete `app/src/routes/abilities/` and the Abilities section in `app/src/routes/pokemon/[name].ts:177` (data) and `:340-347` (template + type field at `:37`); `.bullets` CSS in `document.css:174` is shared, so leave or trim. Nav never links abilities. Two files.
+2. **Sprite bug** — `app/src/lib/templates.ts:25` is the single funnel: home (`(home).ts` via `cardList`), moves, abilities and types all render through `cardList`/`pokemonCard` (`templates.ts:42`). One fix covers every list.
+3. **Name sorting** — `pokemonRefsToSpecies` sorts by id (`data.ts:45`, covers moves/abilities/types lists) and the home index sorts by id (`data.ts:138`); either sort in those two places or once in `cardList`.
+4. **Items section** — new `routes/items/[name].ts` reuses `api.ts`, `data.ts` helpers, `templates.ts` (`section`, `cardList`, `typeLink`), `document.ts`, `format.ts`; but the ~10 lines of handler/document/404 wiring are copy-pasted in every route (e.g. `moves/[name].ts:59-67`), and the `Move` API type is declared twice with divergent shapes (`pokemon/[name].ts:40` vs `moves/[name].ts:20`).
+5. **API base URL / caching** — one file: `lib/api.ts:4` (base URL), `:6-8` (TTL/limits), `:66-70` (media/sprite URLs). Only `server.js:21` (a log line) knows the env var otherwise.
+
+## Strengths
+
+- Clean layering: `api.ts` (raw client) → `data.ts` (domain) → `templates.ts` (presentation) → routes as thin compositions; client scripts are opt-in enhancements coupled only via element ids and the shared `homeUrl`.
+- The Deoxys-style species/Pokémon mapping is centralized in `pokemonRefsToSpecies` (generic over source type), so every card list inherits it.
+- Framework-idiomatic: matches the official Hono server starter nearly verbatim (`server.js`), and the docs' "routes should be entry points, not hold logic" guidance is followed (data loading factored into `loadX` + `lib/data.ts`).
+
+## Weaknesses
+
+- Route wiring (`isBuildRender` guard, 404 status, `document({...context, title})` wrapper, `if (!data) return notFound()`) is repeated verbatim in 4 route files and would be copied a 5th time for Items.
+- `Move` type duplicated across two files with different shapes — a move-schema change touches both.
+- Two near-identical fetch/DOMParser/`replaceWith` client implementations (`(home).client.ts:100`, `pokemon/[name].client.ts:56`).
+- `isBuildRender` keys off the internal `gracile-static` hostname; every new route handler must remember to call it or the build prerender hits the API at build time (a spec violation waiting to happen).
+- All CSS in one 566-line `document.css` (the starter convention is route-scoped `(home).css` siblings), so feature removal can leave dead rules.
+
+```json
+{
+  "dimension": "editability",
+  "criteria": {
+    "removability": {
+      "score": 4,
+      "evidence": [
+        "app/src/routes/abilities/[name].ts:1 — the whole feature is one self-contained route directory",
+        "app/src/routes/pokemon/[name].ts:340 — only cross-file link: the Abilities section here (plus data at :177 and type at :37)",
+        "app/src/document.css:174 — `.bullets` is a shared selector; removing abilities risks a dead rule"
+      ],
+      "rationale": "Abilities removal is a directory delete plus one section in the Pokémon page; no nav or template-helper entanglement. Slightly short of 5 because the CSS lives in one global file rather than being scoped to the feature."
+    },
+    "changeability": {
+      "score": 4,
+      "evidence": [
+        "app/src/lib/templates.ts:25 — sprite fix lands in `pokemonCard`; every card list (home, moves, abilities, types) funnels through `cardList` at :42",
+        "app/src/lib/api.ts:4 — API base URL, TTL and limits all in one file",
+        "app/src/routes/pokemon/[name].ts:40 — `Move` type duplicated with a divergent shape vs moves/[name].ts:20, so move-schema changes touch both"
+      ],
+      "rationale": "The likely bug fixes and data-source changes each land in one obvious, well-commented place. Docked one point for the duplicated Move type and the per-route 404 wiring."
+    },
+    "coupling": {
+      "score": 4,
+      "evidence": [
+        "app/src/lib/api.ts:1 — raw HTTP/cache client with no UI knowledge; data.ts and templates.ts depend only on its exports",
+        "app/src/routes/(home).client.ts:106 — enhancement coupled to the server page only via `#results` and the shared `homeUrl` helper",
+        "app/src/lib/build.ts:7 — `isBuildRender` hides an internal hostname behind a single helper, but every route handler must remember to call it (moves/[name].ts:60, abilities/[name].ts:33, types/[name].ts:39, pokemon/[name].ts:296)"
+      ],
+      "rationale": "Narrow, layered interfaces (api → data → templates → routes → client scripts) with explicit contracts. Minor tangles: two duplicated client fetch-and-swap implementations and the implicit must-call-isBuildRender contract."
+    },
+    "abstraction_design": {
+      "score": 3,
+      "evidence": [
+        "app/src/lib/data.ts:32 — `pokemonRefsToSpecies<T>` is generic over the source ref and already handles the Pokémon-vs-species variation for three callers",
+        "app/src/lib/templates.ts:6 — `CardData` uses optional `types`/`note` fields instead of flag parameters; `section`/`typeLink` stretch across all pages",
+        "app/src/routes/moves/[name].ts:59-67 — handler/document/404 wiring repeated verbatim in all four detail routes; an Items route copies it a fifth time"
+      ],
+      "rationale": "The shared helpers are well designed around the app's real variation, but the route-level wiring and the client-side swap logic are copy-paste rather than a reusable `defineDetailRoute`/`swapRegion` helper, so each new section repeats ~25 lines."
+    }
+  },
+  "overall": 4,
+  "findings": [
+    {
+      "severity": "medium",
+      "location": "app/src/routes/moves/[name].ts:59",
+      "issue": "Route wiring (isBuildRender guard, 404 status, document title fallback, notFound template branch) is duplicated verbatim across moves/[name].ts, abilities/[name].ts:33, types/[name].ts:39 and pokemon/[name].ts:296, and would be copied again for any new detail route.",
+      "suggestion": "Extract a small helper, e.g. `defineDetailRoute(load, render)`, that wraps defineRoute with the standard handler/document/404 shape, keeping per-route code to the load and template functions."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/routes/pokemon/[name].ts:40",
+      "issue": "The `Move` API resource type is declared twice with different shapes (here partial, and fully in moves/[name].ts:20); the species/pokemon types are also local to this file while `TypeDetail` lives in lib/data.ts.",
+      "suggestion": "Move API resource types into lib (e.g. lib/pokeapi-types.ts or alongside data.ts) so a single source of truth serves both routes and data helpers."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/lib/build.ts:7",
+      "issue": "The build-time prerender escape hatch keys off the internal `gracile-static` hostname, and correctness depends on every route handler remembering to call `isBuildRender`; forgetting it makes the build fetch live API data, violating a spec constraint.",
+      "suggestion": "Centralize the guard in the proposed shared route helper so no route can forget it, and add a comment pinning the Gracile version this hostname behavior relies on."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/routes/(home).client.ts:100",
+      "issue": "Fetch → DOMParser → replaceWith progressive-enhancement logic is implemented twice ((home).client.ts `#load` and pokemon/[name].client.ts `#show` at :56), differing only in the swapped element id.",
+      "suggestion": "Extract a shared `swapRegion(url, elementId, signal)` helper in src/lib used by both custom elements."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/document.css:174",
+      "issue": "All 566 lines of CSS live in one global stylesheet with MARK sections instead of Gracile's route-scoped sibling CSS convention (e.g. `(home).css`), so feature removal can strand dead rules.",
+      "suggestion": "Adopt route-scoped `(home).css` / `pokemon.css` siblings (ignored by the router, bundled per route) for page-specific rules, keeping tokens and shared pieces in document.css."
+    }
+  ],
+  "summary": "This is a well-layered, framework-idiomatic Gracile app: raw API access, domain mappers and presentation helpers each live in one module, and every Pokémon card list funnels through a single template, so the likely fixes land in one obvious place. The recurring cost is route-level boilerplate (handler/404/document wiring) and a couple of duplicated types and client-side swap routines that each new section will copy. Overall it is easy and safe to change, a step short of exemplary.",
+  "scenarios": [
+    {
+      "change": "Remove the Abilities pages and every link to them",
+      "files": ["app/src/routes/abilities/[name].ts", "app/src/routes/pokemon/[name].ts", "app/src/document.css"],
+      "difficulty": 4,
+      "notes": "Delete the route directory, drop the Abilities section (data + template + type field) from the Pokémon page; nav never links to it. Trivial except for the shared `.bullets` CSS rule that must be eyeballed in the global stylesheet."
+    },
+    {
+      "change": "Fix the wrong-sprite bug for species whose default Pokémon has a different name (Deoxys)",
+      "files": ["app/src/lib/templates.ts"],
+      "difficulty": 5,
+      "notes": "All four card lists (home, move, ability, type) render through `cardList`/`pokemonCard`, and the species↔Pokémon mapping is centralized in `pokemonRefsToSpecies`, so a change to how the sprite URL is derived covers every list in one file. If the fix needs per-Pokémon sprite data rather than the id pattern, CardData grows a field and the three route mappers pass it — still one template plus mechanical call-site updates."
+    },
+    {
+      "change": "Add sorting by name to every list of Pokémon cards",
+      "files": ["app/src/lib/data.ts", "app/src/lib/templates.ts"],
+      "difficulty": 4,
+      "notes": "Two places establish order: `pokemonRefsToSpecies` (data.ts:45, covers the move/ability/type lists) and the home index (data.ts:138); alternatively one sort inside the shared `cardList` funnel. Home needs care because cards are paginated before rendering, so sorting must happen pre-slice if it applies across pages."
+    },
+    {
+      "change": "Add an Items section (/items, /items/:name) shaped like Moves",
+      "files": ["app/src/routes/items/[name].ts", "app/src/routes/items/(items).ts", "app/src/lib/data.ts", "app/src/lib/templates.ts"],
+      "difficulty": 3,
+      "notes": "Everything substantive is reusable: api.ts, data helpers (getTypeLabels, pokemonRefsToSpecies, cardList), section/typeLink, document and format. What isn't reusable is the ~10-line route wiring (isBuildRender + 404 + document wrapper) and any new API resource type, which get copied per route; the two client enhancement scripts show the same copy-paste pattern. A `defineDetailRoute` helper would make this a 5."
+    },
+    {
+      "change": "Change the API base URL and caching rules",
+      "files": ["app/src/lib/api.ts"],
+      "difficulty": 5,
+      "notes": "Base URL, media URL construction, TTL, LRU size and concurrency limit are all defined in api.ts:4-70 and threaded through helpers; no route or template knows them. Only server.js:21 reads the env var again, and just for a startup log line."
+    }
+  ]
+}
+```

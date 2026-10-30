@@ -1,0 +1,161 @@
+I've read all the app source. Here's my review.
+
+## What I found
+
+**Structure** — The app is cleanly layered: all data access lives in `app/src/lib/server/pokeapi.js` (correctly under `lib/server/`, so it can't leak to the client), consumed only by `+page.server.js` loads; pages render precomputed plain objects; four small prop-driven components. Svelte 5 idioms are current throughout: runes (`$props`, `$state`, `$derived`/`$derived.by`), `onclick`, snippets, keyed each blocks, `$app/state`'s `page`, `error()` helper. No legacy constructs, no experimental flags.
+
+**Scenario walk-through**
+
+1. **Remove Abilities** — delete `app/src/routes/abilities/`, then strip the Abilities section from the Pokémon page (`+page.svelte:90-99`, styles at 242-248) and the `abilities` mapping in its load (`+page.server.js:70-77,166`). The only other trace is the now-dead `getAbility` one-liner (`pokeapi.js:234`). Nothing else links to `/abilities`.
+2. **Sprite bug** — every card list flows through `pokeapi.js`: `getDexData` (line 181) for home and `cardFromSpecies` (192-199, reached via `cardsFromPokemonRefs`/`getPokemonCard`) for moves/abilities/types. One file covers all lists — but the fix must land in **two** functions, because `getDexData` duplicates the card shape instead of calling `cardFromSpecies`.
+3. **Sort by name** — `cardsFromPokemonRefs`'s sort (`pokeapi.js:217`) covers three pages in one edit; the home page's order comes from `getDexData`'s dex array, so a second edit in `routes/+page.svelte` (or `pokeapi.js:174-183`). Two trivial edits.
+4. **Items section** — add `getItem` one-liner to `pokeapi.js`, create `routes/items/[name]/` reusing `PokemonCard`, `cardsFromPokemonRefs`, `englishName`, and the global `panel`/`detail-list`/`card-grid` CSS — but the details-page `<dl>` + Effect section markup would be copy-pasted from the Moves page (~half the page), since there's no shared "resource detail" abstraction. Helpers like `isMissing` would be copied a third time.
+5. **Data source change** — `API_BASE`, `getJson`, the `memo` cache and `spriteUrl` all live in `pokeapi.js:3-24,58`. Exactly one file knows about them.
+
+**Main deductions** — duplicated card shape (`getDexData` vs `cardFromSpecies`), card-list markup repeated in four `+page.svelte` files, `latestEnglishFlavorText` exported but unused while its logic is inlined twice, `isMissing` triplicated, zero type/JSDoc contracts, and the slightly magic `Object.assign(card, {hidden})` → `pokemon.hidden` read in the ability page.
+
+```json
+{
+  "dimension": "editability",
+  "criteria": {
+    "removability": {
+      "score": 4,
+      "evidence": [
+        "app/src/routes/abilities/[name]/+page.server.js:1-39 — feature is fully contained in its own route directory",
+        "app/src/routes/pokemon/[name]/+page.svelte:95 — the only inbound link to /abilities outside the route itself",
+        "app/src/routes/pokemon/[name]/+page.server.js:70-77 — abilities data mapping must be stripped from the Pokémon load",
+        "app/src/lib/server/pokeapi.js:234 — getAbility export becomes dead code unless removed"
+      ],
+      "rationale": "Delete the route directory and remove one section plus its load mapping; only residue is a one-line dead export. Close to ideal, but the feature's tendrils reach into the Pokémon page's client and server files."
+    },
+    "changeability": {
+      "score": 3,
+      "evidence": [
+        "app/src/lib/server/pokeapi.js:181 vs 192-199 — sprite/card construction exists in two parallel implementations (getDexData inline vs cardFromSpecies), so a sprite fix lands twice in the same file",
+        "app/src/lib/server/pokeapi.js:52-55 — latestEnglishFlavorText helper is exported but never used",
+        "app/src/routes/pokemon/[name]/+page.server.js:51-56 — flavor filtering/collapsing re-implemented inline instead of calling the helper",
+        "app/src/routes/moves/[name]/+page.server.js:26-28 — the same flavor-collapsing regex duplicated again",
+        "app/src/routes/pokemon/[name]/+page.server.js:25, app/src/routes/moves/[name]/+page.server.js:10, app/src/lib/components/MoveTable.svelte:31 — isMissing defined three times with diverging semantics (MoveTable also treats '' as missing)"
+      ],
+      "rationale": "Data fixes are findable and mostly centralised in pokeapi.js, but the card-shape and flavor-text duplication means one logical change touches two or three code paths, and the unused helper shows the intended seam wasn't actually used."
+    },
+    "coupling": {
+      "score": 4,
+      "evidence": [
+        "app/src/lib/server/pokeapi.js:1-234 — all API access and caching confined to one server-only module; pages never fetch",
+        "app/src/lib/components/PokemonCard.svelte:4 — components take narrow props (pokemon, showTypes, note) and render declaratively",
+        "app/src/routes/moves/[name]/+page.server.js:5 — loads depend only on the pokeapi module's narrow exports",
+        "app/src/lib/server/pokeapi.js:214-215 — Object.assign merges a conditional 'hidden' property into card objects",
+        "app/src/routes/abilities/[name]/+page.svelte:23 — page reads the implicitly-added pokemon.hidden, an untyped contract between load and page",
+        "app/src/routes/+page.svelte:8-16 — initial URL state read without validating type/generation, while syncFromUrl (:81-89) does validate; two paths for the same concern"
+      ],
+      "rationale": "Server/client separation is exemplary and components are loosely coupled, but data contracts between loads and pages are implicit (no JSDoc/types at all) and the hidden-ability flag travels by mutating card objects."
+    },
+    "abstraction_design": {
+      "score": 3,
+      "evidence": [
+        "app/src/lib/server/pokeapi.js:190-217 — cardsFromPokemonRefs/cardFromSpecies is a genuine seam: one function maps any pokemon-ref list to species cards for moves, abilities and types",
+        "app/src/lib/components/MoveTable.svelte:10-30 — MoveTable stretches to level/no-level tables via table.hasLevel without flag sprawl",
+        "app/src/lib/server/pokeapi.js:174-183 — getDexData re-builds the card shape inline instead of reusing cardFromSpecies, the duplication that hurts every card change",
+        "app/src/routes/+page.svelte:136-138, app/src/routes/moves/[name]/+page.svelte:48-50, app/src/routes/abilities/[name]/+page.svelte:21-23, app/src/routes/types/[name]/+page.svelte:37-39 — card-list markup (ul.card-grid + each + PokemonCard) duplicated four times with no shared CardList component",
+        "app/src/lib/components/TypeBadge.svelte:4 — link/tile boolean props are mild flag creep but contained"
+      ],
+      "rationale": "The data-layer abstractions are real and reusable, but the presentation layer stops one abstraction short: the card list and the 'detail page' pattern (heading + dl + effect section) are copy-pasted per route, so similar-but-different additions inherit duplication rather than reuse."
+    }
+  },
+  "overall": 4,
+  "findings": [
+    {
+      "severity": "medium",
+      "location": "app/src/lib/server/pokeapi.js:174-183",
+      "issue": "getDexData inlines the card shape (id/name/humanName/sprite) instead of reusing cardFromSpecies at :192, duplicating card construction",
+      "suggestion": "Build the home-page dex entries with cardFromSpecies (plus generation/types), so any card field change (e.g. sprite resolution) has one implementation"
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/lib/server/pokeapi.js:52-55",
+      "issue": "latestEnglishFlavorText is exported but unused; the same flavor filtering + whitespace-collapse logic is re-implemented in routes/pokemon/[name]/+page.server.js:51-56,156 and routes/moves/[name]/+page.server.js:26-28",
+      "suggestion": "Use the shared helper in both loads (or delete it and keep the rule in one place)"
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/routes/+page.svelte:136",
+      "issue": "The card-list pattern (ul.card-grid + keyed each + PokemonCard) is duplicated in four pages (also moves/[name]/+page.svelte:48, abilities/[name]/+page.svelte:21, types/[name]/+page.svelte:37)",
+      "suggestion": "Extract a PokemonCardList component taking a cards array plus optional props passthrough; every list-level change (sorting, badges, empty state) then lands once"
+    },
+    {
+      "severity": "low",
+      "location": "app/src/routes/pokemon/[name]/+page.server.js:25",
+      "issue": "isMissing is defined three times (also moves/[name]/+page.server.js:10 and MoveTable.svelte:31, where it additionally treats '' as missing)",
+      "suggestion": "Move one isMissing/format dash helper into lib/format.js and reuse it in loads and components"
+    },
+    {
+      "severity": "low",
+      "location": "app/src/lib/server/pokeapi.js:214-215",
+      "issue": "cardsFromPokemonRefs merges caller-provided 'extra' details into card objects via Object.assign, creating an implicit conditional 'hidden' field read at abilities/[name]/+page.svelte:23",
+      "suggestion": "Keep the extra data separate (return {card, note} tuples, or pass a note callback) so the card contract stays explicit"
+    },
+    {
+      "severity": "low",
+      "location": "app/src/routes/+page.svelte:8-16",
+      "issue": "Initial filter state is read from the URL without validating type/generation against data, unlike syncFromUrl at :81-89 which validates — two divergent paths for one concern",
+      "suggestion": "Initialise state by running the same validation/sync function on page.url"
+    },
+    {
+      "severity": "low",
+      "location": "app/src/lib/server/pokeapi.js:45",
+      "issue": "humanize is re-exported from the API module while components import it from '#lib/format.js' — dual import paths for the same helper, and src/lib/index.js exists only as an empty import-alias anchor",
+      "suggestion": "Import from '#lib/format.js' everywhere and drop the re-export"
+    },
+    {
+      "severity": "low",
+      "location": "app/src/routes/pokemon/[name]/+page.svelte:112",
+      "issue": "{#key data.selectedGame} remounts all MoveTable components to reset sort state on game change; #key is a blunt instrument for state reset",
+      "suggestion": "Reset sortKey/direction with a $derived or $effect.pre on game change, or key on table identity only where needed — acceptable as-is, but worth a comment"
+    }
+  ],
+  "summary": "This is a well-seamed SvelteKit app: one server-only data module, thin prop-driven components, current Svelte 5 idioms and a data-source change confined to a single file. The weaknesses are all of one kind — it stops one abstraction short, duplicating the card shape, the card-list markup and small helpers instead of reusing its own seams. That keeps most edits to one or two files, but card-related changes have to be made in parallel.",
+  "scenarios": [
+    {
+      "change": "Remove the Abilities pages and all links to them",
+      "files": [
+        "app/src/routes/abilities/[name]/+page.server.js",
+        "app/src/routes/abilities/[name]/+page.svelte",
+        "app/src/routes/pokemon/[name]/+page.svelte",
+        "app/src/routes/pokemon/[name]/+page.server.js",
+        "app/src/lib/server/pokeapi.js"
+      ],
+      "difficulty": 4,
+      "notes": "Delete the route directory, remove the Abilities section/markup and the abilities mapping in the Pokémon load, and optionally drop the dead getAbility export. All touchpoints are in the feature's own route plus its one referencing page; easy because the API layer is one-liner exports."
+    },
+    {
+      "change": "Fix sprite resolution for species whose default Pokémon differs (e.g. Deoxys)",
+      "files": ["app/src/lib/server/pokeapi.js"],
+      "difficulty": 3,
+      "notes": "Every list flows through pokeapi.js, so one file covers home, moves, abilities and types — but the fix must be applied in both getDexData (:181) and cardFromSpecies (:197) because the card shape is duplicated; resolving the default Pokémon would also need a shared species→default-pokemon lookup added once in getSpeciesIndex."
+    },
+    {
+      "change": "Add sorting by name to every list of Pokémon cards",
+      "files": ["app/src/lib/server/pokeapi.js", "app/src/routes/+page.svelte"],
+      "difficulty": 4,
+      "notes": "cardsFromPokemonRefs' single sort at pokeapi.js:217 covers the moves, abilities and types pages in one edit; the home page's order comes from getDexData's dex array, so it needs its own comparator in +page.svelte (or the dex build). Two small, obvious edits — no per-page duplication to hunt down because all card lists render via PokemonCard."
+    },
+    {
+      "change": "Add an Items section (/items, /items/:name) shaped like Moves",
+      "files": [
+        "app/src/routes/items/[name]/+page.server.js",
+        "app/src/routes/items/[name]/+page.svelte",
+        "app/src/lib/server/pokeapi.js"
+      ],
+      "difficulty": 3,
+      "notes": "Data helpers (getResource/englishName/cardsFromPokemonRefs), PokemonCard, TypeBadge and the global panel/detail-list/card-grid CSS all reuse cleanly; add getItem as a one-liner. But there is no shared 'resource detail page' component, so the dl + Effect section markup is copied from the Moves page (~half the new code), and isMissing gets a third copy."
+    },
+    {
+      "change": "Change the API base URL and caching rules",
+      "files": ["app/src/lib/server/pokeapi.js"],
+      "difficulty": 5,
+      "notes": "API_BASE (:3), getJson (:18-24), the memo cache (:7-14) and spriteUrl (:58) are the only places that know about the data source, and every page goes through them. Trivial and single-file."
+    }
+  ]
+}
+```

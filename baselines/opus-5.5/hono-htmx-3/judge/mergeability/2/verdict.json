@@ -1,0 +1,106 @@
+{
+  "dimension": "mergeability",
+  "criteria": {
+    "idiomatic": {
+      "score": 5,
+      "evidence": [
+        "app/src/views/layout.tsx:3-12 — jsxRenderer with module-augmented ContextRenderer, exactly the documented hono layout pattern",
+        "app/src/index.tsx:17-28 — HX-Request / HX-History-Restore-Request partial detection with matching Vary header; textbook htmx SSR integration",
+        "app/package.json:12-14 — hono 4.13.14 / @hono/node-server 2.1.5 pinned to the current stable releases",
+        "app/src/views/home.tsx:93-94 — hx-trigger 'input changed delay:200ms, search' debounce plus hx-include/hx-sync replace; idiomatic live-search htmx"
+      ],
+      "rationale": "Reads like hono's own docs plus a well-executed htmx layer: jsxRenderer, c.render, notFound/onError, serveStatic from the correct v2 subpath, and htmx conventions (HX-Push-Url, Vary, hx-sync) used the way they were designed."
+    },
+    "correctness_risks": {
+      "score": 4,
+      "evidence": [
+        "app/src/views/pokemon.tsx:159-161 — sort header buttons lack hx-sync; rapid clicks on different columns can race and last-resolved response wins",
+        "app/src/index.tsx:94-103 — onError returns the full layout for htmx requests, so an API error swaps a whole page into #results",
+        "app/src/api.ts:9-34 — unbounded module-level cache Map with no eviction; fine for this data set but undocumented growth",
+        "app/src/api.ts:48-50 — apiUrl treats a URL without '/api/v2/' as a relative path, silently building a wrong request URL"
+      ],
+      "rationale": "Careful work — 404s handled via null returns, missing values sort last, page clamped to totalPages, JSX escaping — but a few minor fragilities remain, chiefly the unsynchronized sort-button race and error responses not shaped for htmx targets."
+    },
+    "global_abstractions": {
+      "score": 4,
+      "evidence": [
+        "app/src/api.ts:1-66 — single-purpose cache/API client, the only global state, clearly commented",
+        "app/src/views/details.tsx:9,56,102 — each page colocates its loader with its view; no god data module",
+        "app/src/api.ts:35 — 'api<T = any>' and pervasive 'any' at the API boundary (data.ts:49, pokemon.tsx:77, details.tsx:107) leave the rest of the code untyped",
+        "app/src/views/pokemon.tsx:103 — MovesData type exported from a view and imported by index.tsx; slight view/route boundary blur"
+      ],
+      "rationale": "Layering is clean and one-directional (api → data → views) and the shared components file is minimal; the one thing that will need untangling is the untyped PokeAPI boundary, not the structure itself."
+    },
+    "readability": {
+      "score": 4,
+      "evidence": [
+        "app/src/api.ts:24-33 — refresh() with pending-promise dedup; comment explains the SWR intent",
+        "app/src/views/home.tsx:47-55 — homeUrl() documents the canonical-URL rule",
+        "app/src/views/pokemon.tsx:44-56 — sortRows is a dense multi-ternary comparator; the only genuinely hard-to-read spot",
+        "app/src/index.tsx:16 — 'htmx partial requests get fragments' comment explains the isPartial split up front"
+      ],
+      "rationale": "Consistent naming, small functions, why-comments where they matter; a teammate finds their way in minutes. Dense sort logic and pervasive 'any' casts keep it from exemplary."
+    },
+    "review_cost": {
+      "score": 4,
+      "evidence": [
+        "app/src/views/home.tsx:94,99,110 — redundant per-element hx-sync already covered by form-level hx-sync at home.tsx:82",
+        "app/src/api.ts:35 — generic API typing to request as the main non-trivial ask",
+        "app/src/index.tsx:25 — Vary set on '/' but no Cache-Control anywhere; a caching nit for the proxy assumption"
+      ],
+      "rationale": "Approve-with-nits territory: type the API boundary, drop redundant attributes, add Cache-Control, and the race on sort buttons — all small, none blocking."
+    }
+  },
+  "overall": 4,
+  "findings": [
+    {
+      "severity": "medium",
+      "location": "app/src/api.ts:35",
+      "issue": "API boundary is untyped ('api<T = any>'), and callers cast with 'any' throughout (data.ts:49, pokemon.tsx:77, details.tsx:107), so typos in field names fail only at runtime",
+      "suggestion": "Define minimal interfaces for the PokeAPI resources actually consumed (species, pokemon, move, ability, type, generation) and use them as the api<T> default at each call site"
+    },
+    {
+      "severity": "low",
+      "location": "app/src/views/pokemon.tsx:159",
+      "issue": "Move-table sort header buttons issue hx-get requests with no hx-sync, so clicks on two different columns can race and the last-resolved response wins",
+      "suggestion": "Add hx-sync=\"closest form:replace\" or a shared sync group on the table so only the newest sort request lands"
+    },
+    {
+      "severity": "low",
+      "location": "app/src/index.tsx:94",
+      "issue": "onError returns the full page layout regardless of htmx context, so an API failure during a partial request swaps a whole document into #results",
+      "suggestion": "Return a small error fragment when HX-Request is true (optionally with HX-Retarget), or set no-store on error responses"
+    },
+    {
+      "severity": "low",
+      "location": "app/src/api.ts:9",
+      "issue": "In-memory cache Map is unbounded and never evicts, only re-validates after 30s",
+      "suggestion": "Acceptable at this data size, but add a size cap or a comment documenting the expected growth ceiling so future maintainers know it's deliberate"
+    },
+    {
+      "severity": "low",
+      "location": "app/src/api.ts:48",
+      "issue": "apiUrl falls back to using the raw URL as an API path when it lacks '/api/v2/', silently constructing a wrong request",
+      "suggestion": "Throw or log on the -1 case; PokeAPI references always contain the prefix, so a fallback path only hides bugs"
+    },
+    {
+      "severity": "low",
+      "location": "app/src/views/home.tsx:94",
+      "issue": "hx-sync on the input and both selects is redundant with the form-level hx-sync at home.tsx:82",
+      "suggestion": "Keep one sync definition (the form's) to avoid two sources of truth for request cancellation"
+    },
+    {
+      "severity": "low",
+      "location": "app/src/index.tsx:25",
+      "issue": "Vary: HX-Request... is set only on '/', and no route sets Cache-Control; a reverse proxy in front has no caching contract for the fragment-serving endpoints",
+      "suggestion": "Set explicit Cache-Control (e.g. no-store for HTML, immutable for /static) consistently across routes"
+    },
+    {
+      "severity": "low",
+      "location": "app/src/index.tsx:40",
+      "issue": "/pokemon/:name/moves and /moves-table return bare fragments on direct navigation — fine as internal htmx endpoints but undocumented",
+      "suggestion": "Add a one-line comment marking these as htmx fragment endpoints, or gate them to HX-Request requests"
+    }
+  ],
+  "summary": "A well-layered, genuinely idiomatic Hono+htmx app on current stable versions, with correct htmx partial/history handling and a clean api→data→views structure. The main asks are typing the PokeAPI boundary, a couple of request-race and error-response edge cases the tests wouldn't catch, and small hygiene nits. I'd merge after one round of changes."
+}

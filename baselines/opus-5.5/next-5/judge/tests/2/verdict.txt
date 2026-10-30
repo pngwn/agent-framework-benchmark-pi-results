@@ -1,0 +1,146 @@
+I've read all the source. Confirmed: **zero tests in `app/`** — no test files, no test runner in `package.json` (`app/package.json:6-9` defines only `dev`/`build`/`start`), matching the measured `testLoc: 0`. All the behavioral guarantees the app currently enjoys come from the acceptance suite in `tests/`, which the agent didn't write and won't guard future refactors.
+
+Here's my review of the test dimension.
+
+```json
+{
+  "dimension": "tests",
+  "criteria": {
+    "coverage_of_risk": {
+      "score": 1,
+      "evidence": [
+        "app/package.json:6-9 — scripts are dev/build/start only; no test runner installed or configured",
+        "app/src/lib/api.ts:21-35 — TTL/prune cache logic (Map insertion-order eviction, expired-entry scan) has no tests",
+        "app/src/lib/cards.ts:15-28 — alternate-form exclusion, dedupe by species id, dex-number sort untested",
+        "app/src/app/HomeView.tsx:24-47 — readFilters/toQuery URL-state encoding and page clamping untested",
+        "app/src/app/pokemon/[name]/MovesSection.tsx:55-73 — three-way sort chain (missing-last, direction flip, localeCompare tie-break) untested"
+      ],
+      "rationale": "No tests exist at all, and the app's riskiest logic — filtering, pagination, URL state, sorting, and the request-time cache — is entirely unguarded. Even the pure helpers in lib/format.ts, which are trivially unit-testable, have no coverage."
+    },
+    "behaviour_not_implementation": {
+      "score": 1,
+      "evidence": ["app/ — zero test files (grep for vitest|jest|playwright|testing-library|.test.|.spec. returns only package-lock.json noise)"],
+      "rationale": "There are no tests, so nothing distinguishes behavioural from implementation-focused assertions."
+    },
+    "regression_power": {
+      "score": 1,
+      "evidence": [
+        "app/src/lib/format.ts:6-12 — humanize: dropping the filter(Boolean) or capitalization would silently change every list label and no test would fail",
+        "app/src/lib/format.ts:29-38 — latestEnglishFlavorText: switching .at(-1) to [0] or removing the \\s+ collapse would pass unchallenged",
+        "app/src/lib/cards.ts:23 — id > MAX_SPECIES_ID guard: removing it floods type/ability/move pages with Mega forms",
+        "app/src/app/pokemon/[name]/MovesSection.tsx:89-90 — sort-state lives in useState per table and resets via key={`${game}-${method}`}; any refactor breaks sorting silently"
+      ],
+      "rationale": "Every behavior in the app is protected only by the external acceptance suite; a refactor of the data layer or these helpers could break filtering, ordering, or missing-value display with nothing failing inside the repo."
+    },
+    "signal_to_noise": {
+      "score": 3,
+      "evidence": ["app/ — no test files, so no padding and no maintenance burden"],
+      "rationale": "Per the rubric, no tests scores 3: there is no noise, but also no signal."
+    }
+  },
+  "overall": 1,
+  "findings": [
+    {
+      "severity": "high",
+      "location": "app/package.json:6-9",
+      "issue": "No test infrastructure whatsoever: no test script, no runner (vitest/playwright) in devDependencies, no test files anywhere under app/src. Every behavior is guarded only by the acceptance suite in tests/, which the team does not own as a regression net.",
+      "suggestion": "Add a lightweight unit runner (vitest needs no browser) and a `test` script; start with the pure helpers, which need no server or DOM."
+    },
+    {
+      "severity": "high",
+      "location": "app/src/lib/cards.ts:15-28",
+      "issue": "cardsFor does the highest-stakes data transformation in the app — alternate-form exclusion (id > 10000), dedupe of a Pokémon that can appear twice in a list, species-name resolution, and dex-number ordering — with no tests.",
+      "suggestion": "Table-driven unit tests over fixture refs: Mega form excluded, duplicate id kept once, unsorted input comes out dex-ordered, unknown id skipped."
+    },
+    {
+      "severity": "high",
+      "location": "app/src/app/HomeView.tsx:24-47",
+      "issue": "URL filter state is the most fragile code in the repo: readFilters/toQuery (omit-empty/default params, page=1 reset on filter change), plus a 150 ms debounce coordinated through a lastWritten ref and a dependency-less effect. A refactor that adds a dependency array to the effect at line 66, or drops the page: 1 reset in the select handlers at lines 108/122, breaks live behavior with no failing test.",
+      "suggestion": "Extract toQuery/readFilters and test them as pure functions (round-trip defaults, q trimming, page omission at 1); add a component test that typing then changing a select lands on page 1 with the right query string."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/app/pokemon/[name]/MovesSection.tsx:55-73",
+      "issue": "The sortable-table contract is subtle and untested: missing values must sort last in BOTH directions (the missingA/missingB branch at line 66 is easy to invert), a second click must flip direction, aria-sort must move with the sorted header, and compareMethods must order level-up/machine/egg/tutor then alphabetical.",
+      "suggestion": "Unit-test compareValues/compareMethods and the sort comparator with nulls mixed into power/accuracy; assert missing-last holds for dir: 'descending' too."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/lib/format.ts:6-38",
+      "issue": "The humanize/dexNumber/orMissing/latestEnglishFlavorText helpers define user-visible output for every page (Mr Mime, #0025, —, \\n/\\f collapsing) and are pure and trivially testable, yet untested.",
+      "suggestion": "A 20-line unit test file covering humanize('mr-mime'), dexNumber(25), orMissing(null), and a flavor entry containing 'POKéMON\\fMONSTER' style whitespace."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/lib/api.ts:21-49",
+      "issue": "The runtime cache and URL re-rooting are untested and edge-heavy: prune() mixes expiry and insertion-order eviction; rejected promises are only evicted if still the current entry (line 53); 404 NotFoundError promises are negatively cached for the full 30 s TTL, so a resource that appears upstream can keep 404ing; the indexOf('/api/v2/') re-root silently corrupts paths that don't contain that prefix (slice(7) of an unrelated absolute URL).",
+      "suggestion": "Unit-test with a stubbed fetch: 404-then-success within TTL, cache hit avoiding a second fetch, and re-rooting of an absolute API URL. Consider not caching NotFoundError promises at all."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/app/pokemon/[name]/page.tsx:52-86",
+      "issue": "getMoves builds the Game/learn data and relies on groupRecords.sort by order plus games.at(-1) as the default selection (MovesSection.tsx:103); a stable-sort or ordering regression silently changes which game the tables open on.",
+      "suggestion": "A test that, given two version groups with orders 10 and 20, the select defaults to the order-20 group and ?game= overrides it."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/app/types/[name]/page.tsx:18-22",
+      "issue": "Route-name normalization (decodeURIComponent + toLowerCase, repeated in all four [name] pages) is copy-pasted and untested; double-encoded or cased URLs (/pokemon/Mr.%20Mime, /types/FIRE) depend on it for the 404-vs-found decision.",
+      "suggestion": "Extract one normalizeRouteName() helper into lib/format.ts and unit-test encode/decode round trips."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/app/page.tsx:19-44",
+      "issue": "The home index is assembled by cross-joining 18 type records and 9 generation records by pokemon-species id, including slot ordering and the id > MAX_SPECIES_ID filter; nothing pins that a species with a single type in slot 2 (or a species missing from every generation list) is handled by the ?? '' fallback at line 41.",
+      "suggestion": "Extract the index-building loop into a testable function and cover: empty type list for a species, slot-2-only type, alternate-form entry in type.data.pokemon."
+    }
+  ],
+  "summary": "The agent wrote no tests of its own — no runner, no test script, no test files — so the app's entire behavioral surface is guarded only by the acceptance suite it was handed. That is a real cost for a codebase someone will own for years: the riskiest logic (URL filter state with its debounced lastWritten-ref dance, the sortable moves tables, cardsFor's alternate-form filtering, and the TTL cache) is exactly the code a refactor would break silently. The pure helpers in lib/format.ts and lib/cards.ts are one afternoon of vitest away from solid coverage and would be the first thing I'd ask for in review.",
+  "wroteTests": false,
+  "testCount": 0,
+  "valuableTests": [],
+  "lowValueTests": [],
+  "untested": [
+    {
+      "area": "URL filter state on the home page (q/type/generation/page encoding, page reset on filter change, 150 ms debounce, page clamping to pageCount) — app/src/app/HomeView.tsx:24-47,66,101-140",
+      "risk": "high",
+      "likelyBug": "Changing a select while on page 5 no longer resets to page 1, or a dependency-array refactor of the debounce effect stops the URL from catching up with the search box, leaving the address bar stale on refresh/share."
+    },
+    {
+      "area": "cardsFor: alternate-form exclusion (id > 10000), duplicate dedupe, species-name resolution, dex ordering — app/src/lib/cards.ts:15-28",
+      "risk": "high",
+      "likelyBug": "Mega/form entries leak into type, ability and move 'Pokémon' lists and counts, or a sort change makes card lists jump around, breaking the 'ordered by dex number' guarantee on four pages."
+    },
+    {
+      "area": "Moves tables: column sorting with nulls last in both directions, direction flip on second click, aria-sort placement, method order (level-up/machine/egg/tutor then alphabetical), level-up secondary sort — app/src/app/pokemon/[name]/MovesSection.tsx:55-73,124-131",
+      "risk": "high",
+      "likelyBug": "Missing power/accuracy sorts first in descending order (the missingA/missingB branch inverted), or aria-sort stays on a previously sorted header, failing the accessible-sorting contract on every Pokémon page."
+    },
+    {
+      "area": "Pure formatting helpers: humanize, dexNumber padStart(4), orMissing/em dash, latestEnglishFlavorText whitespace collapse — app/src/lib/format.ts:6-38",
+      "risk": "medium",
+      "likelyBug": "The latest flavor text becomes the earliest (index 0 vs .at(-1)), or a non-collapsed \\f leaks into every Pokémon description; both render fine but are spec violations no one would notice by eye."
+    },
+    {
+      "area": "Runtime cache: 30 s TTL, insertion-order prune, rejected-promise eviction, 30 s negative caching of 404s, absolute-URL re-rooting — app/src/lib/api.ts:21-49",
+      "risk": "medium",
+      "likelyBug": "A resource added upstream keeps returning Not found for up to 30 s after it exists (exactly the live-data-overlay scenario), or prune() drops live entries and the app re-fetches dozens of records per request."
+    },
+    {
+      "area": "Default game selection on the Pokémon page: version-group sort by order and games.at(-1) fallback, ?game= override — app/src/app/pokemon/[name]/page.tsx:76-86 and MovesSection.tsx:100-103",
+      "risk": "medium",
+      "likelyBug": "The moves tables open on the wrong game (e.g. red-blue instead of scarlet-violet) after an unstable sort, or an unknown ?game value silently changes the selection instead of falling back to the default."
+    },
+    {
+      "area": "Not-found paths and route-name normalization (decodeURIComponent + toLowerCase duplicated across four [name] pages, apiOrNull + notFound) — app/src/app/moves/[name]/page.tsx:12-16 and siblings",
+      "risk": "medium",
+      "likelyBug": "A URL like /pokemon/Flab%C3%A9b%C3%A9 or /types/FIRE renders Not found for a real resource, or an API 500 (non-404 error) crashes the page instead of rendering not-found."
+    },
+    {
+      "area": "Home index assembly: cross-join of type.pokemon and generation.pokemon_species by species id, slot ordering, generationById fallback — app/src/app/page.tsx:19-44",
+      "risk": "low",
+      "likelyBug": "A species absent from its generation's list gets the '' fallback and disappears from every generation filter, or slot sort is dropped and dual types render in reverse order on cards."
+    }
+  ]
+}
+```

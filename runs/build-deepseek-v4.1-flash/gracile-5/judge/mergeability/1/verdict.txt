@@ -1,0 +1,142 @@
+I've reviewed the app end to end (routes, data layer, client script, build config, server) and cross-checked it against Gracile's current stable release (0.11.0, published April 2026 — the version pinned in `app/package.json:7`) and the official starter templates and annotated examples on gracile.js.org.
+
+**What holds up well.** `app/server.mjs:7-12` is a near-verbatim match for the official "Minimal server (Hono)" starter (`gracile.getClientBuildPath` + `gracile.honoAdapter`); the `defineRoute` handler/document/template split with `responseInit.status = 404` and `context.props.GET` matches the docs' annotated examples exactly (`app/src/routes/pokemon/[name].ts:14-19`); file-based routes (`[name].ts`, `index.ts`, `(home).ts`) and the ambient `route-template-outlet` document are all textbook Gracile. The vanilla-MPA-with-global-client-script approach (`app/src/document.client.ts:1`, `app/src/client/interactions.ts`) is supported by the framework ("document.client.ts" is in the official starter) even though per-route `.client.ts` islands would be the more idiomatic cut. Lit is declared but never imported anywhere — dead weight on a "Gracile with Lit" project.
+
+**Real bugs the tests wouldn't catch.**
+- `app/src/lib/api.ts:24` throws with `` `HTTP ${res.status} ${res.statusText}` `` — `res` doesn't exist, so every non-OK response raises a `ReferenceError` instead of the intended error; the `ApiError` class at `app/src/lib/api.ts:8-12` is dead code.
+- `app/src/lib/api.ts:19-27` caches the *promise*, so a rejected fetch (transient API hiccup) is cached forever — that URL fails for the life of the process, with no eviction.
+- No timeout/abort on `fetch` (`app/src/lib/api.ts:23`): a hung API hangs the SSR response indefinitely.
+- The home handler uses the throwing `api()` for its three base lists (`app/src/lib/data.ts:19,41,49`; `app/src/routes/(home).ts:45-47`), so an API outage produces an unhandled rejection → raw 500, with no error page anywhere (only `404.ts` exists).
+- `app/src/routes/(home).ts:63-65` re-implements the URL-ID regex inline instead of the existing `idFromUrl`/`isSpeciesId` helpers (`app/src/lib/api.ts:38-47`) — same file, two sources of truth.
+- The "Not found" template is copy-pasted into five route files while the `notFound()` helper at `app/src/lib/components.ts:44-49` sits unused; `getAbility` at `app/src/lib/data.ts:139` is also dead.
+- `app/src/lib/data.ts:261`: `Number(detail?.order ?? idFromUrl(ref.url) ?? 0)` yields `NaN` when both are missing (a rejected version-group fetch), silently corrupting the game order.
+
+All of these are one small round of review changes, not structural rework — the layering (`api` → `format` → `data` → `components` → routes) is coherent and each file is easy to navigate, though `lib/data.ts` is a 355-line god module every route depends on, `any` is used pervasively, and there are zero comments explaining magic numbers (255, 1530, 10000, concurrency limits 8/20/40).
+
+```json
+{
+  "dimension": "mergeability",
+  "criteria": {
+    "idiomatic": {
+      "score": 4,
+      "evidence": [
+        "app/server.mjs:7-12 — hono server matches the official 'Minimal server (Hono)' starter verbatim (honoAdapter + getClientBuildPath)",
+        "app/src/routes/pokemon/[name].ts:13-19 — defineRoute with handler/document/template and responseInit.status mirrors the docs' annotated example",
+        "app/src/document.ts:22 — ambient route-template-outlet document, exactly the documented pattern",
+        "app/src/routes/types/index.ts:1-2 — file-based routing conventions ([name].ts, index.ts, (home).ts) as documented",
+        "app/src/routes/(home).ts:110 — lit-style ?selected attribute binding in server-html templates, idiomatic",
+        "app/package.json:10 — 'lit' declared but never imported; client interactivity is one global vanilla script (app/src/client/interactions.ts) instead of per-route .client.ts islands",
+        "app/src/document.ts:14-15 — new URL(..., import.meta.url).pathname for asset hrefs diverges from the docs' static path reference; relies on the build pipeline to rewrite"
+      ],
+      "rationale": "Recognisably the framework's own idiom: routing, document, server adapter and templates all match the current 0.11.0 docs and starters. Minor deviations: unused Lit dependency and a global vanilla client script where per-route islands are the recommended cut."
+    },
+    "correctness_risks": {
+      "score": 3,
+      "evidence": [
+        "app/src/lib/api.ts:24 — throws `HTTP ${res.status}...` with `res` undefined: every non-OK response raises ReferenceError instead of the intended error; ApiError at api.ts:8-12 is dead",
+        "app/src/lib/api.ts:19-27 — rejected promises are cached permanently: one transient API failure poisons that URL for the process lifetime",
+        "app/src/lib/api.ts:23 — fetch has no timeout/AbortController; a hung API hangs SSR forever",
+        "app/src/routes/(home).ts:45-47 + app/src/lib/data.ts:19,41,49 — base lists use throwing api(); API outage = unhandled rejection and a raw 500 (no error route exists)",
+        "app/src/lib/data.ts:261 — Number(detail?.order ?? idFromUrl(ref.url) ?? 0) yields NaN when the version-group fetch failed, corrupting sort order",
+        "app/src/routes/(home).ts:63-65 — invalid ?type=bogus yields 0 matches while the select falls back to 'All types', so URL state and control state disagree"
+      ],
+      "rationale": "A handful of genuine, untested fragilities — most notably a broken error path (undefined `res`), negative caching of failures, and no error boundary around the data layer — but none are user-visible under normal operation and the 404 handling itself is sound."
+    },
+    "global_abstractions": {
+      "score": 3,
+      "evidence": [
+        "app/src/lib/data.ts:1-355 — god data module: every route's view-model, the move-table builder and the evolution tree all live here",
+        "app/src/lib/api.ts:19 — hidden module-level promise cache (permitted by spec, but invisible to callers)",
+        "app/src/routes/(home).ts:63-65 — duplicates idFromUrl/isSpeciesId from app/src/lib/api.ts:38-47 inline in a route file",
+        "app/src/lib/components.ts:44-49 — notFound() helper dead while the same markup is pasted into five route templates"
+      ],
+      "rationale": "The api/format/data/components layering has clear boundaries, but lib/data.ts is a 355-line module every page depends on, and there are two or three duplicated or dead helpers that will need untangling as the app grows."
+    },
+    "readability": {
+      "score": 3,
+      "evidence": [
+        "app/src/lib/format.ts:1-40 — small, well-named pure helpers, easy to follow",
+        "app/src/lib/data.ts — pervasive `any` (e.g. getPokemonPageData returns untyped pokemon/species passthrough) weakens navigability",
+        "app/src/lib/components.ts:129,138 — magic numbers 255/1530 and app/src/lib/api.ts:44 id<10000 with zero comments anywhere in the codebase",
+        "app/src/routes/moves/[name].ts:16 — route wraps getAbilityPage in .catch(() => null) while other routes use tryApi; inconsistent error idiom across files"
+      ],
+      "rationale": "Consistent naming and small functions make the code easy to follow, but pervasive `any`, duplicated not-found markup, dead exports and zero explanatory comments leave several rough spots."
+    },
+    "review_cost": {
+      "score": 3,
+      "evidence": [
+        "app/src/lib/api.ts:24 — must fix the `res` ReferenceError (and either use or delete ApiError at api.ts:8-12)",
+        "app/src/lib/api.ts:19-27 — cache must evict rejections before merge",
+        "app/src/lib/data.ts:139 + app/src/lib/components.ts:44 — dead exports to delete; not-found markup to dedupe",
+        "app/src/routes/(home).ts:63-65 — inline ID regex to replace with idFromUrl/isSpeciesId",
+        "app/src/routes/(home).ts:45-47 — needs an error path for API outage"
+      ],
+      "rationale": "Approvable after one small round: every issue is localised (mostly in api.ts and small route nits), none require architectural rework, but several are must-fix rather than nits."
+    }
+  },
+  "overall": 3,
+  "findings": [
+    {
+      "severity": "medium",
+      "location": "app/src/lib/api.ts:24",
+      "issue": "Error path references undefined `res` (`HTTP ${res.status}`), throwing a ReferenceError instead of the intended message; the ApiError class at app/src/lib/api.ts:8 is never used",
+      "suggestion": "Throw `new ApiError(response.status, url)` and use ApiError in tryApi to distinguish 404s from transient failures"
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/lib/api.ts:19-27",
+      "issue": "Rejected promises are cached forever, so a single transient API failure permanently poisons that URL until process restart",
+      "suggestion": "On failure, delete the cache entry (`cache.delete(url)` in a .catch) so the next request retries"
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/routes/(home).ts:45-47",
+      "issue": "Home page's base lists use the throwing api() (data.ts:19,41,49) with no error handling; an API outage becomes an unhandled rejection and a raw 500 (no error route exists)",
+      "suggestion": "Wrap the handler in a try/catch that renders the 404/error template, or add an app-wide error route"
+    },
+    {
+      "severity": "low",
+      "location": "app/src/lib/api.ts:23",
+      "issue": "fetch has no timeout or AbortSignal, so a hung upstream hangs the SSR response indefinitely",
+      "suggestion": "Add AbortSignal.timeout(5000) to the fetch call"
+    },
+    {
+      "severity": "low",
+      "location": "app/src/routes/(home).ts:63-65",
+      "issue": "Inline re-implementation of the URL-ID regex duplicates idFromUrl/isSpeciesId from app/src/lib/api.ts:38-47",
+      "suggestion": "Use idFromUrl + isSpeciesId from lib/api.js"
+    },
+    {
+      "severity": "low",
+      "location": "app/src/lib/components.ts:44-49",
+      "issue": "notFound() helper is dead while identical 'Not found' markup is copy-pasted into five route templates (e.g. app/src/routes/moves/[name].ts:28-34)",
+      "suggestion": "Use the shared notFound() helper in all routes (including 404.ts)"
+    },
+    {
+      "severity": "low",
+      "location": "app/src/lib/data.ts:261",
+      "issue": "`Number(detail?.order ?? idFromUrl(ref.url) ?? 0)` produces NaN when the version-group detail fetch failed, corrupting the game-select sort order",
+      "suggestion": "Coerce with `?? 0` after idFromUrl, e.g. `Number(detail?.order ?? (Number.isFinite(idFromUrl(ref.url)) ? idFromUrl(ref.url) : 0))`"
+    },
+    {
+      "severity": "low",
+      "location": "app/package.json:10",
+      "issue": "lit is declared as a dependency but never imported; all client interactivity is one global vanilla script (app/src/client/interactions.ts) instead of Gracile's per-route .client.ts islands",
+      "suggestion": "Either drop lit from dependencies, or split interactions.ts into (home).client.ts and pokemon/[name].client.ts islands"
+    },
+    {
+      "severity": "low",
+      "location": "app/src/routes/(home).ts:110",
+      "issue": "With an unknown ?type= value the list shows 0 matches while the select falls back to 'All types', so URL state and control state disagree",
+      "suggestion": "Reset the select to a valid state or 404 the request when the filter value is unknown"
+    },
+    {
+      "severity": "low",
+      "location": "app/src/lib/data.ts:139",
+      "issue": "getAbility is exported but never called (the ability route uses getAbilityPage), and `any` is used pervasively for API payloads and view models",
+      "suggestion": "Delete the dead export and type the view models returned by the data functions"
+    }
+  ],
+  "summary": "A solid, spec-faithful Gracile 0.11 MPA whose routing, document and server wiring read like the framework's own starters. The data layer carries the real review burden: a broken error path (undefined `res`), permanent negative caching of failed fetches, no error boundary on the home page, and a few dead/duplicated helpers. All fixable in one small round, so it's a conditional merge at 3."
+}
+```

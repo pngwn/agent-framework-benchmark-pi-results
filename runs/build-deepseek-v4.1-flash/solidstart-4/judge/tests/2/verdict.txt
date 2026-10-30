@@ -1,0 +1,163 @@
+I've reviewed the spec, all of `app/`'s source (14 files, read in full for the risky paths), and the acceptance suite in `tests/`. Verifying the facts: `app/package.json` has no `test` script and an empty `devDependencies` block; a grep for test/vitest/jest/playwright across `app/src` returns nothing (only README boilerplate and lockfile transitive entries). The app contains **zero tests of its own**.
+
+What that means concretely, given where the logic lives:
+
+- `app/src/lib/format.ts` is a file of pure, spec-mandated helpers (`humanize`, `dexNumber` zero-padding, `formatMeasurement`'s `/10` scaling, `latestEnglishFlavor`'s "last en entry", `collapseWhitespace`, `statLabel`'s `Sp. Atk` mapping) — the cheapest, highest-value unit targets imaginable, all untested.
+- `app/src/lib/queries.ts:413-567` builds the move tables server-side: method priority map, level-up min-level dedup, default sort (level then move name), method columns, `selectedGame` fallback to highest `order`. A refactor here is only guarded by the acceptance suite's happy-path rendered-text checks.
+- `app/src/components/MoveTable.tsx:14-30` — client-side sorting with missing-values-last in both directions and `aria-sort`, held in component state and deliberately not URL-persisted, so only a test would catch a sort regression across all columns/directions.
+- `app/src/routes/index.tsx:96-110` — pagination clamping, default-param omission, and the debounce/back-forward sync effect (`:59-70`) are untested edge cases (`?page=999`, back button mid-debounce).
+- Error paths: `fetchJson` (`app/src/lib/queries.ts:149-171`) throws on non-404 with no error boundary anywhere, and 404s are cached as `null` forever in the module-level `jsonCache` — behavior that only integration testing could pin down.
+
+Since the acceptance tests live outside `app/` and are quite thorough end-to-end (home filters, sort clicks, live-data overlay, not-found), the app currently passes — but nothing in `app/` would fail if someone broke `humanize` or the move-table ordering tomorrow.
+
+```json
+{
+  "dimension": "tests",
+  "criteria": {
+    "coverage_of_risk": {
+      "score": 1,
+      "evidence": [
+        "app/package.json:6-14 — no test script, no test runner, empty devDependencies",
+        "app/src/lib/format.ts:4-9 — humanize/dexNumber and other spec-exact formatters with zero tests",
+        "app/src/lib/queries.ts:519-545 — move-table method ordering, level-up dedupe and default sort untested",
+        "app/src/components/MoveTable.tsx:14-30 — client sort with missing-last and aria-sort, untested and not URL-persisted"
+      ],
+      "rationale": "No tests exist anywhere in app/, so none of the risky data-transformation, URL-state or sorting logic is covered by the app itself; the external acceptance suite is the only guard."
+    },
+    "behaviour_not_implementation": {
+      "score": 1,
+      "evidence": [
+        "app/src/lib/format.ts:1-55 — would have been ideal for behaviour-level unit tests (input → output), but has none",
+        "app/src/routes/index.tsx:84-110 — filter/pagination behaviour never asserted"
+      ],
+      "rationale": "There are no tests at all, so nothing asserts behaviour and nothing asserts implementation details either."
+    },
+    "regression_power": {
+      "score": 1,
+      "evidence": [
+        "app/src/lib/queries.ts:231-296 — type-slot ordering and alternate-form (id > 10000) exclusion would silently regress with no failing test",
+        "app/src/lib/format.ts:28-33 — latestEnglishFlavor 'last en entry' semantics could be broken with no failure in app/",
+        "app/src/lib/queries.ts:149-171 — non-404 fetch errors throw with no error boundary or test to expose it"
+      ],
+      "rationale": "With zero tests, any regression — even in pure functions with exact output contracts like #0025 or 0.4 m — passes the app's own (empty) suite."
+    },
+    "signal_to_noise": {
+      "score": 3,
+      "evidence": [
+        "app/src — no test files, no runner, no low-value tests either"
+      ],
+      "rationale": "No tests means no noise, but also no signal; per the anchor this scores 3."
+    }
+  },
+  "overall": 1,
+  "findings": [
+    {
+      "severity": "high",
+      "location": "app/package.json:6-14",
+      "issue": "The app ships with zero tests: no test script, no runner (vitest/@solidjs/testing-library), no devDependencies.",
+      "suggestion": "Add vitest plus @solidjs/testing-library; start with unit tests for lib/format.ts and lib/queries.ts's pure transformation logic, which need no network."
+    },
+    {
+      "severity": "high",
+      "location": "app/src/lib/format.ts:1-55",
+      "issue": "Pure spec-mandated helpers (humanize, dexNumber padding, formatMeasurement /10 scaling, latestEnglishFlavor, collapseWhitespace, statLabel) are completely untested despite encoding exact output contracts (#0025, 0.4 m, Sp. Atk, em dash).",
+      "suggestion": "Table-driven unit tests per function against spec examples (mr-mime → Mr Mime, 25 → #0025, 4 → 0.4 m, last-en flavor entry)."
+    },
+    {
+      "severity": "high",
+      "location": "app/src/lib/queries.ts:413-545",
+      "issue": "Move-table assembly (method priority map, level-up min-level dedupe, default sort level-then-name, Level column only for level-up, selectedGame fallback to highest order) is the most intricate logic in the app and untested.",
+      "suggestion": "Extract it as a pure function of API fixtures and unit-test method order, tie-breaking, missing-power handling and game fallback."
+    },
+    {
+      "severity": "high",
+      "location": "app/src/components/MoveTable.tsx:14-42",
+      "issue": "Client-side column sorting (missing-last in both directions, numeric vs string compare, aria-sort toggling) lives only in component state, not the URL, so a refactor of sortRows breaks sorting with nothing in app/ to catch it.",
+      "suggestion": "Unit-test sortRows directly (it's exported-able pure logic) for each column, both directions, and missing values; assert aria-sort via a component test."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/routes/index.tsx:84-110",
+      "issue": "URL filter state is untested at its edges: page clamping (?page=999), omitting default params, filter→page-1 reset, and the debounce/back-forward sync effect (lines 59-70) which has a race window while a debounce is pending.",
+      "suggestion": "Component tests with useSearchParams stubbed: assert URL shape after each interaction and back/forward navigation mid-debounce."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/lib/queries.ts:231-296",
+      "issue": "buildTypes' slot ordering, duplicate-entry dedupe and the id > 10000 alternate-form exclusion are untested; a subtle refactor could re-order dual-type cards or leak Mega forms into lists.",
+      "suggestion": "Unit-test with a small fixture type payload containing a dual-type species and an id > 10000 form."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/lib/queries.ts:149-171",
+      "issue": "fetchJson throws on non-404 errors with no error boundary anywhere, and 404s are cached as null forever in the module-level jsonCache (line 152) — never revalidated, which conflicts with 'treat the API as live'.",
+      "suggestion": "Add an integration test for a 500/timeout response and document or bound the 404/error caching policy."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/lib/queries.ts:439-452",
+      "issue": "The ability hidden-flag merge mutates an existing map entry in place; a Pokémon having the ability both normally and hidden sets hidden=true — subtle behaviour no test pins down.",
+      "suggestion": "Unit-test getAbilityPageData's pokemon assembly with a fixture containing both normal and hidden entries for the same species."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/routes/index.tsx:133-150",
+      "issue": "Selects set both the value attribute and per-option selected attributes — two redundant mechanisms whose interaction with late-rendered options is untested.",
+      "suggestion": "Component test asserting the correct option is selected when loading /?type=fire&generation=generation-i directly."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/lib/queries.ts:473-480",
+      "issue": "Recursive evolution-chain mapping and the nested-list renderer (app/src/routes/pokemon/[name].tsx:18-30) are untested for deep or branching chains beyond Eevee.",
+      "suggestion": "Unit-test evolutionNode against a three-level branching fixture."
+    }
+  ],
+  "summary": "The app contains no tests of its own — no runner, no script, no test files — so all quality guarding is delegated to the external acceptance suite. The riskiest logic (spec-exact formatters, move-table assembly, client-side sorting, URL filter state, caching/error paths) is exactly the kind that pure unit tests would cover cheaply, especially lib/format.ts. Acceptance tests pass today, but any refactor of the data layer would land unverified.",
+  "wroteTests": false,
+  "testCount": 0,
+  "valuableTests": [],
+  "lowValueTests": [],
+  "untested": [
+    {
+      "area": "Spec-exact formatting helpers (app/src/lib/format.ts: humanize, dexNumber, formatMeasurement, latestEnglishFlavor, collapseWhitespace, statLabel)",
+      "risk": "high",
+      "likelyBug": "Off-by-one on 'last English flavor entry', wrong zero-padding (#25 vs #0025), or a scaling error in height/weight (data is decimetres/hectograms) — every page's headings and measurements render wrong."
+    },
+    {
+      "area": "Move-table assembly in getPokemonPageData (app/src/lib/queries.ts:413-545): method priority, level-up min-level dedupe, default sort, selectedGame fallback",
+      "risk": "high",
+      "likelyBug": "Tables appear in wrong method order, level-up rows unsorted or duplicated, or the wrong default game selected — acceptance tests check one Pokémon's happy path, so edge cases (missing level, unknown method) slip through."
+    },
+    {
+      "area": "MoveTable client-side sorting (app/src/components/MoveTable.tsx:14-30): missing-last in both directions, numeric vs string, aria-sort state",
+      "risk": "high",
+      "likelyBug": "A sortRows refactor makes missing Power sort first in one direction, compares numbers as strings, or stops updating aria-sort — silently breaks the only interactive widget on the page."
+    },
+    {
+      "area": "Home URL state (app/src/routes/index.tsx:84-110, 59-70): page clamping, default-param omission, debounce/back-forward sync",
+      "risk": "medium",
+      "likelyBug": "?page=999 renders an empty list instead of clamping, back navigation mid-debounce desyncs the input from the URL, or filter changes fail to reset to page 1."
+    },
+    {
+      "area": "Type/generation index building (app/src/lib/queries.ts:204-296): slot ordering, id > 10000 exclusion, species→generation mapping",
+      "risk": "medium",
+      "likelyBug": "Dual-type cards show types out of slot order, Mega/alternate forms leak into lists, or species missing from a generation record get filtered out entirely instead of shown under All generations."
+    },
+    {
+      "area": "Fetch layer (app/src/lib/queries.ts:149-171): non-404 error handling, 404-null caching, module-level cache invalidation",
+      "risk": "medium",
+      "likelyBug": "A 500 from the API produces an unhandled server error page instead of a graceful failure, and 404s cached forever make a resource that appears later (live-data overlay) stay 'Not found' until restart."
+    },
+    {
+      "area": "Ability hidden-flag merge (app/src/lib/queries.ts:439-452) and Pokémon-card 'Hidden ability' labelling",
+      "risk": "low",
+      "likelyBug": "A species with the ability both normally and hidden either loses the hidden marker or gains it on all its cards."
+    },
+    {
+      "area": "Evolution chain recursion and nested-list rendering (app/src/lib/queries.ts:473-480, app/src/routes/pokemon/[name].tsx:18-30)",
+      "risk": "low",
+      "likelyBug": "Deep or branch-heavy chains render flat or drop branches after a refactor; self-referencing data causes infinite recursion."
+    }
+  ]
+}
+```

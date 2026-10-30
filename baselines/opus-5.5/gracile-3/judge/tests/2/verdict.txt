@@ -1,0 +1,125 @@
+I've reviewed the app against the spec and the Gracile 0.11.0 stable release (verified via npm and gracile.js.org — the ecosystem even ships a "minimal setup with various test suites" starter, so testing a Gracile app is expected and cheap). The measured facts are confirmed by inspection: `app/` contains **zero test files** — `package.json` defines only `dev`, `check` (tsc), `build`, and `start`, and there is no test runner, no `test` script, and no spec files anywhere under `app/` (`app/package.json:6-11`; grep for `vitest|jest|playwright|spec` matches nothing relevant).
+
+The regrettable part is that the codebase is unusually *testable*: `app/src/lib/browse.ts` and `app/src/lib/format.ts` are pure, isomorphic functions explicitly factored out for reuse between server and client, and `app/src/lib/data.ts` is a set of loaders whose inputs (API JSON) could be fed from fixtures. None of it is exercised. Once the acceptance suite in `tests/` stops being the only guard, every one of the following is exposed.
+
+```json
+{
+  "dimension": "tests",
+  "criteria": {
+    "coverage_of_risk": {
+      "score": 1,
+      "evidence": [
+        "app/src/lib/browse.ts:42 — browse(): search substring, type/generation filters and 48-per-page slicing — the single riskiest function in the app — completely untested",
+        "app/src/lib/data.ts:181 — moveRows(): dedup key, method ordering (METHOD_ORDER at data.ts:225) and level-then-name sort have no coverage",
+        "app/src/routes/pokemon/[name].client.ts:6 — sortTable(): aria-sort flipping, numeric vs collator compare and missing-values-last logic tested only by the acceptance suite",
+        "app/src/routes/(home).client.ts:62 — debounce/race-ticket/history logic untested",
+        "app/src/lib/api.ts:37 — request-time cache (TTL, eviction on failure, size cap) and the withSlot semaphore untested"
+      ],
+      "rationale": "No tests exist in app/, so none of the risky logic — filtering, pagination, URL state, sorting, alternate-form exclusion, error/404 paths — is covered by the app's own suite."
+    },
+    "behaviour_not_implementation": {
+      "score": 1,
+      "evidence": [
+        "app/package.json:6 — no test script, runner, or spec file anywhere in app/ (confirmed by find/grep)"
+      ],
+      "rationale": "No tests at all, so the criterion can't be met; the rubric assigns 1 when there are no tests asserting behaviour."
+    },
+    "regression_power": {
+      "score": 1,
+      "evidence": [
+        "app/src/lib/browse.ts:60 — page clamping Math.min(Math.max(1, state.page), Math.max(1, pageCount)) and edge cases (page=0, page=999, empty results) would silently regress with no failing test",
+        "app/src/lib/format.ts:34 — latestFlavorText 'last English entry' and collapseWhitespace are one-line regressions-in-waiting with no unit test",
+        "app/src/lib/data.ts:265 — version-group ordering and default-to-highest-order selection (versionGroups.at(-1)) unguarded"
+      ],
+      "rationale": "With zero app-owned tests, breaking any behaviour — even in the pure, trivially testable modules — fails nothing the team owns; only the external acceptance suite would notice, and only for cases it happens to cover."
+    },
+    "signal_to_noise": {
+      "score": 3,
+      "evidence": [
+        "app/ — no test files exist, so there is no noise; per the rubric, 'no tests' scores 3"
+      ],
+      "rationale": "Vacuously lean: nothing to maintain, but nothing to gain either."
+    }
+  },
+  "overall": 1,
+  "findings": [
+    {
+      "severity": "high",
+      "location": "app/package.json:6",
+      "issue": "The app ships no test suite at all — no runner, no test script, no spec files — despite the framework's own starters including test-suite setups and the code being factored into pure, testable modules.",
+      "suggestion": "Add vitest (works out of the box with the existing vite.config.ts) and a test script covering app/src/lib/browse.ts, app/src/lib/format.ts and the transform helpers in data.ts with fixture JSON."
+    },
+    {
+      "severity": "high",
+      "location": "app/src/lib/browse.ts:42",
+      "issue": "browse() — case-insensitive substring on humanized labels, type-in-either-slot, generation match, 48/page slicing and page clamping — is the core risk surface and untested; a refactor of SpeciesIndex (e.g. changing the `types` array shape) would break filtering silently.",
+      "suggestion": "Unit tests over a small synthetic SpeciesIndex covering each filter, combined filters, empty results (pageCount 0), and out-of-range page clamping."
+    },
+    {
+      "severity": "high",
+      "location": "app/src/lib/data.ts:181",
+      "issue": "moveRows() encodes subtle rules: dedup key `${method}|${name}|${level}` (level only for level-up — a Pokémon learning a move twice as 'machine' in different ways would wrongly dedupe), METHOD_ORDER ranking with alphabetical tie-break, and level-then-name sort. Nothing pins any of it.",
+      "suggestion": "Feed a fixture PokemonRecord/MoveRecord set through moveRows and assert table order, dedup behaviour and level nullability."
+    },
+    {
+      "severity": "high",
+      "location": "app/src/routes/pokemon/[name].client.ts:6",
+      "issue": "Client-side table sorting (missing values last in both directions, aria-sort flip, numeric vs collator compare, stable position tie-break) is DOM-only logic with zero coverage; the acceptance tests may not click every column in both directions.",
+      "suggestion": "A jsdom/Playwright component test that clicks each header twice and asserts row order and aria-sort; at minimum, extract the comparison into a pure function and unit-test it."
+    },
+    {
+      "severity": "high",
+      "location": "app/src/routes/(home).client.ts:62",
+      "issue": "Live filtering has race-prone logic (ticket-based latest guard at line 42, 150 ms debounce, push vs replace history choice, fallback to location.assign on index fetch failure) that is exactly where regressions hide.",
+      "suggestion": "Playwright test: type quickly and assert only the final state renders and the URL ends up correct; failing /api/species-index falls back to a full navigation."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/lib/browse.ts:25",
+      "issue": "URL state round-trip (stateFromParams/stateToSearch) has edge cases: parseInt accepts '?page=3x' as 3, negative/zero pages fall back to 1, and defaults must be omitted. Untested.",
+      "suggestion": "Property-style unit tests: stateToSearch(stateFromParams(s)) normalises as specified for q/type/generation/page."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/lib/data.ts:156",
+      "issue": "getSpeciesIndex() joins three API lists (species, 18 filtered types, generations) into the index entries; slot-order type assembly and generation assignment are unguarded — a mis-join would produce wrong cards for every list page.",
+      "suggestion": "Test with fixture JSON containing an alternate form, a dual-type Pokémon and a species with no generation entry, asserting entries, ordering and exclusion of ids > 10000."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/lib/data.ts:135",
+      "issue": "cardsFor() — the alternate-form filter (id <= 10000, which also handles NaN URLs), dedup by species id, and the 'Hidden ability' note — is shared by move/ability/type pages and untested.",
+      "suggestion": "Unit test with refs including an id above 10000, a duplicate, and a hidden-ability note."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/lib/api.ts:37",
+      "issue": "The runtime cache (60 s TTL, eviction of failed promises, >5000-entry sweep, 24-slot semaphore) is untested; a TTL or eviction regression could serve stale data across the live-data-overlay scenario the spec explicitly warns about.",
+      "suggestion": "Unit tests with a fake fetch asserting cache hits within TTL, re-fetch after expiry, and no caching of rejected promises."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/lib/api.ts:83",
+      "issue": "Not-found handling depends on getByName's slug regex and 404→null mapping in load(); a bad name must render the Not found page, not a 500. Untested.",
+      "suggestion": "Tests for getByName with '', 'MISSINGNO', '../etc', and a name the API 404s, asserting null and thus the 404 route's rendering path."
+    }
+  ],
+  "summary": "The agent wrote no tests of its own; the only guard is the external acceptance suite, which the rubric does not credit. The code is unusually well-factored for testing (pure, isomorphic lib modules), which makes the omission more costly than incidental. Every risky area — filtering, pagination, URL state, sorting, cache semantics, alternate-form exclusion, 404 paths — is untested, and any refactor of the data layer would ship regressions undetected.",
+  "wroteTests": false,
+  "testCount": 0,
+  "valuableTests": [],
+  "lowValueTests": [],
+  "untested": [
+    { "area": "Filtering and pagination in browse() (app/src/lib/browse.ts:42) — search substring, type-in-either-slot, generation match, 48/page slice, page clamping", "risk": "high", "likelyBug": "Off-by-one in page slicing, a filter that ANDs incorrectly, or search matching the API name instead of the humanized label — the whole home page silently shows wrong results" },
+    { "area": "URL query state round-trip (app/src/lib/browse.ts:25) — parsing defaults, omitting empty/default params, page=0/'abc' handling", "risk": "medium", "likelyBug": "Deep links like /?type=fire&generation=generation-i stop working after a state shape change; 'page=3x' parsed as 3" },
+    { "area": "Move table construction (app/src/lib/data.ts:181) — dedup key, method order Level Up/Machine/Egg/Tutor then alphabetical, level-then-name sort, null level for non-level-up", "risk": "high", "likelyBug": "Duplicate or missing move rows, wrong default sort, or machine moves deduped away because level isn't part of the key" },
+    { "area": "Client-side sortable tables (app/src/routes/pokemon/[name].client.ts:6) — aria-sort flip, missing-values-last, numeric vs collator compare", "risk": "high", "likelyBug": "Missing values jump to the top when descending, or aria-sort stays on the old header, breaking the accessibility contract" },
+    { "area": "Client filtering script (app/src/routes/(home).client.ts:62) — debounce, race tickets, push/replace history, fallback navigation", "risk": "high", "likelyBug": "Fast typing renders an older result set (race), or the URL drifts out of sync with the visible filters" },
+    { "area": "Species index assembly (app/src/lib/data.ts:156) — joining species/type/generation lists, slot ordering, alternate-form exclusion", "risk": "high", "likelyBug": "A species missing its generation or types renders with blank filters or wrong card types across all list pages" },
+    { "area": "cardsFor() (app/src/lib/data.ts:135) — id<=10000 filter, dedup by species id, 'Hidden ability' note, dex-number ordering", "risk": "medium", "likelyBug": "Mega forms leak into Learned by / ability / type lists after an innocent-looking refactor" },
+    { "area": "Runtime API cache and semaphore (app/src/lib/api.ts:37) — 60 s TTL, failed-promise eviction, size cap, concurrency limit", "risk": "medium", "likelyBug": "Stale cache served across data updates (exactly the live-data-overlay scenario), or a stuck semaphore deadlocking all page loads" },
+    { "area": "Not-found and error paths — getByName slug regex (app/src/lib/api.ts:83), 404→null mapping, 404 route rendering (app/src/routes/404.ts:1)", "risk": "medium", "likelyBug": "An uppercase or malformed name throws a 500 instead of rendering the Not found page" },
+    { "area": "Formatting helpers (app/src/lib/format.ts:12) — humanize, dexNumber padding, latest English flavor text, whitespace collapse, $effect_chance substitution (app/src/lib/data.ts:112)", "risk": "low", "likelyBug": "'mr-mime' renders as 'Mr-mime' or dex numbers lose zero-padding — cosmetic but spec-mandated regressions" }
+  ]
+}
+```

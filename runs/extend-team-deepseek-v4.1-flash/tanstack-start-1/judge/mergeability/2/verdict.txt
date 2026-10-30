@@ -1,0 +1,129 @@
+I've reviewed the full app against the current TanStack Start v1 docs (hosting, server functions, cookies, head/notFound behavior). Summary of the review before the JSON:
+
+**Verified against current docs:** `createServerFn().validator()` is the current API (`inputValidator` is the deprecated one); loaders calling server functions with `getCookie` from `@tanstack/react-start/server` is the documented cookie pattern; wrapping the Vite-emitted `dist/server/server.js` fetch handler with a custom Node server (srvx) is explicitly sanctioned by the hosting docs ("Express or any other custom Node.js server works too"); `HeadContent`/`Scripts`/`?url` CSS imports in `head` match the framework's own examples.
+
+**What's strong:** clean route → server-function → API-client layering with real server/client boundaries; TTL'd, failure-evicting memo cache with explaining comments; the team feature uses cookie-backed SSR (root loader) + client context so the button has no flash, disables preloading on the `/team` link, and sets `staleTime: 0` on the team route with a comment explaining why — deliberate, correct engineering.
+
+**What I'd ask for:** an error component (API failures fall through to the router's default unstyled error UI), removing the private `_notFound` match field, a typecheck script, and a few small nits.
+
+```json
+{
+  "dimension": "mergeability",
+  "criteria": {
+    "idiomatic": {
+      "score": 5,
+      "evidence": [
+        "app/src/routes/__root.tsx:36-38 — head() returns links with styles.css?url imports, exactly the Start hello-world pattern",
+        "app/src/server/functions.ts:28-35 — createServerFn({method:'GET'}) with .validator(), the current (non-deprecated) API, called from route loaders",
+        "app/src/routes/pokemon.$name.tsx:21-27 — validateSearch + loaderDeps + notFound() thrown from the loader: the documented loader/search/404 primitives",
+        "app/server.mjs:1-20 — custom srvx server wrapping dist/server/server.js, which the hosting docs explicitly permit for self-hosted Node",
+        "app/src/routes/team.tsx:6-9 — staleTime: 0 on the cookie-dependent route, with a comment stating why",
+        "app/src/routes/__root.tsx:14 — matches.some((m) => m.status === 'notFound' || m._notFound) reaches into a private match field, the only framework-fighting touch"
+      ],
+      "rationale": "Routing, data loading, head, 404s and the production server all read like the framework's current docs and examples; the single blemish is one private-API read used defensively for the known notFound/title gap."
+    },
+    "correctness_risks": {
+      "score": 4,
+      "evidence": [
+        "app/src/server/pokeapi.ts:41 — non-404 API errors throw, but no route sets errorComponent and the router (app/src/router.tsx:5-11) sets no defaultErrorComponent, so a 500 renders the unstyled default error UI with no h1",
+        "app/src/routes/__root.tsx:14 — m._notFound is an internal field; an upgrade could silently break the 'Not found' document title",
+        "app/src/routes/index.tsx:55 — q is written to the URL untrimmed while matching uses query.trim(), so ' pikachu ' matches live but renders 'No Pokémon found' after reload",
+        "app/src/routes/index.tsx:77 — an out-of-range ?page= is clamped for display but the URL keeps the bogus value, desynchronising the pagination links from the query string",
+        "app/src/components/MoveTable.tsx:94 — key `${row.move}-${row.level}` can collide if the API lists a move twice for the same version group and method",
+        "app/src/server/pokeapi.ts:27-29 — cache sweep only deletes expired entries above 5000, so a burst of distinct keys can exceed the cap until TTLs lapse"
+      ],
+      "rationale": "No races, SSR mismatches or leaks found — the debounce, cookie sync, cache eviction and sort edge cases are all handled deliberately; the remaining risks are a missing error path and three small fragilities."
+    },
+    "global_abstractions": {
+      "score": 5,
+      "evidence": [
+        "app/src/server/pokeapi.ts:1-60 — one cohesive server-only API client; the module-level cache (line 14) is TTL-bounded, failure-evicting and commented, and spec-sanctioned",
+        "app/src/server/functions.ts — one server function per page, keeping raw API shapes off the client; no god data module",
+        "app/src/lib/format.ts:1-24 — tiny pure helpers only; no utils grab-bag",
+        "app/src/lib/types.ts — the single shared client/server contract, used by both sides",
+        "app/src/components/Section.tsx:5-13 — one small component that encodes the spec's section definition once instead of repeating aria-labelledby markup in six routes"
+      ],
+      "rationale": "Each module earns its keep and has a clear boundary; the server/client split is enforced by server functions rather than convention, and the only hidden global (the cache) is small, bounded and documented."
+    },
+    "readability": {
+      "score": 5,
+      "evidence": [
+        "app/src/server/pokeapi.ts:16-19 — comment explains the memo's concurrency and failure-eviction semantics",
+        "app/src/lib/team-context.tsx:18-21 — comment explains the cookie's role in SSR-correct state",
+        "app/src/routes/index.tsx:52-53 — comment explains the debounce-vs-URL design choice",
+        "app/src/components/MoveTable.tsx:44-46 — comment states the default sort contract and the missing-values-last rule",
+        "app/src/routes/team.tsx:12-13 — comment explains why the page renders from context filtered against loaded data"
+      ],
+      "rationale": "Naming is consistent, functions are small, and comments consistently explain why rather than what; a new teammate could navigate this codebase in minutes. The only rough spot is the length of the getPokemonPage handler (app/src/server/functions.ts:90-146)."
+    },
+    "review_cost": {
+      "score": 4,
+      "evidence": [
+        "app/src/router.tsx:5-11 — would ask for a defaultErrorComponent before approving",
+        "app/src/routes/__root.tsx:14 — would ask to drop the m._notFound private-field read",
+        "app/package.json:5-8 — build never runs tsc despite strict: true in tsconfig, so type errors have no gate",
+        "app/src/routes/index.tsx:55 — one-line fix: store the trimmed query in the URL"
+      ],
+      "rationale": "Everything else I'd merge as-is; the review round is a short list of nits — an error component, the private-API read, a typecheck script and one trim."
+    }
+  },
+  "overall": 4,
+  "findings": [
+    {
+      "severity": "medium",
+      "location": "app/src/server/pokeapi.ts:41",
+      "issue": "Non-404 API failures throw from loaders, but neither the router (app/src/router.tsx:5-11) nor any route defines an errorComponent, so an API hiccup renders TanStack Router's default, unstyled error output with no h1 or page chrome.",
+      "suggestion": "Set defaultErrorComponent on createRouter (and optionally per-route) with a styled fallback that keeps the banner/main/footer landmarks."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/routes/__root.tsx:14",
+      "issue": "The root head reads match._notFound, a private internal field, alongside the public match.status check, to compute the 'Not found' title.",
+      "suggestion": "Rely on the public status === 'notFound' signal and the child routes' own head fallbacks, or add a comment pinning the version this workaround targets."
+    },
+    {
+      "severity": "low",
+      "location": "app/package.json:5-8",
+      "issue": "tsconfig has strict: true and noEmit, but no script runs tsc — vite build doesn't typecheck, so the types are never enforced anywhere.",
+      "suggestion": "Add \"typecheck\": \"tsc --noEmit\" and chain it into build (as the framework's own hosting docs do)."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/routes/index.tsx:55",
+      "issue": "The raw (untrimmed) query is written to ?q while matching uses the trimmed value, so padded input matches live but yields 'No Pokémon found' after a reload.",
+      "suggestion": "Navigate with q: query.trim() || undefined."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/routes/index.tsx:76-77",
+      "issue": "An out-of-range ?page= is clamped for rendering but the URL keeps the bogus value, so the 'Previous page' link and URL disagree with the shown page.",
+      "suggestion": "Replace the search to the clamped page when requestedPage is out of range."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/server/pokeapi.ts:27-29",
+      "issue": "The size cap only deletes expired entries; under a burst of distinct keys the cache can exceed 5000 until entries age out.",
+      "suggestion": "Also evict the oldest entries (or use an LRU) when the expiry sweep frees nothing."
+    },
+    {
+      "severity": "low",
+      "location": "app/server.mjs:12-15",
+      "issue": "Every file under dist/client is served with maxAge=31536000 and immutable; the comment assumes everything is content-hashed, which breaks the day an unhashed public asset (favicon, robots.txt) is added.",
+      "suggestion": "Restrict the immutable Cache-Control to /assets/ (or to hashed filenames) and serve the rest with a short max-age."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/components/MoveTable.tsx:94",
+      "issue": "Row key is `${row.move}-${row.level}`, which can collide if the API lists the same move twice for the same version group and learn method.",
+      "suggestion": "Include the row index (or method) in the key."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/server/functions.ts:90-146",
+      "issue": "getPokemonPage's handler mixes version-group resolution, move-table assembly and summary fetches in one ~55-line function.",
+      "suggestion": "Extract move-table assembly (vgNames/byMethod/methods) into a helper in pokeapi.ts or a sibling module."
+    }
+  ],
+  "summary": "A genuinely idiomatic, well-layered TanStack Start app: routing, loaders, server functions, head, 404s and even the self-hosted srvx server match the framework's current documented patterns, and the team feature is engineered with real care around SSR-correct cookie state. The abstractions are few, well-bounded and consistently commented for why. I'd merge it after a nit round: add an error component, drop the one private-API read, wire up typechecking, and fix a handful of small pagination/cache/cache-header edge cases."
+}
+```

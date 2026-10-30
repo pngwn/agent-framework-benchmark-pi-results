@@ -1,0 +1,109 @@
+## Review summary
+
+**Structure.** A clean App Router layout: `src/app/*` mirrors the routes, page-specific client components are colocated (`filters.tsx`, `game-select.tsx`, `moves-table.tsx`, `remove-button.tsx`), shared UI lives in `src/components/`, and the data layer is one guarded module (`src/lib/api.ts` with `import 'server-only'` at `api.ts:1`). The server/client boundary around the team cookie is handled well: `lib/team.ts` is browser-safe while `lib/team-server.ts:1-11` wraps `next/headers`' `cookies()` behind a server-only module — exactly the kind of leakless split the docs push for.
+
+**Idiom.** The code reads like current docs: awaited `params`/`searchParams` promises everywhere (`app/src/app/pokemon/[name]/page.tsx:36-38`), `generateMetadata` deduped against the page load via `cache()` (`app/src/app/pokemon/[name]/page.tsx:39-43`, same pattern in `moves/`, `abilities/`, `types/`), `notFound()` for missing resources, `Metadata` title template with an `absolute` override for home (`app/src/app/layout.tsx:6`, `app/src/app/page.tsx:5`), `await connection()` to force request-time rendering so API data is never baked at build (`app/src/app/types/page.tsx:10` etc.), and `turbopack.root` set to `import.meta.dirname` for the nested app dir (`app/next.config.ts:4`). Render-phase state sync in `game-select.tsx:13-17` and `team-button.tsx:12-19` is the documented "adjust state when props change" pattern.
+
+**Risks.** The two things I'd actually ask for before approving: (1) there is no `error.tsx` anywhere (grep confirms), so any non-404 API hiccup — on a page that is 100% live-fetch — dumps users on Next's unstyled default error screen; (2) `spriteUrl()` (`app/src/lib/api.ts:274`) hardcodes the sprite path and ignores `sprites.front_default`, so a species with a null sprite gets a broken `<img>` (`components/pokemon-cards.tsx:10`). Everything else I looked at held up: the in-memory cache is bounded (1500 entries) with failed promises evicted (`api.ts:59-77`), the concurrency limiter drains fairly (`api.ts:26-38`), 404 bodies are drained rather than cancelled with a comment explaining the tee/`no-store` interaction (`api.ts:47-52`), and the debounce timer is cleaned up on unmount (`filters.tsx:57`).
+
+**Abstractions.** `lib/api.ts` is a 285-line data module, but it's sectioned, typed, and every page goes through it — that's a data layer, not a god module. Minor duplication: the "default variety → Pokémon" resolution exists in both `pokemon/[name]/page.tsx:39-46` and `team/page.tsx:26-38`, and the home page re-requests `getAllTypes()`/`getGenerations()` alongside `getSpeciesIndex()` (deduped only by the TTL cache, not by React `cache()`).
+
+```json
+{
+  "dimension": "mergeability",
+  "criteria": {
+    "idiomatic": {
+      "score": 5,
+      "evidence": [
+        "app/src/app/pokemon/[name]/page.tsx:36-43 — awaited params/searchParams promises + generateMetadata deduped via React cache(), matching current docs",
+        "app/src/app/types/page.tsx:10 — await connection() used precisely to keep rendering request-time so API data isn't baked at build",
+        "app/src/lib/team-server.ts:1-11 — cookies() isolated in a server-only module, keeping lib/team.ts browser-safe; clean server/client boundary",
+        "app/next.config.ts:4-5 — turbopack.root via import.meta.dirname, the documented fix for a nested app directory",
+        "app/src/app/layout.tsx:6 — Metadata title template with absolute override for home (app/src/app/page.tsx:5)"
+      ],
+      "rationale": "Data loading, routing, metadata, and dynamic-rendering opt-in all use the recommended primitives of the current App Router; no framework-fighting workarounds found."
+    },
+    "correctness_risks": {
+      "score": 3,
+      "evidence": [
+        "app/src/app/ (no error.tsx/global-error.tsx) — any non-404 API failure crashes to Next's default error page on a fully dynamic app",
+        "app/src/lib/api.ts:274 — spriteUrl hardcodes the sprite pattern, ignoring sprites.front_default nulls (spec says missing sets are null)",
+        "app/src/components/pokemon-cards.tsx:10 — cards always render an <img>, so a null-sprite species shows a broken image",
+        "app/src/app/pokemon/[name]/page.tsx:42 — decodeURIComponent on params Next has already decoded; a name containing a literal % breaks",
+        "app/src/lib/api.ts:26-38 — withSlot limiter is fair (FIFO, one wakeup per completion) and 404s are drained, so no leak/race there"
+      ],
+      "rationale": "Mostly careful code with bounded caches, 404 handling and timer cleanup done right, but the missing error boundary plus the ignored null-sprite data leave a few minor, easily-triggered failure modes."
+    },
+    "global_abstractions": {
+      "score": 4,
+      "evidence": [
+        "app/src/lib/api.ts:59-77 — module-level promise/TTL cache is hidden global state, but bounded (1500 entries) with failed entries evicted and guarded by server-only",
+        "app/src/lib/api.ts:200-238 — pokemonCards/getSpeciesIndex earn their keep, reused by three pages without duplication",
+        "app/src/app/pokemon/[name]/page.tsx:39-46 vs app/src/app/team/page.tsx:26-38 — default-variety→Pokémon resolution duplicated in two places",
+        "app/src/app/page.tsx:27 — home page fetches getAllTypes/getGenerations separately from getSpeciesIndex, relying on the TTL cache rather than React cache() to dedupe"
+      ],
+      "rationale": "The layering is sound (data module, format utils, components, server/client split), with only a couple of small duplications and one shared cache to keep an eye on."
+    },
+    "readability": {
+      "score": 5,
+      "evidence": [
+        "app/src/lib/api.ts:47-52 — comment explains why the 404 body is drained (fetch tee + no-store), the kind of why-comment that prevents regressions",
+        "app/src/components/pokemon-cards.tsx:9 — eslint-disable carries a reason ('sprites come from the API server')",
+        "app/src/app/layout.tsx — consistent, small component files; routes mirror URLs; client components colocated next to their pages",
+        "app/src/app/pokemon/[name]/moves-table.tsx:64-68 — sort state logic is short, named, and commented (missing values always last)"
+      ],
+      "rationale": "Naming, file organisation and comments are consistent and explain the non-obvious choices; a new teammate could navigate this in minutes."
+    },
+    "review_cost": {
+      "score": 4,
+      "evidence": [
+        "app/src/app/ (missing error.tsx) — one round-trip addition the reviewer will request",
+        "app/src/lib/api.ts:274 — use the API-provided sprite URL with a null fallback instead of the hardcoded pattern",
+        "app/src/app/pokemon/[name]/page.tsx:42 — drop the redundant decodeURIComponent",
+        "app/src/lib/api.ts / app/src/app/team/page.tsx — extract the default-variety resolution into a shared helper"
+      ],
+      "rationale": "Nits only: an error boundary, the sprite-null edge, and two tiny consolidations; no rework of architecture or rendering strategy needed."
+    }
+  },
+  "overall": 4,
+  "findings": [
+    {
+      "severity": "medium",
+      "location": "app/src/app/layout.tsx",
+      "issue": "No error.tsx or global-error.tsx anywhere; the app is 100% dynamic-rendered against a live API, so a single 5xx throws out of a server component and the user gets Next's default unstyled error page.",
+      "suggestion": "Add a route-level error.tsx (and a global-error.tsx for the root) rendering the standard layout with a 'Something went wrong' heading and a retry link."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/lib/api.ts:274",
+      "issue": "spriteUrl() hardcodes /media/sprites/pokemon/<id>.png and every card renders an <img>, ignoring sprites.front_default which the API sets to null for unshipped sprites — a species without a front sprite shows a broken image.",
+      "suggestion": "Pass the sprite URL (or null) through CardData and render the img conditionally, keeping the hardcoded pattern only as a fallback."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/app/pokemon/[name]/page.tsx:42",
+      "issue": "decodeURIComponent is applied to params Next has already decoded (same in moves/abilities/types pages), so a Pokémon name containing a literal % sequence would be double-decoded and 404.",
+      "suggestion": "Rely on Next's decoding; key(name) already lowercases and encodes for the API path."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/app/team/page.tsx:26",
+      "issue": "Default-variety→Pokémon resolution is duplicated between the Pokémon page's loadSpecies and the team page's loadMembers; the next consumer will copy it again.",
+      "suggestion": "Add a getDefaultPokemon(species) helper in lib/api.ts and use it from both call sites."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/app/page.tsx:27",
+      "issue": "Home page fetches getSpeciesIndex() plus getAllTypes()/getGenerations() separately; they only dedupe because of the module TTL cache, so a cold cache briefly triples the request set and a future change could desync them.",
+      "suggestion": "Wrap getAllTypes/getGenerations in React cache() (as pages already do for resource loads) or have getSpeciesIndex return the labels it already computed."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/lib/api.ts:59",
+      "issue": "Hand-rolled TTL/LRU cache with a concurrency queue reimplements what Next 16's cacheComponents/use cache + cacheLife provide, and the queue is a subtle piece of infra a maintainer must reason about (e.g. cache.set ordering, tee-drain comment at api.ts:47).",
+      "suggestion": "Acceptable as-is given cacheComponents is opt-in, but document the choice at the top of api.ts or migrate to 'use cache' with cacheLife when the team enables cacheComponents."
+    }
+  ],
+  "summary": "A genuinely idiomatic current-generation Next.js App Router app: correct use of async params, connection(), cached metadata, server-only boundaries and a clean colocated-component layout, with unusually good why-comments. The merge blockers are small: no error boundary despite fully live data loading, and a hardcoded sprite URL that ignores the API's null sprites. I'd approve after one short round addressing those and two minor duplications."
+}
+```

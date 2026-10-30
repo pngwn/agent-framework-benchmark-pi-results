@@ -1,0 +1,113 @@
+{
+  "dimension": "mergeability",
+  "criteria": {
+    "idiomatic": {
+      "score": 5,
+      "evidence": [
+        "app/src/router.tsx:4-13 — getRouter() factory with scrollRestoration and Register module declaration, exactly the current build-from-scratch doc shape",
+        "app/src/routes/__root.tsx:6-14,29-34 — createRootRoute head() with meta/links, HeadContent/Scripts/Outlet document shell",
+        "app/src/server/functions.ts:14-21 — createServerFn({method:'GET'}).validator().handler(), invoked from loaders as in docs",
+        "app/src/routes/pokemon.$name.tsx:11-17 — validateSearch + loaderDeps + throw notFound() + notFoundComponent, all recommended Router primitives",
+        "app/src/routes/index.tsx:24-37 — validateSearch with default-omitting normalization, loader calling a server fn, staleTime to keep client-side filtering from refetching",
+        "app/vite.config.ts:1-8 — tanstackStart() before viteReact(), matching the documented plugin order",
+        "app/server.mjs:8-19 — srvx fetch handler over dist/server/server.js with staticMiddleware over dist/client, the documented non-Nitro production-server pattern"
+      ],
+      "rationale": "It reads like the framework's own docs and examples: routing, search validation, data loading and the production server all use the currently recommended primitives, with no Next.js-isms or hand-rolled equivalents."
+    },
+    "correctness_risks": {
+      "score": 3,
+      "evidence": [
+        "app/src/server/functions.ts:91-92 — Promise.all over every move row fetching /move/<name> for the selected game: 200+ simultaneous server-side fetches on first hit, no concurrency cap",
+        "grep 'errorComponent' over app/src — no route or router defines errorComponent/catchBoundary, so an API 500 or network failure surfaces the framework default error UI",
+        "app/src/routes/index.tsx:42-60 — hand-rolled two-way sync between local query state and the URL via a lastPushed ref plus a debounce timer; back/forward and a pending timer firing after a Link navigation can race",
+        "app/src/components/PokemonCard.tsx:16-19 — sprite URL built from the id pattern instead of the API's sprites.front_default, so a Pokémon with a null sprite renders a broken image",
+        "app/src/routes/index.tsx:65-66 — displayed page depends on whether the uncommitted query equals the URL's q, duplicating debounce knowledge in the render path",
+        "app/src/lib/format.ts:6-8 — humanize capitalises each word including 'mr-mime' → 'Mr Mime', matching spec, and display() centralises the em dash; cache eviction and 404 handling are handled correctly (pokeapi.ts:22-33, 47-52)"
+      ],
+      "rationale": "No serious bug found, but a handful of minor ones: unbounded fetch fan-out, no custom error boundary, fragile URL/input sync, and sprite URLs derived by pattern rather than from API data."
+    },
+    "global_abstractions": {
+      "score": 5,
+      "evidence": [
+        "app/src/server/pokeapi.ts:1-3,20-33 — single API client with a bounded, failure-evicting TTL memo; the one piece of global state is small, documented and capped at 5000 entries",
+        "app/src/server/functions.ts:15-18 — page-shaping server functions form a clear DTO boundary; raw API types (pokeapi.ts:96-) never leak into components",
+        "app/src/lib/types.ts:1-43 — small shared DTO interfaces are the only contract crossing the server/client boundary",
+        "app/src/lib/config.ts:1-5 — mediaBase delivered via a root loader server fn with a typed accessor, instead of duplicating env logic in components",
+        "app/src/lib/format.ts — pure, tiny helpers used on both sides; no god 'utils' grab-bag, no duplicated near-identical helpers"
+      ],
+      "rationale": "Abstractions are few and each earns its keep: one API client, one DTO layer, and three tiny lib modules with unambiguous server/client boundaries."
+    },
+    "readability": {
+      "score": 4,
+      "evidence": [
+        "app/src/server/pokeapi.ts:20-21,80,96-99 — comments explain why (memo eviction policy, why alternate forms are skipped)",
+        "app/src/routes/index.tsx:40 — 'The search box filters immediately; the URL catches up after a short debounce' explains the intent",
+        "app/src/components/Section.tsx:4-10 — 7-line Section/TypeBadge/PokemonCard components with obvious names; files match their responsibility",
+        "app/src/routes/index.tsx:42-66 — the lastPushed ref + effect pair plus the requestedPage ternary require close reading to verify; the trickiest code in the repo"
+      ],
+      "rationale": "Consistent naming, tiny components, and comments that explain intent throughout; only the home page's search/URL synchronisation is genuinely subtle."
+    },
+    "review_cost": {
+      "score": 4,
+      "evidence": [
+        "app/src/server/functions.ts:91-92 — would ask for a concurrency cap or batched fetch on the move fan-out",
+        "app/src/routes/* — would ask for a shared errorComponent (or router defaultErrorComponent) so API failures render branded UI",
+        "app/tsconfig.json:17 — verbatimModuleSyntax:true, which the Start docs recommend keeping disabled to avoid server code leaking into client bundles",
+        "app/src/routes/__root.tsx:13 — head() reads the internal match._notFound flag alongside the public status"
+      ],
+      "rationale": "Approve after one round of nits: a concurrency cap, an error boundary, and a couple of config/internal-flag tweaks; nothing structural needs rework."
+    }
+  },
+  "overall": 4,
+  "findings": [
+    {
+      "severity": "medium",
+      "location": "app/src/server/functions.ts:91-92",
+      "issue": "Pokemon page fetches /move/<name> for every learn row of the selected game in parallel with no concurrency limit (200+ simultaneous requests on a cold cache); the memo cache only helps within the 60s TTL",
+      "suggestion": "Run the move-summary fetches through a small chunked pool (or at minimum p-limit-style batching) so a cold Pokémon page makes bounded concurrent requests"
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/routes/moves.$name.tsx:8-13",
+      "issue": "No route or router defines errorComponent/catchBoundary, so a PokeAPI 500 or network error from fetchJson (pokeapi.ts:53-54) renders the framework's default error screen",
+      "suggestion": "Add a defaultErrorComponent on the router (app/src/router.tsx) and reuse the NotFound page layout for an error state with a retry link"
+    },
+    {
+      "severity": "low",
+      "location": "app/src/routes/index.tsx:42-60",
+      "issue": "Two-way search/URL sync is hand-rolled with a lastPushed ref, a debounce effect, and a URL-derived effect; the render path (line 65) additionally branches on whether the uncommitted query equals the URL's q, which is easy to break during future edits",
+      "suggestion": "Make the URL the single source of truth: navigate (replace) on a debounced change and derive everything from Route.useSearch(), or extract the sync into a named useDebouncedSearchParam hook with a comment spelling out the back/forward invariant"
+    },
+    {
+      "severity": "low",
+      "location": "app/src/components/PokemonCard.tsx:16-19",
+      "issue": "Card sprite src is constructed from the id pattern (lib/format.ts:23) instead of using the API's sprites.front_default, so a species whose front sprite is null renders a broken image once the data changes",
+      "suggestion": "Pass the sprite URL (or null) through CardData from the API payload and render the card without the img when it's null"
+    },
+    {
+      "severity": "low",
+      "location": "app/tsconfig.json:17",
+      "issue": "verbatimModuleSyntax is enabled, which the TanStack Start docs warn can cause server bundles to leak into client bundles",
+      "suggestion": "Drop verbatimModuleSyntax from tsconfig.json; type-only imports can be enforced with lint instead"
+    },
+    {
+      "severity": "low",
+      "location": "app/src/routes/__root.tsx:13",
+      "issue": "head() checks the internal match._notFound flag in addition to the public match.status === 'notFound'",
+      "suggestion": "Rely on match.status only, or set the Not-found title via the routes' head() (already covered by loaderData?.label ?? 'Not found')"
+    },
+    {
+      "severity": "low",
+      "location": "app/src/routes/index.tsx:26-28",
+      "issue": "validateSearch stores q untrimmed (text() returns the raw string when it trims non-empty), so ' pika ' lands in the URL and round-trips through the sync comparison",
+      "suggestion": "Return value.trim() from text() for q"
+    },
+    {
+      "severity": "low",
+      "location": "app/src/server/pokeapi.ts:176",
+      "issue": "speciesIndex() builds the home page by fetching all 18 full type documents plus 9 generations on the server per cold cache; correct but a burst of ~30 upstream requests, and every cold home load serialises a 1025-entry index to the client",
+      "suggestion": "Fine as-is for a single-server deployment; if the API were remote, consider caching the assembled index longer than the per-resource TTL"
+    }
+  ],
+  "summary": "A genuinely idiomatic TanStack Start 1.0 app that follows the framework's current docs almost verbatim — file-based routes with validateSearch/loaderDeps, server-function DTOs, and the documented srvx production server — with clean, well-commented layering I'd merge with confidence. The real costs are operational: an uncapped move-fetch fan-out on Pokémon pages, no custom error boundary for upstream failures, and a subtle hand-rolled search/URL sync on the home page. None of it is structural; one round of fixes gets this to approval."
+}

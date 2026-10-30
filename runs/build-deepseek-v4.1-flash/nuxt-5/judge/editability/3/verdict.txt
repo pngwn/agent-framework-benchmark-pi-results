@@ -1,0 +1,183 @@
+I have a complete picture. Let me verify one last detail — whether the moves page's "Learned by" and the abilities/type pages share any list helper (they don't, confirmed by grep). Now I'll write the review.
+
+**Review notes (Nuxt 4.6.3 — current stable, confirmed via release notes; the app is on it, and the `app/` + `server/` directory layout matches the current Nuxt 4 project structure).**
+
+Key structural facts driving the scores:
+
+- **Server/client seam is the strongest part.** All upstream PokeAPI knowledge (base URL, caching, raw shapes) lives in one file, `app/server/utils/pokeapi.ts` (`API_BASE` at :4, `apiGet` cache at :79-96). Pages consume purpose-shaped internal endpoints (`app/server/api/app/**`) and are dumb templates. Auto-imported Nitro utils are used idiomatically.
+- **The card sprite data has a single choke point.** Every Pokémon card in the app — home (`index.vue` via `/api/app/dex`), move "Learned by" (`pokeapi.ts:450`), ability "Pokémon" (:486), type "Pokémon" (:525) — derives from the same `SpeciesSummary` built in `getDexIndex` (`pokeapi.ts:188-215`). The scenario-2 bug fix lands in exactly one function. Caveat: `getDexIndex` resolves the default Pokémon by ID shortcut (`pokemon/${ref.id}`, :188) while `getPokemonPage` resolves it properly via `varieties` (:276-278) — the correct logic exists but wasn't shared.
+- **Duplication is real at the template level.** Card-list markup (count + `<ul class="card-grid">` + `PokemonCard` loop) is repeated in four page templates; `displayNumber` is defined twice (`MoveTables.vue:132`, `moves/[name].vue:55` — Nuxt 4's `app/utils/` or `shared/` would give a single auto-imported helper); the type-badge link markup is repeated in five templates; the 404 pattern is repeated in four server handlers and five page components; `getDexIndex`-summary→card-list mapping is copy-pasted three times in the util (:448-454, :483-490, :522-529), with a dead `findSpeciesSummary` helper (:220-224) sitting right next to them.
+- **Caching policy is one file but five declarations** (`rawCache` :27, `typeMetasPromise`/`versionGroupsPromise`/`dexIndexPromise` :29-31, `preparedMoves` :31), all unbounded with no TTL — a caching-rules change touches each.
+- The 18 type names are hardcoded in two places (`VALID_TYPE_NAMES` pokeapi.ts:33, `.type-*` classes main.css:274-291), which is spec-pinned but still a two-place edit if the API changes.
+
+```json
+{
+  "dimension": "editability",
+  "criteria": {
+    "removability": {
+      "score": 4,
+      "evidence": [
+        "app/app/pages/abilities/[name].vue — entire ability UI in one route file, deletable as a directory",
+        "app/server/api/app/ability/[name].get.ts — single handler, only caller of getAbilityPage",
+        "app/server/utils/pokeapi.ts:458-493 — getAbilityPage is one self-contained function",
+        "app/app/pages/pokemon/[name].vue:67-76 — the only inbound links to /abilities (spec-mandated section)",
+        "app/app/layouts/default.vue:7-10 — nav contains no abilities link, so no nav edit needed",
+        "grep 'abilit' matches only the above plus app/app/assets/css/main.css:501 comment"
+      ],
+      "rationale": "Every reference greps to one token; removal is delete-two-directories, delete-one-function, and trim one template section. The only cross-file edit is the spec-mandated Abilities section on the Pokémon page, and the feature's data shaping lives inside the shared util rather than beside its route."
+    },
+    "changeability": {
+      "score": 3,
+      "evidence": [
+        "app/server/utils/pokeapi.ts:188-215 — single place card summaries (incl. sprite) are built; all four card lists reuse it (pokeapi.ts:450, :486, :525, and /api/app/dex)",
+        "app/server/utils/pokeapi.ts:188 vs :276-278 — two different default-Pokémon resolution strategies (ID shortcut vs varieties), so the 'correct' logic for the sprite bug exists but isn't shared",
+        "app/app/components/MoveTables.vue:132 and app/app/pages/moves/[name].vue:55 — displayNumber em-dash logic duplicated",
+        "app/app/pages/moves/[name].vue:10, app/app/pages/pokemon/[name].vue:21, app/app/pages/types/[name].vue:16, app/app/components/MoveTables.vue:36, app/app/components/PokemonCard.vue:19 — type-badge markup repeated five times",
+        "app/server/api/app/pokemon/[name].get.ts:6-7 — 404 pattern copy-pasted in four handlers; mirrored by 'v-if=\"!data?.found\"' + useHead fallback in five page components"
+      ],
+      "rationale": "Data-level fixes land in one obvious place (the sprite fix is a single function that covers every card list), but presentation-level fixes are duplicated 2-5×, so a class of bugs must be fixed N times or first refactored."
+    },
+    "coupling": {
+      "score": 4,
+      "evidence": [
+        "app/server/utils/pokeapi.ts:4,79-96 — sole owner of the upstream base URL and raw fetch; nothing else in app/ knows the API's raw shape",
+        "app/app/pages/*.vue — pages consume only internal /api/app/* view models via useFetch; no page touches PokeAPI directly",
+        "app/app/components/PokemonCard.vue:28-37, app/app/components/MoveTables.vue:51-58, app/app/components/EvolutionTree.vue:14-20 — components take narrow, explicit props",
+        "app/server/ vs app/app/ — server and client code are physically separated per Nuxt 4 layout",
+        "app/server/utils/pokeapi.ts:277-430 — payloads are untyped (Promise<any>), so the server→client contract is implicit and renames aren't compiler-checked"
+      ],
+      "rationale": "Clean seams: one data-owner module, dumb pages, narrow-props components, no shared mutable state. Deducted for the implicit untyped payload contract and the 550-line util that all five resources' logic lives in."
+    },
+    "abstraction_design": {
+      "score": 3,
+      "evidence": [
+        "app/app/components/PokemonCard.vue:28-37 — reused by all four card lists; its two flags (showTypes, hidden) match real spec variation, no flag creep",
+        "app/app/components/MoveTables.vue — data-driven columns/sorting that would stretch to other tabular data",
+        "app/server/utils/pokeapi.ts:448-454, :483-490, :522-529 — three near-identical 'map refs to species summaries + sort by id' loops; dead helper findSpeciesSummary at :220-224",
+        "app/app/pages/moves/[name].vue:36-41, app/app/pages/abilities/[name].vue:12-19, app/app/pages/types/[name].vue:27-33, app/app/pages/index.vue:27-35 — no card-list component, so an Items page copies the skeleton a fifth time",
+        "app/app/pages/moves/[name].vue:10-31 — fact-card dl is hardcoded per resource rather than data-driven"
+      ],
+      "rationale": "The existing components are well designed around real variation and stretch without flag parameters, but the recurring shapes in this app — card lists, detail-page skeletons, type badges, resource-or-404 handlers — were never abstracted, so each similar-but-different feature is ~half copy-paste."
+    }
+  },
+  "overall": 3,
+  "findings": [
+    {
+      "severity": "medium",
+      "location": "app/app/pages/index.vue:27-35",
+      "issue": "Card-list markup (count paragraph + ul.card-grid + PokemonCard loop) is duplicated in four templates (also moves/[name].vue:36-41, abilities/[name].vue:12-19, types/[name].vue:27-33), so any cross-cutting card behaviour (sorting, count wording, grid changes) is a four-file edit.",
+      "suggestion": "Extract a PokemonCardList component (props: species[], count label, showTypes/hidden flags) and use it in all four pages."
+    },
+    {
+      "severity": "medium",
+      "location": "app/server/utils/pokeapi.ts:188",
+      "issue": "getDexIndex resolves a species' default Pokémon via the pokemon/{id} shortcut while getPokemonPage resolves it via species.varieties (:276-278); the correct, robust logic exists but is not shared, so the Deoxys-style sprite bug's fix risks diverging from the detail page's behavior.",
+      "suggestion": "Extract one resolveDefaultPokemon(species) helper used by both getDexIndex and getPokemonPage."
+    },
+    {
+      "severity": "medium",
+      "location": "app/server/api/app/move/[name].get.ts:5-7",
+      "issue": "The resource-or-404 handler pattern (getRouterParam, call getter, setResponseStatus(404), return {found:false}) is copy-pasted in four handlers, and each page component repeats the matching '!data?.found' branch plus a 'Not found – Pokédex' useHead fallback.",
+      "suggestion": "Add a small server helper (e.g. defineResourceHandler(getter)) and a shared page-level composable or layout-level handling for the not-found title."
+    },
+    {
+      "severity": "medium",
+      "location": "app/app/components/MoveTables.vue:132",
+      "issue": "displayNumber (em-dash for missing values) is defined identically in MoveTables.vue:132 and pages/moves/[name].vue:55; changing missing-value rendering is a two-place fix.",
+      "suggestion": "Move it to app/utils/ (or Nuxt 4's shared/utils/) so it auto-imports everywhere with one definition."
+    },
+    {
+      "severity": "low",
+      "location": "app/app/components/PokemonCard.vue:18-21",
+      "issue": "The type-badge link markup (class + type-${name} modifier + label) is repeated in five templates (PokemonCard, pokemon/[name].vue:21, moves/[name].vue:10, types/[name].vue:16, MoveTables.vue:33-40).",
+      "suggestion": "Extract a TypeBadge component; the type-${name} CSS class coupling then has one template site."
+    },
+    {
+      "severity": "low",
+      "location": "app/server/utils/pokeapi.ts:220-224",
+      "issue": "findSpeciesSummary is dead code, while three inline copies of the same lookup exist (:451, :487, :526) — each also an O(n) scan over 1025 species.",
+      "suggestion": "Delete or actually use the helper (with an id→summary Map built once in getDexIndex)."
+    },
+    {
+      "severity": "low",
+      "location": "app/server/utils/pokeapi.ts:27-31",
+      "issue": "Caching policy is spread over five declarations (rawCache, typeMetasPromise, versionGroupsPromise, dexIndexPromise, preparedMoves), all unbounded and without TTL/eviction; a caching-rule change must be applied to each, and the maps grow for the life of the process.",
+      "suggestion": "Wrap them in one small cache helper (key, ttl, loader) so base-URL and cache-policy changes have a single knob."
+    },
+    {
+      "severity": "low",
+      "location": "app/server/utils/pokeapi.ts:277",
+      "issue": "The internal API payload contract is untyped (getPokemonPage/getMovePage/... return Promise<any>; pages read data.value?.found etc.), so renaming a payload field breaks silently at runtime.",
+      "suggestion": "Return typed objects from the getters and put the payload types in shared/types so both sides see them."
+    },
+    {
+      "severity": "low",
+      "location": "app/server/utils/pokeapi.ts:33-37",
+      "issue": "The 18 type names are hardcoded in two places: VALID_TYPE_NAMES and the .type-* CSS classes (main.css:274-291); adding or renaming a type requires both edits.",
+      "suggestion": "Generate the badge classes from the single list of type names (or derive both from the API's /type/ response)."
+    },
+    {
+      "severity": "low",
+      "location": "app/app/assets/css/main.css:186-238",
+      "issue": "All component styles live in one 625-line global stylesheet, so PokemonCard/MoveTables markup and their styles are not co-located; finding a component's CSS requires searching by class name.",
+      "suggestion": "Consider scoped style blocks in the component SFCs (Nuxt-native), keeping tokens.css global."
+    }
+  ],
+  "summary": "The architecture has genuinely good seams: one server util owns all upstream API and caching knowledge, pages are dumb consumers of internal view-model endpoints, and PokemonCard/MoveTables are well-shaped reusable components — data-level bug fixes like the sprite issue land in exactly one function covering every card list. The weakness is template-level duplication: card lists, type badges, not-found handling and displayNumber are each repeated 2-5×, so cross-cutting UI changes are multi-file edits, and the moves→items extension would copy about half its code. Net: easy to fix and re-source, harder to extend uniformly.",
+  "scenarios": [
+    {
+      "change": "Remove the Abilities pages and every link to them",
+      "files": [
+        "app/app/pages/abilities/[name].vue",
+        "app/server/api/app/ability/[name].get.ts",
+        "app/server/utils/pokeapi.ts",
+        "app/app/pages/pokemon/[name].vue",
+        "app/app/assets/css/main.css"
+      ],
+      "difficulty": 4,
+      "notes": "Delete two directories, remove getAbilityPage (:458-493) and the Abilities section in pokemon/[name].vue:67-76 (the only inbound links, spec-mandated); the nav already omits abilities, and every reference greps to 'abilit'. Only the shared util file and the spec-mandated cross-link keep it from a 5."
+    },
+    {
+      "change": "Fix the wrong-sprite bug for species whose default Pokémon has a different name (Deoxys)",
+      "files": [
+        "app/server/utils/pokeapi.ts"
+      ],
+      "difficulty": 5,
+      "notes": "One fix covers every list: all four card lists (home /api/app/dex, move learnedBy :450, ability :486, type :525) reuse the SpeciesSummary built in getDexIndex (:188-215), and PokemonCard just renders pokemon.sprite. Only nuance: getPokemonPage already resolves the default variety correctly (:276-278) and that logic should be extracted rather than re-derived."
+    },
+    {
+      "change": "Add sorting by name to every list of Pokémon cards",
+      "files": [
+        "app/app/pages/index.vue",
+        "app/app/pages/moves/[name].vue",
+        "app/app/pages/abilities/[name].vue",
+        "app/app/pages/types/[name].vue",
+        "app/server/utils/pokeapi.ts"
+      ],
+      "difficulty": 2,
+      "notes": "Painful: there is no shared card-list component, so the count+grid+PokemonCard markup is duplicated in four templates, and server-side ordering is also duplicated (learned.sort :454, pokemon.sort :490 and :529, dex order :213). The same change must be made 4-7 times."
+    },
+    {
+      "change": "Add an Items section (/items, /items/:name) shaped like Moves",
+      "files": [
+        "app/app/pages/items/index.vue",
+        "app/app/pages/items/[name].vue",
+        "app/server/api/app/items/[name].get.ts",
+        "app/server/api/app/items.get.ts",
+        "app/server/utils/pokeapi.ts",
+        "app/app/assets/css/main.css"
+      ],
+      "difficulty": 3,
+      "notes": "The pattern is clear and repeatable (getter in pokeapi.ts + thin handler + page component), and apiGet/humanize/englishName/mediaUrl/404-style/fact-card CSS/PokemonCard are all reusable. But the Moves page's dl, effect section and handler boilerplate are hardcoded per-resource, so roughly half the code is copied rather than reused; the internal-API payload types are implicit (any)."
+    },
+    {
+      "change": "Change the API base URL and caching rules",
+      "files": [
+        "app/server/utils/pokeapi.ts"
+      ],
+      "difficulty": 4,
+      "notes": "Everything lives in one file: API_BASE (:4), the rawCache fetch path (:81), and four module-level caches (:27-31, :227-249). Only the spread of five separate cache declarations — each unbounded, promise-based, with no TTL knob — keeps this from a 5; a new policy (e.g. expiry) must be threaded through each one."
+    }
+  ]
+}
+```

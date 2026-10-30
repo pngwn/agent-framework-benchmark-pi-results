@@ -1,0 +1,176 @@
+{
+  "dimension": "forward-thinking",
+  "criteria": {
+    "latest_apis": {
+      "score": 5,
+      "evidence": [
+        "app/package.json:10-12 — hono 4.13.14, @hono/node-server 2.1.5, htmx.org 2.0.11: all are the exact latest npm stable releases as of 2026-10",
+        "app/src/views/layout.tsx:3-8 — jsxRenderer + ContextRenderer declaration-merging, the currently documented Hono layout/typing pattern (hono skill SKILL.md:435-437, hono.dev/docs/middleware/builtin/jsx-renderer)",
+        "app/src/index.tsx:17-25 — correct htmx partial detection plus 'Vary: HX-Request, HX-History-Restore-Request' so proxies/CDNs cache htmx fragments and full pages separately",
+        "app/src/index.tsx:28,46 — HX-Push-Url used to keep URL query state in sync with fragment swaps, the current htmx way rather than hand-rolled history JS",
+        "app/src/views/home.tsx:99,103,107 — hx-sync/hx-include/hx-trigger 'delay:200ms' debounce, current htmx 2.x idioms"
+      ],
+      "rationale": "Every runtime and dev dependency is pinned at the latest published stable, and all Hono/htmx APIs used (jsxRenderer, ContextRenderer, serveStatic v2, HX-* headers, hx-sync) are the current documented generation; nothing deprecated or legacy-era appears anywhere."
+    },
+    "platform": {
+      "score": 4,
+      "evidence": [
+        "app/src/api.ts:22 — native fetch for upstream API calls, no HTTP client library",
+        "app/src/views/home.tsx:22-29, app/src/index.tsx:43, app/src/views/pokemon.tsx:153 — URLSearchParams for all query-string construction/parsing",
+        "app/build.mjs:9-20 — ESM output, top-level await, jsx:automatic; zero hand-rolled client-side JS (all interactivity is declarative htmx)",
+        "app/src/views/components.tsx:20-22 — width/height/decoding=\"async\" on imgs to avoid layout shift",
+        "app/public/style.css:16-17 — CSS custom properties from design tokens, :focus-visible styles, logical padding-inline (style.css:57)",
+        "app/src/api.ts:23 — res.body?.cancel() to release the 404 response body instead of leaking it"
+      ],
+      "rationale": "Platform-first throughout: native fetch/URL, ESM, no client framework, token-driven CSS. Missing the one platform feature that would matter here: no AbortSignal.timeout on upstream fetches (api.ts:22), so a stalled PokeAPI request stalls page rendering indefinitely, and the cache Map (api.ts:9) has no bound."
+    },
+    "dependencies": {
+      "score": 5,
+      "evidence": [
+        "app/package.json:10-12 — exactly three runtime deps (hono, @hono/node-server, htmx.org), all required and all latest stable",
+        "app/package.json:14-17 — dev deps are esbuild, typescript 7.0.2 (the stable native compiler), @types/node: lean and current",
+        "app/build.mjs:30 — htmx vendored from node_modules at build time instead of a CDN script tag, keeping the dependency graph honest"
+      ],
+      "rationale": "Nothing redundant, nothing heavy, everything at the newest stable line; the build copies htmx from npm rather than trusting a CDN."
+    },
+    "churn_resistance": {
+      "score": 3,
+      "evidence": [
+        "app/src/api.ts:35,48 — 'api<T = any>': API responses cross the boundary untyped; grep finds 16 further 'any' casts (data.ts:49,80-81; views/pokemon.tsx:70,74,77,223,226,229,239,286; views/details.tsx:57,107)",
+        "app/src/views/details.tsx:1,4-6 and app/src/views/pokemon.tsx:1,76-99 — view modules call api() directly, so API path knowledge lives in three places (api.ts, data.ts, and the view loaders) rather than one data layer",
+        "app/src/api.ts:3-5 — API_BASE_URL normalization and cache policy centralized in one module; app/src/views/home.tsx:13 PAGE_SIZE single constant",
+        "app/src/views/home.tsx:22-29 — homeUrl() single canonical URL builder shared by full and partial responses, so filter state cannot drift between them",
+        "app/src/index.tsx:11-13,19-22 — only public, documented Hono APIs (app.use, c.render, app.notFound/onError); an upgrade to Hono 5 would touch no route bodies"
+      ],
+      "rationale": "Structure is upgrade-friendly (centralized config, canonical URL builder, standard Hono APIs, view-model types like Card/MoveRow), but the biggest boundary — the PokeAPI response shapes — is entirely 'any', so upstream or spec drift surfaces as runtime breakage rather than type errors, and data access is split between data.ts and view-local loaders."
+    }
+  },
+  "overall": 4,
+  "findings": [
+    {
+      "severity": "medium",
+      "location": "app/src/api.ts:35",
+      "issue": "API responses cross the type boundary as 'any' (api<T = any>, apiUrl<T = any>), with 16 downstream 'any' casts in data.ts and views; upstream shape changes break at runtime, not compile time.",
+      "suggestion": "Define response interfaces (Species, Pokemon, Move, Type…) in api.ts/data.ts and type the loaders' returns; tsc --noEmit already exists as a script."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/api.ts:22",
+      "issue": "Upstream fetch has no timeout or abort: a hung PokeAPI request holds the page render indefinitely with no recovery.",
+      "suggestion": "Use fetch(url, { signal: AbortSignal.timeout(5000) }) and map aborts to a 502/500 page so users aren't left waiting."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/views/details.tsx:1",
+      "issue": "View modules import api/apiUrl directly (also views/pokemon.tsx:1), so API path strings are spread across api.ts, data.ts and view loaders instead of one data-access layer.",
+      "suggestion": "Move loadMove/loadAbility/loadType/loadPokemon/loadMoves behind data.ts (or a dedicated loaders module) so views consume typed view models only."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/api.ts:9",
+      "issue": "In-memory cache is an unbounded Map with no eviction; only the fixed 30s freshness policy (FRESH_MS) limits work, not memory.",
+      "suggestion": "Cap entries with a simple LRU or periodic sweep; fine for the current snapshot but a leak against a live API with 100k+ move/species URLs."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/index.tsx:13",
+      "issue": "serveStatic({ root: './dist' }) is resolved against process.cwd(); running the built server from any other directory silently breaks /static/*.",
+      "suggestion": "Resolve the static root relative to the built file (e.g. new URL('../static', import.meta.url)) or a documented absolute path."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/views/home.tsx:91-99",
+      "issue": "hx-sync=\"this:replace\" on the form is redundant with hx-sync=\"closest form:replace\" on the inputs; harmless but duplicated configuration.",
+      "suggestion": "Keep the form-level hx-sync only (inputs already inherit the nearest sync strategy) to avoid two places to update when the strategy changes."
+    },
+    {
+      "severity": "low",
+      "location": "app/package.json:6-8",
+      "issue": "Exact version pins (no ^ ranges) for all deps; deliberate upgrades are required for every patch, including security fixes (the Sept 2026 serve-static fixes arrived in 2.1.3).",
+      "suggestion": "Use caret ranges with the lockfile (package-lock.json already pins exactly) or add a Dependabot/Renovate config so security patches aren't a manual edit."
+    }
+  ],
+  "summary": "A deliberately modern, lean server-rendered app: every dependency is at the exact latest npm stable (Hono 4.13.14, node-server 2.1.5, htmx 2.0.11, TypeScript 7 native), and it uses the current documented Hono and htmx idioms — jsxRenderer, HX-Push-Url, hx-sync — with zero hand-rolled client JS. The main thing that will age badly is the fully untyped PokeAPI boundary ('any' throughout) and missing upstream fetch timeouts. Everything else — centralized config, canonical URL builders, single cache module — is set up to absorb framework upgrades with minimal churn.",
+  "apis": [
+    {
+      "api": "hono#Hono / app.get / c.render / app.notFound / app.onError",
+      "location": "app/src/index.tsx:11",
+      "status": "current",
+      "replacement": ""
+    },
+    {
+      "api": "hono/jsx-renderer#jsxRenderer",
+      "location": "app/src/views/layout.tsx:3",
+      "status": "current",
+      "replacement": "Confirmed current per hono skill SKILL.md:435-437 and hono.dev jsx-renderer docs"
+    },
+    {
+      "api": "hono#ContextRenderer declaration merging",
+      "location": "app/src/views/layout.tsx:5",
+      "status": "current",
+      "replacement": ""
+    },
+    {
+      "api": "@hono/node-server#serve",
+      "location": "app/src/index.tsx:81",
+      "status": "current",
+      "replacement": "v2.1.5 is npm latest (2026-10-13)"
+    },
+    {
+      "api": "@hono/node-server/serve-static#serveStatic",
+      "location": "app/src/index.tsx:2",
+      "status": "current",
+      "replacement": "v2.1.3+ contains the Sept 2026 path-decoding security fix; app is on 2.1.5"
+    },
+    {
+      "api": "hono/jsx#Child, PropsWithChildren",
+      "location": "app/src/views/components.tsx:1",
+      "status": "current",
+      "replacement": ""
+    },
+    {
+      "api": "htmx hx-* attributes (hx-get/hx-trigger/hx-target/hx-swap/hx-sync/hx-include)",
+      "location": "app/src/views/home.tsx:91-107",
+      "status": "current",
+      "replacement": "htmx 4.0 (Aug 2026) exists but 2.x is deliberately kept as npm 'latest' and maintained"
+    },
+    {
+      "api": "htmx HX-Push-Url response header",
+      "location": "app/src/index.tsx:28",
+      "status": "current",
+      "replacement": ""
+    }
+  ],
+  "dependencies": [
+    {
+      "name": "hono",
+      "verdict": "modern",
+      "note": "4.13.14, the npm latest stable (v5 is RC only, released 2026-10-10); zero-dependency framework"
+    },
+    {
+      "name": "@hono/node-server",
+      "verdict": "modern",
+      "note": "2.1.5, latest release (2026-10-13), includes recent serve-static security fixes"
+    },
+    {
+      "name": "htmx.org",
+      "verdict": "modern",
+      "note": "2.0.11, npm latest; htmx 4.0 shipped 2026-08-28 but 2.x is the maintained 'latest' line; vendored locally at build"
+    },
+    {
+      "name": "typescript",
+      "verdict": "modern",
+      "note": "7.0.2, the stable native (Go) compiler — current npm 'latest'; used via a typecheck script only"
+    },
+    {
+      "name": "esbuild",
+      "verdict": "modern",
+      "note": "0.28.2, small and current; build is ~20 lines with no framework boilerplate to regenerate"
+    },
+    {
+      "name": "@types/node",
+      "verdict": "modern",
+      "note": "^24, matches the Node 24 build target in build.mjs:19"
+    }
+  ]
+}

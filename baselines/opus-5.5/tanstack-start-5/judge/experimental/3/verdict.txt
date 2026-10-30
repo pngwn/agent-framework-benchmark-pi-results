@@ -1,0 +1,96 @@
+## Review notes
+
+I read the spec and all of `app/` (7 route files, 3 lib modules, `components/ui.tsx`, `router.tsx`, `server.mjs`, `vite.config.ts`, `package.json`), then verified the status of every framework-facing API against current sources:
+
+- **TanStack Start** — the app pins `@tanstack/react-start@^1.169.4` (npm, published 2026-10-22) which sits on `@tanstack/react-router@1.170.46`. TanStack Start reached v1 stable on **2026-10-13** (tanstack.com/blog/tanstack-start-1-0, and the "Start stable" PR TanStack/router#8696 merged 2026-10-12). So the framework the whole app rests on was declared stable 17 days ago — "recently-stable", not experimental. Router itself has been 1.x-stable since 2024.
+- **`createServerFn().validator().handler()`** (`app/src/lib/pokedex.functions.ts:8-27`) — this is the current documented API (TanStack Start server-functions guide; the official `start-core/server-functions` skill lists `validator` as the canonical API; the old `inputValidator`/`unstable_createServerFn` names are gone). The `.functions.ts` / `.server.ts` file split matches the official skill's file-organization guidance exactly.
+- **srvx** (`app/server.mjs:4-5`) — `srvx` 1.0.0 released **2026-09-02** (releasealert.dev/github/h3js/srvx, GitHub releases), so "recently-stable". Notably it's the TanStack team's own recommended way to serve Start production builds on Node (official examples/e2e use `pnpx srvx --prod` — PR TanStack/router#5915), so this is a canonical, not novelty, choice.
+- **Vite 8 / TypeScript 7** — Vite 8 stable 2026-03-12 (vite.dev/blog/announcing-vite8) and is now *required* by Start stable (per PR #8696 notes); TypeScript 7 stable 2026-07-08 (devblogs.microsoft.com). Both dev-tooling only.
+- **Router APIs** — `createFileRoute`/`createRootRoute`/`HeadContent`/`Scripts`/`notFound`/`validateSearch`/`loaderDeps` and the `hashScrollIntoView` navigate option (`app/src/routes/pokemon.$name.tsx:156-158`) are all documented stable options in current Router docs.
+- A repo-wide grep finds **zero** `unstable_`/`experimental_`/beta/preview markers in source, no experimental Vite/TS config flags (`app/vite.config.ts:1-7` is minimal), and no opt-in to RSC (`@tanstack/react-start-rsc` appears only as a transitive dependency in `package-lock.json:660`).
+- The one fragile touch: `app/src/routes/__root.tsx:14` reads the underscore-private `match._notFound` property to compute the root title.
+
+```json
+{
+  "dimension": "experimentalness",
+  "criteria": {
+    "reach": {
+      "score": 3,
+      "evidence": [
+        "app/package.json:6-9 — pins @tanstack/react-start 1.169.4 (post-1.0-stable) and @tanstack/react-router 1.170.46",
+        "app/src/lib/pokedex.functions.ts:1 — createServerFn from @tanstack/react-start, the app's central data layer",
+        "app/server.mjs:4-5 — srvx/node serve + srvx/static staticMiddleware (srvx 1.0, Sep 2026)",
+        "app/vite.config.ts:3 — tanstackStart() plugin with no experimental flags; vite 8 / typescript 7 are toolchain-only (app/package.json:14-20)"
+      ],
+      "rationale": "No experimental, preview, RC or canary APIs at all, but the entire app rests on TanStack Start, which only reached 1.0 stable on 2026-10-13 (two weeks ago), plus srvx 1.0 (Sep 2026) and TypeScript 7 (Jul 2026) — recently-stable APIs in central places, which is exactly the anchor-3 case."
+    },
+    "containment": {
+      "score": 4,
+      "evidence": [
+        "app/src/lib/pokedex.functions.ts:8-27 — all server functions (the Start-specific surface) live in one module",
+        "app/src/lib/pokedex.server.ts:1-40 — server-only API access and caching isolated behind one module",
+        "app/server.mjs:1-16 — all srvx usage confined to a single 16-line entry file",
+        "app/src/routes/__root.tsx:14 — only non-contained touch: reads the private match._notFound property"
+      ],
+      "rationale": "Everything swappable (srvx server, server-function layer, cache) is isolated behind single modules, and the Start idioms spread across routes are the framework's mandatory core. The single line reaching into a private router property keeps this from a 5."
+    },
+    "justification": {
+      "score": 5,
+      "evidence": [
+        "app/package.json:6 — Start itself is mandated by SPEC.md, pinned to the current stable line",
+        "app/src/lib/pokedex.functions.ts:8 — createServerFn().validator() is the documented pattern for keeping HTTP fetching server-side (loaders are isomorphic), matching the official start-core/server-functions skill",
+        "app/server.mjs:5-16 — srvx serves the built Start handler the same way TanStack's own examples do; nothing here a plainer stable stack could do better",
+        "app/vite.config.ts:5 — no RSC, no betas, no flags: deliberately avoids the framework's still-bleeding-edge features"
+      ],
+      "rationale": "Every recently-stable choice buys something a stable alternative couldn't (spec-mandated framework, type-safe server functions, the framework authors' own prod-server recipe), and the tempting experimental surface (RSC, canary flags) was deliberately left untouched."
+    }
+  },
+  "overall": 4,
+  "findings": [
+    {
+      "severity": "low",
+      "location": "app/src/routes/__root.tsx:14",
+      "issue": "Root head() reads match._notFound, an underscore-prefixed private Router property, to pick the not-found title (the public match.status === 'notFound' half of the check is fine).",
+      "suggestion": "Rely on match.status alone, or set the not-found title via the notFoundComponent/head of a dedicated catch-all route instead of probing private match internals."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/routeTree.gen.ts:1",
+      "issue": "The generated route tree is committed even though TanStack's file-based routing guidance puts routeTree.gen.ts in .gitignore (app/.gitignore lists .tanstack/ but not the generated tree).",
+      "suggestion": "Add src/routeTree.gen.ts to .gitignore and let the build regenerate it; committed generated code can drift from the route files."
+    }
+  ],
+  "summary": "The app contains zero experimental, preview or canary APIs — no unstable_ names, no experimental build flags, and no RSC opt-in. Its recency risk is concentrated where the spec forces it: the whole app sits on TanStack Start, which only hit 1.0 stable on 2026-10-13, with srvx 1.0 and TypeScript 7 as the other recently-stable pieces, all pinned to current stable lines and isolated behind clean module boundaries. Only real nits are one line touching a private Router property and a committed generated route tree.",
+  "experimentalApis": [
+    {
+      "api": "@tanstack/react-start (createServerFn, tanstackStart vite plugin, .functions.ts/.server.ts conventions)",
+      "location": "app/src/lib/pokedex.functions.ts:1",
+      "status": "recently-stable",
+      "since": "1.0 stable 2026-10-13 (app pins 1.169.4, published 2026-10-22)",
+      "source": "tanstack.com/blog/tanstack-start-1-0 and TanStack/router PR #8696 'Start stable' (merged 2026-10-12); official start-core/server-functions SKILL.md documents .validator as canonical"
+    },
+    {
+      "api": "srvx (serve from srvx/node, staticMiddleware from srvx/static)",
+      "location": "app/server.mjs:4-5",
+      "status": "recently-stable",
+      "since": "srvx 1.0.0, 2026-09-02 (app pins ^1.0.7)",
+      "source": "GitHub releases h3js/srvx (v1.0.0 Sep 2, 2026); used by TanStack Start's own examples/e2e (PR TanStack/router#5915)"
+    },
+    {
+      "api": "TypeScript 7 (native compiler, devDependency)",
+      "location": "app/package.json:21",
+      "status": "recently-stable",
+      "since": "2026-07-08",
+      "source": "devblogs.microsoft.com/typescript/announcing-typescript-7-0"
+    },
+    {
+      "api": "Vite 8 (Rolldown-based build)",
+      "location": "app/package.json:20",
+      "status": "recently-stable",
+      "since": "2026-03-12 (now required by TanStack Start stable)",
+      "source": "vite.dev/blog/announcing-vite8; TanStack/router PR #8696 notes Vite 8 is required"
+    }
+  ],
+  "count": 0
+}
+```

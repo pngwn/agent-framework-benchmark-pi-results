@@ -1,0 +1,160 @@
+I've read the spec, the single spec file, and the riskiest code paths (server loaders, home filtering/pagination, move-table sorting, API client, data endpoint). Summary of the test picture before scoring:
+
+**What exists:** exactly one unit-test file, `app/src/app/shared/format.spec.ts` — 3 cases, 8 assertions, run via `ng test` (`@angular/build:unit-test`/vitest, `app/angular.json:75`). It covers the three pure helpers in `app/src/app/shared/format.ts`.
+
+**What the suite guards vs. what it doesn't:** the three written tests are genuinely behavioural (pure-function input → output, no mocks, no internals) and each pins a spec rule: `humanize` capitalization (`mr-mime` → `Mr Mime`), `dexNumber` zero-padding (`25` → `#0025`), and `orDash` — including the classic falsy-zero trap (`orDash(0)` must be `'0'`, not `'—'`), which would catch a lazy `value || '—'` rewrite. That's the whole suite, though: ~20 test lines against ~880 significant LOC.
+
+Everything with real complexity is untested:
+- `app/src/server/loaders.ts` (~400 lines) — all data transformation: move-table grouping/dedup (`loaders.ts:250` key `method|move|level`), method ordering (`loaders.ts:266` `rank`), version-group fallback (`loaders.ts:218` `selected`), alternate-form exclusion (`loaders.ts:128` `id < ALTERNATE_FORM_MIN_ID`), `latestFlavorText`/`collapse` (`loaders.ts:93`), evolution tree mapping (`loaders.ts:200`), damage-relation mapping (`loaders.ts:355`). A refactor of any of these — the likeliest kind of change once the acceptance suite is retired — could silently break spec ordering, leak Mega forms into lists, or pick the wrong flavor text.
+- `app/src/app/pages/home/home.ts:53-80` — URL-state filtering, `page` clamping, 48/page slicing, filter→page-1 reset, and the debounce/`linkedSignal` search sync (`home.ts:41`). Off-by-one pagination or a broken clamp would pass the current suite.
+- `app/src/app/pages/pokemon/move-table.ts:79-93` — sort comparator with "missing values last in both directions" and tie-breaks; `aria-sort` flipping in `sortBy` (`move-table.ts:95`). Easy to break asc/desc parity.
+- `app/src/server/api-client.ts` — `toUrl` marker parsing (`api-client.ts:30`), `idFromUrl` regex, cache TTL/eviction.
+- `app/src/app/data/page-data.ts:20-26` — `/_data` fetch + 404→null mapping, TransferState hydration consume-once logic (`page-data.ts:47`); a hydration double-fetch or stale-cache bug slips through.
+
+The tested helpers are the *least* risky code in the app; the risk is concentrated in server-side transformation and URL state, none of it covered.
+
+```json
+{
+  "dimension": "tests",
+  "criteria": {
+    "coverage_of_risk": {
+      "score": 1,
+      "evidence": [
+        "app/src/app/shared/format.spec.ts:3-17 — the only spec file; 3 cases on pure string/number formatting helpers",
+        "app/src/server/loaders.ts:246-272 — move-table grouping, dedup key and method ordering (the most intricate logic in the app) has no test",
+        "app/src/app/pages/home/home.ts:53-80 — filtering, page clamping and pagination slicing driven by URL params, untested",
+        "app/src/app/pages/pokemon/move-table.ts:79-93 — sort comparator with missing-values-last rule, untested"
+      ],
+      "rationale": "The only tests target trivial pure helpers; every high-risk area (data transformation, filtering/pagination, URL state, not-found handling) is uncovered. This is 'trivial only' on the anchor scale."
+    },
+    "behaviour_not_implementation": {
+      "score": 4,
+      "evidence": [
+        "app/src/app/shared/format.spec.ts:4-9 — asserts humanize('mr-mime') === 'Mr Mime', input→output behaviour",
+        "app/src/app/shared/format.spec.ts:15-18 — orDash(0) === '0' pins the observable falsy-zero edge case, not internals",
+        "app/src/app/shared/format.spec.ts — no mocks, no snapshots, no component-state or call-count assertions anywhere"
+      ],
+      "rationale": "The tests that exist are fully behavioural — public pure functions, concrete expected outputs, no implementation coupling. Not 5 only because the sample is so small there's little to point to."
+    },
+    "regression_power": {
+      "score": 2,
+      "evidence": [
+        "app/src/app/shared/format.spec.ts:15 — would catch an `orDash` rewrite to `value || '—'` (blanking 0 power/accuracy)",
+        "app/src/server/loaders.ts:128 — breaking the id<10000 alternate-form filter would not fail any app test",
+        "app/src/app/pages/home/home.ts:71-74 — an off-by-one in page slicing or a broken page clamp would not fail any app test"
+      ],
+      "rationale": "The three written tests have real bite for their tiny scope, but they cover ~2% of the logic; breaking sorting, filtering, pagination, move-table construction or the API cache would sail through."
+    },
+    "signal_to_noise": {
+      "score": 4,
+      "evidence": [
+        "app/src/app/shared/format.spec.ts:4-17 — three tests, each pinning a distinct spec-defined display rule",
+        "app/src/app/shared/format.spec.ts — no duplicated cases, no framework-behaviour tests, no getters-under-test"
+      ],
+      "rationale": "Zero noise: every test earns its keep and the suite is minimal. Not 5 because a 3-test suite is lean by omission rather than by disciplined selection across a large codebase."
+    }
+  },
+  "overall": 2,
+  "findings": [
+    {
+      "severity": "high",
+      "location": "app/src/server/loaders.ts:246-272",
+      "issue": "Move-table construction (dedup key method|move|level, method rank order, level-then-name default sort, version-group fallback selection) is completely untested — it's the most intricate logic in the app.",
+      "suggestion": "Extract the move-table builder and version-group selection into pure functions taking API-shaped input and test them against small fixtures (fixture data can be plain objects; no HTTP needed)."
+    },
+    {
+      "severity": "high",
+      "location": "app/src/app/pages/home/home.ts:53-80",
+      "issue": "URL-driven filtering (type/generation/q matching), page clamping, 48-per-page slicing and reset-to-page-1 are untested; an off-by-one or clamp regression would pass.",
+      "suggestion": "Extract the matches/page/results computation as pure functions of (vm, params) and unit-test edge cases: empty query params, page beyond pageCount, zero matches, name matching case-insensitivity against humanized names."
+    },
+    {
+      "severity": "high",
+      "location": "app/src/server/loaders.ts:126-138",
+      "issue": "toCards' alternate-form exclusion (id < 10000), dedup and dex ordering are untested; a wrong comparison silently leaks Mega forms or drops species.",
+      "suggestion": "Test toCards with refs including ID 10000+ and duplicate species entries, asserting exclusion, dedup and ascending order."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/app/pages/pokemon/move-table.ts:79-99",
+      "issue": "Sort comparator (missing values last in BOTH directions, numeric vs localeCompare, tie-break by name) and aria-sort flipping are untested; asc/desc parity bugs are easy to introduce.",
+      "suggestion": "Extract the comparator and sortBy state transition into pure functions and test nulls-last in both directions plus the ascending→descending toggle."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/server/loaders.ts:91-103",
+      "issue": "latestFlavorText (last English entry) and collapse (whitespace/\\f runs) are untested — spec-pinned behaviour with classic index/regex bugs.",
+      "suggestion": "Add cases: only non-English entries, entries with \\f and \\n, $effect_chance substitution in shortEffect."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/server/api-client.ts:29-59",
+      "issue": "toUrl marker parsing, idFromUrl regex and cache eviction are untested; a URL-parsing regression breaks every page.",
+      "suggestion": "Unit-test toUrl with the three accepted shapes (bare path, /api/v2/... path, absolute URL) and idFromUrl with and without trailing slash."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/app/data/page-data.ts:40-55",
+      "issue": "PageData's TransferState consume-once hydration and the /_data fetch's 404→null / non-ok→throw mapping are untested; hydration double-fetches or error-swallowing would slip through.",
+      "suggestion": "Test load() with a fake loader and TransferState: present key returns cached value and removes it; second call hits the loader; fetch 404 resolves null."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/server/loaders.ts:389-417",
+      "issue": "loadPageData path routing (malformed %-escapes → null, extra segments → null, missing name → null) is untested and defines which URLs 404.",
+      "suggestion": "Test the router table directly: '/pokemon/pikachu?game=x', '/home/x', '%zz' — expect null."
+    }
+  ],
+  "summary": "The agent wrote exactly three unit tests for the pure formatting helpers; they're behavioural, lean and each pins a real spec rule (including the falsy-zero em-dash trap), but they cover the least risky code in the app. The high-risk logic — the 400-line server-side view-model builder, URL-state filtering/pagination, and the sortable move tables — is entirely untested, so a refactor of the data layer after acceptance testing ends would be unguarded. Overall the test suite is a token effort: correct in style, negligible in coverage.",
+  "wroteTests": true,
+  "testCount": 3,
+  "valuableTests": [
+    "format — shows missing values as an em dash (asserts orDash(0) === '0') — would catch a rewrite to `value || '—'` that blanks out legitimate zero values",
+    "format — humanizes API names (mr-mime → Mr Mime, thunder-punch → Thunder Punch) — pins the spec's display-name rule used on every list page",
+    "format — formats dex numbers (25 → #0025, 1026 → #1026) — pins the zero-padding and non-padding-above-9999 rules"
+  ],
+  "lowValueTests": [],
+  "untested": [
+    {
+      "area": "Server view-model construction in loaders.ts: move-table grouping/dedup/method ordering, version-group selection fallback, stat/ability/type ordering",
+      "risk": "high",
+      "likelyBug": "Reordering move methods (Level Up/Machine/Egg/Tutor), dropping duplicate level-up entries, or defaulting to the wrong game version group — all spec-pinned, none would fail any test"
+    },
+    {
+      "area": "Home page URL-state filtering: q/type/generation matching, page clamping, 48-per-page slicing, reset-to-page-1 on filter change",
+      "risk": "high",
+      "likelyBug": "Off-by-one pagination, page clamp removed (blank page on ?page=999), filter change not resetting page, or search matching raw instead of humanized names"
+    },
+    {
+      "area": "Alternate-form exclusion and card dedup in toCards (id < 10000)",
+      "risk": "high",
+      "likelyBug": "Mega/regional forms leaking into Learned-by and ability lists, or duplicate species cards when a Pokémon and species share an id"
+    },
+    {
+      "area": "Move-table column sorting: missing-values-last in both directions, numeric vs string comparison, aria-sort state transition",
+      "risk": "medium",
+      "likelyBug": "Nulls sorting first in descending order, Power compared as strings ('100' < '20'), or aria-sort stuck on ascending"
+    },
+    {
+      "area": "Flavor text/effect selection: last English entry, \\f/\\n whitespace collapse, $effect_chance substitution, fallback to flavor text",
+      "risk": "medium",
+      "likelyBug": "First English flavor entry shown instead of latest, literal form-feed characters rendered, or '—' fallback lost when short_effect is missing"
+    },
+    {
+      "area": "API client URL parsing (toUrl, idFromUrl) and in-memory cache TTL/eviction/error invalidation",
+      "risk": "medium",
+      "likelyBug": "Absolute sprite/evolution-chain URLs mis-parsed (double /api/v2/), ID extraction returning NaN, or failed requests cached as pending forever"
+    },
+    {
+      "area": "PageData TransferState hydration (consume-once) and /_data fetch error mapping (404→null, non-ok→throw)",
+      "risk": "medium",
+      "likelyBug": "Hydration double-fetch after client navigation, or a 500 from /_data swallowed into a null (wrongly rendered not-found) page"
+    },
+    {
+      "area": "Not-found and error paths: loadPageData returning null for malformed escapes, extra path segments or unknown kinds; server 404/500 responses",
+      "risk": "low",
+      "likelyBug": "A bad URL like /pokemon/%zz crashing the server with a decodeURIComponent exception instead of rendering not-found"
+    }
+  ]
+}
+```

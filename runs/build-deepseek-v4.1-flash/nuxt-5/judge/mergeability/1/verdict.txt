@@ -1,0 +1,78 @@
+I've reviewed the app against SPEC.md and Nuxt 4.6.x (current stable, verified against the framework's docs and release history). The app is a well-structured Nuxt 4 SSR app: a server-side BFF layer (`server/utils/pokeapi.ts` + thin `server/api/app/*` routes) that pre-aggregates PokeAPI data, consumed by pages via `useFetch`/`useAsyncData`. Structure, composables and Nitro usage are all correct for the framework's current release.
+
+```json
+{
+  "dimension": "mergeability",
+  "criteria": {
+    "idiomatic": {
+      "score": 4,
+      "evidence": [
+        "app/nuxt.config.ts:1 — Nuxt 4.6.3 (current stable, verified) with correct srcDir layout: pages in app/app, Nitro server at app/server",
+        "app/app/pages/pokemon/[name].vue:83-86 — useFetch with reactive URL + watch, useHead with computed title: exactly the documented data/meta pattern",
+        "app/server/api/app/pokemon/[name].get.ts:1-6 — defineEventHandler + getRouterParam/getQuery/setResponseStatus, the documented Nitro route idiom",
+        "app/app/pages/[...slug].vue:6 — setResponseStatus(404) in a page; verified against Nuxt 4.6.3 dist that the app-side wrapper accepts a bare status and is a no-op in the browser",
+        "app/app/pages/index.vue:104-116 — hand-rolled debounce + mirrored search/URL state instead of deriving from route; works but is the least framework-shaped part",
+        "app/app/assets/css/main.css:1 — one 600-line global stylesheet instead of scoped per-component styles; spec allows it but it diverges from Vue conventions"
+      ],
+      "rationale": "Recognisably reads like Nuxt's own docs: correct v4 directory layout, composables, auto-imports and Nitro routes. It deviates on a few points (inline found-flag 404s instead of throw createError, no error.vue, one global CSS file, hand-rolled search sync)."
+    },
+    "correctness_risks": {
+      "score": 3,
+      "evidence": [
+        "app/app/pages/index.vue:104-112 — debounce timer is never cleared on unmount; if the user types then navigates within 250 ms, the callback fires on the new route, fails the `same` check against the foreign route.query, and router.replace()s the user back to '/'",
+        "app/app/pages/pokemon/[name].vue:1 — NotFoundPage renders but the SSR response is 200; only the catch-all (app/app/pages/[...slug].vue:6) sets 404, so unknown pokemon/move/ability/type URLs respond 200 (spec: 404 'encouraged')",
+        "app/app/pages/index.vue:72-78 — requestedPage is clamped for display but the URL keeps ?page=999, leaving URL and rendered state inconsistent",
+        "app/server/utils/pokeapi.ts:285-291,188-193 — silent catch blocks fall back to an empty evolution chain / null species detail, masking upstream API failures",
+        "app/server/utils/pokeapi.ts:27-31 — module-level promise caches (rawCache, preparedMoves) are unbounded; acceptable here since the API surface is a fixed snapshot and the spec permits runtime caching, but there is no size guard or invalidation path"
+      ],
+      "rationale": "No serious defects, but one real client-side bug (unowned debounce timer can hijack navigation) plus a handful of small fragilities: 200-instead-of-404 on detail pages, URL/page clamping drift, and error-swallowing fallbacks."
+    },
+    "global_abstractions": {
+      "score": 4,
+      "evidence": [
+        "app/server/utils/pokeapi.ts — single cohesive server-only data module behind thin routes (server/api/app/*), a clean server/client boundary pages can't bypass",
+        "app/server/utils/pokeapi.ts:60-103 — cached DexIndex summary reused by move/ability/type pages: an abstraction that clearly earns its keep and avoids client-side fan-out",
+        "app/server/utils/pokeapi.ts:33-38 — the 18 valid types are a hardcoded whitelist rather than derived from the API (config buried in code; a new generation needs a code edit)",
+        "app/server/utils/pokeapi.ts:216-452 — every page payload is returned as `any` (typeLines: 19 total), so the shared boundary is untyped for consumers",
+        "app/app/pages/moves/[name].vue:55 and app/app/components/MoveTables.vue:101 — near-identical displayNumber helpers duplicated in two files"
+      ],
+      "rationale": "The structure is sound: one data module with a crisp server boundary and a genuinely useful cached index. The deductions are typing debt across that boundary, a hardcoded type whitelist, and a small duplicated helper — all untangleable in an afternoon."
+    },
+    "readability": {
+      "score": 4,
+      "evidence": [
+        "app/server/utils/pokeapi.ts:1-3 — one of the few comments, and it explains the important why (no build-time fetching)",
+        "app/app/pages/pokemon/[name].vue:35-60 — section ids/aria-labelledby headings map one-to-one onto the spec's named sections, making the file self-documenting",
+        "app/app/components/MoveTables.vue:96-115 — sorting logic with explicit missing-last handling is easy to follow",
+        "app/server/utils/pokeapi.ts — pervasive `any` in the 550-line data module is the main readability tax; a new teammate can't see payload shapes without reading every getter",
+        "app/app/pages/index.vue:108-110 — the `same`-check dance between search state and route query takes a few reads to be sure it can't loop"
+      ],
+      "rationale": "Consistent page/component structure, good names, and section names that mirror the spec make the codebase quick to navigate. The untyped data module and one tricky state-sync watch are the rough spots."
+    },
+    "review_cost": {
+      "score": 4,
+      "evidence": [
+        "app/app/pages/index.vue:104-112 — reviewer would ask for the debounce timer to be cleared in onScopeDispose/onBeforeUnmount (small, localised)",
+        "app/app/pages/pokemon/[name].vue:87-89 — add setResponseStatus(404) (the pattern the catch-all already uses) or throw createError per the Nuxt docs example",
+        "app/nuxt.config.ts:2 — compatibilityDate '2025-07-15' is over a year behind the pinned 4.6.3; one-line bump",
+        "app/app/pages/types/index.vue:14 vs app/app/pages/index.vue:53 — useFetch vs useAsyncData with explicit key used inconsistently for the same kind of call (nit)"
+      ],
+      "rationale": "Everything I'd ask for is small and localised: timer cleanup, 404 status propagation, a compat-date bump, and consistency nits. No structural rework is needed; I'd approve after one light round."
+    }
+  },
+  "overall": 4,
+  "findings": [
+    { "severity": "medium", "location": "app/app/pages/index.vue:104", "issue": "Debounce timer for search is never cancelled on unmount; if the user types and navigates away within 250 ms, the callback compares against the new route's query and router.replace()s the user back to '/'.", "suggestion": "Clear the timer in onBeforeUnmount (or use onScopeDispose), and bail out of the callback when route.path !== '/'." },
+    { "severity": "low", "location": "app/app/pages/pokemon/[name].vue:1", "issue": "Unknown pokemon/move/ability/type names render the Not-found component but the page responds with HTTP 200; only the catch-all route sets 404.", "suggestion": "In each [name].vue, call setResponseStatus(404) when !data?.found (the wrapper verified in Nuxt 4.6.3 is a safe client no-op), or throw createError({ statusCode: 404 }) with an error.vue as the docs example shows." },
+    { "severity": "low", "location": "app/server/utils/pokeapi.ts:33", "issue": "The 18 valid type names are a hardcoded whitelist; the spec defines them as every API type except stellar/unknown/shadow, so new API data silently drops types.", "suggestion": "Derive the list from the API by excluding a small exclusion set instead of enumerating the 18 names." },
+    { "severity": "low", "location": "app/server/utils/pokeapi.ts:216", "issue": "Every page payload from the shared data module is returned as `any`, so the server/client boundary is untyped and consumers can't see shapes.", "suggestion": "Define the payload types in Nuxt 4's shared/ directory (auto-imported in both app and server) and type the getters' returns." },
+    { "severity": "low", "location": "app/app/pages/index.vue:78", "issue": "requestedPage is clamped to totalPages for display, but the URL keeps an out-of-range ?page, leaving URL and rendered state inconsistent.", "suggestion": "Replace the URL with the clamped page (or remove the page param) via router.replace when requestedPage exceeds totalPages." },
+    { "severity": "low", "location": "app/app/pages/moves/[name].vue:55", "issue": "displayNumber is duplicated between the move page and MoveTables.vue:101 — the em-dash-for-missing-value rule has two implementations.", "suggestion": "Move it into a small auto-imported app/utils/ (or shared/) helper and import it in both places." },
+    { "severity": "low", "location": "app/nuxt.config.ts:2", "issue": "compatibilityDate is 2025-07-15, more than a year behind the pinned nuxt 4.6.3 (Oct 2026), so newer default behaviours and the dev-time warning are avoided for no reason.", "suggestion": "Bump compatibilityDate to the current release date." },
+    { "severity": "low", "location": "app/server/utils/pokeapi.ts:285", "issue": "Broad silent catch blocks swallow upstream API failures (evolution chain fetch, per-species details in getDexIndex) and degrade the page without any signal.", "suggestion": "At minimum log the failures; ideally surface a visible fallback state rather than silently rendering empty data." },
+    { "severity": "low", "location": "app/app/pages/types/index.vue:14", "issue": "Inconsistent data-loading convention: this page uses plain useFetch while index.vue:53 uses useAsyncData with an explicit key for the same shape of call.", "suggestion": "Pick one composable convention for simple endpoint calls (useFetch) and use explicit keys only where sharing across components is intended." },
+    { "severity": "low", "location": "app/app/pages/[...slug].vue:4", "issue": "Not-found title is set twice — NotFoundPage's useHead ('Not found – Pokédex') and each detail page's computed title ('Not found – Pokédex') — duplication that can drift.", "suggestion": "Let the NotFoundPage component own the title and drop the fallback branch from each detail page's useHead." }
+  ],
+  "summary": "A genuinely well-built Nuxt 4.6 app: correct v4 layout, idiomatic composables and Nitro routes, and a server-side BFF layer with a clean boundary that does the heavy aggregation where it belongs. The issues a reviewer would flag are small and localised — an uncancelled debounce timer that can hijack navigation, missing 404 status propagation on detail pages, a hardcoded type whitelist, and untyped payloads at the server/client boundary. I'd merge after one light round of fixes."
+}
+```

@@ -1,0 +1,123 @@
+{
+  "dimension": "mergeability",
+  "criteria": {
+    "idiomatic": {
+      "score": 5,
+      "evidence": [
+        "app/src/views/layout.tsx:5-20 — jsxRenderer with the documented `declare module 'hono' { interface ContextRenderer }` title-prop pattern",
+        "app/src/index.tsx:36-39 — handlers load data, pass typed props to page components, use c.render with the declared title",
+        "app/src/index.tsx:2,14 — serveStatic imported from @hono/node-server/serve-static, the correct (current-stable) location",
+        "app/src/index.tsx:18-24 — isPartial() checks HX-History-Restore-Request and sets Vary + HX-Push-Url; textbook htmx/history handling most apps miss",
+        "app/src/views/home.tsx:94,99 — hx-sync replace + input delay for typeahead; form keeps a no-JS action/method fallback",
+        "app/src/views/team.tsx:3 — hono/cookie helpers (setCookie/deleteCookie/getCookie) for the browser-owned team state",
+        "app/src/views/components.tsx:1-2 — Child/PropsWithChildren imports and `class` (not className), per the hono-jsx skill",
+        "app/package.json:12-14 — hono 4.13.14 and @hono/node-server 2.1.5, both current stable as of 2026-10"
+      ],
+      "rationale": "Reads like the framework's own examples: current-stable Hono with the documented jsxRenderer/ContextRenderer pattern, correct node-server static serving, and htmx usage (hx-sync, HX-Push-Url, history-restore, Vary) that follows the framework's own best-practice guidance rather than fighting it."
+    },
+    "correctness_risks": {
+      "score": 4,
+      "evidence": [
+        "app/src/index.tsx:33,45,76,83 — every loader's null result routes to notFound(); app.notFound registered at index.tsx:105",
+        "app/src/api.ts:11-15 — 404 handled via res.body?.cancel(); non-ok throws to app.onError (index.tsx:110)",
+        "app/src/views/pokemon.tsx:47-55 — null-safe sort keeps missing values last in both directions",
+        "app/src/api.ts:9 — module-level Map cache with no size cap or eviction; growth bounded only by API dataset size",
+        "app/src/api.ts:11 — fetch with no timeout/AbortSignal; a hung upstream stalls the request indefinitely",
+        "app/src/index.tsx:93-98 — POST /team/add/:name accepts any name and writes it to the cookie without validating it's a species",
+        "app/src/index.tsx:14 — serveStatic root './dist' resolves against process.cwd(); started from another directory, static assets 404",
+        "app/src/views/team.tsx:37-52 — cookie read-modify-write is not atomic across concurrent requests (last write wins)"
+      ],
+      "rationale": "No serious bugs found: 404s, escaping, cache-dedup and history-restore are all handled correctly. Remaining risks are the unbounded cache, the missing fetch timeout, the cwd-dependent static root, and unvalidated team-add — all minor and cheap to fix."
+    },
+    "global_abstractions": {
+      "score": 4,
+      "evidence": [
+        "app/src/api.ts:1-45 — single transport+cache module with a clear boundary and honest JSDoc",
+        "app/src/data.ts — cohesive domain layer (names, dex numbers, species/type/generation loading) rather than a dumping-ground utils module",
+        "app/src/views/team.tsx:11-52 — cookie persistence and Hono Context imports live in the views layer; a server concern inside render code",
+        "app/src/data.ts:74-84 — typesByPokemonId() rebuilds an ~18k-entry map from type records on every home/team request (CPU, not memoized)",
+        "app/src/views/home.tsx:60-63 and app/src/views/team.tsx:57-60 — near-duplicated card+types assembly in two loaders"
+      ],
+      "rationale": "The layering (api → data → views) is clean and each module earns its keep, with load/view colocation applied consistently across all five pages. The one real wart is team-cookie logic (and its Context dependency) living in views/, plus a pair of duplicated card-assembly blocks."
+    },
+    "readability": {
+      "score": 4,
+      "evidence": [
+        "app/src/views/* — consistent loader+page colocation in every file; a new teammate can find any page in seconds",
+        "app/src/index.tsx:16-20, app/src/api.ts:1-2 — comments explain *why* (partial vs restore requests, stale-while-revalidate policy)",
+        "app/src/views/pokemon.tsx:58-66 — loadPokemon returns untyped `any` species/pokemon/chain; data shapes are implicit",
+        "app/src/views/details.tsx:57 — inline `as any[]` cast; similar casts at data.ts:74 and sort comparators `(a: any, b: any)` in pokemon.tsx",
+        "app/src/views/pokemon.tsx:83-130 — loadMoves is dense (dedup keys, three nested loops) and would benefit from typed shapes"
+      ],
+      "rationale": "Naming, organisation and the why-comments are good and consistent across files. The cost is pervasive `any`: a handful of small interfaces for the API resources actually used would remove most of the casts and make the loaders self-documenting."
+    },
+    "review_cost": {
+      "score": 4,
+      "evidence": [
+        "app/src/views/team.tsx:1-52 — ask: move cookie/team state into src/team.ts so views stay render-only",
+        "app/src/index.tsx:14 — ask: use an import.meta.dirname-based absolute static root",
+        "app/src/api.ts:9,11 — ask: cap the cache and add a fetch timeout",
+        "app/src/index.tsx:93 — ask: validate team-add names against the species list"
+      ],
+      "rationale": "Approve after a round of small, localized changes: relocate team cookie logic, harden the cache and static root, and add a few API-shape types. Nothing structural needs rework."
+    }
+  },
+  "overall": 4,
+  "findings": [
+    {
+      "severity": "medium",
+      "location": "app/src/views/team.tsx:11-52",
+      "issue": "Cookie persistence and Hono Context handling live in the views layer, making the render module depend on server concerns (and forcing index.tsx to import five team functions from views/)",
+      "suggestion": "Move readTeam/writeTeam/addToTeam/removeFromTeam/loadTeam into a src/team.ts (or src/team.tsx if components stay) module; views/team.tsx keeps only TeamButton/TeamContent/TeamPage"
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/api.ts:9",
+      "issue": "Module-level cache Map with no size cap or eviction policy; growth is bounded only by the API dataset (pokemon records are large), and it survives forever in a long-running server",
+      "suggestion": "Add an LRU/size cap or an explicit statement that the dataset is fixed, and consider aborting entries when the backing fetch fails repeatedly"
+    },
+    {
+      "severity": "low",
+      "location": "app/src/index.tsx:14",
+      "issue": "serveStatic({ root: './dist' }) resolves against process.cwd(), so starting the server from another directory silently breaks all static assets",
+      "suggestion": "Derive the root from import.meta.dirname (e.g. new URL('./dist', import.meta.url)) so it is start-directory-independent"
+    },
+    {
+      "severity": "low",
+      "location": "app/src/api.ts:11",
+      "issue": "Upstream fetch has no timeout/AbortSignal; a hung API request stalls the page indefinitely and onError never fires",
+      "suggestion": "Pass AbortSignal.timeout(...) to fetch and throw a typed error for the 500 handler"
+    },
+    {
+      "severity": "low",
+      "location": "app/src/index.tsx:93",
+      "issue": "POST /team/add/:name persists any name to the cookie without checking it's a real species, so garbage can accumulate in user state",
+      "suggestion": "Validate the name against allSpecies() (or the species fetch) before writing the cookie, mirroring the null-check pattern used everywhere else"
+    },
+    {
+      "severity": "low",
+      "location": "app/src/views/pokemon.tsx:58",
+      "issue": "API responses are untyped (`any`) throughout the loaders, with inline casts (details.tsx:57, data.ts:74) that hide data-shape assumptions",
+      "suggestion": "Define small interfaces (Species, Pokemon, Move, TypeRecord, VersionGroup) in data.ts and type api<T>() calls; removes most casts and documents the API contract"
+    },
+    {
+      "severity": "low",
+      "location": "app/src/views/team.tsx:37-53",
+      "issue": "addToTeam/removeFromTeam are declared async with no awaits, and the cookie read-modify-write is not atomic under concurrent htmx requests (last write wins)",
+      "suggestion": "Drop the unnecessary async, or document the concurrency semantics; validation (above) also bounds the blast radius"
+    },
+    {
+      "severity": "low",
+      "location": "app/src/data.ts:74-84",
+      "issue": "typesByPokemonId() rebuilds a map over every type's pokemon list (~18k entries) on every home and team request despite the underlying records being cached",
+      "suggestion": "Memoize the derived map alongside the cached type records, or cache it by the type-list identity"
+    },
+    {
+      "severity": "low",
+      "location": "app/src/index.tsx:58-73",
+      "issue": "/pokemon/:name/moves-table returns a bare, unstyled table fragment when navigated to directly",
+      "suggestion": "Acceptable for an htmx-only endpoint, but returning 404 (or the full page) for non-HX requests would be more defensive"
+    }
+  ],
+  "summary": "A small, tidy, genuinely idiomatic Hono + htmx app on current stable versions, with best-practice details (history-restore handling, Vary, hx-sync dedup, SWR cache) that most htmx integrations miss. The main review asks are layering (team cookie logic out of views/), typing the API responses, and two robustness nits (cache cap, fetch timeout, cwd-relative static root). I'd merge after one round of small, localized changes."
+}

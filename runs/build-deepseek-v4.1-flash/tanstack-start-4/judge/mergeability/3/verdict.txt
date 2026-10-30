@@ -1,0 +1,126 @@
+I've reviewed the app end to end, checked its TanStack Start usage against the current stable docs (Start 1.169+; `.validator()` is the current API since `inputValidator()` was removed, `shellComponent`/`HeadContent`/`Scripts` match the official `start-basic` example, `srvx --prod` matches the team's own example start scripts, and the router docs explicitly require `throw notFound()` for missing resources and provide built-in hash scrolling via `hashScrollIntoView`).
+
+```json
+{
+  "dimension": "mergeability",
+  "criteria": {
+    "idiomatic": {
+      "score": 4,
+      "evidence": [
+        "app/src/routes/__root.tsx:16-19 — shellComponent + HeadContent/Scripts from @tanstack/react-router, exactly the official start-basic pattern for current stable",
+        "app/src/lib/data.functions.ts:1-27 — createServerFn({method:'GET'}).validator(...) is the current API (inputValidator removed in 1.169); loaders calling server fns is the documented data-loading path",
+        "app/src/routes/index.tsx:25-49 — validateSearch + loaderDeps keyed on search is the recommended URL-as-state pattern; srvx --prod start script matches the TanStack team's own examples (app/package.json:6-9)",
+        "app/src/routes/moves.$name.tsx:17 — returns null and renders NotFound in the component instead of throw notFound() in the loader; router docs say the developer must throw notFound() for missing resources (repeated in pokemon/abilities/types routes)",
+        "app/src/routes/pokemon.$name.tsx:47-54 — hand-rolled rAF hash-scroll effect duplicates the router's built-in hashScrollIntoView (defaults to true)",
+        "app/src/router.tsx:9-10 — no errorComponent anywhere despite the framework's first-class DefaultCatchBoundary pattern"
+      ],
+      "rationale": "The routing, loader, server-function, head and document-shell structure reads like the framework's own examples on the current stable release; the deductions are two contained workarounds (null-render instead of notFound(), manual hash scrolling) plus a missing error boundary."
+    },
+    "correctness_risks": {
+      "score": 3,
+      "evidence": [
+        "app/src/lib/api.server.ts:68 — apiGet throws on non-OK, but no route or root defines errorComponent; an API hiccup surfaces as Start's generic JSON error body with 500 instead of any UI",
+        "app/src/routes/$.tsx:4-7 — splat route renders NotFound with HTTP 200; same for every detail route's null-data render, so not-found pages are cacheable 200s and never 404",
+        "app/src/routes/index.tsx:44-46 and 87 — search navigates on every keystroke (no debounce) and the URL→state effect can clobber the input with a stale committed search.q while a newer navigation is still in flight",
+        "app/src/lib/api.server.ts:37-55 — memo never evicts expired entries from `memory`; growth is bounded by dataset size but can reach tens of MB per process with no cap",
+        "app/src/lib/api.server.ts:58-71 — 404 is handled cleanly (returns null) and inFlight dedupes concurrent fetches; no leaked listeners or SSR/CSR mismatch sources found"
+      ],
+      "rationale": "No serious data-corruption bugs, but a handful of real fragilities: no error boundary in front of a network dependency, 200-status not-found pages, an undebounced per-keystroke server round trip with a mirrored-state race, and a cache with no eviction."
+    },
+    "global_abstractions": {
+      "score": 4,
+      "evidence": [
+        "app/src/lib/api.server.ts:25-596 — single ~600-line data module for all five page types, but server-only by .server.ts convention, emits typed view models (app/src/lib/model.ts) and keeps a clean client/server boundary (routes import only data.functions)",
+        "app/src/lib/api.server.ts:139 vs 563 — the name→TypeInfo map is built twice (getTypeMap and an inline rebuild in loadTypePage), a small drift risk",
+        "app/src/lib/api.server.ts:236-257 vs 507-523 — cardsFromPokemonRefs and an inline ability-page variant are near-duplicates differing only in hidden-ability handling",
+        "app/src/lib/model.ts:58/80/93/106 — `found: true` discriminant plus unused name/sprite fields are dead payload weight the components never read"
+      ],
+      "rationale": "Abstractions are few and have a clear boundary (routes → server-fn wrappers → server-only loader → pure formatters), so nothing needs untangling; only two small duplications and some dead view-model fields will need tidying."
+    },
+    "readability": {
+      "score": 4,
+      "evidence": [
+        "app/src/routes/, app/src/components/, app/src/lib/ — conventional TanStack Start layout; every file's job is obvious from its name and each component is small",
+        "app/src/styles.css:61-276 — CSS grouped by section with comments and driven entirely by design tokens (no hardcoded colors)",
+        "app/src/lib/api.server.ts:80-82 — spriteForId synthesizes sprite URLs from IDs instead of using API-provided URLs, a non-obvious spec-sanctioned shortcut with zero explanation (commentLines across the app: 0)",
+        "app/src/lib/api.server.ts:25 — `type Json = any` loosens the entire server layer; safety only reappears at the view-model boundary"
+      ],
+      "rationale": "A new teammate finds their way in minutes thanks to consistent naming, small functions and token-based CSS; the rough spot is that no comment anywhere explains the handful of genuinely non-obvious decisions."
+    },
+    "review_cost": {
+      "score": 3,
+      "evidence": [
+        "app/src/routes/moves.$name.tsx:17 (and pokemon/abilities/types/$​.tsx) — would be asked to switch to throw notFound() so the framework renders the root notFoundComponent and emits a 404",
+        "app/src/routes/__root.tsx:12-20 — would be asked to add an errorComponent/DefaultCatchBoundary",
+        "app/src/routes/index.tsx:44-46 — would be asked to debounce the search input (spec allows 300 ms) or stop mirroring search into local state",
+        "app/src/lib/model.ts:58 and app/package.json:5 — nits: drop dead fields/`found`, remove the unused `#/*`/`@/*` alias config, add a .gitignore for dist/ and .tanstack/"
+      ],
+      "rationale": "Approve-able architecture, but one real round of changes (not-found semantics, error boundary, search-state hardening) plus a nit list before I'd sign off."
+    }
+  },
+  "overall": 4,
+  "findings": [
+    {
+      "severity": "medium",
+      "location": "app/src/routes/__root.tsx:12-20",
+      "issue": "No errorComponent/defaultErrorComponent anywhere, so any API failure thrown from app/src/lib/api.server.ts:68 surfaces as TanStack Start's generic JSON 500 body instead of an error UI.",
+      "suggestion": "Add a DefaultCatchBoundary errorComponent on the root route (and optionally per-route), matching the official start-basic example."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/routes/moves.$name.tsx:17",
+      "issue": "All detail routes return null from the loader and render NotFound in the component, and the splat route (app/src/routes/$.tsx:4) does the same, so every not-found page is served as HTTP 200.",
+      "suggestion": "Throw notFound() from the loaders (or return it) and let the root notFoundComponent handle it, which also yields proper 404 responses."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/routes/index.tsx:87",
+      "issue": "Search navigates on every keystroke with no debounce, and index.tsx:44-46 mirrors the committed search.q back into local input state, which can transiently revert typed characters while a newer navigation is in flight.",
+      "suggestion": "Debounce navigation by ~300 ms (explicitly allowed by the spec) and/or derive the input value solely from useSearch instead of a mirrored useState."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/lib/api.server.ts:37-55",
+      "issue": "Module-level memo cache never evicts expired entries and has no size cap; it is bounded by dataset size but can grow to tens of MB per server process.",
+      "suggestion": "Delete expired keys on access or cap the Map (e.g. simple LRU) and note the caching policy in a comment."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/routes/pokemon.$name.tsx:47-54",
+      "issue": "Hand-rolled requestAnimationFrame hash-scroll effect duplicates the router's built-in hashScrollIntoView, which defaults to true and runs after location commit.",
+      "suggestion": "Delete the effect and rely on scrollRestoration + hashScrollIntoView; if a special case remains, pass hashScrollIntoView options to navigate."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/lib/api.server.ts:563",
+      "issue": "Duplicated construction of the name→type map (also built by getTypeMap at line 139), and the ability-page card loop (507-523) near-duplicates cardsFromPokemonRefs (236-257).",
+      "suggestion": "Reuse getTypeMap in loadTypePage and extend cardsFromPokemonRefs with an optional per-pokemon flag callback so the two loops can't drift."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/lib/model.ts:58",
+      "issue": "Dead view-model weight: `found: true` discriminants are never checked (components test null instead), and PokemonPageData.name/sprite are computed but unused.",
+      "suggestion": "Drop `found`, `name` and the unused `sprite` field, or actually use the discriminant in a type guard."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/lib/api.server.ts:80-82",
+      "issue": "spriteForId synthesizes sprite URLs from the species ID rather than using the API-provided sprite URLs, and the whole app contains zero comments explaining such non-obvious choices.",
+      "suggestion": "Add a short comment citing the spec's documented sprite-URL pattern and the id>10000 alternate-form exclusion."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/router.tsx:10",
+      "issue": "defaultPreloadStaleTime: 0 makes intent preloading immediately stale, so hover-preloaded data is always refetched on click.",
+      "suggestion": "Set a modest staleTime (e.g. 30_000) or drop the option and rely on the default."
+    },
+    {
+      "severity": "low",
+      "location": "app/package.json:5",
+      "issue": "Dead config: the `#/*` import map and both tsconfig path aliases are unused (all imports are relative), and no .gitignore covers app/dist and app/.tanstack build artifacts.",
+      "suggestion": "Remove the unused aliases (or actually use one consistently) and add app/.gitignore entries for dist/, .tanstack/ and node_modules/."
+    }
+  ],
+  "summary": "This is a well-built TanStack Start app: current-stable APIs throughout, a clean routes → server-fn → server-only loader → typed view-model boundary, and tidy token-driven CSS. The main gaps a reviewer would flag are robustness and semantics rather than structure: no error boundary in front of a flaky API dependency, not-found pages rendered at HTTP 200 instead of using the framework's notFound(), and an undebounced per-keystroke search navigation with a mirrored-state race. I'd merge after one focused round of fixes and a nit pass."
+}
+```

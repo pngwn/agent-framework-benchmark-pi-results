@@ -1,0 +1,129 @@
+I've read the spec, all 13 source files, config, and verified the framework version (`@builder.io/qwik@1.20.3` is the current stable release as of today; 2.0 is still RC). Here's my review.
+
+```json
+{
+  "dimension": "mergeability",
+  "criteria": {
+    "idiomatic": {
+      "score": 4,
+      "evidence": [
+        "app/src/routes/index.tsx:9 — routeLoader$ with url-derived initial state, the current Qwik City data-loading primitive",
+        "app/src/routes/pokemon/[name]/index.tsx:428 — head: DocumentHead with resolveValue, correct current API for dynamic titles",
+        "app/src/routes/index.tsx:38 — useSignal/useComputed$ for client-side filtering, recommended reactivity primitives",
+        "app/src/routes/index.tsx:64 — manual window.history.replaceState instead of Qwik City navigation (useNavigate / link-driven SPA nav)",
+        "app/src/routes/pokemon/[name]/index.tsx:417 — window.location.assign for the Game select: full page reload, bypasses the SPA router",
+        "app/src/entry.ssr.tsx:24 — containerAttributes {lang:'en'} for html lang, the documented pattern"
+      ],
+      "rationale": "Routing, loading, head, and state all read like current Qwik City docs and the pinned version is the latest stable. Two spots work around the router with raw history/navigation APIs rather than useNavigate."
+    },
+    "correctness_risks": {
+      "score": 3,
+      "evidence": [
+        "app/src/lib/data.ts:64-76 — fetchJson catches every error and caches `null` permanently in the promise map: a transient API failure permanently renders a valid resource as Not found until restart, and 404 vs network error are indistinguishable",
+        "app/src/lib/data.ts:70 — silent `catch {}` with no logging makes production diagnosis impossible",
+        "app/src/routes/index.tsx:60-62 — currentPage clamps out-of-range ?page=999 to the last page but the URL is never synced, leaving address bar and view inconsistent",
+        "app/src/routes/[...catchall]/index.tsx:3 — valid-resource handlers render the Not-found page at HTTP 200 (spec says 404 status is optional, so not a spec bug, but Qwik City's ctx.fail(404) was available)",
+        "app/src/lib/data.ts:98-110 — per-URL promise dedup in mapLimit actually prevents fetch fan-out races; a thoughtful touch"
+      ],
+      "rationale": "The core flows (filtering, pagination, sorting, not-found) are sound and the in-flight dedup is genuinely careful, but caching swallowed failures as permanent nulls plus conflating 404 with outages is a real fragility."
+    },
+    "global_abstractions": {
+      "score": 3,
+      "evidence": [
+        "app/src/lib/data.ts:48-50 — hidden globalThis __pokedexStore cache; justified for SSR dedup and documented, but it is process-lifetime state with no invalidation",
+        "app/src/components/ui.tsx:1-2 — client components import humanize/displayDex from lib/data.ts, pulling formatting helpers out of the same module as all server data access: a leaky server/client boundary (works only thanks to tree-shaking)",
+        "app/src/lib/data.ts:104,109 — englishName/latestEnglishFlavor take `any`, so the single data module defines no real API contract for 1000+ consumers of its shape",
+        "app/src/routes/moves/[name]/index.tsx:60 and app/src/routes/types/[name]/index.tsx:88 — near-duplicate inline type-badge anchors despite an existing TypeBadgeLink component in components/ui.tsx:32",
+        "app/src/lib/data.ts:139-285 — catalog/species-index/generations/types/version-groups loaders are cohesive and individually small; the module is big but sectioned"
+      ],
+      "rationale": "The single data module is cohesive and the global cache is the right idea, but mixing pure formatters with server-only fetch code (and importing it from client components) is a boundary that will need untangling, and badge markup is duplicated where a component already exists."
+    },
+    "readability": {
+      "score": 4,
+      "evidence": [
+        "app/src/lib/data.ts:1-7 — module header comment explains caching strategy and the live-API constraint, the only comments that matter and they explain why",
+        "app/src/routes/pokemon/[name]/index.tsx:227-246 — compareRows/valueFor sort logic is clear and handles the missing-values-last rule explicitly",
+        "app/src/routes/pokemon/[name]/index.tsx:440 — file is ~440 lines with an embedded MoveTable component; extractable but still navigable",
+        "app/src/routes/index.tsx:64-69,80-85,103-108 — three nearly identical onInput$/onChange$ handler bodies (signal set + page reset + replaceState) that beg for one helper",
+        "app/src/routes/layout.tsx:1-27 — layout landmarks are minimal and self-explanatory"
+      ],
+      "rationale": "Naming is consistent, files are organised by route, and a new teammate would find their way quickly. The rough spots are the long pokemon route file, triple-duplicated filter handlers, and pervasive `any`."
+    },
+    "review_cost": {
+      "score": 3,
+      "evidence": [
+        "app/src/lib/data.ts:64-76 — must-fix: don't cache failures, distinguish 404 from outage",
+        "app/src/components/ui.tsx:1 — must-change: split formatting helpers into src/lib/format.ts to fix the client/server boundary",
+        "app/src/routes/index.tsx:9-15 — whole 1025-entry catalog serialized to the client for client-side filtering; a reviewer would ask for server-side filtering or a justification (tests confirm it works, so it's a size trade-off, not a bug)",
+        "app/src/routes/pokemon/[name]/index.tsx:417 — swap location.assign for useNavigate",
+        "app/src/routes/moves/[name]/index.tsx:60 — reuse TypeBadgeLink"
+      ],
+      "rationale": "Nothing structurally wrong enough to reject, but I'd want one real round: failure-caching fix, format/data split, router-native navigation, and badge dedup before approving."
+    }
+  },
+  "overall": 3,
+  "findings": [
+    {
+      "severity": "medium",
+      "location": "app/src/lib/data.ts:64-76",
+      "issue": "fetchJson swallows all errors and caches the resulting `null` in the promise map forever; a transient API hiccup makes valid resources render as Not found for the life of the server, and 404s are indistinguishable from outages.",
+      "suggestion": "Only cache successful responses (delete the map entry when the fetch yields null), distinguish !response.ok (404) from thrown network errors, and log the latter."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/lib/data.ts:48-50",
+      "issue": "Pure formatting helpers (humanize, displayDex, formatValue, typeLabelFor) live in the same module as all server-only data access, and client components import from it (app/src/components/ui.tsx:1, app/src/routes/pokemon/[name]/index.tsx:1-18), leaking the server boundary into the client bundle.",
+      "suggestion": "Split into src/lib/format.ts (pure, client-safe) and src/lib/data.ts (server-only); consider an eslint boundary rule."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/routes/index.tsx:9-15",
+      "issue": "The routeLoader serializes the entire 1025-entry catalog into the SSR payload because filtering happens client-side in useComputed$, roughly 100-200KB of qwik JSON shipped on every home-page load.",
+      "suggestion": "Filter server-side in the loader from url.searchParams and serialize only the 48 visible entries plus the total count, or document why client-side filtering was chosen."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/routes/pokemon/[name]/index.tsx:417",
+      "issue": "Game select uses window.location.assign, causing a full page reload and dropping SPA navigation.",
+      "suggestion": "Use Qwik City's useNavigate() to change the ?game= query param (optionally preserve the #moves hash)."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/routes/index.tsx:64,80,103",
+      "issue": "Three near-identical filter handler bodies (set signal, reset page, rebuild URL, replaceState) are copy-pasted.",
+      "suggestion": "Extract one update(key, value) helper that owns the URL reconstruction."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/routes/moves/[name]/index.tsx:60",
+      "issue": "Inline type-badge anchor markup duplicates the TypeBadgeLink component (also duplicated in app/src/routes/types/[name]/index.tsx:88), so badge styling/semantics can drift.",
+      "suggestion": "Use the existing TypeBadgeLink from components/ui.tsx everywhere."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/lib/data.ts:12,104,109",
+      "issue": "The entire data layer is typed with `any`, so there is no contract for the large PokeAPI shapes the codebase leans on.",
+      "suggestion": "Define minimal interfaces for the records actually consumed (species, pokemon, move, type, ability) — the loaders already narrow what is read."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/routes/[...catchall]/index.tsx:3",
+      "issue": "Unknown resources render the Not-found page with HTTP 200; Qwik City supports throwing ctx.fail(404) from loaders, and the spec encourages the status.",
+      "suggestion": "Return ctx.fail(404) in the loaders' notFound branch (and keep the rendered NotFound component for the SPA case)."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/routes/index.tsx:60-62",
+      "issue": "Out-of-range ?page= is clamped for display but the URL keeps the invalid value, leaving the address bar inconsistent with the view.",
+      "suggestion": "Redirect/replace to the clamped page URL when the loader sees an out-of-range page."
+    },
+    {
+      "severity": "low",
+      "location": "app/tmp/tsconfig.tsbuildinfo",
+      "issue": "Build artifact checked into the working tree (dist/ and server/ are correctly gitignored, tmp/ is not).",
+      "suggestion": "Delete tmp/ and add it to .gitignore."
+    }
+  ],
+  "summary": "This is a competent, current-stable Qwik City app: routeLoader$/useSignal/useComputed$/DocumentHead are used the way the 1.20.x docs intend, structure is clean, and the acceptance-covered flows are handled carefully (in-flight dedup, clamped pages, sort with aria-sort). The blocking-for-me issues are quality-of-boundary ones: a server data module that client components import pure helpers from, failure responses cached as permanent 404s, and two spots that bypass the router with raw history/location APIs. One round of focused changes — split formatters, fix failure caching, use navigate APIs, dedupe badges — and I'd merge it."
+}
+```

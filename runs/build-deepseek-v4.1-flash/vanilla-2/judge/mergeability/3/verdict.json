@@ -1,0 +1,115 @@
+{
+  "dimension": "mergeability",
+  "criteria": {
+    "idiomatic": {
+      "score": 4,
+      "evidence": [
+        "app/package.json:8-14 — vite ^8.3.5, current stable (verified against npm, Oct 2026), no framework to fight",
+        "app/src/main.js:828-874 — hand-rolled link interception + pushState/popstate router, the standard vanilla-JS pattern for a Vite SPA",
+        "app/src/api.js:1-5 — runtime API base injected by server.mjs:27 instead of build-time env, the right call since API_BASE_URL can change per `npm start` without a rebuild",
+        "app/src/styles.css:8-19 — plain CSS on design tokens (var(--color-bg), var(--font-sans)), no CSS framework, per spec",
+        "app/src/api.js:97-99 — escapeAttr as an alias of escapeHtml rather than a real distinction; mild but harmless"
+      ],
+      "rationale": "For vanilla JS on current Vite this is the idiomatic shape: ES modules, template-literal rendering, history API, native controls, token-driven CSS. No reimplementation of anything the platform provides."
+    },
+    "correctness_risks": {
+      "score": 3,
+      "evidence": [
+        "app/src/main.js:424-434 — game change handler pushes ?game= to the URL, then awaits loadRowsForGame with no try/catch; a rejected fetch leaves URL and tables inconsistent and produces an unhandled promise rejection",
+        "app/src/main.js:818-822 — every non-404 API error (network blip, 500) renders the 'Not found' page, conflating transient failure with a missing resource",
+        "app/src/api.js:7 — responseCache is an unbounded session-lifetime Map; a long browsing session caches every species/move/type JSON touched",
+        "app/src/main.js:147-148 — an out-of-range ?page= is clamped for display but the URL keeps the invalid value, so 'Page 3 of 3' can sit on ?page=99",
+        "app/src/main.js:434-441 — the outerHTML swap + re-entrant attachMovesHandlers(state, token) pattern works but is subtle and unexplained; easy to break in future edits"
+      ],
+      "rationale": "Rendering races are handled well (token checks after every await, e.g. main.js:161, 456, 630), but the unguarded async event handler and the errors-become-404s policy are real minor fragilities the acceptance tests never exercise."
+    },
+    "global_abstractions": {
+      "score": 3,
+      "evidence": [
+        "app/src/api.js:3-107 — one module exports config, HTTP client + cache, HTML escaping, name formatting, dex formatting, sprite URL synthesis and a concurrency limiter; ui.js:1-7 imports 'api.js' just for escapeHtml/formatDex",
+        "app/src/main.js:1-877 — router, all five page renderers and the moves-table domain logic in a single module; renderHome alone is ~90 lines (main.js:186-278)",
+        "app/src/data.js:6-8 — module-level promise singletons (speciesPromise/typesPromise/generationsPromise) are hidden global caches, though documented behavior and spec-permitted",
+        "app/src/main.js:361, 584, 678, 751 — the type-badge anchor markup is duplicated four times while ui.js:4-9 holds a span-only variant nobody reuses here"
+      ],
+      "rationale": "The api/data/ui split is the right idea, but api.js has become a utils grab-bag with a misleading name and a leaky boundary (view helpers depend on the HTTP layer), and main.js is a god module by page count. Both will need untangling as pages grow."
+    },
+    "readability": {
+      "score": 4,
+      "evidence": [
+        "app/src/api.js:61-99 — small, well-named helpers (englishEntry, latestEnglishFlavor, humanize) that read like the spec's definitions",
+        "app/src/data.js:20-46 — loadSpecies/loadTypes/loadGenerations mirror each other in structure; consistent across the file",
+        "app/src/main.js:95-102 — afterRender hash-jump logic and api.js:1-2, 35 are the only 'why' comments; the renderToken protocol and the outerHTML re-attach trick (main.js:437-441) go unexplained",
+        "app/src/styles.css — organized by component (site-header, pokemon-card, stats-table) with a single breakpoints section at :671, :693"
+      ],
+      "rationale": "Naming and file organisation are consistently good; a new teammate finds their way quickly. The knocks are main.js's size, near-zero comments on the trickiest code, and long template-assembly functions."
+    },
+    "review_cost": {
+      "score": 3,
+      "evidence": [
+        "app/src/main.js:424-434 — must add error handling to the game-select handler before I'd approve",
+        "app/src/main.js:818-822 — must stop rendering 'Not found' for non-404 failures",
+        "app/src/main.js:1-877 — would ask for a pages/ split of the five renderers plus the router",
+        "app/src/api.js:1-107 — would ask for the utils grab-bag to be split so ui.js stops importing the HTTP module"
+      ],
+      "rationale": "Approve after one round of changes: two small robustness fixes and a module reorganisation. Nothing needs rework, and no finding blocks correctness of the tested flows."
+    }
+  },
+  "overall": 4,
+  "findings": [
+    {
+      "severity": "medium",
+      "location": "app/src/main.js:424",
+      "issue": "The game-select change handler pushes ?game=… to history (main.js:430) and then awaits loadRowsForGame with no try/catch; on failure the URL claims one game while the tables still show the previous one, and the rejection is unhandled.",
+      "suggestion": "Wrap the await in try/catch (render an inline error in the panel or revert the select), or push the URL only after the data loads successfully."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/main.js:818",
+      "issue": "Every API error that isn't a 404 — network timeouts, 5xx, malformed JSON — renders the 'Not found' page (main.js:821-822), telling users a resource doesn't exist when the request merely failed.",
+      "suggestion": "Only render Not found for ApiError with status 404; show a distinct 'Something went wrong' message (ideally with a retry) for everything else."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/main.js:1",
+      "issue": "Single 877-line module holds the router, the click/popstate wiring, all five page renderers and the moves-table sorting domain logic; the natural seams (router, pages, moves tables) are all in one file.",
+      "suggestion": "Split into a small router module plus pages/home.js, pages/pokemon.js, pages/moves.js, pages/ability.js, pages/type.js; main.js keeps only the routing table."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/api.js:1",
+      "issue": "api.js is a utils grab-bag: runtime config, HTTP client + cache, HTML escaping, humanize/formatDex/spriteUrl and the mapLimit concurrency helper, all exported from the module named after the HTTP client; ui.js:1-7 imports it solely for escaping and formatting, making view code depend on the network layer.",
+      "suggestion": "Rename/split into http.js (client + cache + ApiError), html.js (escapeHtml/escapeAttr), format.js (humanize, englishName, latestEnglishFlavor, formatDex, displayValue) and keep spriteUrl with the api module."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/api.js:7",
+      "issue": "responseCache is an unbounded session-lifetime Map with no eviction; browsing many Pokémon pages caches every version-group and move detail response in memory for the whole session.",
+      "suggestion": "Fine for this app, but bound it (simple LRU cap or clear on navigation) or document the intent, so a future feature can't turn it into a leak."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/main.js:361",
+      "issue": "The type-badge anchor markup is hand-rolled four times with slight variations (main.js:361, 584, 678, 751) while ui.js:4-9 already has a typeBadge helper that nothing in main.js uses.",
+      "suggestion": "Extract a typeBadgeLink(apiName, label) helper into ui.js and use it in all five call sites."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/main.js:148",
+      "issue": "An out-of-range ?page= is clamped for rendering but the URL keeps the invalid value, so the visible 'Page 1 of 22' can sit on ?page=99 and the Previous/Next links disagree with the address bar.",
+      "suggestion": "When the clamped page differs from filters.page, history.replaceState the normalized URL before rendering."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/main.js:439",
+      "issue": "The moves panel re-renders via currentPanel.outerHTML = movesPanelHtml(state) followed by a re-entrant attachMovesHandlers(state, token) (also at :457); correct today but fragile — the next editor must notice that outerHTML silently drops all listeners.",
+      "suggestion": "Add a comment explaining the listener-drop rationale, or re-render only the table bodies so the select's listener survives and the pattern disappears."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/main.js:59",
+      "issue": "setPage clears main.innerHTML and nothing paints until every fetch resolves; a first visit to a Pokémon page fires ~30 version-group requests plus ~100+ move-detail requests (main.js:469-486, 495-502) before the summary, stats and abilities appear.",
+      "suggestion": "Render the summary/stats/abilities sections before awaiting prepareMoves, and show a lightweight loading state for the moves panel."
+    }
+  ],
+  "summary": "A well-executed vanilla-JS/Vite SPA with careful race protection, consistent escaping and correct URL-driven state — I'd merge it after one round of changes. The two functional asks are an unguarded async event handler that can desync the URL from the moves tables, and rendering 'Not found' for transient API failures. The structural asks are splitting the 877-line main.js and breaking up the api.js utils grab-bag that view code imports from."
+}

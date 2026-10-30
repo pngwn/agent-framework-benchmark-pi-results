@@ -1,0 +1,165 @@
+## Review: test quality
+
+The app contains **zero tests of its own**. `app/package.json:6-12` defines only `build`, `build.types`, `dev`, and `start` — no test script, no `vitest`/`playwright`/`@builder.io/qwik/testing` dependency, and grep across `app/` finds no spec/test files (the only matches are false positives like `latestFlavorText`). Yet the code is dense with exactly the kind of pure, breakable logic Qwik's current toolchain (`npm run qwik add vitest`, `createDOM` from `@builder.io/qwik/testing`, or a route-level Playwright suite) tests cheaply: filtering, pagination clamping, sorting with nulls-last, Pokémon→species remapping, and localization pickers.
+
+The untested risk inventory:
+
+- **Filtering/pagination** (`app/src/routes/index.tsx:62-79`): case-insensitive match against humanized labels, type/generation filters, `Math.max(1, …)` / `Math.min(…, totalPages)` page clamping, and the `slice((page-1)*48, page*48)` window. An off-by-one or a broken clamp (e.g. `page=999` showing an empty list vs. the last page) passes silently.
+- **Table sorting** (`app/src/components/moves-table.tsx:44-68`): the subtlest code in the repo — nulls-last in *both* directions, `sign * compareValues` with string/number mixing, level-up default order `(a.level ?? Infinity) - …` then name tie-break. The `aria-sort` contract in JSX (`moves-table.tsx:85`) is equally unguarded.
+- **Species mapping** (`app/src/lib/server-api.ts:105-127` `cardsFor`, and `:133-162` `speciesIndex`): Pokémon-ID→species-name remapping, `id > MAX_DEFAULT_ID` alternate-form exclusion, slot-ordered types. This is precisely the path the acceptance overlay exercises (one extra Pokémon), so any refactor here regresses only when the external suite runs.
+- **URL state**: `homeHref` default-omission (`index.tsx:24-33`), the debounced search navigation and the `document.activeElement` guard (`index.tsx:91-97, 126-152`), the `?game=` select that reuses `new URL(loc.url)` and must preserve other params (`app/src/routes/pokemon/[name]/index.tsx:241-249`), and `?game=` validation/default-to-highest-order (`pokemon/[name]/index.tsx:113-119`).
+- **Formatting/i18n pickers** (`server-api.ts:47-66`, `format.ts:5-30`): `latestFlavorText`'s last-English-entry + `\s+` collapse, `humanize`, `dexNumber` zero-padding, `orDash` em-dash rule. `idFromUrl` (`server-api.ts:41-43`) returns `NaN` on malformed URLs, which silently poisons every map keyed by it.
+- **Error/404 paths**: `status(404)` + `NotFound` in all four detail loaders (`pokemon/[name]/index.tsx:91-96`, `moves/[name]/index.tsx:19-23`, `abilities/[name]/index.tsx:11-15`, `types/[name]/index.tsx:15-20`) and the `[...rest]` catch-all — plus the throw-on-non-404 branch of `api()` (`server-api.ts:31-34`), where a rejection is cached and handed to concurrent callers before `value.catch(...)` evicts it (`server-api.ts:36-42`).
+
+The only mitigation is that most of this logic lives in plain exported functions (`api`, `cardsFor`, `speciesIndex`, `latestFlavorText`, `sortRows`, `homeHref`) that could be tested directly without rendering — the architecture is testable; the author simply didn't write any.
+
+```json
+{
+  "dimension": "tests",
+  "criteria": {
+    "coverage_of_risk": {
+      "score": 1,
+      "evidence": [
+        "app/package.json:6-12 — scripts are build/dev/start only; no test runner, test script, or test dependency anywhere in app/",
+        "app/src/lib/server-api.ts:105-127 — cardsFor: Pokémon→species remapping, alternate-form exclusion, dedupe, hidden flag — untested",
+        "app/src/routes/index.tsx:62-79 — search/type/generation filtering, 48-per-page slicing and page clamping — untested",
+        "app/src/components/moves-table.tsx:44-68 — sortRows with nulls-last both directions and tie-breaks — untested"
+      ],
+      "rationale": "No tests exist, so the riskiest logic (filtering, pagination, sorting, species mapping, URL state, 404s) is entirely uncovered."
+    },
+    "behaviour_not_implementation": {
+      "score": 1,
+      "evidence": [
+        "app/src — zero *.spec.* / *.test.* files; grep for spec/test/vitest/playwright matches only identifiers like latestFlavorText (server-api.ts:59)"
+      ],
+      "rationale": "There are no tests to classify; the app asserts nothing itself."
+    },
+    "regression_power": {
+      "score": 1,
+      "evidence": [
+        "app/src/routes/index.tsx:71-79 — Math.max/Math.min page clamping and slice window would break silently under any refactor",
+        "app/src/lib/server-api.ts:59-66 — latestFlavorText last-English-entry + \\s+ collapse is exactly the kind of detail a data-layer refactor silently breaks",
+        "app/src/lib/server-api.ts:41-43 — idFromUrl returns NaN on malformed URLs with no test pinning the contract"
+      ],
+      "rationale": "With no tests, every behavioural regression — including the acceptance overlay's extra-Pokémon scenario once the external suite changes — sails through."
+    },
+    "signal_to_noise": {
+      "score": 3,
+      "evidence": [
+        "app/ — no test files at all, so no noise to review"
+      ],
+      "rationale": "No tests means no low-value tests; per the rubric this scores 3, but it offers no protection either."
+    }
+  },
+  "overall": 1,
+  "findings": [
+    {
+      "severity": "high",
+      "location": "app/package.json:6-12",
+      "issue": "No test runner, no test script, and no tests anywhere in the app; the external acceptance suite is the only guard.",
+      "suggestion": "Add `npm run qwik add vitest` (Qwik's documented path: vitest with the qwikCity/qwikVite plugins, `createDOM` from @builder.io/qwik/testing), plus a `test` script wired into CI."
+    },
+    {
+      "severity": "high",
+      "location": "app/src/routes/index.tsx:62-79",
+      "issue": "Home-page filtering, 48-per-page pagination and page clamping are untested; off-by-one or clamp bugs (page=999, page=0, last-page Next link) would slip through.",
+      "suggestion": "Unit-test the loader's filter/slice/clamp behaviour against a small fake index, including boundary pages and the zero-match `No Pokémon found` branch."
+    },
+    {
+      "severity": "high",
+      "location": "app/src/components/moves-table.tsx:44-68",
+      "issue": "The subtlest logic in the repo — nulls-last in both sort directions, mixed string/number comparison, level-up default order, name tie-breaks, aria-sort flips — is untested.",
+      "suggestion": "Extract sortRows-style tests over MoveRow fixtures covering null power/accuracy, ascending/descending flips and tie-break ordering."
+    },
+    {
+      "severity": "high",
+      "location": "app/src/lib/server-api.ts:105-127",
+      "issue": "cardsFor (Pokémon→species mapping, id>10000 exclusion, dedupe, hidden flag) is the exact path the acceptance data-overlay stresses, and has no regression net.",
+      "suggestion": "Test cardsFor with a stubbed speciesNames map covering deoxys-normal→deoxys style aliases, alternate forms, duplicates and hidden abilities."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/routes/index.tsx:126-152",
+      "issue": "Client-side URL-state machinery (200 ms debounce, replaceState navigation, the document.activeElement guard at :91-97) is untested; a timer or race refactor breaks search silently.",
+      "suggestion": "Cover with a Playwright component/e2e test that types and asserts the URL and result list update without Enter."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/lib/server-api.ts:26-44",
+      "issue": "The in-memory cache is untested: rejected promises are handed to concurrent callers before eviction, cache keys ignore API_BASE_URL, and 404-as-null is cached for 60 s.",
+      "suggestion": "Unit-test api() against a stubbed fetch: 404→null, non-ok→throw, TTL expiry, and that a failed request is not sticky."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/routes/pokemon/[name]/index.tsx:113-119",
+      "issue": "Game selection logic — ?game= validation, default-to-highest-order, and query preservation in the select handler (:241-249) — is untested.",
+      "suggestion": "Test the loader with ?game=<invalid>, ?game=<valid>, and omitted, plus the select's URL rewriting with other params present."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/routes/pokemon/[name]/index.tsx:89-96",
+      "issue": "404 paths (status(404)+NotFound) across all four detail loaders and the [...rest] catch-all are untested.",
+      "suggestion": "One parametrized test per route asserting status 404 and the rendered NotFound for a bogus slug."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/lib/format.ts:5-30",
+      "issue": "Trivially testable pure helpers (humanize, dexNumber zero-padding, orDash em-dash) are untested.",
+      "suggestion": "A dozen one-line vitest cases would pin the display-name and em-dash rules the spec spells out."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/lib/server-api.ts:41-43",
+      "issue": "idFromUrl silently returns NaN for URLs without a trailing numeric segment, poisoning every id-keyed map downstream.",
+      "suggestion": "Test idFromUrl against '/api/v2/pokemon/25/', trailing-slash-less URLs and garbage; decide explicitly what happens on NaN."
+    }
+  ],
+  "summary": "The app contains no tests of its own — no runner, script, or spec files — despite most of its risky logic (pagination, sorting, species mapping, URL state, 404s) living in plain exported functions that are cheap to test. Qwik's current documented setup (`npm run qwik add vitest`, @builder.io/qwik/testing) is entirely absent. Once the external acceptance suite is no longer the only guard, any refactor of the data layer or table sorting will regress undetected.",
+  "wroteTests": false,
+  "testCount": 0,
+  "valuableTests": [],
+  "lowValueTests": [],
+  "untested": [
+    {
+      "area": "Home filtering, 48-per-page pagination and page clamping (app/src/routes/index.tsx:62-79)",
+      "risk": "high",
+      "likelyBug": "Off-by-one in the slice window, page=0/999 escaping the clamp, Next link shown on the last page, or the count disagreeing with the list."
+    },
+    {
+      "area": "Move-table sorting: nulls-last both directions, tie-breaks, aria-sort state (app/src/components/moves-table.tsx:44-99)",
+      "risk": "high",
+      "likelyBug": "Nulls jumping to the top on descending sort, mixed number/string comparison misordering Power/Accuracy, or aria-sort not flipping."
+    },
+    {
+      "area": "Pokémon→species mapping and alternate-form exclusion in cardsFor/speciesIndex (app/src/lib/server-api.ts:105-162)",
+      "risk": "high",
+      "likelyBug": "Alternate forms (id>10000) leaking into lists, wrong-species links (deoxys-normal → /pokemon/deoxys-normal), or slot ordering of card types breaking — precisely what the live-data overlay tests."
+    },
+    {
+      "area": "Debounced search navigation and URL-state sync (app/src/routes/index.tsx:91-152)",
+      "risk": "medium",
+      "likelyBug": "Stale results after rapid typing, back/forward not restoring the search box, or navigation firing on Enter with a stale page parameter."
+    },
+    {
+      "area": "In-memory API cache semantics (app/src/lib/server-api.ts:26-44)",
+      "risk": "medium",
+      "likelyBug": "A rejected fetch being sticky for concurrent requests, 404-null cached past a data change, or non-2xx statuses crashing the loader instead of rendering an error page."
+    },
+    {
+      "area": "Game-version select: ?game= validation, default-to-highest-order, query preservation (app/src/routes/pokemon/[name]/index.tsx:113-119, 241-249)",
+      "risk": "medium",
+      "likelyBug": "An invalid ?game= falling back to the wrong default, or the select wiping other query parameters on change."
+    },
+    {
+      "area": "404/not-found paths in all four detail loaders and the [...rest] catch-all",
+      "risk": "medium",
+      "likelyBug": "A refactor turning a 404 into a 500 or an empty page, breaking both status code and the Not-found heading/title."
+    },
+    {
+      "area": "Formatting and localization pickers: humanize, dexNumber, latestFlavorText, english/englishName, orDash (app/src/lib/format.ts, app/src/lib/server-api.ts:41-66)",
+      "risk": "low",
+      "likelyBug": "Wrong zero-padding (#25 instead of #0025), flavor text picking the first instead of last English entry, or \\n/\\f not collapsed to single spaces."
+    }
+  ]
+}
+```

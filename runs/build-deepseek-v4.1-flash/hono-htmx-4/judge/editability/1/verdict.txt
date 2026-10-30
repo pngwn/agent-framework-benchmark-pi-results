@@ -1,0 +1,152 @@
+I've now read every source file in `app/`, the spec, and checked the framework APIs against current releases (`hono` 4.13.x tagged templates via `hono/html`, `@hono/node-server` 2.x `serve`/`serve-static`, htmx 2.x — all the APIs used here are current and idiomatic, so nothing dings editability on framework grounds). My judgment is driven by how the code is factored, not by outdated usage.
+
+## Review
+
+**Structure.** The app is four modules with genuinely clean seams: `lib/api.mjs` is the only place that knows the API base URL, the cache, and URL construction; `lib/format.mjs` is pure string/label logic; `views/layout.mjs` holds the shared shell and the `pokemonCard`/`section`/`typeBadge` components; `server.mjs` is routes plus everything else. The data/format/layout split is the strongest thing here — changing the API base or caching rules (scenario 5) touches exactly one file (`app/lib/api.mjs:3,8-14,38-50`).
+
+The weakness is that `server.mjs` is an 820-line monolith: every page's markup is inlined in its route handler (`renderPokemonPage` at `server.mjs:339`, the move page at `server.mjs:604-650`, abilities at `server.mjs:652-700`, types at `server.mjs:728-780`), alongside sorting, filtering, pagination and htmx endpoint wiring. `views/layout.mjs` proves the author knew how to extract view modules; the per-page templates just never got the same treatment.
+
+**The concrete scenarios:**
+
+1. **Remove Abilities** — route at `server.mjs:652`, the linking section at `server.mjs:398-412`, the `getAbility` import and getter (`server.mjs:9`, `lib/api.mjs:105`). Then dead code is left behind: `pokemonCard`'s `hidden` param (`views/layout.mjs:50,62`) and its CSS (`public/styles.css:254`), plus `.hidden-inline` (`public/styles.css:460`). Four files, small edits, residue — a solid "3".
+2. **Sprite fix** — every card list renders through one component, `pokemonCard` (`views/layout.mjs:44-64`, sprite at line 47 via `spriteUrl(species.id)` from `lib/api.mjs:110-116`), so one fix covers home, moves, abilities and types. The only wrinkle: the species catalog carries only `{id, name}` (`lib/api.mjs:76-92`), so a fix that needs the default variety's identity would also touch the catalog loader.
+3. **Sorting by name on all card lists** — the ref→dedupe→sort→cards logic is *triplicated*: shared helper `speciesCardsForRefs` (`server.mjs:87-106`, used only by moves at `server.mjs:615`), plus hand-rolled copies in abilities (`server.mjs:672-687`) and types (`server.mjs:742-757`), and the home route's own pipeline (`server.mjs:432-470`). Any cross-list change is an N-place edit.
+4. **Items section like Moves** — `renderLayout`, `section`, `countText`, `pokemonCardGrid`, `speciesCardsForRefs` and the `getMove` getter pattern (`lib/api.mjs:101-103`) are all reusable; the page template itself is inlined in the route, so it's copy-adapt (~45 lines).
+5. **Data source change** — one file, `lib/api.mjs`.
+
+**Abstraction design.** The components are well-shaped around real variation: `pokemonCard`'s optional `types`/`hidden` params match the spec's actual per-page card differences rather than boolean-flag creep, and `renderMoveTable` is shared by both the full page and the htmx sort partial (`server.mjs:244`, used at `server.mjs:545-567` and via `renderMovesSection` at `server.mjs:322-328`), so the two can't drift. Against that: `speciesCardsForRefs` has a speculative, never-used `hiddenBySpecies` flag (`server.mjs:87,100-103`) that the abilities route bypasses by duplicating it inline; `capitalize` is dead (`lib/format.mjs:63`); and `methodLabel` is used to humanize damage *categories* (`server.mjs:198,288`), a misleading name to trip over when editing.
+
+```json
+{
+  "dimension": "editability",
+  "criteria": {
+    "removability": {
+      "score": 3,
+      "evidence": [
+        "app/server.mjs:652 — the whole abilities route is one self-contained handler",
+        "app/server.mjs:398-412 — but links to /abilities live inside renderPokemonPage's inline abilitiesSection, so the route alone isn't enough",
+        "app/lib/api.mjs:105 — getAbility must be removed with it",
+        "app/views/layout.mjs:50,62 — pokemonCard's hidden param and .hidden-label markup become dead code",
+        "app/public/styles.css:254,460 — .hidden-label / .hidden-inline rules left behind in a flat 539-line stylesheet"
+      ],
+      "rationale": "Removing Abilities is a handful of small, findable edits across four files, and it strands dead component options and CSS because card variants and abilities styling aren't co-located with the feature."
+    },
+    "changeability": {
+      "score": 4,
+      "evidence": [
+        "app/views/layout.mjs:47 — every Pokémon card (home server.mjs:497, moves server.mjs:615, abilities server.mjs:681, types server.mjs:757) renders through pokemonCard, so the sprite fix lands in one component",
+        "app/lib/api.mjs:76-116 — though a fix needing the default variety's identity would also touch the catalog loader, since it only stores {id, name}",
+        "app/server.mjs:244-296 — renderMoveTable is shared by the full page and the htmx sort partial (server.mjs:545, 322), so the two can't drift",
+        "app/server.mjs:87-106 vs 672-687 vs 742-757 — but the ref→dedupe→sort card-list logic is triplicated, so list-level bugs get fixed three times"
+      ],
+      "rationale": "The single shared card component makes the sprite fix a one-place change covering every list, and the moves table renderer serves both endpoints; the duplicated species-list assembly is the remaining N-times risk."
+    },
+    "coupling": {
+      "score": 3,
+      "evidence": [
+        "app/lib/api.mjs:3,8-14 — API base and cache are module-local; no other file knows about them",
+        "app/views/layout.mjs:4 — the view layer imports spriteUrl from the data layer rather than receiving media URLs",
+        "app/server.mjs:57-59 — isHtmx header sniffing plus HX-Push-Url (server.mjs:514, 583) mixes transport concerns into handlers",
+        "app/server.mjs:308 — renderMovesSection hardcodes the htmx endpoint wiring (/pokemon/:name, target #moves) next to the markup it swaps",
+        "app/server.mjs:1-820 — routes, page templates, sorting, filtering and pagination all live in one file"
+      ],
+      "rationale": "Data, format and view seams are real and narrow, but server.mjs is a monolith that knows everything, and one view reaches into the API module for URL construction."
+    },
+    "abstraction_design": {
+      "score": 3,
+      "evidence": [
+        "app/views/layout.mjs:50,58-62 — pokemonCard's optional types/hidden params track the spec's real per-page variation instead of copied card components",
+        "app/views/layout.mjs:65-67 — the section helper standardizes the region pattern every page must follow",
+        "app/server.mjs:87,100-103 — speciesCardsForRefs carries a speculative hiddenBySpecies flag no caller uses, while abilities and types re-implement it inline (server.mjs:672-687, 742-757)",
+        "app/lib/format.mjs:63 — capitalize is dead code",
+        "app/server.mjs:604-650 — the move page template is inlined in its route rather than extracted like views/layout.mjs"
+      ],
+      "rationale": "The shared components are designed around genuine variation and stretch well, but the one list-building abstraction was never adopted by two of its three natural callers, and per-page templates never made it into view modules."
+    }
+  },
+  "overall": 3,
+  "findings": [
+    {
+      "severity": "medium",
+      "location": "app/server.mjs:339-780",
+      "issue": "All page templates are inlined in an 820-line server.mjs alongside routing, filtering, pagination and sorting; views/layout.mjs shows the author knew the better pattern.",
+      "suggestion": "Extract per-page view modules (views/pokemon.mjs, views/move.mjs, …) mirroring views/layout.mjs, leaving server.mjs as routing + data orchestration."
+    },
+    {
+      "severity": "medium",
+      "location": "app/server.mjs:672-687",
+      "issue": "The ref→dedupe→sort→cards pipeline for Pokémon card lists is duplicated: once in speciesCardsForRefs (server.mjs:87-106, used only by moves at 615) and re-implemented inline in the abilities and types routes (server.mjs:742-757).",
+      "suggestion": "Make abilities and types call speciesCardsForRefs (it already accepts a hiddenBySpecies option), so list changes and bug fixes land once."
+    },
+    {
+      "severity": "low",
+      "location": "app/server.mjs:87",
+      "issue": "speciesCardsForRefs takes a hiddenBySpecies flag parameter that no caller ever passes — speculative generality the abilities route bypasses by duplicating the logic instead.",
+      "suggestion": "Either use the option from the abilities route or delete it; don't keep both the flag and a parallel inline copy."
+    },
+    {
+      "severity": "low",
+      "location": "app/views/layout.mjs:4",
+      "issue": "The view layer imports spriteUrl from lib/api.mjs, coupling layout components to the data module's internals (API base and media URL scheme).",
+      "suggestion": "Pass the sprite URL in with the card data, or move media/sprite URL helpers into a small shared module neutral between view and data layers."
+    },
+    {
+      "severity": "low",
+      "location": "app/server.mjs:198,288",
+      "issue": "methodLabel (a move-learn-method name) is reused to humanize damage classes (physical/special/status), a misleading name for future editors.",
+      "suggestion": "Use humanize directly or add a damageClassLabel helper in lib/format.mjs."
+    },
+    {
+      "severity": "low",
+      "location": "app/server.mjs:51-53",
+      "issue": "Three copy-pasted per-file static routes for tokens.css, styles.css and htmx.min.js.",
+      "suggestion": "One serveStatic({ root: PUBLIC_DIR }) mounted at the file paths (or a shared helper) so adding an asset doesn't mean another copied line."
+    },
+    {
+      "severity": "low",
+      "location": "app/lib/format.mjs:63",
+      "issue": "capitalize is exported but never used anywhere.",
+      "suggestion": "Delete it."
+    },
+    {
+      "severity": "low",
+      "location": "app/public/styles.css:254,460",
+      "issue": "Abilities-only card styles (.hidden-label, .hidden-inline) sit unmarked in a flat 539-line stylesheet, so removing the feature leaves dead CSS.",
+      "suggestion": "Group or comment stylesheet sections by feature so feature removal can take its CSS along."
+    }
+  ],
+  "summary": "The data/format/view seams are clean and the shared card component means the highest-probability bug class (sprites in card lists) fixes in one place, with the API base and cache isolated to a single module. But server.mjs is an 820-line monolith holding every page template inline, and the species-list assembly logic it needs is duplicated across three routes. It's an unremarkable, workable 3: safe to own, but every page-level change reads and edits the same big file.",
+  "scenarios": [
+    {
+      "change": "Remove the Abilities pages and all links to them",
+      "files": ["app/server.mjs", "app/lib/api.mjs", "app/views/layout.mjs", "app/public/styles.css"],
+      "difficulty": 3,
+      "notes": "Route (server.mjs:652), the abilities section that links to it (server.mjs:398-412), getAbility (api.mjs:105) and the import are all easy to find; but removal strands pokemonCard's hidden param and two CSS rules, and the section lives inside the big inline renderPokemonPage template."
+    },
+    {
+      "change": "Fix wrong sprites for species whose default Pokémon differs (e.g. Deoxys)",
+      "files": ["app/views/layout.mjs", "app/lib/api.mjs"],
+      "difficulty": 4,
+      "notes": "Every list renders through pokemonCard (layout.mjs:44-64), so one fix covers home, moves, abilities and types. Only wrinkle: the sprite comes from species.id and the catalog stores just {id, name} (api.mjs:76-92), so a fix keyed on the default variety would touch the catalog loader too."
+    },
+    {
+      "change": "Add sorting by name to every list of Pokémon cards",
+      "files": ["app/server.mjs"],
+      "difficulty": 2,
+      "notes": "Four separate list-building sites: speciesCardsForRefs (87), home (432-470), abilities (672-687), types (742-757). The right move is to consolidate the triplicated dedupe/sort pipeline first, then add the sort — as written, it's a copy the logic four times job."
+    },
+    {
+      "change": "Add an Items section (/items, /items/:name) shaped like Moves",
+      "files": ["app/server.mjs", "app/lib/api.mjs", "app/views/layout.mjs"],
+      "difficulty": 3,
+      "notes": "Layout, section, countText, pokemonCardGrid, speciesCardsForRefs and the getMove getter pattern are genuinely reusable, so ~60% carries over; the move page's ~45-line template is inline in the route and gets copied, and the nav link edit is in layout.mjs."
+    },
+    {
+      "change": "Change the API base URL and caching rules",
+      "files": ["app/lib/api.mjs"],
+      "difficulty": 5,
+      "notes": "API_BASE (api.mjs:3), the promise cache (api.mjs:8-14), cached key format and every URL builder live in one module; no other file knows the origin or that caching exists."
+    }
+  ]
+}
+```

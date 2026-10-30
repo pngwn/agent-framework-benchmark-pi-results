@@ -1,0 +1,129 @@
+## Review: Astro Pokédex app
+
+**Version currency.** The app pins `astro ^7.4.2` + `@astrojs/node ^11.1.9` (`app/package.json:8-9`), which matches the current stable line as of 2026-10 (7.4.x, node adapter 11.x). The config uses stable, non-experimental options (`output: 'server'`, standalone adapter — `app/astro.config.mjs:5-9`); nothing deprecated in the v7 migration guide is used. Data loading is `await`ed in frontmatter, recursion uses `Astro.self` (`app/src/components/EvolutionNode.astro:18`), scripts are bundled/TS by default with a `noscript` fallback — this is recognisably how the docs do SSR Astro.
+
+**Where I'd push back in review:**
+
+- **Error handling.** `load()` throws on any non-404 status (`app/src/lib/api.ts:43`) and nothing catches it — an API blip turns every page into a raw 500. The rejection-removal logic in the cache (`api.ts:57-59`) is careful, but there's no middleware or error boundary anywhere.
+- **Types.** The pipeline is `any` end-to-end: `api<T = any>` (`api.ts:52`), `moveInfo(record: any)` (`pokedex.ts:194`), and the entire Pokémon page state is `page: any` with `(a: any)`, `(d: any)` callbacks (`app/src/pages/pokemon/[name].astro:60-112`). Astro is TS-first and `astro check` is the documented practice; there's no `check`/`sync` script in `package.json` either.
+- **Semaphore fairness bug.** In `withSlot` (`api.ts:16-26`), a queued waiter's `active++` happens in a microtask after `queue.shift()?.()`; a caller arriving in that gap sees `active < MAX` and jumps the queue. Minor, but it means the cap can be briefly exceeded and ordering is unfair.
+- **Implicit server↔client contract.** The progressive-enhancement scripts re-fetch full pages and swap fragments matched by `data-results` / `data-move-tables` selectors duplicated in template and script (`app/src/pages/index.astro:63,109-110`, `pokemon/[name].astro:200,232-233`). Works, and the `latest` request guard prevents stale swaps, but it's a hand-rolled partial-refresh mechanism where a shared constant or Astro island props would make the coupling explicit. No `AbortController`, so rapid typing fans out full server renders.
+- Nits: `security: { checkOrigin: false }` is disabled with no POST form needing it; `spriteUrl` hard-codes the media path pattern rather than using API data (`api.ts:75`) (sanctioned by the spec, but a silent coupling); results swap has no `aria-live`.
+
+**What's good:** the SWR cache is bounded (5000 entries, FIFO eviction) and correctly un-caches failed promises; all markup is Astro-escaped (no `set:html`); 404s are handled on every dynamic route with `Astro.response.status = 404` plus a `404.astro` fallback; naming and comments explain *why*; components are small and single-purpose.
+
+I'd approve after one round: error handling for API failures and real types on the API layer.
+
+```json
+{
+  "dimension": "mergeability",
+  "criteria": {
+    "idiomatic": {
+      "score": 4,
+      "evidence": [
+        "app/package.json:8-9 — astro 7.4.2 + @astrojs/node 11.1.9, matches current stable line",
+        "app/astro.config.mjs:5-9 — output:'server' with standalone node adapter, stable v7 options only",
+        "app/src/pages/pokemon/[name].astro:31-35 — awaited data loading in frontmatter, idiomatic SSR Astro",
+        "app/src/components/EvolutionNode.astro:18 — Astro.self recursion for the evolution chain",
+        "app/src/pages/index.astro:62 — noscript submit fallback on an otherwise progressive-enhancement form",
+        "app/src/pages/index.astro:104-116 — hand-rolled fetch-full-page + DOMParser fragment swap instead of framework primitives"
+      ],
+      "rationale": "Current version, stable config, docs-style frontmatter loading and scoped styles; the only home-grown piece is the fragment-swap enhancement, which Astro has no direct primitive for but which duplicates page markup as a contract."
+    },
+    "correctness_risks": {
+      "score": 4,
+      "evidence": [
+        "app/src/lib/api.ts:43 — non-404 API errors throw and nothing catches them: any transient API failure becomes a raw 500 on every page",
+        "app/src/lib/api.ts:16-26 — withSlot waiter increments active in a later microtask, so concurrent arrivals can jump the queue or briefly exceed the cap",
+        "app/src/pages/index.astro:104-116 — no AbortController; rapid typing fans out full server renders (latest-guard prevents stale swaps, so cosmetic)",
+        "app/src/lib/api.ts:57-63 — failed promises are un-cached and the cache is bounded at 5000 entries: no leak",
+        "app/src/pages/pokemon/[name].astro:37 — Astro.response.status = 404 plus 404.astro fallback covers all not-found cases",
+        "app/src/components/MovesTable.astro:14-27 — no set:html anywhere; all interpolation is escaped, no XSS surface"
+      ],
+      "rationale": "Careful cache lifecycle and request-ordering guards, 404 handling everywhere, no escaping issues; the unhandled API-error-to-500 path and the semaphore micro-race are minor but real."
+    },
+    "global_abstractions": {
+      "score": 4,
+      "evidence": [
+        "app/src/lib/api.ts:7-10 — module-level cache and semaphore are hidden global state, but bounded (5000 entries, 60s TTL) and documented",
+        "app/src/lib/pokedex.ts:96-140 — getSpeciesIndex assembles species+types+generations once and is reused by list, move, ability and type pages",
+        "app/src/lib/pokedex.ts:146-166 — cardsForPokemon centralizes the alternate-form/dex-order rules in one place instead of duplicating per page",
+        "app/src/pages/pokemon/[name].astro:34 — pokemon page only pulls typeLabels, not the full index: right-grained usage"
+      ],
+      "rationale": "Two lib modules carry the whole domain; boundaries are clean and each earns its keep, though pokedex.ts is drifting toward a god data module as more pages lean on the prebuilt index."
+    },
+    "readability": {
+      "score": 4,
+      "evidence": [
+        "app/src/lib/api.ts:1-2 — comments explain the caching strategy (SWR, never at build time)",
+        "app/src/lib/pokedex.ts:73-75 — comment explains why type data maps straight onto species",
+        "app/src/pages/pokemon/[name].astro:60-118 — page: any and (a: any) callbacks; the biggest page reads as untyped glue",
+        "app/src/scripts/sortable.ts:1-3 — header comment explains data-sort conventions and delegation"
+      ],
+      "rationale": "Consistent structure, small files, why-comments in the right places; the pervasive any-typing on the heaviest page is the main thing that would slow a teammate down."
+    },
+    "review_cost": {
+      "score": 4,
+      "evidence": [
+        "app/src/lib/api.ts:43 — needs an error boundary (middleware or per-route) before merge",
+        "app/src/pages/pokemon/[name].astro:60 — page-level any should be typed",
+        "app/package.json:6-10 — no astro check/sync/lint/test scripts for a team codebase",
+        "app/astro.config.mjs:6 — security.checkOrigin disabled with no POST forms needing it"
+      ],
+      "rationale": "Approve with one round of changes: error handling for API failures, real types, and drop the needless checkOrigin:false; the rest is nits."
+    }
+  },
+  "overall": 4,
+  "findings": [
+    {
+      "severity": "medium",
+      "location": "app/src/lib/api.ts:43",
+      "issue": "Any non-404 API response throws and no route or middleware catches it, so every page becomes an unhandled 500 on a transient API failure.",
+      "suggestion": "Add a try/catch in the pages or an Astro middleware that renders the Not found/error layout when the API is unreachable."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/pages/pokemon/[name].astro:60",
+      "issue": "The largest page builds its whole state as `page: any` with `(a: any)` callbacks, and api() returns any by default (app/src/lib/api.ts:52).",
+      "suggestion": "Define API response types in lib and type the assembled page object; add an `astro check` script to package.json."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/lib/api.ts:16-26",
+      "issue": "withSlot resolves a queued waiter but increments active in a later microtask, so new callers can jump the queue and briefly exceed MAX_CONCURRENT.",
+      "suggestion": "Increment active before enqueuing resolution, or hand off the slot synchronously in the finally block."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/pages/index.astro:109-110",
+      "issue": "Client scripts re-fetch full pages and swap fragments via data-results/data-move-tables selectors duplicated between template and script (also app/src/pages/pokemon/[name].astro:232-233); the server/client contract is implicit, and fetches aren't aborted on superseded requests.",
+      "suggestion": "Centralize the selector names in one shared module and abort superseded fetches with AbortController."
+    },
+    {
+      "severity": "low",
+      "location": "app/astro.config.mjs:6",
+      "issue": "security.checkOrigin is disabled although the app only uses GET forms; this weakens CSRF protection for no benefit.",
+      "suggestion": "Remove the security.checkOrigin override."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/pages/index.astro:104",
+      "issue": "The results fragment swap has no aria-live region, so screen-reader users get no announcement when filters change.",
+      "suggestion": "Add aria-live=\"polite\" to the [data-results] container or announce the new count."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/lib/api.ts:75",
+      "issue": "spriteUrl hard-codes the media URL pattern instead of using the sprite URLs in API data, coupling the app to the media server's layout.",
+      "suggestion": "Use the API-provided front_default sprite URL with the pattern as fallback."
+    },
+    {
+      "severity": "low",
+      "location": "app/package.json:6-10",
+      "issue": "No check/lint/test scripts despite a TypeScript-first setup; tsconfig references .astro/types.d.ts but nothing runs astro sync.",
+      "suggestion": "Add `astro sync` and `astro check` scripts and wire them into CI."
+    }
+  ],
+  "summary": "A genuinely idiomatic, current-version Astro SSR app: clean routes, awaited frontmatter loading, bounded SWR caching, careful 404 handling and escaped markup throughout. The main merge blockers are the total absence of API error handling (any API hiccup becomes a raw 500) and any-typed data plumbing on the heaviest page. One round of changes, then approve."
+}
+```

@@ -1,0 +1,109 @@
+I've reviewed the app thoroughly. The measured facts are confirmed: the Angular CLI scaffolded a complete vitest setup (`app/angular.json:67-69` uses `@angular/build:unit-test`, `app/tsconfig.spec.json` includes `src/**/*.spec.ts`, and `vitest` + `jsdom` are devDependencies), and the `ng test` script exists (`app/package.json:9`) — but there is not a single spec file under `app/src`. Grep for `describe(`/`it(`/`expect(` across `app/src` returns nothing. The agent wrote zero tests of its own.
+
+The code under test-blindness is substantial: pure helpers (`app/src/app/core/format.ts`), home-page filter/sort/pagination/URL-state logic (`app/src/app/pages/home-page.ts:48-128`), move-table construction and multi-key sorting with nulls-last semantics (`app/src/app/pages/pokemon-page.ts:69-140, 292-301`), catalog cross-referencing with the alternate-form exclusion rule (`app/src/app/core/catalog.service.ts:60-119`), an HTTP cache (`app/src/app/core/api.service.ts:22-38`), and a hand-rolled static server with runtime config injection (`app/server.mjs:17-21`). I also spotted latent bugs these missing tests would have caught: `type-page.ts:76-82` falls back to rendering the raw API URL as a card label when the species map misses (unlike `move-page.ts`/`ability-page.ts`, which drop such entries), and `api.service.ts:29-31` caches a failed observable with `shareReplay({refCount: false})`, so a transient network error permanently locks a resource into "Not found" for the session.
+
+```json
+{
+  "dimension": "tests",
+  "criteria": {
+    "coverage_of_risk": {
+      "score": 1,
+      "evidence": [
+        "app/src/app/core/format.ts:4-51 — humanize, padDex, idFromUrl, latestEnglishFlavor, displayValue: spec-critical pure transforms, zero tests",
+        "app/src/app/pages/home-page.ts:48-128 — search/type/generation filtering, 48-per-page pagination, URL query round-trip: untested",
+        "app/src/app/pages/pokemon-page.ts:69-140 — buildTables, compareRows nulls-last sorting, method priority ordering: untested",
+        "app/src/app/core/catalog.service.ts:60-119 — id>10000 alternate-form exclusion, type-slot ordering, generation mapping: untested",
+        "app/tsconfig.spec.json:8-12 — spec include pattern matches zero files"
+      ],
+      "rationale": "No tests exist at all, despite a fully scaffolded vitest runner and an app full of the exact logic (filtering, sorting, pagination, URL state) that breaks under refactor."
+    },
+    "behaviour_not_implementation": {
+      "score": 1,
+      "evidence": [
+        "app/src — grep for describe(/it(/expect( across all of app/src returns no matches"
+      ],
+      "rationale": "There are no tests, so there is nothing to assess on this axis; the app is entirely untested behaviourally or otherwise."
+    },
+    "regression_power": {
+      "score": 1,
+      "evidence": [
+        "app/src/app/pages/home-page.ts:106-115 — pageLink/currentPage clamping: a refactor that breaks URL↔view sync would be caught by nothing",
+        "app/src/app/shared/pokemon-card.ts:31-46 — sprite-error fallback: silently broken images would ship unnoticed",
+        "app/server.mjs:17-21 — API_BASE_URL injection into index.html: a bad injection bricks the whole app in production with no guard"
+      ],
+      "rationale": "Once the acceptance suite is gone, any behaviour change — including outright breakage of filtering, sorting, or the server — passes without a single failing test."
+    },
+    "signal_to_noise": {
+      "score": 3,
+      "evidence": [
+        "app/src — zero spec files; no noise because there is no signal either"
+      ],
+      "rationale": "Per the rubric, no tests scores 3: no padding, but nothing purposeful either."
+    }
+  },
+  "overall": 1,
+  "findings": [
+    {
+      "severity": "high",
+      "location": "app/src/app/core/format.ts:4-51",
+      "issue": "Pure, easily-testable helpers (humanize, padDex, idFromUrl, latestEnglishFlavor, englishShortEffect, displayValue) have zero tests despite encoding subtle spec rules (last English entry, whitespace collapse, em-dash for missing values).",
+      "suggestion": "Add a vitest spec for format.ts covering mr-mime, #0025 padding, trailing-slash URL ids, mixed-case/\\n/\\f flavor text, and null power → '—'."
+    },
+    {
+      "severity": "high",
+      "location": "app/src/app/pages/home-page.ts:48-128",
+      "issue": "Filter/pagination/URL-state logic is untested: combined filters, page clamping, page=1 param omission, and reset-to-page-1 on filter change.",
+      "suggestion": "Test parseQuery and the filtered/currentPage/pageItems computeds against a small fixture catalog: verify q+type+generation intersection, out-of-range page clamps to totalPages, and empty filters produce 1025-equivalent results."
+    },
+    {
+      "severity": "high",
+      "location": "app/src/app/pages/pokemon-page.ts:69-140, 292-301",
+      "issue": "Move-table construction and sorting (nulls sort last in both directions, per-method independent sort state, method priority Level Up > Machine > Egg > Tutor) is entirely untested.",
+      "suggestion": "Unit-test compareRows/sortRows and buildTables with mixed null power/accuracy rows and multiple methods; assert ascending vs descending null placement and table ordering."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/app/core/api.service.ts:22-33",
+      "issue": "Failed HTTP requests are cached forever: the errored observable is stored in the cache behind shareReplay({refCount:false}), so a transient error makes a resource permanently resolve to null (Not found) for the session.",
+      "suggestion": "Remove a failed key from the cache (e.g. via a catchError/tap that deletes cache.get(key)) and add a test that a failed get can succeed on retry."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/app/pages/type-page.ts:76-82",
+      "issue": "When a type lists a Pokémon whose id is missing from speciesById, the card label falls back to the raw API URL (entry.url), unlike move-page.ts:66-76 and ability-page.ts:60-74 which drop such entries — a latent rendering bug nothing would catch.",
+      "suggestion": "Match move/ability pages: filter out entries with no resolvable species name, and add a shared tested helper for the alternate-form/dedup/species-resolution pattern used in three copy-pasted places."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/app/core/catalog.service.ts:60-119",
+      "issue": "Catalog cross-referencing (id>10000 exclusion, type-slot ordering, generationBySpeciesId) is untested; a refactor that flips the exclusion boundary or loses slot ordering breaks the home page and type badges silently.",
+      "suggestion": "Test catalog$ construction against fixture data including an alternate form (id 10001) and a multi-slot dual type, asserting exclusion and slot order."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/app/pages/pokemon-page.html:146-153",
+      "issue": "Recursive evolution-tree template (branching chains like Eevee) is untested; a cycle or malformed chain in the data would render incorrectly or blow the stack with no guard.",
+      "suggestion": "Add a component test rendering a branching chain (Eevee fixture) asserting all 9 species links appear nested correctly."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/app/shared/pokemon-card.ts:31-46",
+      "issue": "Sprite fallback uses a per-instance triedFallback flag that is never reset when inputs change (reused card in @for), and the fallback swap is untested.",
+      "suggestion": "Reset triedFallback in an effect on pokemonId changes, or derive fallback via computed; test that an image error triggers the front_default fallback."
+    },
+    {
+      "severity": "low",
+      "location": "app/server.mjs:17-21, 53-60",
+      "issue": "The hand-rolled static server (API_BASE_URL injection, path-traversal guard, SPA fallback) is the production entry point and has no tests.",
+      "suggestion": "A few node-side vitest cases: injected script present in served index.html, /pokemon/missingno returns the SPA shell, traversal attempts rejected."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/app/pages/home-page.ts:36-37",
+      "issue": "Query parsing uses a `params as unknown as Map<string,string>` cast instead of a typed adapter, and parseQuery's NaN/out-of-range handling is untested.",
+      "suggestion": "Type it honestly against ParamMap and unit-test parseQuery with page=abc, page=0, page=99, and missing params."
+    }
+  ],
+  "summary": "The app ships zero tests of its own, even though the CLI fully scaffolded vitest (builder, tsconfig, devDeps) and `ng test` is wired. Meanwhile the riskiest logic — filtering, pagination, move-table sorting, catalog cross-referencing, and an HTTP cache with a real error-caching bug — sits completely unguarded. Once the acceptance suite stops being the only safety net, any refactor or data-shape change can break the home page, type pages, or Pokémon pages without a single failing test."
+}
+```

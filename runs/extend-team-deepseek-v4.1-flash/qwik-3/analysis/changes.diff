@@ -1,0 +1,426 @@
+diff --git a/app/src/global.css b/app/src/global.css
+index 52f6ee0..e28ced7 100644
+--- a/app/src/global.css
++++ b/app/src/global.css
+@@ -304,6 +304,88 @@ select {
+   text-align: center;
+ }
+ 
++.empty-link {
++  text-align: center;
++  margin-top: calc(-1 * var(--space-4));
++}
++
++/* Team builder */
++.team-action {
++  display: flex;
++  align-items: center;
++  flex-wrap: wrap;
++  gap: var(--space-3);
++  margin-top: var(--space-3);
++}
++
++.team-action button,
++.team-remove {
++  font: inherit;
++  color: var(--color-text);
++  background: var(--color-surface);
++  border: 1px solid var(--color-border);
++  border-radius: var(--radius-md);
++  padding: var(--space-2) var(--space-4);
++  cursor: pointer;
++}
++
++.team-action button:hover:not(:disabled),
++.team-remove:hover {
++  border-color: var(--color-link);
++}
++
++.team-action button:disabled {
++  color: var(--color-text-muted);
++  cursor: not-allowed;
++  opacity: 0.7;
++}
++
++.team-full {
++  color: var(--color-text-muted);
++  font-size: var(--text-sm);
++}
++
++.team-card {
++  display: flex;
++  flex-direction: column;
++}
++
++.team-card .card {
++  flex: 1;
++}
++
++.team-remove {
++  margin-top: var(--space-2);
++  font-size: var(--text-sm);
++  color: var(--color-link);
++}
++
++.coverage-table {
++  width: 100%;
++  border-collapse: collapse;
++}
++
++.coverage-table th,
++.coverage-table td {
++  padding: var(--space-2) var(--space-3);
++  border-bottom: 1px solid var(--color-border);
++  text-align: left;
++}
++
++.coverage-table thead th {
++  color: var(--color-text-muted);
++  font-size: var(--text-sm);
++  font-weight: var(--weight-normal);
++}
++
++.coverage-table tbody th {
++  font-weight: var(--weight-normal);
++}
++
++.coverage-table td {
++  width: 8rem;
++}
++
+ /* Pokémon page */
+ .pokemon-summary {
+   display: grid;
+diff --git a/app/src/lib/data.ts b/app/src/lib/data.ts
+index f36de10..2c0e0cc 100644
+--- a/app/src/lib/data.ts
++++ b/app/src/lib/data.ts
+@@ -1,6 +1,7 @@
+ // Builds page data from API responses. Server only.
+ import { apiBase, find, get, isValidName } from "./api";
+ import { englishName, humanize, idFromUrl, latestFlavorText, shortEffect } from "./format";
++import type { AttackType } from "./team";
+ 
+ export interface TypeRef {
+   name: string;
+@@ -324,6 +325,61 @@ export async function abilityPage(name: string) {
+   };
+ }
+ 
++// ---------------------------------------------------------------------------
++// Team
++
++export interface TeamCard extends Card {
++  types: TypeRef[];
++}
++
++async function attackTypes(): Promise<AttackType[]> {
++  const types = await mainTypes();
++  const names = (list: { name: string }[] | undefined) => (list ?? []).map((t) => t.name);
++  return types.map((t) => ({
++    name: t.name,
++    label: t.label,
++    double: names(t.record.damage_relations?.double_damage_to),
++    half: names(t.record.damage_relations?.half_damage_to),
++    none: names(t.record.damage_relations?.no_damage_to),
++  }));
++}
++
++/** Team members in the order they were added, with live species and type data. */
++export async function teamPage(names: string[]) {
++  if (names.length === 0) return { cards: [] as TeamCard[], attacks: [] as AttackType[] };
++
++  const [attacks, cards] = await Promise.all([
++    attackTypes(),
++    Promise.all(
++      names.map(async (name): Promise<TeamCard | null> => {
++        if (!isValidName(name)) return null;
++        const species = await find(`pokemon-species/${name}`);
++        if (!species) return null;
++        const variety = species.varieties?.find((v: any) => v.is_default) ?? species.varieties?.[0];
++        const pokemon = await get(variety ? variety.pokemon.url : `pokemon/${species.id}`);
++        const types = await Promise.all(
++          (pokemon.types ?? [])
++            .slice()
++            .sort((a: any, b: any) => a.slot - b.slot)
++            .map((t: any) => typeRef(t.type.name)),
++        );
++        return {
++          id: species.id as number,
++          name: species.name as string,
++          label: humanize(species.name),
++          sprite: spriteUrl(species.id),
++          types,
++        };
++      }),
++    ),
++  ]);
++
++  return {
++    cards: cards.filter((card): card is TeamCard => card !== null),
++    attacks,
++  };
++}
++
+ export async function typesPage() {
+   const types = await mainTypes();
+   return types.map((t) => ({ name: t.name, label: t.label }));
+diff --git a/app/src/lib/team.ts b/app/src/lib/team.ts
+new file mode 100644
+index 0000000..5cf8c18
+--- /dev/null
++++ b/app/src/lib/team.ts
+@@ -0,0 +1,83 @@
++// Team state helpers. The team lives in a cookie so server-rendered pages can
++// reflect it immediately, with the browser as the only source of truth.
++
++export const TEAM_COOKIE = "team";
++export const MAX_TEAM = 6;
++
++const VALID_NAME = /^[a-z0-9-]+$/i;
++
++/** Read a team cookie value into a clean, ordered list of species names. */
++export function parseTeam(value: string | null | undefined): string[] {
++  const names: string[] = [];
++  for (const part of (value ?? "").split(",")) {
++    let name = part.trim().toLowerCase();
++    try {
++      name = decodeURIComponent(name);
++    } catch {
++      // Leave malformed escapes as they came in; they fail validation below.
++    }
++    if (!VALID_NAME.test(name) || names.includes(name)) continue;
++    names.push(name);
++    if (names.length >= MAX_TEAM) break;
++  }
++  return names;
++}
++
++export const serializeTeam = (names: string[]) => names.slice(0, MAX_TEAM).map(encodeURIComponent).join(",");
++
++/** Persist the team in the browser. Only ever called from client code. */
++export function writeTeamCookie(names: string[]) {
++  document.cookie = `${TEAM_COOKIE}=${serializeTeam(names)}; Path=/; Max-Age=31536000; SameSite=Lax`;
++}
++
++export function addTeamMember(names: string[], name: string): string[] {
++  if (names.includes(name) || names.length >= MAX_TEAM) return names;
++  return [...names, name];
++}
++
++export function removeTeamMember(names: string[], name: string): string[] {
++  return names.filter((n) => n !== name);
++}
++
++export interface AttackType {
++  name: string;
++  label: string;
++  double: string[];
++  half: string[];
++  none: string[];
++}
++
++export interface CoverageRow {
++  name: string;
++  label: string;
++  weak: number;
++  resistant: number;
++}
++
++interface CoverageCard {
++  types: { name: string }[];
++}
++
++/** Damage a type does to one Pokémon, using its types in slot order. */
++function damageMultiplier(attack: AttackType, types: { name: string }[]): number {
++  return types.reduce((product, type) => {
++    if (attack.none.includes(type.name)) return 0;
++    if (attack.double.includes(type.name)) return product * 2;
++    if (attack.half.includes(type.name)) return product * 0.5;
++    return product;
++  }, 1);
++}
++
++/** One row per attacking type, in API order. */
++export function computeCoverage(cards: CoverageCard[], attacks: AttackType[]): CoverageRow[] {
++  return attacks.map((attack) => {
++    let weak = 0;
++    let resistant = 0;
++    for (const card of cards) {
++      const multiplier = damageMultiplier(attack, card.types);
++      if (multiplier > 1) weak++;
++      else if (multiplier < 1) resistant++;
++    }
++    return { name: attack.name, label: attack.label, weak, resistant };
++  });
++}
+diff --git a/app/src/routes/layout.tsx b/app/src/routes/layout.tsx
+index 2164a15..b145696 100644
+--- a/app/src/routes/layout.tsx
++++ b/app/src/routes/layout.tsx
+@@ -21,6 +21,9 @@ export default component$(() => (
+             <li>
+               <Link href="/types">Types</Link>
+             </li>
++            <li>
++              <Link href="/team">Team</Link>
++            </li>
+           </ul>
+         </nav>
+       </div>
+diff --git a/app/src/routes/pokemon/[name]/index.tsx b/app/src/routes/pokemon/[name]/index.tsx
+index 9a57388..f06d153 100644
+--- a/app/src/routes/pokemon/[name]/index.tsx
++++ b/app/src/routes/pokemon/[name]/index.tsx
+@@ -1,14 +1,25 @@
+-import { component$ } from "@builder.io/qwik";
++import { component$, useComputed$, useSignal } from "@builder.io/qwik";
+ import { Link, routeLoader$, useNavigate, type DocumentHead } from "@builder.io/qwik-city";
+ import { MoveTable } from "~/components/move-table";
+ import { Evolution, NotFound, Section, TypeBadge } from "~/components/ui";
+ import { pokemonPage } from "~/lib/data";
+ import { dexNumber, orDash, pageTitle } from "~/lib/format";
++import {
++  addTeamMember,
++  MAX_TEAM,
++  parseTeam,
++  removeTeamMember,
++  TEAM_COOKIE,
++  writeTeamCookie,
++} from "~/lib/team";
+ 
+-export const usePokemon = routeLoader$(async ({ params, url, status }) => {
++export const usePokemon = routeLoader$(async ({ params, url, status, cookie }) => {
+   const data = await pokemonPage(params.name, url.searchParams.get("game"));
+-  if (!data) status(404);
+-  return data;
++  if (!data) {
++    status(404);
++    return null;
++  }
++  return { ...data, team: parseTeam(cookie.get(TEAM_COOKIE)?.value) };
+ });
+ 
+ const MAX_STAT = 255;
+@@ -17,6 +28,9 @@ export default component$(() => {
+   const loader = usePokemon();
+   const nav = useNavigate();
+   const p = loader.value;
++  const team = useSignal(p?.team ?? []);
++  const onTeam = useComputed$(() => !!p && team.value.includes(p.name));
++  const teamFull = useComputed$(() => team.value.length >= MAX_TEAM);
+   if (!p) return <NotFound />;
+ 
+   return (
+@@ -28,6 +42,22 @@ export default component$(() => {
+         <div class="summary-info">
+           <p class="dex-number">{dexNumber(p.id)}</p>
+           <h1>{p.title}</h1>
++          <div class="team-action">
++            <button
++              type="button"
++              disabled={teamFull.value && !onTeam.value}
++              onClick$={() => {
++                const next = onTeam.value
++                  ? removeTeamMember(team.value, p.name)
++                  : addTeamMember(team.value, p.name);
++                team.value = next;
++                writeTeamCookie(next);
++              }}
++            >
++              {onTeam.value ? "Remove from team" : "Add to team"}
++            </button>
++            {teamFull.value && !onTeam.value && <span class="team-full">Team is full</span>}
++          </div>
+           {p.genus && <p class="genus">{p.genus}</p>}
+           <p class="badges">
+             {p.types.map((t) => (
+diff --git a/app/src/routes/team/index.tsx b/app/src/routes/team/index.tsx
+new file mode 100644
+index 0000000..b1c7124
+--- /dev/null
++++ b/app/src/routes/team/index.tsx
+@@ -0,0 +1,83 @@
++import { component$, useComputed$, useSignal } from "@builder.io/qwik";
++import { Link, routeLoader$, type DocumentHead } from "@builder.io/qwik-city";
++import { PokemonCard, Section } from "~/components/ui";
++import { teamPage } from "~/lib/data";
++import { pageTitle } from "~/lib/format";
++import {
++  computeCoverage,
++  parseTeam,
++  removeTeamMember,
++  TEAM_COOKIE,
++  writeTeamCookie,
++} from "~/lib/team";
++
++export const useTeam = routeLoader$(({ cookie }) => teamPage(parseTeam(cookie.get(TEAM_COOKIE)?.value)));
++
++export default component$(() => {
++  const loader = useTeam();
++  const team = useSignal(loader.value.cards);
++  const coverage = useComputed$(() => computeCoverage(team.value, loader.value.attacks));
++
++  return (
++    <>
++      <h1>Team</h1>
++      <p class="count">{team.value.length} of 6</p>
++
++      {team.value.length === 0 ? (
++        <>
++          <p class="empty">Your team is empty</p>
++          <p class="empty-link">
++            <Link href="/">Browse Pokémon</Link>
++          </p>
++        </>
++      ) : (
++        <>
++          <ul class="card-grid team-grid">
++            {team.value.map((card) => (
++              <li key={card.id} class="team-card">
++                <PokemonCard card={card} />
++                <button
++                  type="button"
++                  class="team-remove"
++                  onClick$={() => {
++                    const names = removeTeamMember(
++                      team.value.map((c) => c.name),
++                      card.name,
++                    );
++                    team.value = team.value.filter((c) => c.name !== card.name);
++                    writeTeamCookie(names);
++                  }}
++                >
++                  Remove {card.label}
++                </button>
++              </li>
++            ))}
++          </ul>
++
++          <Section id="coverage" title="Type coverage">
++            <table class="coverage-table">
++              <thead>
++                <tr>
++                  <th scope="col">Type</th>
++                  <th scope="col">Weak</th>
++                  <th scope="col">Resistant</th>
++                </tr>
++              </thead>
++              <tbody>
++                {coverage.value.map((row) => (
++                  <tr key={row.name}>
++                    <th scope="row">{row.label}</th>
++                    <td>{row.weak}</td>
++                    <td>{row.resistant}</td>
++                  </tr>
++                ))}
++              </tbody>
++            </table>
++          </Section>
++        </>
++      )}
++    </>
++  );
++});
++
++export const head: DocumentHead = { title: pageTitle("Team") };

@@ -1,0 +1,88 @@
+## Review summary
+
+I read `SPEC.md`, every source file in `app/` (14 files, ~700 significant LOC), and verified the framework's current guidance: the shipped `@tanstack/react-start@1.169.4` is the first **stable** release (RC migration notes: `.validator()` is canonical, `inputValidator()` removed), the official server-functions skill prescribes exactly this `.functions.ts` / `.server.ts` split, and the hosting docs/community examples prescribe exactly this srvx "static `dist/client` + `fetch` handler" production shape.
+
+**What's strong:** the data layer mirrors the official skill almost verbatim — `createServerFn({ method: 'GET' }).validator().handler()` wrappers in `pokedex.functions.ts:5-28`, server-only helpers behind them in `pokedex.server.ts`, loaders that only call server functions (`pokemon.$name.tsx:27-33`, `index.tsx:24-25`), typed search via `validateSearch` + `loaderDeps` (`index.tsx:22-26`), `throw notFound()` in loaders with root/global `notFoundComponent` (`router.tsx:11`, `__root.tsx:17`), `head()` per route with `HeadContent`/`Scripts`, `styles.css?url` in root links, and `hashScrollIntoView` used correctly for the `#moves` game-switch case (`pokemon.$name.tsx:147-152`). The production server (`server.mjs:13-18`) matches the documented Node/srvx deployment shape. Boundaries are clean: shared types in `lib/types.ts`, shared formatters in `lib/format.ts`, server-only code never leaks into client modules.
+
+**What I'd flag:** the root `head` reaches into the router's private `_notFound` field to compute the not-found title (`__root.tsx:16`); the search box's focus-guard can desync the input text from the URL after Back/Forward (`index.tsx:43-46`); the server module is ~350 lines of `any`-typed internal record handling; and the in-memory cache only prunes expired entries and only on the 5001st write (`pokedex.server.ts:43-46`). Nothing rises above "minor" — there are no serious races, no leaks, no SSR/CSR mismatch hazards, and 404 handling is thorough.
+
+```json
+{
+  "dimension": "mergeability",
+  "criteria": {
+    "idiomatic": {
+      "score": 4,
+      "evidence": [
+        "app/src/lib/pokedex.functions.ts:5-28 — server fns use the canonical createServerFn({method:'GET'}).validator().handler() chain from the current stable API",
+        "app/src/lib/pokedex.server.ts:1-19 — server-only helpers split into *.server.ts, exactly the file organization the official skill prescribes",
+        "app/src/routes/index.tsx:22-26 — validateSearch + loaderDeps + loader calling a server fn; URL-driven filter state",
+        "app/src/routes/pokemon.$name.tsx:27-36 — loader throws notFound() and per-route head() sets the title",
+        "app/src/routes/__root.tsx:18-24 — HeadContent/Scripts/styles.css?url document shell as in the docs",
+        "app/src/router.tsx:6-12 — createRouter with routeTree, scrollRestoration, defaultPreload:'intent'",
+        "app/server.mjs:13-18 — srvx static middleware + fetch handler, matching the documented Node/srvx production shape",
+        "app/src/routes/__root.tsx:16 — reads the internal m._notFound field, which is not public API"
+      ],
+      "rationale": "Data loading, routing, head management and deployment follow the current stable docs and the shipped start-core skill almost verbatim; the single blemish is reaching into the router's private _notFound field for the 404 title."
+    },
+    "correctness_risks": {
+      "score": 4,
+      "evidence": [
+        "app/src/routes/index.tsx:43-46 — input only resyncs from search.q when unfocused, so Back/Forward to a different q leaves the visible text and the URL/filters desynced",
+        "app/src/lib/pokedex.server.ts:43-46 — cache pruning removes only already-expired entries and only on the 5001st write, so stale entries persist and the cap is best-effort",
+        "app/src/lib/pokedex.server.ts:232-233 — one full move record fetched per learned move (~90 parallel upstream requests per Pokémon page, on hover via intent preloading)",
+        "app/src/lib/pokedex.server.ts:34-38 — non-404 API failures throw and surface as an uncustomized default error boundary; no errorComponent/onError anywhere",
+        "app/src/lib/pokedex.server.ts:42 — value.catch(() => cache.delete(key)) correctly evicts rejected promises so a transient failure isn't cached",
+        "app/src/routes/pokemon.$name.tsx:147-152 — game change navigates with hash preserved and hashScrollIntoView:false, correctly avoiding jump/scroll bugs",
+        "app/src/lib/pokedex.server.ts:57-58 — user input validated (validName) before it reaches the API; 404s handled everywhere via notFound()"
+      ],
+      "rationale": "No serious bugs found: 404s, upstream failures, hash navigation and in-flight dedup are all handled. Remaining risks are minor (search/URL desync after history navigation, best-effort cache pruning) and untested-by-design."
+    },
+    "global_abstractions": {
+      "score": 4,
+      "evidence": [
+        "app/src/lib/pokedex.server.ts:78-153 — shared indexes (speciesList/typeIndex/generationIndex) built once and reused by every page loader; locally reasonable and well-bounded",
+        "app/src/lib/pokedex.server.ts:27 — module-level cache Map is hidden global state, but it is documented, TTL'd and eviction-aware",
+        "app/src/lib/types.ts:1-63 — a single typed boundary shared by all server fns and components; good split between server output types and API internals",
+        "app/src/components/ui.tsx:1-87 — one grab-bag module mixing layout (Section), data display (CardList/PokemonCard) and the NotFound page; fine at this size, will need splitting as it grows",
+        "app/src/lib/pokedex.server.ts:196-350 — ~155 lines covering one resource per function with clear section separators; the whole API lives in one module"
+      ],
+      "rationale": "Abstractions are few and have clean boundaries (functions/server/types split is exactly the documented shape, and no client code imports server code). The single god data module and the ui.tsx grab-bag are the only things a reviewer might ask to untangle later."
+    },
+    "readability": {
+      "score": 4,
+      "evidence": [
+        "app/src/lib/format.ts:1-21 — tiny, well-named shared formatters (humanize/dexNumber/orDash/pageTitle) with no dead weight",
+        "app/src/lib/pokedex.server.ts:60,85,99,232 — heavy use of any for upstream records while the project is strict-mode TS, weakening the otherwise strong type story",
+        "app/src/routes/pokemon.$name.tsx:143-198 — SortableMoveTable is self-contained, with missing-values-last sorting and aria-sort logic commented where non-obvious",
+        "app/src/styles.css:64,116,167 — CSS organized into labelled sections built on design tokens",
+        "app/src/routes/index.tsx:12-15 — SEARCH_DEBOUNCE_MS and cleanFilters documented with a why-comment"
+      ],
+      "rationale": "Consistent naming, small components, sectioned comments and clean file organization make this easy to navigate. The internal any-typing in the server module is the main rough spot."
+    },
+    "review_cost": {
+      "score": 4,
+      "evidence": [
+        "app/src/routes/__root.tsx:16 — the one thing I'd insist on changing: replace m._notFound with the public m.status check or a route-level title",
+        "app/src/routes/index.tsx:43-46 — focus-guard syncs are clever but subtle; a reviewer would ask for a comment or a simpler owned-vs-URL state rule",
+        "app/package.json:8-10 — build script runs vite build only; adding tsc --noEmit (as the docs' scripts show) would make the strict tsconfig actually enforce something",
+        "app/src/lib/pokedex.server.ts:30-47 — cache would draw a couple of questions about eviction policy under load",
+        "app/server.mjs:15 — middleware hardcodes the /assets/ prefix, coupling the server to Vite's default output layout"
+      ],
+      "rationale": "I'd approve after one small round: swap the private-field read for the public status check, add tsc --noEmit to the build script, and add a comment or simpler rule for the search-input sync. Everything else is nits."
+    }
+  },
+  "overall": 4,
+  "findings": [
+    { "severity": "medium", "location": "app/src/routes/__root.tsx:16", "issue": "Root head() reads the router's private m._notFound field to pick the not-found title; this is not public API and can break silently on a minor upgrade.", "suggestion": "Rely on the public match.status === 'notFound' (the 1.114 fix makes meta work for not-found matches), or set the title in each route's head()/notFoundComponent and drop the root-level fallback logic." },
+    { "severity": "medium", "location": "app/src/routes/index.tsx:43-46", "issue": "The search input only resyncs from search.q while it is not focused, so Back/Forward (or an external link) to a different q leaves the input text and the URL/filters desynced.", "suggestion": "Track whether the last q change originated locally (e.g. a 'dirty until URL commit' flag or timestamp) instead of relying on document.activeElement, so URL-driven changes always win when the local edit isn't in flight." },
+    { "severity": "low", "location": "app/src/lib/pokedex.server.ts:43-46", "issue": "Cache eviction removes only already-expired entries and only when size exceeds 5000 on a subsequent write, so stale entries can persist indefinitely and the cap is best-effort.", "suggestion": "Sweep expired entries on a timer, or cap by size with LRU-style eviction rather than only-when-over-threshold-and-only-expired." },
+    { "severity": "low", "location": "app/src/lib/pokedex.server.ts:30-60", "issue": "The entire upstream API surface is handled through any (get<T = any>, (r: any) casts) in a strict-mode project, so record-shape regressions from the API are invisible to the compiler.", "suggestion": "Declare minimal interfaces (or a validator) for the API records actually consumed (species, pokemon, move, ability, type) and type get<T extends KnownRecord>." },
+    { "severity": "low", "location": "app/package.json:8-10", "issue": "build runs vite build only; the strict tsconfig.json is never enforced in CI.", "suggestion": "Change build to \"vite build && tsc --noEmit\" as the docs' scripts do." },
+    { "severity": "low", "location": "app/server.mjs:15", "issue": "Static serving is gated on the hardcoded /assets/ pathname prefix, coupling the production server to Vite's default asset layout; any non-hashed file in dist/client would fall through to the SSR handler.", "suggestion": "Serve the whole dist/client directory via staticMiddleware (which falls through to next() on misses) instead of path-prefix matching." },
+    { "severity": "low", "location": "app/src/lib/pokedex.server.ts:196-350", "issue": "All five resources plus caching and the i18n rules live in a single ~350-line module; as pages grow this becomes the file everyone touches.", "suggestion": "Split per resource (species/pokemon, move, ability, type) with a shared api.ts holding get(), the cache and the English-name helpers." },
+    { "severity": "low", "location": "app/src/components/ui.tsx:1-87", "issue": "ui.tsx is a grab-bag mixing layout primitives (Section), domain display (PokemonCard/CardList/TypeBadge), copy helpers (Count) and the NotFound page.", "suggestion": "Split into Section.tsx, PokemonCard.tsx, NotFound.tsx as components accrue; keep the current file only if the set stays this small." },
+    { "severity": "low", "location": "app/src/router.tsx:6-12", "issue": "No errorComponent/onError is configured at router or route level, so an upstream API 500 renders the generic framework error page with no recovery path.", "suggestion": "Add a small defaultErrorComponent (root or router) that renders a friendly message with a link back to /, and log the error in onError." }
+  ],
+  "summary": "A genuinely idiomatic TanStack Start app for the current stable release: server functions, loaders, search-param state, head management and the srvx production server all follow the shipped docs and skills, with clean server/client boundaries and typed view models. Risks are minor — one private-API read in the root head, a search-input/URL desync edge case, best-effort cache eviction and an any-typed internal data layer. I'd merge after one small round of fixes."
+}
+```

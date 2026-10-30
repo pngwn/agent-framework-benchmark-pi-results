@@ -1,0 +1,110 @@
+{
+  "dimension": "mergeability",
+  "criteria": {
+    "idiomatic": {
+      "score": 5,
+      "evidence": [
+        "app/src/index.tsx:14-15 — implements the current htmx-documented full-page-vs-fragment contract (HX-Request / HX-History-Restore-Request)",
+        "app/src/views/layout.tsx:3-7 — jsxRenderer with documented ContextRenderer module augmentation; current hono 4.13 pattern",
+        "app/src/index.tsx:28 — Vary: HX-Request, HX-History-Restore-Request on the dual-representation URL",
+        "app/src/views/home.tsx:62-79 — hx-get/hx-trigger delay:200ms/hx-include closest form plus native action=/ fallback; idiomatic htmx 2 usage",
+        "app/package.json:11-14 — hono 4.13.14, @hono/node-server 2.1.5, htmx.org 2.0.11: all current stable releases"
+      ],
+      "rationale": "Reads like the framework's own docs: current versions, jsxRenderer used the documented way, and the htmx fragment/history-restore handling matches the exact pattern htmx 2.x documents."
+    },
+    "correctness_risks": {
+      "score": 3,
+      "evidence": [
+        "app/src/api.ts:9-33 — in-memory cache with no eviction or size cap; every resource ever requested is retained for the process lifetime",
+        "app/src/index.tsx:58 — moves-table 404 returns a full-page document that htmx swaps into a table-sized fragment target",
+        "app/src/index.tsx:93-105 — onError renders a full document for partial requests too, corrupting the fragment target on API failure",
+        "app/src/index.tsx:13 — serveStatic root './dist' resolved against cwd; breaks if started from another directory",
+        "app/src/api.ts:53-55 — apiUrl on a non-/api/v2/ URL silently prepends API_ROOT, producing a bogus request instead of failing loudly",
+        "app/src/views/home.tsx:56 — aria-live region itself is outerHTML-swapped, so screen readers likely won't announce result changes"
+      ],
+      "rationale": "No XSS, no races (hx-sync groups and pending-promise dedup handle both), correct 404 status handling; but the unbounded cache plus fragment/error-representation mismatches are real fragility a reviewer must flag."
+    },
+    "global_abstractions": {
+      "score": 4,
+      "evidence": [
+        "app/src/api.ts:1-9 — the one hidden global (cache) is documented, justified, and confined to a single module",
+        "app/src/data.ts:46-53 — mainTypes() returns full API records to label-only consumers (TypesPage, typeLabels), a leaky boundary that also bloats the cache",
+        "app/src/data.ts:58-60 — typeLabels/typeLabel pair threaded through every loader's return value; explicit but repetitive plumbing",
+        "app/src/views/home.tsx:16-44 — query parsing/canonical-URL logic lives with its page, not in a shared utils grab-bag"
+      ],
+      "rationale": "Abstractions are few and cohesive: one API client, one derived-data module, one shared component file; the only untangling needed later is trimming type records from label consumers."
+    },
+    "readability": {
+      "score": 4,
+      "evidence": [
+        "app/src/api.ts:1-2 — module header comment explains the why (request-time fetching, SWR cache policy)",
+        "app/src/views/pokemon.tsx:70-93 — pervasive `any` on pokemon/move records hides the data shape the views depend on",
+        "app/src/views/pokemon.tsx:196-215 — bar width math with `MAX_STAT * stats.length || 1` needs a comment; subtle normalization",
+        "app/src/views/home.tsx:16-27 — parseHomeQuery/homeUrl are small, named for what they do, and colocated with the page"
+      ],
+      "rationale": "A new teammate finds their way quickly: consistent naming, small functions, comments where they matter; the `any` casts and one dense 300-line pokemon.tsx are the rough spots."
+    },
+    "review_cost": {
+      "score": 3,
+      "evidence": [
+        "app/src/views/pokemon.tsx:70,223-229 — untyped API records behind ~20 `any` casts would be my first ask",
+        "app/src/api.ts:9 — second ask: bound the cache (LRU cap or entry limit)",
+        "app/src/index.tsx:58,93-105 — third ask: fragment-aware 404/onError for the htmx endpoints",
+        "app/src/index.tsx:13 — fourth ask: absolute static root via import.meta"
+      ],
+      "rationale": "Approving as-is would be premature; the asks are concrete, localized and small — one focused round of changes, not structural rework."
+    }
+  },
+  "overall": 4,
+  "findings": [
+    {
+      "severity": "medium",
+      "location": "app/src/api.ts:9",
+      "issue": "Global response cache never evicts; every API resource touched (up to ~3000 records incl. all pokemon/move pages) is held in memory forever, with no size guard.",
+      "suggestion": "Cap the Map (e.g. simple LRU at a few hundred entries) or add a max-entry guard with an explanatory comment."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/views/pokemon.tsx:70",
+      "issue": "Pervasive `any` on API records (also views/pokemon.tsx:223-229, views/details.tsx:57, data.ts:49) defeats tsconfig strict mode and hides the data contract the views rely on.",
+      "suggestion": "Define minimal interfaces for the used fields of pokemon-species, pokemon, move, ability, type; type api<T>() call sites."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/index.tsx:58",
+      "issue": "Fragment endpoints answer 404 and 500 (onError, index.tsx:93-105) with full-page documents, which htmx swaps into a table fragment target.",
+      "suggestion": "Make notFound/onError HX-Request-aware: return a small fragment ('<p>Not found</p>') when isPartial(c)."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/index.tsx:13",
+      "issue": "serveStatic({ root: './dist' }) resolves against the process cwd, so npm start only works when launched from app/. ",
+      "suggestion": "Use an absolute root derived from import.meta.dirname (or pathToFileURL) so the server is location-independent."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/index.tsx:40-46",
+      "issue": "Direct navigation to /pokemon/:name/moves (the fragment URL) returns a bare fragment with no document shell, contrary to htmx's 'public URL should return a complete document' guidance.",
+      "suggestion": "Either reuse the isPartial() branch to return the full pokemon page for non-hx requests, or mark these as non-public fragment routes."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/data.ts:46-53",
+      "issue": "mainTypes() carries full type records (incl. every Pokémon list) to consumers that only need name/label (TypesPage, typeLabels, HomePage select), inflating cache and blurring the boundary.",
+      "suggestion": "Split into a lightweight typeList() (name+label) and keep record access inside typesByPokemonId()."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/index.tsx:48-62",
+      "issue": "Every sort click re-runs loadPokemon + loadMoves (all move fetches for the game) just to re-render one table; wasteful though masked by the cache.",
+      "suggestion": "Acceptable with the cache, but consider caching per (pokemon, game) rows in memory or sorting client-side from the already-rendered table."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/views/home.tsx:56",
+      "issue": "The aria-live='polite' div is replaced via outerHTML swap; replacing the live region itself typically suppresses announcements.",
+      "suggestion": "Keep the #results container static and swap its inner content (hx-swap innerHTML) so the live region persists."
+    }
+  ],
+  "summary": "This is idiomatic, current-release Hono + htmx done the way the docs actually teach it — jsxRenderer, fragment/full-page dual rendering keyed on HX-Request with correct history-restore handling, and hx-sync race control. The structure is clean and the shared components earn their keep; the costs are an unbounded in-memory cache, `any`-typed API records, and fragment endpoints that return whole documents on errors. I'd request one focused round of changes and then merge."
+}

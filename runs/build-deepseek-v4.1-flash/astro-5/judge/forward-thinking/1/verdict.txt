@@ -1,0 +1,128 @@
+I've reviewed the app and verified the framework's current APIs against Astro's live docs and release history. Key verification results: Astro's current stable is 7.4.4 (released 28 Oct 2026) and `@astrojs/node`'s is 11.1.9 — the app pins exactly those. `Astro.response.status`, `Astro.url.searchParams`, `set:html`, `Astro.self`, processed `<script>` tags, and `output: 'server'` are all current per docs.astro.build. Two things I confirmed against the v7 docs: (1) `export const prerender = false` is annotated in the official caching guide as "Not needed in 'server' mode", and (2) Astro 7 stabilized route caching (`memoryCache()` provider + `Astro.cache`/`routeRules`), which this app doesn't use (it hand-rolls an in-memory promise cache, which the spec explicitly permits).
+
+```json
+{
+  "dimension": "forward-thinking",
+  "criteria": {
+    "latest_apis": {
+      "score": 5,
+      "evidence": [
+        "app/package.json:11-12 — astro 7.4.4 and @astrojs/node 11.1.9, exactly the newest stable releases (7.4.4 published 28 Oct 2026)",
+        "app/astro.config.mjs:4-6 — output: 'server' + node standalone adapter, current Astro 7 configuration",
+        "app/src/pages/index.astro:124 — set:html with a JSON script island, current directive",
+        "app/src/pages/pokemon/[name].astro:30 — Astro.response.status = 404, matches the current documented 404 pattern in the Astro 7 API reference",
+        "app/src/components/EvolutionNode.astro:19 — Astro.self recursion, current syntax",
+        "app/src/pages/pokemon/[name].astro:151 — ' (hidden)' keeps its leading space, showing awareness of Astro 7's new jsx-mode compressHTML whitespace rules"
+      ],
+      "rationale": "Everything is on the current generation: the app is pinned to the latest patch of Astro 7 (released two days before review date) and every API used — routing, response status, URL handling, directives, script bundling — is verified current in the Astro 7 docs. It opts out of Astro 7's new route-caching and src/fetch.ts advanced routing, but those are opt-in additions, not replacements for anything used here."
+    },
+    "platform": {
+      "score": 5,
+      "evidence": [
+        "app/src/lib/pokeapi.ts:36 — native fetch for all data access, no HTTP library",
+        "app/src/pages/index.astro:44,153,173 — URLSearchParams for all query-string handling",
+        "app/src/pages/index.astro:184-185 — history.pushState/replaceState for URL state",
+        "app/src/pages/index.astro:244,246 — replaceChildren() instead of innerHTML string building",
+        "app/src/pages/pokemon/[name].astro:248 — dataset API for sort keys; padStart used for dex numbers in app/src/components/PokemonCard.astro:14",
+        "app/src/pages/index.astro:69-86 — native form controls (input type=search, select) for all interactivity"
+      ],
+      "rationale": "The platform is the first choice everywhere: fetch, URLSearchParams, the History API, replaceChildren, dataset, and native form controls, with zero polyfills and zero client-side libraries. The 200ms debounce is a 3-line setTimeout, which is more appropriate than a dependency."
+    },
+    "dependencies": {
+      "score": 5,
+      "evidence": [
+        "app/package.json:13-16 — exactly two runtime dependencies: astro and @astrojs/node",
+        "app/package.json:17-18 — no devDependencies, no client framework, no utility library",
+        "app/src/pages/index.astro:127-260 — client-side filtering implemented in ~130 lines of vanilla DOM instead of pulling in a UI framework"
+      ],
+      "rationale": "The minimal possible dependency set for a server-rendered Astro app: the framework and its Node adapter, both at the newest stable versions. Filtering, sorting, debouncing, and pagination are all hand-built with platform APIs, so there is nothing heavy to upgrade or replace."
+    },
+    "churn_resistance": {
+      "score": 3,
+      "evidence": [
+        "app/src/lib/pokeapi.ts:3-58 — all API access, base-URL resolution, and caching live in one module; swapping the data source touches one file (good)",
+        "app/src/pages/index.astro:21-60 vs 146-260 — filtering, pagination, URL building, and humanize() are implemented twice (server frontmatter and inline client script) and must be kept in sync",
+        "app/src/lib/pokeapi.ts:32,101,107 — the data layer is typed as any throughout, and app/tsconfig.json:6 sets strict: false, so API shape changes surface as runtime bugs, not type errors",
+        "app/src/pages/[...path].astro:5-13 and app/src/pages/404.astro:5-13 — byte-identical duplicate 404 handlers; the catch-all makes 404.astro unreachable",
+        "app/src/pages/pokemon/[name].astro:17-30, moves/[name].astro:17-30, abilities/[name].astro:17-28, types/[name].astro:17-28 — the same try/catch-isNotFound-status-404 block copy-pasted into four pages",
+        "app/src/pages/abilities/[name].astro:36 — inline regex re-implements lib idFromUrl (app/src/lib/pokeapi.ts:54-58)",
+        "app/src/pages/pokemon/[name].astro:266-267 — client-side sorting parses cell textContent; any change to display formatting silently breaks sort order",
+        "app/src/pages/index.astro:27 and app/src/components/PokemonCard.astro:16 — the default sprite path pattern is duplicated in two places"
+      ],
+      "rationale": "The bones are right — one data module, one config file, no reliance on framework internals — but the home page's logic exists in two parallel implementations, the API layer is untyped any with strict mode off, and the 404/not-found handling is copy-pasted six times. Those are the places where a requirement change or an API shape change will ripple."
+    }
+  },
+  "overall": 4,
+  "findings": [
+    {
+      "severity": "medium",
+      "location": "app/src/pages/index.astro:132-260",
+      "issue": "The client script re-implements the server-side filter, pagination, URL-building, and humanize() logic from the frontmatter; the two implementations must be edited in lockstep.",
+      "suggestion": "Extract humanize, the filter predicate, and URL building into src/lib (e.g. filters.ts) and import them in both the frontmatter and the processed <script> — Astro bundles shared modules into client scripts, so one implementation serves both."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/lib/pokeapi.ts:32",
+      "issue": "The data layer is untyped (api<T = any>, resource: any) and tsconfig sets strict: false, so changes to the PokeAPI shape won't be caught at build time.",
+      "suggestion": "Define interfaces for the API responses consumed by the app (species, pokemon, move, type, generation) at the boundaries in pokeapi.ts and turn on strict mode; the app already has the right module to centralize them."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/pages/index.astro:6",
+      "issue": "export const prerender = false is declared in all 8 page files but is redundant under output: 'server' — the Astro 7 docs explicitly annotate this line 'Not needed in server mode'.",
+      "suggestion": "Delete the export from the pages; if intent needs documenting, a comment in astro.config.mjs is enough."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/pages/404.astro:5",
+      "issue": "404.astro and [...path].astro are byte-identical; the catch-all route makes the 404 page unreachable, leaving two copies of the same page to maintain.",
+      "suggestion": "Keep the [...path].astro catch-all and delete 404.astro (or vice versa), since either one alone covers all unmatched URLs under output: 'server'."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/pages/pokemon/[name].astro:17-30",
+      "issue": "The try/catch → isNotFound → set 404 status block is copy-pasted across four [name].astro pages.",
+      "suggestion": "Add a helper in pokeapi.ts such as fetchOr404(name, endpoint) that returns null on 404, reducing each page to one call."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/pages/abilities/[name].astro:36",
+      "issue": "Inlines a /\\/(\\d+)\\/?$/ regex that duplicates the existing idFromUrl helper from lib/pokeapi.ts.",
+      "suggestion": "Reuse idFromUrl so the URL-parsing rule lives in exactly one place."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/pages/pokemon/[name].astro:266-267",
+      "issue": "Column sorting parses rendered cell textContent and Number()s it, so any future formatting change (units, % signs, different dash glyph) silently breaks sort order.",
+      "suggestion": "Emit a data-sort-value attribute on each cell during server rendering and sort on that, falling back to text for string columns."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/pages/index.astro:27",
+      "issue": "The default sprite path pattern /media/sprites/pokemon/{id}.png is duplicated in index.astro:27 and PokemonCard.astro:16.",
+      "suggestion": "Move it into a defaultSpriteUrl(id) helper in pokeapi.ts next to mediaUrl()."
+    },
+    {
+      "severity": "low",
+      "location": "app/astro.config.mjs:4-6",
+      "issue": "Astro 7 stabilized route caching (memoryCache() provider, routeRules, Astro.cache), which would suit this read-heavy app; it re-renders every request instead, relying only on the hand-rolled data cache.",
+      "suggestion": "Optional, not a defect: consider cache: { provider: memoryCache() } plus a conservative routeRule (e.g. short maxAge on /pokemon/[name]) to reduce per-request rendering cost; the spec permits it since the data cache already keeps responses fresh."
+    }
+  ],
+  "summary": "This app is pinned to the current stable Astro (7.4.4, two days old at review time) with only the framework and its Node adapter as dependencies, and every framework and web-platform API in use is verified current — nothing is legacy or deprecated. Data access is cleanly centralized in one typed-any module and configuration lives in one file, so an Astro upgrade would be low-friction. What will age poorly is duplication: the home page's filter logic exists in two parallel implementations, the 404 path is copy-pasted six times, and the untyped data layer means API changes surface as runtime bugs rather than type errors.",
+  "apis": [
+    { "api": "output: 'server' + @astrojs/node adapter", "location": "app/astro.config.mjs:4-6", "status": "current", "replacement": "" },
+    { "api": "Astro.response.status", "location": "app/src/pages/pokemon/[name].astro:30", "status": "current", "replacement": "" },
+    { "api": "Astro.url.searchParams", "location": "app/src/pages/index.astro:13", "status": "current", "replacement": "" },
+    { "api": "Astro.params", "location": "app/src/pages/pokemon/[name].astro:14", "status": "current", "replacement": "" },
+    { "api": "set:html directive", "location": "app/src/pages/index.astro:124", "status": "current", "replacement": "" },
+    { "api": "Astro.self (recursive component)", "location": "app/src/components/EvolutionNode.astro:19", "status": "current", "replacement": "" },
+    { "api": "export const prerender = false", "location": "app/src/pages/index.astro:6", "status": "legacy", "replacement": "No replacement needed: Astro 7 docs annotate it 'Not needed in server mode' when output is 'server' (docs.astro.build/en/guides/caching)" },
+    { "api": "Astro.cache / routeRules / memoryCache() (Astro 7 route caching)", "location": "app/astro.config.mjs:4", "status": "current", "replacement": "Unused but available; would be the current-gen way to cache rendered responses on top of the hand-rolled data cache in app/src/lib/pokeapi.ts:17" }
+  ],
+  "dependencies": [
+    { "name": "astro", "verdict": "modern", "note": "7.4.4 is the latest stable release (published 28 Oct 2026, per the withastro/astro releases page); engines node >=22.23.4 matches Astro 7.4.2's raised minimum." },
+    { "name": "@astrojs/node", "verdict": "modern", "note": "11.1.9 is the latest stable adapter release matching astro 7.4.x (11.1.10 only exists as a beta); standalone mode with node ./dist/server/entry.mjs is the current documented production setup." }
+  ]
+}
+```

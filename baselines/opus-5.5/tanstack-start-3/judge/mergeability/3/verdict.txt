@@ -1,0 +1,113 @@
+I've reviewed the app against the current TanStack Start/Router stable APIs (v1.169+ Start stable, `.validator()` canonical form, `notFound()`/`notFoundComponent` guide, `start-basic` example shape, and the officially sanctioned srvx production-server pattern used in the router repo's own examples/e2e setup). The app tracks that guidance closely.
+
+```json
+{
+  "dimension": "mergeability",
+  "criteria": {
+    "idiomatic": {
+      "score": 5,
+      "evidence": [
+        "app/src/routes/index.tsx:34-42 — validateSearch keeps filter state in the URL, exactly the documented pattern",
+        "app/src/routes/pokemon.$name.tsx:15-17 — loaderDeps keyed on search.game so the loader refetches when the game select changes",
+        "app/src/server/functions.ts:44-50 — createServerFn({method:'GET'}).validator(...).handler(...) uses the canonical current .validator() API (renamed from inputValidator in 1.168.25)",
+        "app/src/routes/pokemon.$name.tsx:18-21 — throw notFound() from loader + route notFoundComponent, matching the not-found guide",
+        "app/src/router.tsx:5-10 — getRouter with defaultPreload:'intent' and scrollRestoration mirrors the official start-basic example",
+        "app/server.mjs:10-17 — serving dist/server/server.js with srvx + staticMiddleware matches the pattern the TanStack repo itself ships in examples/e2e ('npx srvx --prod ...')",
+        "app/src/routes/__root.tsx:4-34 — HeadContent/Scripts root document and per-route head() titles, matching start-basic's __root"
+      ],
+      "rationale": "Reads like the framework's own examples: file-based routing, server functions called from loaders, loaderDeps for query-dependent loads, and a production-server setup the TanStack repo itself endorses. Version pins (Vite 8, Start 1.169, .validator()) are on the current stable APIs."
+    },
+    "correctness_risks": {
+      "score": 4,
+      "evidence": [
+        "app/src/server/functions.ts:91-93 — one moveSummary HTTP fetch per learnable move per game (100+ concurrent on a cold cache), and one failed move rejects the whole page",
+        "app/src/routes/__root.tsx:1-34 — no errorComponent/defaultErrorComponent anywhere, so API 5xx or network failure renders TanStack's bare default error UI",
+        "app/src/routes/index.tsx:44-51 — a pending 150ms debounce timer can fire after a pagination/filter navigation and rewrite the URL with a stale q, resetting page to 1",
+        "app/src/routes/index.tsx:39-43 — external q sync overwrites in-progress typing during SPA back/forward; correct but subtle",
+        "app/src/routes/index.tsx:67-68 — out-of-range ?page= is clamped for display but the URL is left pointing at a nonexistent page",
+        "app/src/server/pokeapi.ts:53-62 — 404s are converted to null and then notFound(); non-404 errors propagate cleanly with no swallowed rejections",
+        "app/src/server/pokeapi.ts:23-34 — cache is TTL-bounded, evicts failed entries and caps size; no unbounded growth or leaked listeners found"
+      ],
+      "rationale": "No SSR/CSR mismatches, races are minor and mostly inherent to debounced-URL search, and 404 handling is thorough. The real cost is the per-move fetch fan-out with no concurrency limit or per-row failure isolation, plus the absence of any custom error boundary."
+    },
+    "global_abstractions": {
+      "score": 5,
+      "evidence": [
+        "app/src/server/pokeapi.ts:9-34 — single server-only data module with a documented TTL memo; server/client boundary is clean (pokeapi is only imported from server functions)",
+        "app/src/lib/types.ts:1-44 — small shared DTO types used by both sides, no god schema",
+        "app/src/lib/format.ts:1-24 — pure display helpers, no hidden state",
+        "app/src/lib/config.ts:4-6 — mediaBase flows through the root loader rather than a hidden global or build-time embed",
+        "app/src/components/Section.tsx:4-13 — one Section abstraction earns its keep (used by 8 sections across 4 pages)"
+      ],
+      "rationale": "The one non-trivial abstraction (pokeapi.ts + its memo cache) is server-only, well-commented, bounded, and every route goes through the server-fn facade; components are small and reused rather than duplicated. No utils dumping ground, no leaky server/client seams."
+    },
+    "readability": {
+      "score": 4,
+      "evidence": [
+        "app/src/server/pokeapi.ts:18-21 — comment explains promise-sharing and failure eviction, the good 'why' kind",
+        "app/src/server/functions.ts:104-105 — comment justifies caching move summaries separately from full move docs",
+        "app/src/routes/__root.tsx:13 — matches.some(m => m.status === 'notFound' || m._notFound) reaches into an underscore-prefixed internal field with no explanation",
+        "app/src/routes/index.tsx:31-33 — lastPushed ref dance for URL/debounce sync is subtle and uncommented",
+        "app/src/server/functions.ts:22-122 — getPokemonPage handler is ~100 lines; linear but would read better split"
+      ],
+      "rationale": "Layout (routes/components/lib/server) is conventional and a new teammate would find their way in minutes; most comments explain intent rather than mechanics. A few genuinely subtle spots (root head notFound check, search debounce sync) lack the comment they deserve."
+    },
+    "review_cost": {
+      "score": 4,
+      "evidence": [
+        "app/src/server/functions.ts:92 — reviewer would likely ask for a concurrency cap or per-move fallback in the moves fan-out",
+        "app/src/router.tsx:1-12 — reviewer would ask for a defaultErrorComponent for API failures",
+        "app/src/routes/__root.tsx:13 — one-line nit to drop the internal _notFound field",
+        "app/src/routes/index.tsx:67-68 — nit: reconcile clamped page with the URL"
+      ],
+      "rationale": "Approve after one round of small changes: an error boundary, a bounded/guarded move fan-out, and two or three line-level nits. Nothing requires structural rework."
+    }
+  },
+  "overall": 4,
+  "findings": [
+    {
+      "severity": "medium",
+      "location": "app/src/server/functions.ts:92",
+      "issue": "getPokemonPage issues one moveSummary HTTP fetch per learnable move in the selected version group with unbounded concurrency, and any single failure rejects the entire page; cold-cache pokemon pages can burst 100+ requests.",
+      "suggestion": "Cap concurrency (small pool or batched Promise.all chunks) and degrade per-row — e.g. render a move row with an em dash for missing details instead of failing the page."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/router.tsx:5-11",
+      "issue": "No errorComponent or defaultErrorComponent is configured anywhere, so an API outage or 5xx from the PokeAPI server renders TanStack Start's bare default error screen instead of a branded page.",
+      "suggestion": "Add a DefaultCatchBoundary component as defaultErrorComponent on the router (mirroring the start-basic example) with a link back home."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/routes/__root.tsx:13",
+      "issue": "Root head() peeks at the internal m._notFound field in addition to the public m.status === 'notFound'; internal underscore fields can change without notice, and the route-level heads already fall back to 'Not found' titles.",
+      "suggestion": "Drop the _notFound check (rely on m.status) or add a comment justifying it; route-level head fallbacks already cover the titles."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/routes/index.tsx:44-51",
+      "issue": "The 150ms search debounce timer survives pagination/type/generation navigations: clicking Next page mid-debounce then fires and rewrites the URL with page: undefined plus the stale q, dropping the user back to page 1.",
+      "suggestion": "Cancel or flush the pending timer inside the other navigate handlers, or key the debounce effect so it only fires when query is the last-touched value."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/routes/index.tsx:67-68",
+      "issue": "When ?page= exceeds totalPages the displayed page is clamped but the URL keeps the invalid page number, so Previous/Next links are computed off a page number that differs from the URL.",
+      "suggestion": "Replace the URL with the clamped page (or strip page) when it's out of range."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/routes/pokemon.$name.tsx:24",
+      "issue": "NotFound is wired as notFoundComponent on four leaf routes plus defaultNotFoundComponent on the router; the router default already covers every route, so this is five copies of the same wiring.",
+      "suggestion": "Keep defaultNotFoundComponent and drop the per-route notFoundComponent entries, or keep them but acknowledge the redundancy."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/server/pokeapi.ts:27-29",
+      "issue": "The cache sweep only runs when size exceeds 5000 and only removes already-expired entries; in theory a burst of fresh entries can grow the map past the nominal cap.",
+      "suggestion": "Fine in practice with a 60s TTL; a comment (or sweeping the oldest entry regardless of expiry) would make the bound unconditional."
+    }
+  ],
+  "summary": "This is a clean, current-idiom TanStack Start app — file-based routes, server functions with the canonical .validator(), loaderDeps, notFound() handling, and the srvx production-server pattern TanStack's own examples use. The main merge objections are the unbounded per-move fetch fan-out on the Pokémon page and the complete absence of error boundaries. I'd approve after one round of targeted fixes."
+}
+```

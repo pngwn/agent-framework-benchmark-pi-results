@@ -1,0 +1,148 @@
+# Review: `app/` (Astro 7.4, Pokédex + Team builder)
+
+The app is a clean, conventional Astro 7 SSR project (`output: 'server'` + `@astrojs/node`, current stable APIs, no deprecated flags). Structure: one data layer (`src/lib/api.ts`, `src/lib/pokedex.ts`), one layout, six small components, one page per route. Data is fetched at request time behind a hand-rolled SWR cache in `api.ts` — a defensible choice given Astro 7's new route-caching would be wrong for the cookie-dependent `/team` and filtered `/`.
+
+**Scenario walkthroughs**
+
+1. **Remove Abilities**: delete `app/src/pages/abilities/` and remove the section + links in `app/src/pages/pokemon/[name].astro:53,136-146`. Grep confirms no other references (nav has no Abilities link). One leftover: the `note` param/callback on `Card` (`pokedex.ts:95,104,112`) and `.card-note` CSS exist only for the ability "Hidden ability" text and would go dead.
+2. **Sprite fix**: sprite URLs are constructed in exactly one place (`pokedex.ts:32`) and rendered by exactly one component (`CardList.astro:18`), so one fix covers every card list. (As it happens the app is currently correct — `data/api/v2/pokemon/386` confirms `deoxys-normal` shares the species id — but a fix to use the Pokémon record's `front_default` would need a sprite field threaded through `Card`'s three producers, `pokedex.ts:102,120,142`.)
+3. **Sort cards by name**: one edit in `cardsForPokemon` (`pokedex.ts:113`) covers the move/ability/type lists; home needs a separate sort in `index.astro:21-27`; team must be left alone (it uses `getTeamMembers`, a different function, so the risk is only human).
+4. **Items section**: `/items` can model on `types/index.astro`; `/items/[name]` must copy the detail-page skeleton from `moves/[name].astro:16-38` — the fetch-by-name → 404 → facts `dl` → effect-fallback pattern is duplicated across three pages rather than shared. `Base`, `Section`, `NotFound`, `CardList` and the `lib` helpers all reuse as-is.
+5. **API base URL / caching**: one file. `API_BASE_URL` is defined once (`api.ts:4-5`), `FRESH_MS`/SWR/concurrency once (`api.ts:6-8,11-21`); `spriteUrl` imports the same constant (`pokedex.ts:1,32`). Only caveat: media base is assumed to equal the API base.
+
+The feature change (team) is where editability degrades: the team concern is spread over six files, and the layout (`Base.astro:38-80`) now carries the team's client-side cookie read/write, duplicating `TEAM_COOKIE`/`MAX_TEAM_SIZE` and the JSON cookie format already in `lib/team.ts` — two implementations of the same serialization that must be edited in lockstep.
+
+```json
+{
+  "dimension": "editability",
+  "criteria": {
+    "removability": {
+      "score": 5,
+      "evidence": [
+        "app/src/pages/abilities/[name].astro — the whole feature is one route file; delete it",
+        "app/src/pages/pokemon/[name].astro:136 — the only links to /abilities/ live in the Pokémon page's Abilities section (var at :53)",
+        "app/src/components/CardList.astro:18 — Card rendering has no ability-specific branches",
+        "app/src/lib/pokedex.ts:104 — after removal only the optional `note` callback (used solely for 'Hidden ability') goes dead, plus .card-note in global.css:290"
+      ],
+      "rationale": "Deleting Abilities is exactly the anchor case: remove one route directory and one section in the page that links to it; grep confirms nothing else references abilities."
+    },
+    "changeability": {
+      "score": 4,
+      "evidence": [
+        "app/src/lib/pokedex.ts:32 — spriteUrl is the single sprite-URL constructor, consumed only by CardList.astro:18, so one fix covers every card list",
+        "app/src/pages/moves/[name].astro:35 — effect fallback (short_effect ?? flavor text ?? DASH) duplicated verbatim at abilities/[name].astro:23",
+        "app/src/pages/moves/[name].astro:38 — local `show()` helper re-implemented in MovesSection.astro:73",
+        "app/src/pages/abilities/[name].astro:11-14 — fetch-by-name + 404-status pattern repeated in moves, abilities and types pages",
+        "app/src/pages/index.astro:104-107 — fetch/DOMParser/replaceWith enhancement duplicated at MovesSection.astro:195-199"
+      ],
+      "rationale": "Data-layer fixes concentrate in pokedex.ts/api.ts, but presentation helpers and the fetch-and-swap client pattern exist in two or three copies each, so some fixes land N times."
+    },
+    "coupling": {
+      "score": 3,
+      "evidence": [
+        "app/src/layouts/Base.astro:40-41 — layout's client script re-declares TEAM_COOKIE and MAX_TEAM_SIZE already exported from lib/team.ts:4-5",
+        "app/src/layouts/Base.astro:46-57 — cookie JSON encode/decode duplicated client-side, must stay in sync with team.ts normaliseTeam/parseTeamCookie",
+        "app/src/layouts/Base.astro:63-78 — delegated click handler knows the data attributes defined in CardList.astro:31 and pokemon/[name].astro:78-81",
+        "app/src/lib/pokedex.ts:142-186 — team-specific getTeamMembers/getTypeCoverage live in the generic data lib rather than the team module",
+        "app/src/components/CardList.astro:8 — components otherwise take narrow Card props and the api.ts seam is clean (api.ts:4,29)"
+      ],
+      "rationale": "Props and data helpers are narrow and server/client separation is clear, but the team feature's state format is implemented twice (server TS + inline layout script) and its behavior reaches from the layout into CardList and the Pokémon page."
+    },
+    "abstraction_design": {
+      "score": 3,
+      "evidence": [
+        "app/src/lib/pokedex.ts:102-114 — cardsForPokemon<T> with a `note` callback generalizes type/move/ability card lists: one function, three pages, no flags",
+        "app/src/components/Section.astro:7-9 — auto-derived heading ids let any titled section get aria-labelledby for free",
+        "app/src/pages/moves/[name].astro:16-38 — detail-page skeleton (name fetch, 404, facts dl, effect) not shared; adding /items means copying ~40 lines from this file",
+        "app/src/components/CardList.astro:30-33 — `removable` boolean flag leaks the team concern into the shared card component",
+        "app/src/pages/index.astro:99-131 — bespoke enhancement script that a generic 'refresh a region from a URL' helper could serve (shared with MovesSection)"
+      ],
+      "rationale": "The card/section/badge abstractions are genuinely reused and stretch well, but there is no shared detail-page or partial-refresh abstraction, so a new resource type (Items) is largely copy-paste and CardList is growing a team-specific flag."
+    }
+  },
+  "overall": 4,
+  "findings": [
+    {
+      "severity": "medium",
+      "location": "app/src/layouts/Base.astro:40-57",
+      "issue": "Team cookie name, max size and JSON serialization are duplicated between the layout's inline client script and lib/team.ts; changing the format requires editing both in lockstep or the server and browser disagree on the team.",
+      "suggestion": "Pass the constants in once (e.g. `define:vars` from lib/team.ts, or data attributes) and keep a single canonical encode/decode pair, exporting the same values to the client script."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/layouts/Base.astro:60-78",
+      "issue": "The layout owns the team add/remove behavior for the whole site: every page ships a delegated handler coupled to data attributes defined in CardList.astro:31 and pokemon/[name].astro:78-81.",
+      "suggestion": "Move the handler into a small team-specific script co-located with the feature (team.ts or a TeamButton component), so the layout stays generic and removing the team feature touches no shared file."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/pages/moves/[name].astro:16-38",
+      "issue": "The resource-detail pattern (fetch by param name, set 404 status, facts <dl>, effect-with-fallback) is copy-pasted across moves, abilities and types pages; a new Items section would copy it a fourth time.",
+      "suggestion": "Extract a shared helper (e.g. loadResource(kind, name) returning {record, status}) and/or a small ResourceFacts component, so detail pages only declare their specific fields."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/pages/moves/[name].astro:35",
+      "issue": "Effect fallback chain (englishShortEffect ?? latestEnglishFlavorText ?? DASH) duplicated at abilities/[name].astro:23.",
+      "suggestion": "Add an `effectText(record)` helper to lib/pokedex.ts next to the two primitives it composes."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/pages/index.astro:99-131",
+      "issue": "The fetch → DOMParser → replaceWith → abort → popstate enhancement is implemented independently (and slightly differently) in index.astro and MovesSection.astro:185-208.",
+      "suggestion": "Extract one shared 'swap a region from a URL' client helper; both call sites reduce to selectors plus URLs and error behavior stays consistent."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/lib/pokedex.ts:142-186",
+      "issue": "Team-domain logic (getTeamMembers, getTypeCoverage) lives in the generic Pokédex data module, splitting the team feature across six files (team.ts, team.astro, Base.astro, CardList.astro, pokemon page, pokedex.ts).",
+      "suggestion": "Move both functions into lib/team.ts (importing getTypeLabels/TypeInfo as needed) so the feature has one home."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/components/CardList.astro:8",
+      "issue": "The `removable` boolean flag puts team-specific markup and semantics inside the shared card component.",
+      "suggestion": "Use a named <slot slot=\"actions\"> or a per-card action element so CardList stays generic; alternatively accept a render-prop style callback in the team page."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/lib/pokedex.ts:104",
+      "issue": "The `note` callback on cardsForPokemon and Card.note exist solely for the abilities page's 'Hidden ability' text, so they become dead code if Abilities is removed.",
+      "suggestion": "Fine as-is for now, but if the only consumer disappears, delete the param, the Card.note field and .card-note styles in the same change."
+    }
+  ],
+  "summary": "A well-organized Astro 7 app: one narrow API seam, one card component, one shared card-list builder that genuinely serves three pages, so removal and data-source changes are close to trivial. The team feature change fits the conventions but leaks into the layout (duplicated cookie code and a global click handler) and adds a flag to CardList. Presentation-level duplication (detail-page skeletons, effect fallback, partial-refresh scripts) is the main thing that will make the next similar page costlier than it should.",
+  "scenarios": [
+    {
+      "change": "Drop the Abilities pages and all links to them",
+      "files": ["app/src/pages/abilities/[name].astro", "app/src/pages/pokemon/[name].astro", "app/src/lib/pokedex.ts", "app/src/styles/global.css"],
+      "difficulty": 5,
+      "notes": "Delete the abilities directory and the Abilities section/links in the Pokémon page (lines 53 and 136-146); nothing else references /abilities/. Only cosmetic cleanup: the now-unused `note` callback (pokedex.ts:104), Card.note and .card-note CSS."
+    },
+    {
+      "change": "Fix the card sprite for species whose default Pokémon has a different name",
+      "files": ["app/src/lib/pokedex.ts", "app/src/components/CardList.astro"],
+      "difficulty": 4,
+      "notes": "spriteUrl (pokedex.ts:32) plus the single render site in CardList.astro:18 cover every card list, so one fix lands everywhere. If the fix requires reading the Pokémon record's sprites.front_default instead of building a URL from the id, the Card type and its three producers (cardsForPokemon, getHomeEntries, getTeamMembers) all need a sprite field — still contained, but more than one edit."
+    },
+    {
+      "change": "Sort every list of Pokémon cards by name",
+      "files": ["app/src/lib/pokedex.ts", "app/src/pages/index.astro"],
+      "difficulty": 3,
+      "notes": "One edit in cardsForPokemon (pokedex.ts:113) covers the move, ability and type lists; the home list needs a separate sort in index.astro:21-27; team order must deliberately stay untouched (it flows through getTeamMembers, a different function, so the exclusion is easy but must be remembered). Also collides with the spec's dex-number ordering, so it is a spec change, not just code."
+    },
+    {
+      "change": "Add an Items section (/items, /items/:name) shaped like Moves",
+      "files": ["app/src/pages/items/index.astro", "app/src/pages/items/[name].astro", "app/src/components/Section.astro", "app/src/layouts/Base.astro", "app/src/styles/global.css"],
+      "difficulty": 3,
+      "notes": "Layout, Section, NotFound, CardList, TypeBadge and all lib helpers reuse as-is; the nav link is one line in Base.astro. But the detail-page skeleton (name fetch, 404, facts dl, effect fallback) must be copied from moves/[name].astro because it was never abstracted — roughly half of the new page is paste-with-renames."
+    },
+    {
+      "change": "Change the API base URL and caching rules",
+      "files": ["app/src/lib/api.ts"],
+      "difficulty": 5,
+      "notes": "API_BASE_URL, FRESH_MS, the SWR cache and the concurrency limiter all live in api.ts:4-21; spriteUrl imports the same constant (pokedex.ts:32). One file, no other code knows about the cache. Only assumption: the media origin equals the API origin."
+    }
+  ]
+}
+```

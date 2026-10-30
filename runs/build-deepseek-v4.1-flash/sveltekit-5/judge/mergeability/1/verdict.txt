@@ -1,0 +1,118 @@
+## Review
+
+This is a SvelteKit 3 app (the current stable release, October 2026), and it is *consciously* written against that release's conventions rather than SvelteKit 2 muscle memory: configuration lives in the Vite plugin (`app/vite.config.js:5`), the `#lib` subpath-import alias is declared in `package.json exactly as the v3 migration guide prescribes (`app/package.json:14`), runes/`$props`/`{#snippet}` are used throughout with zero legacy `export let`/`$:`/`$page`, and the home page uses the brand-new `goto(..., { shallow: true, replace })` API — the replacement for the now-deprecated `pushState`/`replaceState` — to keep filter state in the URL without re-running `load` (`app/src/routes/+page.svelte:53`). `error(404, 'Not found')` in its new string-message form is called without `throw`, which is correct (`app/src/routes/pokemon/[name]/+page.server.js:36`).
+
+The one place where it slips off the current API is a real one: SvelteKit 3 **removed** the `noScroll`/`keepFocus` `goto` options in favour of `reset: false` (PR #16558, merged 2026-07-29; there is even an official error page `svelte.dev/e/kit/goto_options_removed` for it). `app/src/routes/pokemon/[name]/+page.svelte:16` still passes them, so they are silently ignored and changing the `Game` select resets scroll/focus — visible exactly on the spec's `#moves` screenshot scenario.
+
+Smaller items: `+error.svelte` hard-codes "Not found" for every error status, so an API outage renders as a 404 page; the move-table row key `moveName + ':' + level` can collide on duplicate (move, level) pairs; helpers are duplicated (`isMissing` ×3 with divergent semantics, flavor-text collapsing ×3 while the exported `latestEnglishFlavorText` sits unused) and `getPokemonCard` is dead code; and the styles for `PokemonCard`/`MoveTable`/`TypeBadge` markup all live in the global `app.css` (`app/src/app.css:154`, `:238`, `:319`), so component markup and its CSS live in different files.
+
+Server-side data loading is well done: a single cohesive server-only module with a promise-level memo cache that evicts failed requests (`app/src/lib/server/pokeapi.js:8`), 404-aware fetching (`:20`), and shape-derived views per route. No `{@html}`, no leaked listeners, no SSR/CSR mismatch paths.
+
+```json
+{
+  "dimension": "mergeability",
+  "criteria": {
+    "idiomatic": {
+      "score": 4,
+      "evidence": [
+        "app/vite.config.js:5 — adapter passed to the sveltekit() Vite plugin, exactly the SvelteKit 3 config layout",
+        "app/package.json:14 — '#lib' subpath imports declared per the v3 migration guide",
+        "app/src/routes/+page.svelte:53 — goto(queryUrl(...), { shallow: true, replace, reset: false }): current shallow-routing API (pushState/replaceState deprecated)",
+        "app/src/routes/+page.svelte:120 — afterNavigate popstate sync, aware that shallow navigations now fire hooks",
+        "app/src/routes/pokemon/[name]/+page.server.js:36 — error(404, 'Not found') in the current string-message form, correctly called without throw",
+        "app/src/lib/components/EvolutionList.svelte:4 — {#snippet}/{@render} recursive rendering, idiomatic Svelte 5",
+        "app/src/routes/pokemon/[name]/+page.svelte:16 — goto(url, { noScroll: true, keepFocus: true }) uses options removed in SvelteKit 3 (replaced by reset: false)"
+      ],
+      "rationale": "Plainly written against the current SvelteKit 3 docs: plugin-based config, #lib imports, runes, and the new shallow-routing goto API. The one miss is the removed noScroll/keepFocus options, which silently do nothing on v3."
+    },
+    "correctness_risks": {
+      "score": 3,
+      "evidence": [
+        "app/src/routes/pokemon/[name]/+page.svelte:16 — removed goto options are ignored in SvelteKit 3, so changing the Game select resets scroll/focus, breaking the #moves-anchored view the spec calls out",
+        "app/src/lib/components/MoveTable.svelte:109 — row key 'moveName:level' can collide if a version group lists the same move twice at one level, producing duplicate-key warnings/rows",
+        "app/src/routes/+error.svelte:4 — 'Not found' h1 regardless of status, so a 500 from an API failure is indistinguishable from a bad URL",
+        "app/src/lib/server/pokeapi.js:8-16 — promise memo cache evicts rejected entries and is bounded by the dataset; sound",
+        "app/src/lib/server/pokeapi.js:20-27 — 404s mapped to null, other failures throw into Kit's error handling; no swallowed rejections found"
+      ],
+      "rationale": "No injection, races or hydration hazards found, but the removed goto options are a genuine behavioral bug, plus a duplicate-key edge case and error pages that misreport 500s."
+    },
+    "global_abstractions": {
+      "score": 3,
+      "evidence": [
+        "app/src/lib/server/pokeapi.js:8 — single server-only data module with a memo cache; cohesive and well-bounded (a god module only in size, not in reach)",
+        "app/src/app.css:238 — .pokemon-card / .data-table / .type-badge styles live globally in app.css while the markup lives in src/lib/components/*, splitting markup from its CSS",
+        "app/src/routes/moves/[name]/+page.server.js:10 — isMissing re-defined here, in pokemon/[name]/+page.server.js:25 and MoveTable.svelte:31, with divergent semantics ('' counts as missing only in the last)",
+        "app/src/lib/server/pokeapi.js:52 — latestEnglishFlavorText exported but unused while its logic is re-inlined in routes/pokemon/[name]/+page.server.js:51 and routes/moves/[name]/+page.server.js:24",
+        "app/src/lib/server/pokeapi.js:220 — getPokemonCard is dead code"
+      ],
+      "rationale": "The server data layer is a reasonable, bounded abstraction; the rough edges are stylistic (component CSS centralized in app.css) plus small duplicated/dead helpers that will drift over time."
+    },
+    "readability": {
+      "score": 4,
+      "evidence": [
+        "app/src/routes/+page.server.js:1-4 — two-line load; route files stay thin and all shaping is declarative",
+        "app/src/routes/pokemon/[name]/+page.server.js:76 — comment explains a non-obvious ordering fact ('ordered by their order, not move-data order')",
+        "app/src/routes/types/[name]/+page.server.js:6 — RELATIONS table maps spec terms to API keys; easy to audit against the spec",
+        "app/src/lib/components/MoveTable.svelte:43-88 — sorting logic including missing-last is centralized and readable",
+        "app/src/lib/index.js:1 — empty barrel file, and unused exports (pokeapi.js:52, :220) are the main clutter"
+      ],
+      "rationale": "Consistent naming, thin routes, and code that tracks the spec closely; a new teammate would find their way quickly. Only dead exports and the app.css/markup split slow it down."
+    },
+    "review_cost": {
+      "score": 4,
+      "evidence": [
+        "app/src/routes/pokemon/[name]/+page.svelte:16 — one-line fix: replace noScroll/keepFocus with reset: false",
+        "app/src/routes/+error.svelte:4 — switch on page.status for the h1; a few lines",
+        "app/src/lib/server/pokeapi.js:52 — delete dead exports, reuse latestEnglishFlavorText in the two routes that re-inline it"
+      ],
+      "rationale": "One real (but one-line) fix for the removed goto options plus nits; everything else I'd approve as-is."
+    }
+  },
+  "overall": 4,
+  "findings": [
+    {
+      "severity": "high",
+      "location": "app/src/routes/pokemon/[name]/+page.svelte:16",
+      "issue": "goto(url, { noScroll: true, keepFocus: true, replace: true }) uses options removed in SvelteKit 3 (now reset: false); they are silently ignored, so selecting a game resets scroll and focus — visibly breaking the #moves-anchored view",
+      "suggestion": "Use goto(url, { reset: false, replace: true })"
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/routes/+error.svelte:4",
+      "issue": "The error page always says 'Not found', so a 500 (e.g. the API server is down) renders as a 404 page",
+      "suggestion": "Branch on page.status (import { page } from '$app/state') and show a generic error heading for non-404 statuses"
+    },
+    {
+      "severity": "low",
+      "location": "app/src/lib/components/MoveTable.svelte:109",
+      "issue": "Each-block key `row.moveName + ':' + (row.level ?? '')` can collide if the API lists the same move twice at the same level in one version group",
+      "suggestion": "Key by index, or by a composite including method, or ensure rows are deduped in the load function"
+    },
+    {
+      "severity": "low",
+      "location": "app/src/lib/server/pokeapi.js:52",
+      "issue": "latestEnglishFlavorText is exported but unused, while its exact logic is re-inlined in pokemon/[name]/+page.server.js:51 and moves/[name]/+page.server.js:24",
+      "suggestion": "Use the helper in both routes (and delete getPokemonCard at pokeapi.js:220, which is also dead)"
+    },
+    {
+      "severity": "low",
+      "location": "app/src/routes/moves/[name]/+page.server.js:10",
+      "issue": "isMissing is defined three times (here, pokemon/[name]/+page.server.js:25, MoveTable.svelte:31) with subtly different semantics ('' is 'missing' only in the component)",
+      "suggestion": "Move one canonical isMissing/format pair into #lib/format.js and import it everywhere"
+    },
+    {
+      "severity": "low",
+      "location": "app/src/app.css:154",
+      "issue": "Styles for TypeBadge/PokemonCard/MoveBadge markup (.type-badge, .pokemon-card, .data-table) live in the global stylesheet while the markup lives in src/lib/components, so component edits require cross-file CSS hunting",
+      "suggestion": "Move component-specific rules into each .svelte file's scoped <style> (the components own their markup, so scoping works); keep only design tokens and layout helpers global"
+    },
+    {
+      "severity": "low",
+      "location": "app/src/lib/index.js:1",
+      "issue": "Empty barrel file that only exists to satisfy the '#lib' import mapping; nothing imports bare '#lib'",
+      "suggestion": "Either re-export format.js and components from it or drop the '#lib' mapping and keep only '#lib/*'"
+    }
+  ],
+  "summary": "A genuinely current SvelteKit 3 codebase: plugin-based config, #lib imports, runes, and the new shallow-routing goto API used the way the v3 docs prescribe, with clean server-only data loading and no legacy patterns. The one blocking issue is a removed goto option (noScroll/keepFocus instead of reset: false) that silently breaks scroll preservation on the moves page; the rest is small clean-up (error page status, dead/duplicated helpers, component styles centralized in app.css). I'd merge after one small round."
+}
+```

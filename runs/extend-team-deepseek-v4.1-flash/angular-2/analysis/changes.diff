@@ -1,0 +1,456 @@
+diff --git a/app/src/app/app.routes.ts b/app/src/app/app.routes.ts
+index 39f4f2f..5d0fab2 100644
+--- a/app/src/app/app.routes.ts
++++ b/app/src/app/app.routes.ts
+@@ -51,6 +51,11 @@ export const routes: Routes = [
+     loadComponent: () => import('./pages/type/type-page'),
+     resolve: { vm: pageData((route) => `/type/${param(route, 'name')}`) },
+   },
++  {
++    path: 'team',
++    title: 'Team',
++    loadComponent: () => import('./pages/team/team-page'),
++  },
+   {
+     path: '**',
+     loadComponent: () => import('./pages/not-found/not-found'),
+diff --git a/app/src/app/app.ts b/app/src/app/app.ts
+index abb97e4..4e83665 100644
+--- a/app/src/app/app.ts
++++ b/app/src/app/app.ts
+@@ -12,6 +12,7 @@ import { Router, RouterLink, RouterOutlet, Scroll } from '@angular/router';
+         <nav class="site-header__nav" aria-label="Main">
+           <a routerLink="/">Pokémon</a>
+           <a routerLink="/types">Types</a>
++          <a routerLink="/team">Team</a>
+         </nav>
+       </div>
+     </header>
+diff --git a/app/src/app/data/team-store.ts b/app/src/app/data/team-store.ts
+new file mode 100644
+index 0000000..39dcc15
+--- /dev/null
++++ b/app/src/app/data/team-store.ts
+@@ -0,0 +1,70 @@
++import { Injectable, PLATFORM_ID, afterNextRender, inject, signal } from '@angular/core';
++import { isPlatformBrowser } from '@angular/common';
++
++/** A team holds at most this many species. */
++export const TEAM_SIZE = 6;
++
++const STORAGE_KEY = 'pokedex.team';
++
++function readStoredTeam(): string[] {
++  try {
++    const parsed: unknown = JSON.parse(localStorage.getItem(STORAGE_KEY) ?? '[]');
++    if (!Array.isArray(parsed)) return [];
++    const names = parsed.filter((name): name is string => typeof name === 'string' && name.length > 0);
++    return [...new Set(names)].slice(0, TEAM_SIZE);
++  } catch {
++    return [];
++  }
++}
++
++/**
++ * The user's team, persisted in the browser's localStorage. The server renders with an
++ * empty team; the stored team is loaded after the first render so hydration stays clean.
++ */
++@Injectable({ providedIn: 'root' })
++export class TeamStore {
++  private readonly isBrowser = isPlatformBrowser(inject(PLATFORM_ID));
++  private readonly namesState = signal<string[]>([]);
++  private readonly readyState = signal(false);
++
++  readonly names = this.namesState.asReadonly();
++  readonly ready = this.readyState.asReadonly();
++
++  constructor() {
++    if (this.isBrowser) {
++      afterNextRender(() => {
++        this.namesState.set(readStoredTeam());
++        this.readyState.set(true);
++      });
++    }
++  }
++
++  has(name: string): boolean {
++    return this.namesState().includes(name);
++  }
++
++  isFull(): boolean {
++    return this.namesState().length >= TEAM_SIZE;
++  }
++
++  add(name: string): void {
++    const names = this.namesState();
++    if (!name || names.includes(name) || names.length >= TEAM_SIZE) return;
++    this.setNames([...names, name]);
++  }
++
++  remove(name: string): void {
++    this.setNames(this.namesState().filter((existing) => existing !== name));
++  }
++
++  private setNames(names: string[]): void {
++    this.namesState.set(names);
++    if (this.isBrowser) {
++      try {
++        localStorage.setItem(STORAGE_KEY, JSON.stringify(names));
++      } catch {
++        // Storage can be unavailable (private mode, quota); the team still works in memory.
++      }
++    }
++  }
++}
+diff --git a/app/src/app/pages/pokemon/pokemon-page.html b/app/src/app/pages/pokemon/pokemon-page.html
+index 946a559..3131bed 100644
+--- a/app/src/app/pages/pokemon/pokemon-page.html
++++ b/app/src/app/pages/pokemon/pokemon-page.html
+@@ -16,6 +16,18 @@
+           <app-type-badge [type]="type" />
+         }
+       </p>
++      @if (teamReady()) {
++        <div class="team-actions">
++          @if (onTeam()) {
++            <button type="button" class="button" (click)="removeFromTeam()">Remove from team</button>
++          } @else {
++            <button type="button" class="button" [disabled]="teamFull()" (click)="addToTeam()">Add to team</button>
++            @if (teamFull()) {
++              <span class="muted">Team is full</span>
++            }
++          }
++        </div>
++      }
+       <dl class="facts">
+         <div>
+           <dt>Height</dt>
+diff --git a/app/src/app/pages/pokemon/pokemon-page.ts b/app/src/app/pages/pokemon/pokemon-page.ts
+index ed6a606..e544587 100644
+--- a/app/src/app/pages/pokemon/pokemon-page.ts
++++ b/app/src/app/pages/pokemon/pokemon-page.ts
+@@ -1,6 +1,7 @@
+ import { Component, computed, inject, input } from '@angular/core';
+ import { NgOptimizedImage } from '@angular/common';
+ import { ActivatedRoute, Router, RouterLink } from '@angular/router';
++import { TeamStore } from '../../data/team-store';
+ import { dexNumber } from '../../shared/format';
+ import { PokemonVM } from '../../shared/models';
+ import { TypeBadge } from '../../shared/type-badge';
+@@ -19,9 +20,27 @@ const STAT_MAX = 255;
+ export default class PokemonPage {
+   private readonly router = inject(Router);
+   private readonly route = inject(ActivatedRoute);
++  private readonly team = inject(TeamStore);
+ 
+   readonly vm = input.required<PokemonVM | null>();
+ 
++  protected readonly teamReady = this.team.ready;
++  protected readonly onTeam = computed(() => {
++    const name = this.vm()?.name;
++    return !!name && this.team.has(name);
++  });
++  protected readonly teamFull = computed(() => this.team.isFull());
++
++  protected addToTeam(): void {
++    const name = this.vm()?.name;
++    if (name) this.team.add(name);
++  }
++
++  protected removeFromTeam(): void {
++    const name = this.vm()?.name;
++    if (name) this.team.remove(name);
++  }
++
+   protected readonly number = computed(() => dexNumber(this.vm()?.id ?? 0));
+   protected readonly height = computed(() => `${((this.vm()?.height ?? 0) / 10).toFixed(1)} m`);
+   protected readonly weight = computed(() => `${((this.vm()?.weight ?? 0) / 10).toFixed(1)} kg`);
+diff --git a/app/src/app/pages/team/team-page.ts b/app/src/app/pages/team/team-page.ts
+new file mode 100644
+index 0000000..565f647
+--- /dev/null
++++ b/app/src/app/pages/team/team-page.ts
+@@ -0,0 +1,93 @@
++import { Component, computed, effect, inject, signal } from '@angular/core';
++import { RouterLink } from '@angular/router';
++import { PageData } from '../../data/page-data';
++import { TEAM_SIZE, TeamStore } from '../../data/team-store';
++import { humanize } from '../../shared/format';
++import { TeamVM } from '../../shared/models';
++import { PokemonCard } from '../../shared/pokemon-card';
++
++@Component({
++  selector: 'app-team-page',
++  imports: [RouterLink, PokemonCard],
++  template: `
++    <h1 class="page-title">Team</h1>
++    @if (team.ready()) {
++      <p class="count">{{ count() }} of {{ size }}</p>
++      @if (!count()) {
++        <div class="panel team-empty">
++          <p>Your team is empty</p>
++          <p><a routerLink="/">Browse Pokémon</a></p>
++        </div>
++      } @else if (vm(); as vm) {
++        <ul class="card-grid team-grid">
++          @for (member of vm.members; track member.name) {
++            <li class="team-member">
++              <app-pokemon-card [id]="member.id" [name]="member.name" [types]="member.types" />
++              <button type="button" class="button team-member__remove" (click)="remove(member.name)">
++                Remove {{ label(member.name) }}
++              </button>
++            </li>
++          }
++        </ul>
++        <section class="panel" aria-labelledby="coverage-heading">
++          <h2 id="coverage-heading">Type coverage</h2>
++          <div class="table-scroll">
++            <table class="data-table coverage-table">
++              <thead>
++                <tr>
++                  <th scope="col">Type</th>
++                  <th scope="col">Weak</th>
++                  <th scope="col">Resistant</th>
++                </tr>
++              </thead>
++              <tbody>
++                @for (row of vm.coverage; track row.name) {
++                  <tr>
++                    <th scope="row">{{ row.label }}</th>
++                    <td>{{ row.weak }}</td>
++                    <td>{{ row.resistant }}</td>
++                  </tr>
++                }
++              </tbody>
++            </table>
++          </div>
++        </section>
++      }
++    }
++  `,
++})
++export default class TeamPage {
++  private readonly pageData = inject(PageData);
++  protected readonly team = inject(TeamStore);
++
++  protected readonly size = TEAM_SIZE;
++  protected readonly count = computed(() => this.team.names().length);
++  protected readonly vm = signal<TeamVM | null>(null);
++
++  /** Identifies the latest request, so a slow response can't overwrite a newer one. */
++  private requestId = 0;
++
++  constructor() {
++    effect(() => {
++      if (!this.team.ready()) return;
++      const names = this.team.names();
++      const requestId = ++this.requestId;
++      if (!names.length) {
++        this.vm.set(null);
++        return;
++      }
++      const path = `/team?names=${encodeURIComponent(names.join(','))}`;
++      void this.pageData.load<TeamVM>(path).then((vm) => {
++        if (requestId === this.requestId) this.vm.set(vm);
++      });
++    });
++  }
++
++  protected label(name: string): string {
++    return humanize(name);
++  }
++
++  protected remove(name: string): void {
++    this.team.remove(name);
++  }
++}
+diff --git a/app/src/app/shared/models.ts b/app/src/app/shared/models.ts
+index f99bfb0..df05028 100644
+--- a/app/src/app/shared/models.ts
++++ b/app/src/app/shared/models.ts
+@@ -98,6 +98,22 @@ export interface TypesVM {
+   types: NamedRef[];
+ }
+ 
++export interface TeamMember extends Card {
++  types: NamedRef[];
++}
++
++export interface CoverageRow {
++  name: string;
++  label: string;
++  weak: number;
++  resistant: number;
++}
++
++export interface TeamVM {
++  members: TeamMember[];
++  coverage: CoverageRow[];
++}
++
+ export interface DamageRelationVM {
+   label: string;
+   types: NamedRef[];
+diff --git a/app/src/server/loaders.ts b/app/src/server/loaders.ts
+index 47c0e03..31b522c 100644
+--- a/app/src/server/loaders.ts
++++ b/app/src/server/loaders.ts
+@@ -6,6 +6,7 @@ import { humanize } from '../app/shared/format';
+ import type {
+   AbilityVM,
+   Card,
++  CoverageRow,
+   EvolutionNode,
+   HomeVM,
+   MoveRow,
+@@ -13,6 +14,8 @@ import type {
+   MoveVM,
+   NamedRef,
+   PokemonVM,
++  TeamMember,
++  TeamVM,
+   TypesVM,
+   TypeVM,
+ } from '../app/shared/models';
+@@ -354,6 +357,56 @@ export async function loadTypes(): Promise<TypesVM> {
+   return { types: types.map((t) => ({ name: t.name, label: englishName(t.names, t.name) })) };
+ }
+ 
++/** The attacking type's multiplier against a defending type. */
++function attackMultiplier(attacker: ApiType, defender: string): number {
++  const relations = attacker.damage_relations;
++  if ((relations['double_damage_to'] ?? []).some((r) => r.name === defender)) return 2;
++  if ((relations['half_damage_to'] ?? []).some((r) => r.name === defender)) return 0.5;
++  if ((relations['no_damage_to'] ?? []).some((r) => r.name === defender)) return 0;
++  return 1;
++}
++
++/**
++ * The team view model for a list of species names, in the order they were added. The
++ * species' default Pokémon supplies the types used on the cards and for type coverage.
++ */
++export async function loadTeam(names: string[]): Promise<TeamVM> {
++  const [types, species] = await Promise.all([allTypes(), speciesNames()]);
++  const labels = new Map(types.map((t) => [t.name, englishName(t.names, t.name)]));
++  const idByName = new Map([...species].map(([id, name]) => [name, id] as const));
++
++  const wanted = [...new Set(names)].slice(0, 6);
++  const loaded = await Promise.all(
++    wanted.map(async (name): Promise<TeamMember | null> => {
++      const id = idByName.get(name);
++      if (id === undefined) return null;
++      const pokemon = await apiGet<ApiPokemon>(`pokemon/${id}`);
++      return {
++        id,
++        name,
++        types: [...pokemon.types].sort((a, b) => a.slot - b.slot).map((t) => typeRef(t.type.name, labels)),
++      };
++    }),
++  );
++  const members = loaded.filter((member): member is TeamMember => member !== null);
++
++  const coverage: CoverageRow[] = types.map((type) => {
++    let weak = 0;
++    let resistant = 0;
++    for (const member of members) {
++      const multiplier = member.types.reduce(
++        (product, memberType) => product * attackMultiplier(type, memberType.name),
++        1,
++      );
++      if (multiplier > 1) weak++;
++      else if (multiplier < 1) resistant++;
++    }
++    return { name: type.name, label: englishName(type.names, type.name), weak, resistant };
++  });
++
++  return { members, coverage };
++}
++
+ const RELATIONS: [string, string][] = [
+   ['Super effective against', 'double_damage_to'],
+   ['Not very effective against', 'half_damage_to'],
+@@ -403,6 +456,8 @@ export async function loadPageData(path: string): Promise<unknown> {
+       return name === undefined ? loadHome() : null;
+     case 'types':
+       return name === undefined ? loadTypes() : null;
++    case 'team':
++      return name === undefined ? loadTeam(url.searchParams.get('names')?.split(',') ?? []) : null;
+     case 'pokemon':
+       return name ? loadPokemon(name, url.searchParams.get('game')) : null;
+     case 'moves':
+diff --git a/app/src/styles.css b/app/src/styles.css
+index 13b93cd..9401f6a 100644
+--- a/app/src/styles.css
++++ b/app/src/styles.css
+@@ -211,6 +211,31 @@ a.type-badge:hover {
+ 
+ /* ---------- Forms ---------- */
+ 
++.button {
++  min-height: 2.5rem;
++  padding: var(--space-2) var(--space-4);
++  border: 1px solid var(--color-link);
++  border-radius: var(--radius-md);
++  background: var(--color-link);
++  color: #ffffff;
++  font: inherit;
++  cursor: pointer;
++}
++
++button.button:disabled {
++  border-color: var(--color-border);
++  background: var(--color-border);
++  color: var(--color-text-muted);
++  cursor: not-allowed;
++}
++
++.team-actions {
++  display: flex;
++  align-items: center;
++  gap: var(--space-3);
++  margin-bottom: var(--space-4);
++}
++
+ .field {
+   display: flex;
+   flex-direction: column;
+@@ -541,6 +566,39 @@ th[aria-sort='descending'] .sort-button::after {
+   padding-block: var(--space-1);
+ }
+ 
++/* ---------- Team ---------- */
++
++.team-empty {
++  display: flex;
++  flex-direction: column;
++  gap: var(--space-3);
++  padding: var(--space-5) var(--space-4);
++}
++
++.team-grid > li.team-member {
++  flex-direction: column;
++}
++
++.team-member__remove {
++  margin-top: var(--space-2);
++}
++
++.coverage-table th,
++.coverage-table td {
++  width: 33.333%;
++}
++
++.coverage-table td {
++  text-align: right;
++  font-variant-numeric: tabular-nums;
++}
++
++@media (min-width: 40.0625rem) {
++  .coverage-table {
++    max-width: 32rem;
++  }
++}
++
+ /* ---------- Small screens ---------- */
+ 
+ @media (max-width: 40rem) {

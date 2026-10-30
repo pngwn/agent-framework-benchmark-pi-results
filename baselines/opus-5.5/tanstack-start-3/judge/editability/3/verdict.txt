@@ -1,0 +1,137 @@
+## Review: Pokédex (TanStack Start)
+
+I read `SPEC.md`, all of `app/src` (routes, components, lib, server), and verified the framework version in `app/package-lock.json` (installed `@tanstack/react-start@1.169.4` / `@tanstack/react-router@1.170.46` — the current stable line; Start went 1.0-stable on 2026-10-13, and `.validator()` is the canonical server-function API, which is what's used here). Every claim below is backed by a file/line I read.
+
+**Scenario work-through:**
+
+1. **Remove Abilities** — delete `app/src/routes/abilities.$name.tsx` (the only route file mentioning them besides the generated tree) and the one inbound link block at `app/src/routes/pokemon.$name.tsx:110-121`; `routeTree.gen.ts` regenerates on build. Residue if you don't prune: `getAbilityPage` (`app/src/server/functions.ts:138`), `getAbility`/`RawAbility` (`app/src/server/pokeapi.ts:302-310`), and the ability-only `hidden` flag that lives in the *shared* card (`app/src/lib/types.ts:10`, `app/src/components/PokemonCard.tsx:34`). Self-contained, with a couple of findable scraps.
+2. **Sprite fix** — every card list (home, move, ability, type) renders through `PokemonCardList` → `PokemonCard.tsx:16` → `spriteUrl` (`app/src/lib/format.ts:23`). One fix covers all lists. The catch: the URL is *constructed* from the species ID rather than read from the API's `front_default`, so a fix that needs real sprite data must thread a field through `CardData` (`app/src/lib/types.ts:4`) and **two** card producers — `toCards` (`app/src/server/pokeapi.ts:96`) for the three detail pages and `speciesIndex` (`app/src/server/pokeapi.ts:172`) for home. Today the ID pattern is spec-guaranteed, so no bug exists, but the blast radius of a data-driven fix is wider than the render point suggests.
+3. **Sort by name** — one edit inside `PokemonCardList` covers all four lists' rendering; but if you sort at the data layer you again hit the two producers (`pokeapi.ts:99` sorts `toCards`; home sorts inside `speciesIndex`/client filter).
+4. **Items section** — the per-resource pattern (route file + getter in `server/pokeapi.ts` + server fn in `server/functions.ts`) is exactly what Moves/Abilities/Types follow; you'd reuse `Section`, `PokemonCardList`, `orNull`/`memo`/`englishName`. Cost: ~25-30 lines of route boilerplate copied, no shared-code surgery.
+5. **API base URL / caching** — `apiBase()` (`app/src/server/pokeapi.ts:10`) is the only `API_BASE_URL` reader; the client gets one derived seam via the root loader → `useMediaBase()` (`app/src/lib/config.ts:4`, `functions.ts:39`). Server cache TTL lives in one memo (`pokeapi.ts:6-27`), but route-level cache policy (`staleTime`, `shouldReload`) is scattered across `__root.tsx:10-11` and `index.tsx:31`.
+
+**Strengths:** strict server/client separation (components never import `server/pokeapi.ts`; all API access sits behind one memoized module), narrow view-model interfaces in `lib/types.ts`, and genuinely data-driven components (`MoveTable` columns at `MoveTable.tsx:20-36`, `toCards`' `extra` callback at `pokeapi.ts:96`). **Weaknesses:** the duplicated card producers, the home route's three-source-of-truth search-state dance (`index.tsx:42-77`), and small cross-feature residue in the shared card component.
+
+```json
+{
+  "dimension": "editability",
+  "criteria": {
+    "removability": {
+      "score": 4,
+      "evidence": [
+        "app/src/routes/abilities.$name.tsx:8 — the feature is one self-contained file-based route; routeTree.gen.ts regenerates on build",
+        "app/src/routes/pokemon.$name.tsx:110-121 — the only inbound links to /abilities are this one Section block; nav (routes/__root.tsx:54) never mentions abilities",
+        "app/src/server/functions.ts:138 — getAbilityPage is orphaned dead code unless pruned",
+        "app/src/server/pokeapi.ts:302-310 — getAbility/RawAbility likewise orphaned",
+        "app/src/components/PokemonCard.tsx:34 — the ability-only 'Hidden ability' note lives inside the shared card component, so deletion leaves residue"
+      ],
+      "rationale": "Delete one route file and one Section block and the feature is gone, with the generated route tree picking it up automatically; the deduction is for cross-file residue (a server fn, a getter, and a card flag) a lazy deletion would leave behind."
+    },
+    "changeability": {
+      "score": 4,
+      "evidence": [
+        "app/src/lib/format.ts:23 — spriteUrl is the single place a card sprite URL is built",
+        "app/src/components/PokemonCard.tsx:16 — single render point; home, move, ability and type lists all funnel through PokemonCardList, so one fix covers every list",
+        "app/src/server/pokeapi.ts:96 — toCards is the one producer for the three detail-page lists (dex sort at line 99)",
+        "app/src/server/pokeapi.ts:172 — speciesIndex is a second, independent producer feeding the home list; a data-level card change must be made twice",
+        "app/src/server/pokeapi.ts:16-27 — memo/TTL/404 handling is centralized and commented"
+      ],
+      "rationale": "Behaviour changes mostly land in one obvious place (spriteUrl, PokemonCardList, toCards, the memo cache), but the card data has two producers and the sprite URL is constructed rather than read from the API, so a data-shaped fix fans out to 3-4 files along one path."
+    },
+    "coupling": {
+      "score": 4,
+      "evidence": [
+        "app/src/lib/types.ts:1-43 — server fns and components share narrow view-model interfaces (CardData, MoveSummary, LearnTable), not raw API shapes",
+        "app/src/server/functions.ts:1-38 — all createServerFn handlers in one module; components never import server/pokeapi.ts directly",
+        "app/src/lib/config.ts:4 — the media origin is passed explicitly through the root loader seam instead of the client reading process.env",
+        "app/src/routes/index.tsx:42-77 — home mixes debounced local input, a lastPushed ref and URL search into three sources of truth for one filter",
+        "app/src/lib/format.ts:23 — a generic formatting module encodes the API's media-URL layout (mediaBase + id)"
+      ],
+      "rationale": "Loose coupling with clear seams: one server data layer, one server-fn boundary, narrow shared types. Only minor tangles — the home route's state dance and API-media knowledge leaking into lib/format.ts."
+    },
+    "abstraction_design": {
+      "score": 4,
+      "evidence": [
+        "app/src/server/pokeapi.ts:96 — toCards' extra callback absorbs the one real variation (the hidden-ability flag) without flag parameters",
+        "app/src/components/PokemonCard.tsx:5 — typeLabels map stretches the shared card to the home page's extra requirement",
+        "app/src/components/Section.tsx:6 — one component covers the section/region idiom including anchor ids (used as id='moves' at routes/pokemon.$name.tsx:129)",
+        "app/src/components/MoveTable.tsx:20-36 — columns are data-driven (COLUMNS + value()); adding a column is one entry plus one case plus one cell",
+        "app/src/routes/moves.$name.tsx:1-30 — a predictable per-resource pattern (route file + getter + server fn) that an Items section can copy"
+      ],
+      "rationale": "The abstractions stretch to the real variation in the app (card extras, level-up columns, relation tables) without boolean creep; an Items section would copy ~30 lines of route boilerplate rather than reuse a generic resource abstraction, which is the right trade for four resource types."
+    }
+  },
+  "overall": 4,
+  "findings": [
+    {
+      "severity": "medium",
+      "location": "app/src/server/pokeapi.ts:96",
+      "issue": "Card data has two independent producers: toCards (line 96) for the move/ability/type lists and speciesIndex (line 172) for home; both feed PokemonCardList but must be changed in tandem for any per-card data change (e.g. real sprite URLs instead of ID-constructed ones).",
+      "suggestion": "Shape home's entries through the same card helper (or extract a shared card-shaping function) so card fields have one home."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/lib/format.ts:23",
+      "issue": "spriteUrl constructs media URLs from the species ID rather than the API's sprites.front_default, encoding an API-media layout assumption in a generic formatting module.",
+      "suggestion": "Name the helper for what it assumes (default-front-sprite-by-id) and keep it beside the mediaBase seam, or thread the API-provided URL through CardData if the ID assumption ever breaks."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/routes/index.tsx:42-77",
+      "issue": "The home route synchronizes a debounced input, a lastPushed ref and URL search params, and derives the page from a query-equality check (line 76); filter-behaviour changes require reasoning about three overlapping states.",
+      "suggestion": "Keep only the raw input debounced and derive the effective filter/page purely from validated search state."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/components/PokemonCard.tsx:34",
+      "issue": "The ability-only 'Hidden ability' rendering (and CardData.hidden at lib/types.ts:10) lives in the shared card component, so removing Abilities leaves dead code in a component used by every page.",
+      "suggestion": "Render feature-specific notes via a slot/child prop, or accept that feature removal should prune this flag along with the route."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/server/pokeapi.ts:6",
+      "issue": "Cache policy is split across layers: server-side TTL/memo here versus per-route staleTime/shouldReload (routes/__root.tsx:10-11, routes/index.tsx:31).",
+      "suggestion": "Centralize route-level cache settings in the router (router.tsx defaultPreloadStaleTime/defaultStaleTime) so a policy change touches one file."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/routes/moves.$name.tsx:15",
+      "issue": "The `?? 'Not found'` title fallback is duplicated across four route heads plus the root's matches-based check (routes/__root.tsx:13-18); changing the not-found title touches five files.",
+      "suggestion": "Drop the per-route fallback and rely on the root head's notFound detection, or extract a shared head helper."
+    }
+  ],
+  "summary": "A well-factored app on the current stable TanStack Start idiom (createServerFn + validator, file-based routes, a single memoized server data layer) with narrow view-model types and one render path per concept. The main editability risks are the duplicated card-data producers and the home route's multi-source filter state, both contained but non-obvious. Extending with another resource follows an established, copyable pattern rather than needing new abstractions.",
+  "scenarios": [
+    {
+      "change": "Remove the Abilities pages and every link to them",
+      "files": ["app/src/routes/abilities.$name.tsx", "app/src/routes/pokemon.$name.tsx", "app/src/server/functions.ts", "app/src/server/pokeapi.ts", "app/src/components/PokemonCard.tsx", "app/src/lib/types.ts"],
+      "difficulty": 4,
+      "notes": "Deleting the route file and the one Section block (pokemon.$name.tsx:110-121) removes the feature; the route tree regenerates. Only the two server-side helpers and the hidden flag on the shared card need pruning to avoid dead code."
+    },
+    {
+      "change": "Fix the Deoxys-style card sprite",
+      "files": ["app/src/lib/format.ts", "app/src/components/PokemonCard.tsx", "app/src/lib/types.ts", "app/src/server/pokeapi.ts"],
+      "difficulty": 4,
+      "notes": "spriteUrl (format.ts:23) plus PokemonCard.tsx:16 is the single render path, so one fix covers every list. But the URL is ID-derived rather than taken from the API, so a data-driven fix must add a CardData field and touch both producers (toCards at pokeapi.ts:96 and speciesIndex at pokeapi.ts:172)."
+    },
+    {
+      "change": "Add sorting by name to every list of Pokémon cards",
+      "files": ["app/src/components/PokemonCard.tsx"],
+      "difficulty": 4,
+      "notes": "Doing it at the render layer is a single edit in PokemonCardList and covers all four lists. Doing it at the data layer means two edits (toCards' sort at pokeapi.ts:99 and home's client-side pipeline in routes/index.tsx), and home's spec-mandated dex order interacts with any default change."
+    },
+    {
+      "change": "Add an Items section (/items, /items/:name) shaped like Moves",
+      "files": ["app/src/routes/items.$name.tsx", "app/src/server/pokeapi.ts", "app/src/server/functions.ts"],
+      "difficulty": 4,
+      "notes": "The per-resource pattern is fully established: new route file (auto-registered via the generated tree), getItem + memo in pokeapi.ts, getItemsPage in functions.ts. Section, PokemonCardList, orNull, englishName and latestEnglish all reuse directly; ~30 lines of route boilerplate get copied rather than shared."
+    },
+    {
+      "change": "Change the API base URL and caching rules",
+      "files": ["app/src/server/pokeapi.ts", "app/src/server/functions.ts", "app/src/routes/__root.tsx", "app/src/routes/index.tsx"],
+      "difficulty": 4,
+      "notes": "The base URL is read in exactly one function (apiBase at pokeapi.ts:10) with one derived client seam (getConfig at functions.ts:39, useMediaBase at lib/config.ts:4). The server cache TTL is centralized, but route-level staleTime/shouldReload settings are scattered across two route files, so a policy change touches both layers."
+    }
+  ]
+}
+```

@@ -1,0 +1,114 @@
+I've reviewed the app against the SPEC/FEATURE, the acceptance tests' expectations, and current Nuxt 4 guidance (current stable is **4.6.3**, released 2026-10-27; the app pins `^4.6.2`, locked at 4.6.2). Key things verified: Nuxt 4 `app/` + `server/` structure is used correctly; `shared/utils` / `shared/types` (Nuxt 3.14+/4 feature) is the documented home for the code this app duplicates across the app/server boundary; and the 4.6.3 release includes a moderate security advisory affecting ≥4.6.0 <4.6.3 (dot-segment path bypass, GHSA-9v7c-q64q-vv33).
+
+```json
+{
+  "dimension": "mergeability",
+  "criteria": {
+    "idiomatic": {
+      "score": 4,
+      "evidence": [
+        "app/nuxt.config.ts:1 — Nuxt 4 config with compatibilityDate, runtimeConfig.public.apiBase consumed via NUXT_PUBLIC_API_BASE in package.json start script",
+        "app/app/composables/team.ts:20-24 — useCookie + useState for team state shared with SSR: the recommended pattern for browser-owned state that must survive reloads without label flash",
+        "app/server/api/species.get.ts:1 — server routes via defineEventHandler + server/utils auto-imports (api, allTypes, cardsFor), matching Nuxt 4 structure",
+        "app/app/composables/format.ts:30-37 — thin useFetch wrapper with reactive URL getters, keys, and createError on failure",
+        "app/app/composables/format.ts:1 vs app/server/utils/pokeapi.ts:34 — humanize implemented twice instead of Nuxt 4's shared/utils, which exists exactly for this boundary",
+        "app/server/api/pokemon/[name].get.ts:16 — pervasive `any` casts where Nuxt 4's typed server tsconfig project references (app/tsconfig.json:5) could give real types"
+      ],
+      "rationale": "Recognisably idiomatic Nuxt 4 throughout (app/ dir, server routes, auto-imports, useFetch/useState/useCookie/useHead); the deductions are duplicated cross-boundary helpers that the framework's shared/ directory is designed to host, and untyped server code."
+    },
+    "correctness_risks": {
+      "score": 3,
+      "evidence": [
+        "app/app/composables/format.ts:31-42 — usePageData only throws on setup; after a client-side param change on a reused page (e.g. clicking an evolution link), a failed refetch sets error.value but nothing renders it — the page silently keeps the previous Pokémon",
+        "app/app/composables/format.ts:40-41 — a failure with undefined statusCode is mapped to 404/'Not found', so a network/API 500 shows the misleading Not found page",
+        "app/server/api/pokemon/[name].get.ts:39 — Promise.all over every move record (~100-200 upstream fetches) plus versionGroupOrder (all ~30 groups, server/utils/versionGroups.ts:2) and typeLabels (18 types) on the first uncached hit of any Pokémon page",
+        "app/server/utils/pokeapi.ts:17-30 — cache entries are only evicted on failure or overwritten on re-request; expired entries linger indefinitely (bounded here by the fixed snapshot, but the Map has no size or sweep)",
+        "app/app/pages/index.vue:75-80 — debounce timer cleared in onBeforeUnmount, and pre-hydration typing is reconciled on mount — no leaked timer or SSR/CSR input mismatch"
+      ],
+      "rationale": "Careful work (debounce cleanup, pre-hydration sync, page clamping), but there are several minor gaps: silent stale UI on refetch failure, mislabelled error status, and an aggressive fetch fan-out on uncached Pokémon pages."
+    },
+    "global_abstractions": {
+      "score": 3,
+      "evidence": [
+        "app/server/utils/pokeapi.ts:1-100 — well-bounded server client with documented TTL cache, clear helpers (apiList, cardsFor, withNotFound); boundaries are good",
+        "app/app/composables/format.ts:1 and app/server/utils/pokeapi.ts:34 — humanize duplicated verbatim across the app/server boundary; sprite URL built in both server/utils/pokeapi.ts:52 and app/app/pages/index.vue:19 — these will drift",
+        "app/app/components/EvolutionNode.vue:2 vs app/server/api/pokemon/[name].get.ts:5-11 — ChainNode declared twice; MoveInfo (app/app/pages/pokemon/[name].vue:8) and MoveRow (app/app/components/MovesTable.vue:3) are near-duplicates; page-level response interfaces redeclared by hand in each page instead of shared/types",
+        "app/server/api/species.get.ts:1 — home-page aggregator endpoint is a deliberate, well-placed boundary rather than a god module"
+      ],
+      "rationale": "No god modules or hidden global state, and the server cache is documented and server-side only; the main untangling cost is duplicated helpers and hand-mirrored interfaces across the app/server boundary that Nuxt 4's shared/ directory exists to eliminate."
+    },
+    "readability": {
+      "score": 4,
+      "evidence": [
+        "app/server/utils/pokeapi.ts:2 — comments explain intent (TTL cache, request-time fetching) rather than restating code",
+        "app/app/pages/index.vue:56-58 — comment explains why the debounce exists; app/app/pages/index.vue:72-73 explains the pre-hydration reconciliation",
+        "app/app/components/PageSection.vue:1-5 — small focused components (7 total) with consistent naming; pages follow one uniform script/template shape",
+        "app/server/api/pokemon/[name].get.ts:16-89 — long handler but linear and well-commented; heavy `any` casts reduce the reader's confidence in shapes"
+      ],
+      "rationale": "A new teammate would find their way quickly: uniform page structure, purposeful comments, and small components; the rough spot is the untyped server data-shuffling code."
+    },
+    "review_cost": {
+      "score": 4,
+      "evidence": [
+        "app/package.json:13 — nuxt ^4.6.2 locked at 4.6.2; a reviewer would require the 4.6.3 patch with the moderate security fix (GHSA-9v7c-q64q-vv33) before merge",
+        "app/app/composables/format.ts:31-42 — refetch-error wiring is a small, contained change in one helper",
+        "app/server/utils/pokeapi.ts:34 vs app/app/composables/format.ts:1 — deduping humanize/sprite-URL/types into shared/ is mechanical"
+      ],
+      "rationalale": null,
+      "rationale": "Approve after a round of nits: bump the Nuxt patch, dedupe cross-boundary helpers/types into shared/, and wire refetch errors; nothing structural needs rework."
+    }
+  },
+  "overall": 4,
+  "findings": [
+    {
+      "severity": "medium",
+      "location": "app/package.json:13",
+      "issue": "Nuxt is pinned at ^4.6.2 (lock resolves 4.6.2), but current stable 4.6.3 (2026-10-27) ships a moderate security fix for a dot-segment path-bypass affecting >=4.6.0 <4.6.3 (GHSA-9v7c-q64q-vv33).",
+      "suggestion": "Bump to ^4.6.3 and refresh the lockfile before merge."
+    },
+    {
+      "severity": "medium",
+      "location": "app/app/composables/format.ts:31",
+      "issue": "usePageData only checks error at setup; on client-side param changes (reused page component, e.g. evolution links) a failed refetch leaves error.value set but the page silently renders the previous Pokémon.",
+      "suggestion": "Watch error.value (or use `checkPending`/onResponseError or route middleware) and throw/show an error state when a refetch fails."
+    },
+    {
+      "severity": "medium",
+      "location": "app/server/api/pokemon/[name].get.ts:39",
+      "issue": "First uncached hit of any Pokémon page triggers a parallel fan-out of every move record (~100-200 upstream requests) plus all version groups and all types; a burst of distinct Pokémon pages in a TTL window hammers the upstream API.",
+      "suggestion": "Fetch only the moves needed for the requested/selected version group, or load move details lazily per selected game; keep the fan-out bounded."
+    },
+    {
+      "severity": "low",
+      "location": "app/app/composables/format.ts:40",
+      "issue": "Failures with no statusCode (network errors, upstream 500 without propagation) are mapped to 404 'Not found', showing the wrong error page.",
+      "suggestion": "Preserve the upstream status and message; only 404 responses should render 'Not found'."
+    },
+    {
+      "severity": "low",
+      "location": "app/server/utils/pokeapi.ts:17",
+      "issue": "The module-level cache Map only removes entries on failure or on re-request of the same key; expired-but-unrequested entries are never evicted, so the map can grow unboundedly in general use.",
+      "suggestion": "Sweep expired entries on insert (or cap the map size); cheap to add now, hard to notice in production later."
+    },
+    {
+      "severity": "low",
+      "location": "app/server/utils/pokeapi.ts:34",
+      "issue": "humanize is duplicated verbatim between the server util and the app composable (app/app/composables/format.ts:1), and the sprite URL is constructed in two places (server/utils/pokeapi.ts:52 and app/app/pages/index.vue:19) — they will drift.",
+      "suggestion": "Move the pure helpers to shared/utils/ (Nuxt 4's documented boundary) and derive sprite URLs from one helper everywhere."
+    },
+    {
+      "severity": "low",
+      "location": "app/app/pages/pokemon/[name].vue:5",
+      "issue": "Response and prop interfaces are hand-mirrored across the boundary: ChainNode (EvolutionNode.vue:2 vs server/api/pokemon/[name].get.ts:5), MoveInfo vs MoveRow, and each page redeclares its API payload shape — contract changes silently desynchronise.",
+      "suggestion": "Declare the payload and component interfaces once in shared/types/ and reuse them in pages, components and server routes."
+    },
+    {
+      "severity": "low",
+      "location": "app/server/api/pokemon/[name].get.ts:16",
+      "issue": "Server route handlers rely on `any` casts throughout (also abilities/, moves/, types/, team.get.ts), discarding the type safety Nuxt 4's split tsconfig project references provide.",
+      "suggestion": "Define types for the upstream PokeAPI payloads in shared/types or server/types and let the handlers be typed end-to-end."
+    }
+  ],
+  "summary": "A clean, genuinely idiomatic Nuxt 4 codebase — server API routes with a documented TTL cache, cookie/useState-backed team state, and small well-named components — that I'd merge after one round of nits. The required changes: bump to the 4.6.3 patch release (moderate security advisory), dedupe the humanize/sprite-URL/interface duplication into Nuxt 4's shared/ directory, and wire up error handling for client-side refetches. Nothing structural needs rework."
+}
+```

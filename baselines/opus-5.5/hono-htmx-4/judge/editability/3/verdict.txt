@@ -1,0 +1,151 @@
+## Review: editability of the Pokédex app (Hono + htmx)
+
+**Context check.** `hono@^4.13.14` / `@hono/node-server@^2.1.5` is the current stable line as of 2026-10-30 (v4.13.14 shipped Oct 25; v5 is still RC), so the app is on current APIs: `hono/jsx` async server components (`FC` returning promises), `raw('<!DOCTYPE html>')` with `c.html`, `serveStatic` from `@hono/node-server/serve-static`. Nothing I'd flag as outdated. htmx usage (`hx-get`/`hx-trigger`/`hx-target`/`hx-swap`/`hx-sync`, `HX-Push-Url`, `Vary: HX-Request`) is idiomatic htmx 2.x. The architecture has a genuinely good seam: each htmx-updatable region is its own component (`Results` in `app/src/pages/home.tsx:87`, `MovesBody` in `app/src/pages/pokemon.tsx:159`) used by both the full-page render and the partial endpoint.
+
+**What works well.** The layering is clean and one-directional: `api.ts` (data + cache, the only place that knows the API base URL and cache policy), `components.tsx` (shared chrome), `pages/*` (page bodies), `index.tsx` (routing only). Sprite construction is centralized (`spriteUrl`, `app/src/api.ts:172`) and consumed by exactly one component (`PokemonCard`, `app/src/components.tsx:62`), and all four card lists on home/move/ability/type pages flow through `CardList`→`PokemonCard` — so the Deoxys-class sprite fix would land in one place and cover every list. `speciesForPokemon`'s generic `extra` parameter (`app/src/api.ts:225`) is exactly the right abstraction for the real variation between "hidden ability" and "no extra" lists. The client script (`app/public/app.js`) uses event delegation and a narrow `data-sort` contract, so server and client code are well separated.
+
+**What costs editability.** English-name resolution is re-inlined four times in the router (`app/src/index.tsx:55,73,79,88`) with a *different fallback* (raw API name) than the existing `englishName` helper (`app/src/api.ts:160`, humanized fallback) — title and h1 could drift apart. A Pokémon's types are derived from two independent API sources (`type.pokemon` scans in `getDex`, `app/src/api.ts:245-263`, vs `pokemon.types` in `app/src/pages/pokemon.tsx:83-88`). `MoveTable`'s column list is written twice (headers `pokemon.tsx:249-261` vs cells `pokemon.tsx:266-277`). The moves `?game=` URL is built three times (`index.tsx:65-66`, form `action` at `pokemon.tsx:193`). Removing Abilities means edits in three source files plus a dead CSS rule — the only real removability tax.
+
+```json
+{
+  "dimension": "editability",
+  "criteria": {
+    "removability": {
+      "score": 3,
+      "evidence": [
+        "app/src/index.tsx:76 — abilities route plus imports at index.tsx:7 and index.tsx:9 to delete",
+        "app/src/pages/details.tsx:65 — AbilityPage is one self-contained component",
+        "app/src/pages/pokemon.tsx:97 — Pokémon page's Abilities section links into the feature, must be edited too",
+        "app/public/styles.css:274 — .card__note is only used by the ability page; deleting pages leaves dead CSS"
+      ],
+      "rationale": "The feature has no nav link and one route, but it is not self-contained: removal means edits to the router, the details page module, the Pokémon page, and leaves one dead CSS rule. All edits are obvious, so mid-scale."
+    },
+    "changeability": {
+      "score": 4,
+      "evidence": [
+        "app/src/components.tsx:62 — every card list renders through PokemonCard, so a sprite fix in one component covers home, move, ability and type pages",
+        "app/src/api.ts:172 — spriteUrl is the single sprite-URL construction point",
+        "app/src/index.tsx:55 — English name fallback re-inlined (also 73, 79, 88) with a different fallback than englishName at app/src/api.ts:160",
+        "app/src/api.ts:245 — types derived from type.pokemon scans here, but from pokemon.types at app/src/pages/pokemon.tsx:83"
+      ],
+      "rationale": "Most fixes land in one obvious place (cards, sprite URL, cache, query parsing), but the English-name title fallback is duplicated four times with an inconsistent fallback, and a Pokémon's types are computed from two different API sources."
+    },
+    "coupling": {
+      "score": 4,
+      "evidence": [
+        "app/src/pages/home.tsx:87 — Results component shared between full page and htmx partial; clean partial/full seam",
+        "app/src/pages/pokemon.tsx:159 — MovesBody is likewise a standalone swap target",
+        "app/public/app.js:2 — client code touches only the data-sort/sortable contract, no server internals",
+        "app/src/components.tsx:2 — components import spriteUrl/dexNumber from the data module; mild data/presentation coupling"
+      ],
+      "rationale": "Server and client are clearly separated via a narrow data-attribute contract, routing lives only in index.tsx, and shared state (the cache) is explicit and module-scoped. Only nit: presentation helpers (spriteUrl, dexNumber) are exported from the data layer."
+    },
+    "abstraction_design": {
+      "score": 4,
+      "evidence": [
+        "app/src/api.ts:225 — speciesForPokemon's generic extra parameter absorbs the real variation between card lists without flags",
+        "app/src/pages/home.tsx:24 — parseHomeQuery/homeUrl keep URL filter state in one place",
+        "app/src/pages/pokemon.tsx:249 — MoveTable column headers and cells at pokemon.tsx:266 are two parallel lists to keep in sync, plus a withLevel flag",
+        "app/src/pages/details.tsx:16 — englishShortEffect lives in details.tsx while its sibling text helpers (latestEnglishFlavor) live in api.ts"
+      ],
+      "rationale": "The shared abstractions (Section, CardList, Count, dash, speciesForPokemon, homeUrl) are small, real, and stretch to new cases; an Items page would reuse most of the Moves machinery. Docked for the duplicated MoveTable column definitions and one helper filed in the wrong module."
+    }
+  },
+  "overall": 4,
+  "findings": [
+    {
+      "severity": "medium",
+      "location": "app/src/index.tsx:55",
+      "issue": "English display-name resolution is inlined four times (lines 55, 73, 79, 88) with a raw-name fallback that differs from the existing englishName helper's humanized fallback (app/src/api.ts:160), so page title and h1 can drift.",
+      "suggestion": "Use englishName() in the routers, or compute the title inside each page component next to its h1."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/api.ts:245",
+      "issue": "A Pokémon's types are derived from two unrelated API sources: getDex scans type.pokemon lists, while the Pokémon page uses pokemon.types (app/src/pages/pokemon.tsx:83). A bug or API change must be checked in both places.",
+      "suggestion": "Give the home-page DexEntry its types through the same source (or a single helper) used by the Pokémon page, or add a comment documenting the two paths."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/pages/pokemon.tsx:249",
+      "issue": "MoveTable's thead column list (lines 249-261) and tbody cell list (lines 266-277) are parallel hand-maintained lists plus a withLevel flag; adding or reordering a column needs two synchronized edits.",
+      "suggestion": "Define columns once as data (key, label, sort type, render) and generate both header and cells from it."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/index.tsx:65",
+      "issue": "The /pokemon/:name moves URL with ?game= is constructed three times (index.tsx:65, 66 and the form action at pokemon.tsx:193), each with its own encoding logic.",
+      "suggestion": "Extract a movesUrl(speciesName, game, {hash}) helper next to homeUrl in pages/pokemon.tsx or home.tsx."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/pages/details.tsx:16",
+      "issue": "englishShortEffect is module-private to details.tsx while its sibling text helpers (latestEnglishFlavor, cleanText) live in api.ts, splitting the text-normalization helpers across two modules.",
+      "suggestion": "Move englishShortEffect into api.ts alongside latestEnglishFlavor."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/api.ts:172",
+      "issue": "spriteUrl and dexNumber are presentation concerns exported from the data module, so components.tsx:2 depends on data-layer internals for markup.",
+      "suggestion": "Keep them, but note they're presentation helpers; or move spriteUrl's pattern into components.tsx if the data module should stay transport-only."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/pages/home.tsx:80",
+      "issue": "The CardList extra callback ignores its p argument and re-indexes data.items[i] by position, a fragile coupling to CardList's iteration order.",
+      "suggestion": "Use the callback's own item (pass the entry's types through CardData or capture the entry directly)."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/pages/pokemon.tsx:112",
+      "issue": "The no-evolution-chain fallback fabricates a fake ChainLink with url: '', a lie about the API shape that the component must remember not to dereference.",
+      "suggestion": "Handle the empty-chain case in EvolutionTree (or pass species links, not chain links)."
+    },
+    {
+      "severity": "low",
+      "location": "app/public/app.js:3",
+      "issue": "The client sort contract (table.sortable, .sort-button, data-sort, data-sort-type) is implicit stringly-typed coupling with the markup at pokemon.tsx:238-277; renaming an attribute silently breaks sorting.",
+      "suggestion": "Name the contract: a short comment block in both files, or generate the table's data attributes from one shared constant file."
+    },
+    {
+      "severity": "low",
+      "location": "app/public/styles.css:274",
+      "issue": ".card__note is used only by the ability page; deleting the Abilities pages leaves a dead rule with no automated way to notice.",
+      "suggestion": "Co-locate feature-specific CSS (or accept the small dead-code risk on removal)."
+    }
+  ],
+  "summary": "A small, cleanly layered codebase where the important seams are real: every htmx partial is a shared component, every card list flows through one PokemonCard, and all API/cache knowledge is confined to api.ts. Editability tax is mostly scattered duplication: English-name titles inlined four times in the router, two sources for a Pokémon's types, and MoveTable's parallel header/cell lists. I'd approve it after the medium findings are addressed.",
+  "scenarios": [
+    {
+      "change": "Remove the Abilities pages and every link to them",
+      "files": ["app/src/index.tsx", "app/src/pages/details.tsx", "app/src/pages/pokemon.tsx", "app/public/styles.css"],
+      "difficulty": 3,
+      "notes": "Route + imports in index.tsx (76, 7, 9), AbilityPage in details.tsx (65-89), the Abilities section on the Pokémon page (pokemon.tsx:97-108), plus the now-dead .card__note rule. All edits are obvious but scattered across four files."
+    },
+    {
+      "change": "Fix the sprite shown for species whose default Pokémon has a different name (e.g. Deoxys)",
+      "files": ["app/src/components.tsx", "app/src/api.ts"],
+      "difficulty": 4,
+      "notes": "All four card lists render through CardList→PokemonCard (components.tsx:62-77) fed by spriteUrl (api.ts:172), so one fix covers every list. If the fix needs the default variety's real sprite rather than the ID pattern, CardData gains a field filled by the two producers (getDex api.ts:242, speciesForPokemon api.ts:225) — still confined to one module."
+    },
+    {
+      "change": "Add sorting by name to every list of Pokémon cards",
+      "files": ["app/src/api.ts", "app/src/pages/home.tsx"],
+      "difficulty": 4,
+      "notes": "Change the default sort in speciesForPokemon (api.ts:236) to cover move/ability/type lists in one line, and the home page's order in getDex/loadResults (api.ts:259, home.tsx:44) — or add an optional sort to CardList. Two files either way."
+    },
+    {
+      "change": "Add an Items section (/items, /items/:name) shaped like Moves",
+      "files": ["app/src/api.ts", "app/src/pages/details.tsx", "app/src/index.tsx", "app/src/components.tsx"],
+      "difficulty": 4,
+      "notes": "Most machinery is reusable: getItem/type + Item type in api.ts (~15 lines), speciesForPokemon for held_by_pokemon, Section/Count/CardList/dash, TypesPage as the /items index pattern. Only the detail page body is a copy-and-adapt of MovePage (~30 lines); a nav link goes in Layout (components.tsx:22)."
+    },
+    {
+      "change": "Change the API base URL and caching rules",
+      "files": ["app/src/api.ts"],
+      "difficulty": 5,
+      "notes": "API_BASE_URL (api.ts:6) is referenced only at api.ts:31 and 172; FRESH_MS/MAX_ENTRIES/the stale-while-revalidate logic (api.ts:7-9, 52-74) are all in this one module. One-file change, nothing else knows."
+    }
+  ]
+}
+```

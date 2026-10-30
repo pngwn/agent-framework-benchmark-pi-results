@@ -1,0 +1,125 @@
+I've reviewed the app thoroughly. Here's my assessment of the **test quality** dimension.
+
+## What I found
+
+The app contains **zero tests of its own**. `app/package.json` has no `test` script and no test runner in devDependencies (only build tooling: `app/package.json:6-23`). Static facts confirm: `tests.files: 0, cases: 0`. This is despite ~880 lines of script, nearly all of it being exactly the kind of data-transformation logic that breaks silently: pure name/ID/flavor helpers (`app/app/lib/format.ts:1-46`), the alternate-form boundary (`app/app/lib/api.server.ts:101`), move-table grouping (`app/app/lib/api.server.ts:316-337`), and inline filter/pagination/sort logic in route components (`app/app/routes/home.tsx:64-88`, `app/app/routes/pokemon.tsx:226-240`).
+
+Notably, the filtering, pagination and column-sort logic are embedded directly in component bodies rather than extracted as pure functions — so even a willing maintainer would have to restructure code before they could test it. `format.ts` is the one bright spot: it's already pure and would take a dozen vitest cases to cover.
+
+Several latent risks that nothing guards:
+- Module-level IIFE promises (`app/app/lib/api.server.ts:65-81`) cache their first outcome forever — one failed fetch at boot poisons every page for the process lifetime, and no test would distinguish that from a 404.
+- Two different magic boundaries coexist: `id <= 10000` for alternate-form exclusion vs `id <= 1025` for the hardcoded sprite pattern (`app/app/lib/api.server.ts:121`). Change one without the other and live-data-overlay Pokémon get broken images silently.
+- `page` clamping (`app/app/routes/home.tsx:84-87`) means `?page=999` renders the last page while the URL keeps the bogus value — an off-by-one in the clamp/slice (`home.tsx:86`) would show empty lists with no failing signal.
+- The descending sort negates the tie-break comparator (`app/app/routes/pokemon.tsx:240`), so secondary ordering flips direction — an untested invariant the acceptance suite only samples.
+- A non-404 API failure throws from loaders into the framework's default error page; the app has no `ErrorBoundary` (`app/app/root.tsx`), so API 500s render an unbranded crash page.
+
+```json
+{
+  "dimension": "tests",
+  "criteria": {
+    "coverage_of_risk": {
+      "score": 1,
+      "evidence": [
+        "app/package.json:6-23 — no test script, no test runner in devDependencies; zero test files in app/",
+        "app/app/lib/format.ts:1-46 — humanize/dexNumber/englishName/englishFlavor/idFromUrl/valueOrDash are pure, drive every page's text, and are completely untested",
+        "app/app/routes/home.tsx:64-88 — filtering, type/generation matching and 48-per-page slicing inline in the component, untested",
+        "app/app/lib/api.server.ts:316-337 — move-group construction and game-param fallback, untested"
+      ],
+      "rationale": "No tests exist at all in a data-transformation-heavy app; every risky path is unguarded."
+    },
+    "behaviour_not_implementation": {
+      "score": 1,
+      "evidence": ["app/ — zero test files (facts: tests.files 0, cases 0)"],
+      "rationale": "There are no tests, so nothing asserts behaviour either."
+    },
+    "regression_power": {
+      "score": 1,
+      "evidence": [
+        "app/app/lib/format.ts:25-34 — englishFlavor's 'last en entry' rule could be changed to 'first' and nothing in app/ would fail",
+        "app/app/lib/api.server.ts:101,121 — alternate-form boundary (10000) and sprite boundary (1025) could diverge in a refactor with no failing test",
+        "app/app/routes/home.tsx:86 — a pagination slice off-by-one or a removed page clamp would render empty/incorrect pages with no signal"
+      ],
+      "rationale": "With zero tests, any regression in the data layer passes unnoticed once the acceptance suite stops being the gate."
+    },
+    "signal_to_noise": {
+      "score": 3,
+      "evidence": ["app/ — no tests, hence no noise"],
+      "rationale": "No low-value tests exist because no tests exist; the anchor assigns 3 here."
+    }
+  },
+  "overall": 1,
+  "findings": [
+    {
+      "severity": "high",
+      "location": "app/app/lib/format.ts:1-46",
+      "issue": "All display-name, dex-number, flavor-text and URL-ID helpers are pure and trivially testable, yet have zero coverage; a regression here breaks every page at once.",
+      "suggestion": "Install vitest and add unit tests for humanize (hyphenated/empty words, case), englishFlavor (last en entry, whitespace/\\f collapsing), idFromUrl (trailing slash, non-numeric), valueOrDash, dexNumber padding."
+    },
+    {
+      "severity": "high",
+      "location": "app/app/lib/api.server.ts:65-81",
+      "issue": "typeInfosPromise/generationInfosPromise/versionGroupsPromise/homeDataPromise are module-level IIFEs with no failure handling; a single failed fetch at boot leaves a permanently rejected cached promise, bricking every page until restart.",
+      "suggestion": "Wrap in a memoized-but-retryable getter, and add a test that a transient API failure on first call doesn't poison subsequent calls."
+    },
+    {
+      "severity": "high",
+      "location": "app/app/routes/home.tsx:64-88",
+      "issue": "Filtering, pagination and page clamping are inline in the component, so they are untestable without a browser and currently untested; off-by-one errors in slice or clamp would show wrong or empty pages.",
+      "suggestion": "Extract filterSpecies(species, {q,type,generation}) and paginate(list, page, size) into a pure module and unit-test edge cases (NaN page, page 0, page > totalPages, empty filters, whitespace-only q)."
+    },
+    {
+      "severity": "high",
+      "location": "app/app/lib/api.server.ts:101,121",
+      "issue": "Two divergent magic boundaries: id <= 10000 excludes alternate forms while cardSprite hardcodes id <= 1025 for the sprite URL pattern; changing one without the other silently breaks live-data-overlay Pokémon sprites.",
+      "suggestion": "Extract a single isAlternateForm(id)/sprite-url helper, and test the boundary (id 10001 excluded from lists, id 1026 goes through the API sprite lookup)."
+    },
+    {
+      "severity": "medium",
+      "location": "app/app/routes/pokemon.tsx:226-240",
+      "issue": "Column-sort comparator: descending negates the whole comparison including the moveLabel tie-break (secondary order flips), and missing-last handling returns early; these invariants are untested.",
+      "suggestion": "Extract the comparator as a pure function with tests covering missing values in both directions, numeric vs string columns, tie-break stability and aria-sort state."
+    },
+    {
+      "severity": "medium",
+      "location": "app/app/lib/api.server.ts:316-337",
+      "issue": "Move-group map construction, the seen-key dedupe (method:move:level) and the ?game fallback to the highest-order group are untested; a bad dedupe key would drop or duplicate rows silently.",
+      "suggestion": "Unit-test getPokemonPage against a small fixture: game param invalid → falls back to latest; same move at two levels appears twice; duplicate details collapse."
+    },
+    {
+      "severity": "medium",
+      "location": "app/app/root.tsx:1-53",
+      "issue": "Loaders only special-case null (404); any non-404 API error throws into the framework's default error page, which has none of the app's landmark chrome — the thrown-error path is completely untested.",
+      "suggestion": "Add an ErrorBoundary export on root (or per-route), and a test that a 500 from the API renders the app shell with a friendly message rather than the default stack page."
+    },
+    {
+      "severity": "medium",
+      "location": "app/app/routes/home.tsx:27-58",
+      "issue": "Search/URL synchronisation relies on a previousQ ref plus a document.activeElement check to distinguish typing from popstate; this is fragile browser-history behaviour with no coverage.",
+      "suggestion": "Add a Playwright test (back/forward navigation with a focused search input, and with it blurred) or restructure to derive the input value from searchParams with a debounce."
+    },
+    {
+      "severity": "low",
+      "location": "app/app/lib/api.server.ts:26-40",
+      "issue": "fetchJson caches 404 responses as null permanently and the cache key embeds the query string; stale-null and key-collision behaviour are untested.",
+      "suggestion": "Unit-test relativePath/cache key normalisation (trailing slashes, query order) and document or test the 404-caching semantics."
+    }
+  ],
+  "summary": "The app ships no tests of its own and no test infrastructure whatsoever, despite being ~880 lines of almost pure data transformation. The riskiest logic (name/flavor extraction, alternate-form boundaries, filtering, pagination, move-table sorting) is either untested or embedded in components where it cannot be unit-tested. Once the acceptance suite is no longer the only guard, a data-layer refactor could break every page at once with nothing failing.",
+  "wroteTests": false,
+  "testCount": 0,
+  "valuableTests": [],
+  "lowValueTests": [],
+  "untested": [
+    { "area": "Pure format helpers (humanize, dexNumber, englishName, englishGenus, englishFlavor, valueOrDash, idFromUrl) — app/app/lib/format.ts", "risk": "high", "likelyBug": "Taking the first instead of last English flavor entry, or breaking whitespace/\\f collapsing, silently corrupts descriptions on hundreds of pages; a humanize change (e.g. dropping hyphen splitting) breaks every list label and the search index simultaneously." },
+    { "area": "Alternate-form exclusion and sprite URL boundaries — app/app/lib/api.server.ts:101,121", "risk": "high", "likelyBug": "An off-by-one includes ID-10001 forms in lists or drops species near the boundary; diverging 10000/1025 constants yields broken images for the live-data-overlay Pokémon that the acceptance fixtures specifically test." },
+    { "area": "Home filtering, search match, generation/type filters and 48-per-page pagination — app/app/routes/home.tsx:64-88", "risk": "high", "likelyBug": "Page clamp removal or slice off-by-one shows empty or duplicated pages; a filter change forgetting to reset page leaves stale pagination; case-sensitivity regression makes search miss results." },
+    { "area": "Move-table grouping, game-param fallback and row dedupe — app/app/lib/api.server.ts:316-337", "risk": "high", "likelyBug": "Wrong dedupe key drops legitimately duplicated level-up entries or keeps duplicates; an invalid ?game no longer falls back to the highest-order version group, rendering empty Moves tables." },
+    { "area": "Sortable table comparator and aria-sort semantics — app/app/routes/pokemon.tsx:226-252", "risk": "medium", "likelyBug": "Descending sort reverses the secondary move-name order or missing values stop sorting last; aria-sort could be set on non-active headers, breaking the accessibility contract invisibly." },
+    { "area": "Module-level index/home promises and their failure modes — app/app/lib/api.server.ts:65-81,158-231", "risk": "high", "likelyBug": "A transient API blip at first request leaves a permanently rejected cached promise: every subsequent page 500s until the process restarts, with nothing distinguishing it from a genuine 404." },
+    { "area": "Error vs not-found paths across loaders — app/app/routes/{pokemon,move,ability,type-detail}.tsx loaders and app/app/root.tsx", "risk": "medium", "likelyBug": "Non-404 API failures throw into the default framework error page (no banner/main/contentinfo landmarks, no 'Not found' heading), so an outage renders an unbranded stack page." },
+    { "area": "Search input ↔ URL synchronisation on back/forward navigation — app/app/routes/home.tsx:27-58", "risk": "medium", "likelyBug": "The previousQ/activeElement dance desynchronises the input from the URL on popstate, showing a stale query with filtered-to-URL results or vice versa." },
+    { "area": "Evolution-chain recursion and nested list rendering — app/app/lib/api.server.ts:243-250 and app/app/components.tsx:103-116", "risk": "low", "likelyBug": "Deep or branching chains (Eevee) render at the wrong nesting level or lose branches; a cyclic or malformed chain would stack-overflow with no test to catch it." },
+    { "area": "HTTP cache semantics (404 cached as null, query-embedded keys) — app/app/lib/api.server.ts:26-40", "risk": "low", "likelyBug": "A previously-missing resource that the API later serves stays null forever, and differently-ordered query strings fragment the cache." }
+  ]
+}
+```

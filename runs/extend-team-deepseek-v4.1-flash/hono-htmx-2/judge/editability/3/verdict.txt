@@ -1,0 +1,138 @@
+I've now read the full app (`app/src/` — 6 view files, `api.ts`, `data.ts`, `team.ts`, `index.tsx`, `build.mjs`, plus package/build config) and the spec/feature docs. Quick framework-currency check: the app uses Hono 4.13 with `jsxRenderer` + `ContextRenderer` declaration merging, `getCookie`/`setCookie` from `hono/cookie`, and `serveStatic` from `@hono/node-server/serve-static` — all current stable idioms; htmx 2.x attributes (`hx-sync`, `hx-include`) and response headers (`HX-Push-Url`) are also current. Nothing to flag as outdated.
+
+Scenario walk-throughs:
+
+1. **Remove Abilities**: delete the route + import in `index.tsx:93-97`, delete `loadAbility`/`AbilityPage` in `details.tsx:53-71`, delete the Abilities section in `pokemon.tsx:230-241`. The `note` plumbing in `data.ts:101` and `components.tsx:35` becomes dead code but nothing else breaks. A handful of findable edits.
+2. **Sprite fix**: every card renders through `CardList` (`components.tsx:25` → `spriteUrl` at `data.ts:28`), so one fix covers home, move, ability, type and team lists — though `Card` only carries the id, so a fix needing the pokemon record's `sprites.front_default` would have to flow through the three card loaders (see finding 2).
+3. **Sort by name**: single render point (`CardList`) makes a display-level sort a one-file change, but a *correct* sort on the home page must happen before pagination in `loadHome` (`home.tsx:47-60`), and team order is semantic — so it's a helper in `data.ts` plus 3 loader call sites.
+4. **Items section**: copy the `loadMove`/`MovePage` pattern from `details.tsx` into a new file, two route lines in `index.tsx`; `Section`, `Count`, `CardList`, `orDash`, `englishEffect`, `cardsForPokemon` are all directly reusable. The page-specific glue (~50 lines) is genuinely page-specific.
+5. **API base URL / caching**: everything lives in `api.ts` (`API_BASE_URL`/`API_ROOT` lines 4-5, `FRESH_MS` line 6, the stale-while-revalidate in `refresh`/`api` lines 18-46); `data.ts:28` imports the constant rather than re-reading env. One file.
+
+```json
+{
+  "dimension": "editability",
+  "criteria": {
+    "removability": {
+      "score": 4,
+      "evidence": [
+        "app/src/index.tsx:93 — abilities route is one self-contained block with its own loader",
+        "app/src/views/details.tsx:53 — loadAbility/AbilityPage live together and are trivially deletable",
+        "app/src/views/pokemon.tsx:230 — the only inbound link is the Abilities section on the Pokémon page",
+        "app/src/data.ts:101 — cardsForPokemon's `note` param (only consumer: abilities) would be left as dead code",
+        "app/src/views/layout.tsx:32 — team nav link is one line, next to its two siblings"
+      ],
+      "rationale": "Features cluster in a loader+component pair plus one route block, so removal is a handful of findable edits across 2-3 files; only the `note` plumbing and CardList's `card.note` render would linger as dead code."
+    },
+    "changeability": {
+      "score": 4,
+      "evidence": [
+        "app/src/views/components.tsx:25 — every card list renders sprites through one CardList/spriteUrl seam, so a sprite bug fix covers all five lists",
+        "app/src/views/home.tsx:14 — filter parsing/URL canonicalization (parseHomeQuery/homeUrl) are named functions in one place",
+        "app/src/api.ts:4 — API base URL and cache TTL (FRESH_MS) are constants in the single API module",
+        "app/src/data.ts:85 — cardsForPokemon centralizes the Pokémon-reference→species mapping used by moves/abilities/types",
+        "app/src/views/home.tsx:60 — but Card objects are also built independently here and in team.ts:52, so card-shape changes touch three loaders"
+      ],
+      "rationale": "Most fixes land in one obvious place (CardList, api.ts, data helpers); the deduction is that card construction is split across three loaders, so changes to what a card contains are not quite one-shot."
+    },
+    "coupling": {
+      "score": 4,
+      "evidence": [
+        "app/src/views/details.tsx:11 — views bind to loaders via NonNullable<Awaited<ReturnType<typeof loadMove>>>, a narrow, compiler-checked seam",
+        "app/src/index.tsx:19 — htmx negotiation (isPartial, HX-* headers) is isolated in the route layer; views contain no client JS",
+        "app/src/team.ts:24 — cookie persistence, team loading and coverage math are one coherent domain module, not spread through routes",
+        "app/src/data.ts:44 — mainTypes() returns raw API records, so team.ts:73 and data.ts:66 reach into type record internals (damage_relations, pokemon lists)"
+      ],
+      "rationale": "Loose coupling overall: server/client split is clean (htmx attributes only), loaders colocated with their views, and types derived from loaders. The main tangle is that mainTypes leaks full API records into domain helpers, and API responses are untyped (`api<T = any>`), so the 'seam' has no compiler enforcement against API-shape drift."
+    },
+    "abstraction_design": {
+      "score": 4,
+      "evidence": [
+        "app/src/views/components.tsx:22 — CardList's optional `action` callback absorbed the team feature without flags; `note` absorbed hidden-ability text",
+        "app/src/data.ts:85 — cardsForPokemon is the right abstraction for the app's real variation (type/move/ability refs → species cards, forms excluded)",
+        "app/src/views/components.tsx:5 — Section enforces the app's region/heading convention for every page including the new coverage section",
+        "app/src/views/pokemon.tsx:127 — MoveTable parameterizes method/sort/dir cleanly instead of duplicating a table per method",
+        "app/src/views/home.tsx:60 — card-with-types construction duplicated with team.ts:52 rather than shared"
+      ],
+      "rationale": "The components stretch well (the team feature reused CardList, Section, Count, orDash with zero duplication) and MoveTable handles per-method variation with data, not copies. Held back from 5 by the small card-construction duplication and by cardsForPokemon's slightly overloaded signature (note callback)."
+    }
+  },
+  "overall": 4,
+  "findings": [
+    {
+      "severity": "medium",
+      "location": "app/src/api.ts:45",
+      "issue": "API responses are untyped (`api<T = any>`) and loaders cast to `any` throughout (details.tsx:19, 39; pokemon.tsx:75-77, 174), so changing or verifying API data shapes relies on reading raw JSON, not the compiler.",
+      "suggestion": "Define response interfaces (or at least the slices the app consumes: Named, Ref, Type, Move, Species) in data.ts/api.ts and use them in the loaders; the existing `Awaited<ReturnType<typeof loadX>>` view seam then propagates the types for free."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/views/home.tsx:60",
+      "issue": "Card objects are constructed in three places (loadHome here, loadTeam in team.ts:52, cardsForPokemon in data.ts:98), duplicating the `types: typesById.get(s.id) ?? []` merge; a change to card content (e.g., switching cards to a per-Pokémon sprite) must be made in all three.",
+      "suggestion": "Add a `cardsForSpecies(ids)` helper in data.ts that all three loaders call, or give loadTeam/loadHome a shared 'attach types' step."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/data.ts:44",
+      "issue": "mainTypes() returns raw API records bundled with name/label, so consumers (data.ts:66, team.ts:73, details.tsx) poke at record internals like `damage_relations` and `t.record.pokemon`.",
+      "suggestion": "Return { name, label, relations, members } fields explicitly, keeping the PokeAPI record shape inside mainTypes."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/data.ts:85",
+      "issue": "cardsForPokemon's `note` callback exists solely for the ability page's 'Hidden ability' text; if abilities were removed this plumbing would survive as dead code, and future readers must trace both call sites to understand it.",
+      "suggestion": "Fine to keep, but document the param's purpose (one comment line) or move hidden-ability labelling into the ability loader's card post-processing."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/index.tsx:19",
+      "issue": "The htmx partial negotiation (isPartial + Vary + HX-Push-Url) is wired only for the home route; adding fragment responses to another page means replicating that three-line pattern per route rather than a shared helper/middleware.",
+      "suggestion": "Extract a `partialOrFull(c, query, fragment, page)` helper in index.tsx so fragment routes stay one-liners."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/index.tsx:112",
+      "issue": "The /team/remove `next` redirect allowlist is a regex coupled to the app's route shapes; adding a page that hosts remove buttons requires updating the regex in a non-obvious place.",
+      "suggestion": "Validate with a generic 'starts with / and has no scheme' check, or accept only known prefixes via a small exported constant next to the routes."
+    },
+    {
+      "severity": "low",
+      "location": "app/package.json:9",
+      "issue": "Exact version pins (\"hono\": \"4.13.14\", \"@hono/node-server\": \"2.1.5\") with no ranges make deliberate upgrades explicit but silent, low-risk dependency bumps impossible.",
+      "suggestion": "Use caret ranges for runtime deps and rely on package-lock.json for reproducibility, or document that pins are intentional."
+    }
+  ],
+  "summary": "This is a well-organized, genuinely idiomatic Hono + htmx codebase: features cluster into loader+component pairs with one route block each, shared conventions live in small named components (Section, CardList, Count), and all data access funnels through a single cached API module, so most changes land in one obvious place. The team feature was absorbed into existing abstractions with essentially no duplication, which is the best evidence the abstractions are the right shape. The two real debts are the untyped API boundary (`api<T = any>` plus `any` casts in every loader) and card construction being split across three loaders, both of which raise the cost of data-shape changes over time.",
+  "scenarios": [
+    {
+      "change": "Remove the Abilities pages and every link to them",
+      "files": ["app/src/index.tsx", "app/src/views/details.tsx", "app/src/views/pokemon.tsx", "app/src/views/components.tsx"],
+      "difficulty": 3,
+      "notes": "Route block, loader and component each delete cleanly, plus the Abilities section on the Pokémon page; only the `note` plumbing in data.ts/components.tsx would be left behind."
+    },
+    {
+      "change": "Fix the wrong-sprite bug on Pokémon cards (species whose default Pokémon has a different name)",
+      "files": ["app/src/data.ts", "app/src/views/components.tsx", "app/src/views/home.tsx", "app/src/team.ts"],
+      "difficulty": 4,
+      "notes": "All card lists render through CardList/spriteUrl, so the URL construction is one place; but if the fix needs the Pokémon record's own sprite URL, Card must gain a field and all three card loaders (loadHome, loadTeam, cardsForPokemon) must populate it."
+    },
+    {
+      "change": "Add sorting by name to every list of Pokémon cards",
+      "files": ["app/src/data.ts", "app/src/views/home.tsx", "app/src/views/details.tsx", "app/src/views/team.tsx"],
+      "difficulty": 3,
+      "notes": "CardList is a single render point so a display-level sort is one file, but a correct sort on home must happen before pagination in loadHome, and team order (added order) is semantic and must be excluded — so a shared sortCards helper plus three call sites."
+    },
+    {
+      "change": "Add an Items section (/items, /items/:name) shaped like Moves",
+      "files": ["app/src/views/items.tsx", "app/src/index.tsx", "app/src/views/layout.tsx"],
+      "difficulty": 4,
+      "notes": "Section/Count/CardList/orDash/englishEffect and the api module are all reusable; the new work is one ~50-line loader+page pair following the details.tsx pattern, two route lines, and an optional nav link."
+    },
+    {
+      "change": "Change the API base URL and caching rules",
+      "files": ["app/src/api.ts"],
+      "difficulty": 5,
+      "notes": "Base URL, cache TTL and the stale-while-revalidate logic are constants/functions in the single API module; data.ts imports API_BASE_URL from it, so no other file knows about either."
+    }
+  ]
+}
+```

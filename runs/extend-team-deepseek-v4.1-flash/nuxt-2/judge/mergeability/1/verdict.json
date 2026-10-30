@@ -1,0 +1,121 @@
+{
+  "dimension": "mergeability",
+  "criteria": {
+    "idiomatic": {
+      "score": 4,
+      "evidence": [
+        "app/package.json:8 — nuxt ^4.6.2, current stable (4.6.3)",
+        "app/nuxt.config.ts:1-20 — app/ layout, runtimeConfig public apiBase overridden by NUXT_PUBLIC_API_BASE at start",
+        "app/app/pages/[...slug].vue:2 — catch-all throws createError({statusCode:404, fatal:true})",
+        "app/app/composables/team.ts:23-46 — useCookie + useState pattern for SSR-safe team state",
+        "app/server/utils/pokeapi.ts:4-5 — hand-rolled TTL/promise cache where Nitro cachedFunction exists"
+      ],
+      "rationale": "Reads like current Nuxt 4 docs throughout (app/ dir, server routes, useFetch+useHead, cookie-backed state); the only real deviations are the hand-rolled server cache instead of Nitro's cachedFunction and boundary-duplicated helpers instead of shared/."
+    },
+    "correctness_risks": {
+      "score": 4,
+      "evidence": [
+        "app/app/pages/index.vue:66 — debounce timer cleared in onBeforeUnmount",
+        "app/app/pages/index.vue:37-40 — page clamped to totalPages, pagination omits defaults",
+        "app/server/utils/pokeapi.ts:20-27 — 404 mapped to NotFound, rejected promises removed from cache",
+        "app/app/pages/team.vue:19-23 — count from cookie vs server-filtered members can disagree for a stale entry",
+        "app/app/composables/format.ts:18 — usePageData key frozen at setup, stale on param-only navigation"
+      ],
+      "rationale": "No races, leaks, unescaped output, missing 404s or SSR/CSR mismatches found; the residual issues (stale-cookie count mismatch, never-evicted expired cache entries, frozen fetch key) are all minor and unlikely to bite in practice."
+    },
+    "global_abstractions": {
+      "score": 4,
+      "evidence": [
+        "app/server/utils/pokeapi.ts:39 — humanize duplicated from app/app/composables/format.ts:1 instead of shared/",
+        "app/app/composables/format.ts:18 — usePageData wrapper is thin, single-purpose, used uniformly",
+        "app/app/components/PageSection.vue:2-6 — heading id derived, consistent aria-labelledby pattern",
+        "app/app/components/PokemonCard.vue:1-19 — one card component reused across four pages"
+      ],
+      "rationale": "Abstractions are few and earn their keep (pokeapi client, usePageData, PageSection/PokemonCard), but the server/client split forces duplicated helpers that Nuxt 4's shared/ folder exists to prevent — a small structural untangle waiting to happen."
+    },
+    "readability": {
+      "score": 4,
+      "evidence": [
+        "app/server/api/pokemon/[name].get.ts:14-29 — toChain recursion, clear STAT_LABELS map",
+        "app/app/pages/index.vue:57 — comment explains the URL-sync debounce",
+        "app/server/api/pokemon/[name].get.ts:45-50 — learnsets use bare [move, method, level] tuples",
+        "app/server/api/species.get.ts:10-26 — heavy implicit-any, payload shape undocumented on producer side"
+      ],
+      "rationale": "A new teammate finds their way fast: consistent file naming, small components, why-comments in the right places; dinged for pervasive `any` and stringly tuples in server handlers where the client defines proper interfaces."
+    },
+    "review_cost": {
+      "score": 4,
+      "evidence": [
+        "app/app/composables/format.ts:1 vs app/server/utils/pokeapi.ts:39 — one structural ask (move to shared/)",
+        "app/server/utils/pokeapi.ts:14-30 — replace hand-rolled cache with Nitro cachedFunction",
+        "app/app/pages/index.vue:83-87 — synthetic Event cast is a nit",
+        "app/app/pages/pokemon/[name].vue:24 — static useFetch key nit"
+      ],
+      "rationale": "Approve-with-comments: everything that matters (correctness, a11y structure, SSR behavior) is right, and the remaining asks are a shared-folder move and small nits."
+    }
+  },
+  "overall": 4,
+  "findings": [
+    {
+      "severity": "medium",
+      "location": "app/app/composables/format.ts:1",
+      "issue": "humanize (and the label/dash/sprite helper family) is duplicated between client composables and server utils, so the two copies can drift",
+      "suggestion": "Move shared pure helpers into Nuxt 4's shared/utils/ directory, which is auto-imported on both the app and server sides"
+    },
+    {
+      "severity": "medium",
+      "location": "app/server/utils/pokeapi.ts:5",
+      "issue": "Hand-rolled TTL/promise-dedup cache; expired entries that are never revisited are never evicted (only failed fetches delete keys)",
+      "suggestion": "Use Nitro's cachedFunction/cachedEventHandler (auto-imported in server code) for TTL caching and in-flight dedup, which also evicts expired entries"
+    },
+    {
+      "severity": "low",
+      "location": "app/server/api/pokemon/[name].get.ts:39",
+      "issue": "Promise.all fan-out over up to ~180 move fetches per request with no concurrency limit (also species.get.ts:9, versionGroups.ts:4)",
+      "suggestion": "Chunk the fan-out or add a small concurrency limiter; at minimum comment that the TTL cache absorbs repeat load"
+    },
+    {
+      "severity": "low",
+      "location": "app/server/api/pokemon/[name].get.ts:76",
+      "issue": "Server handlers rely on implicit `any` for API payloads; shape contracts exist only as client-side interfaces",
+      "suggestion": "Define response/payload interfaces next to the producers so a payload change fails at the server boundary"
+    },
+    {
+      "severity": "low",
+      "location": "app/app/pages/team.vue:22",
+      "issue": "`<n> of 6` counts cookie entries while cards come from server-filtered members, so a stale team entry makes the count and list disagree",
+      "suggestion": "Drive the count from the fetched members (or reconcile the cookie when the server drops entries)"
+    },
+    {
+      "severity": "low",
+      "location": "app/app/composables/format.ts:18",
+      "issue": "usePageData's key is evaluated once at setup, so on in-place param navigation the asyncData key no longer matches the resource",
+      "suggestion": "Build the key reactively or rely on Nuxt's auto-generated keys from the URL"
+    },
+    {
+      "severity": "low",
+      "location": "app/app/pages/index.vue:83",
+      "issue": "onMounted fires a synthetic onSearch({target: el} as unknown as Event) to catch pre-hydration typing",
+      "suggestion": "Read input.value directly instead of faking an event; or drop the hack if pre-hydration input isn't a real scenario"
+    },
+    {
+      "severity": "low",
+      "location": "app/app/pages/index.vue:112",
+      "issue": "Selects set both :value on the <select> and :selected on every option (redundant)",
+      "suggestion": "Keep only the :value binding"
+    },
+    {
+      "severity": "low",
+      "location": "app/app/pages/index.vue:39",
+      "issue": "An out-of-range ?page is clamped for display but the URL keeps the bogus value",
+      "suggestion": "Optionally replace the URL with the clamped page for shareable/canonical links"
+    },
+    {
+      "severity": "low",
+      "location": "app/app/pages/pokemon/[name].vue:45",
+      "issue": "learnsets rows are bare [move, method, level] tuples serialized to the client, slightly cryptic at both ends",
+      "suggestion": "Use named fields ({move, method, level}) in the payload"
+    }
+  ],
+  "summary": "A clean, current-Nuxt-4 implementation that would merge after a comments round: correct SSR/cookie-backed team state, uniform 404 handling, small composable components, and no real correctness defects. The structural asks are moving duplicated client/server helpers into Nuxt 4's shared/ folder and replacing the hand-rolled TTL cache with Nitro's cachedFunction. Everything else is nits — loose `any` in server handlers, a frozen useFetch key, and minor count/URL inconsistencies."
+}

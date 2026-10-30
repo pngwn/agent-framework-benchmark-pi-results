@@ -1,0 +1,80 @@
+## Review — test quality
+
+The app under review contains **zero tests of its own**. `app/package.json:6-8` defines only `build` and `start`; the sole dev dependency is `vite` (`app/package.json:12`), and there is no test file, runner, or script anywhere under `app/` (confirmed by the measured facts: `tests.files: 0, cases: 0, assertions: 0`). The only safety net is the repo-root Playwright acceptance suite (`tests/run.mjs`, root `package.json:8`), which the agent didn't write and won't guard future refactors.
+
+What makes this a notable miss rather than a mere omission: a large fraction of this codebase is **pure, dependency-free logic that is trivially unit-testable** — `app/src/lib/format.ts:1-31` (humanize, dexNumber, flavor-text whitespace collapse, stat labels), `app/src/lib/data.ts:286-341` (`buildMoveTables`: method ordering, level-up sort with tie-break), `app/src/lib/data.ts:232-245` (`evolutionTree` recursion), and the pagination/URL math in `app/src/routes/(home).ts:26-31,74-79`. None of it has a single assertion. Node 24 ships `node:test`; Gracile itself publishes a "minimal setup with various test suites" starter, so this is an established pattern in the ecosystem, not an unsupported one.
+
+The absence of tests is not hypothetical risk — I found a latent bug that one error-path test would have caught immediately:
+
+- **`app/src/lib/api.ts:22`** references undefined `res` (`HTTP ${res.status}` inside a callback whose parameter is `response`). Every non-ok API response throws `ReferenceError` instead of the intended message. It's masked because `tryApi` (`api.ts:30-35`) swallows everything, and `app/src/routes/abilities/[name].ts:19` adds a belt-and-braces `.catch(() => null)`, so 404s still render — but the error handling layer is effectively broken and untestable-as-written. The exported `ApiError` class (`api.ts:4-8`) is dead code, never thrown.
+- **`app/src/lib/api.ts:25`** caches the promise *before* it settles, so a single transient API hiccup poisons that URL's cache with a permanently-rejected promise until process restart.
+
+Both live in the exact layer (data fetching/caching/error paths) the dimension cares about, and both are invisible to the acceptance suite as long as the API behaves.
+
+```json
+{
+  "dimension": "tests",
+  "criteria": {
+    "coverage_of_risk": {
+      "score": 1,
+      "evidence": [
+        "app/package.json:6-8 — no test script; only build/start defined",
+        "app/src/lib/api.ts:22 — undefined `res` in non-ok branch: a real bug no test exists to catch",
+        "app/src/lib/api.ts:25 — rejected promise cached permanently; caching/error path untested",
+        "app/src/routes/(home).ts:74-79 — pagination clamping and pageUrl param preservation untested",
+        "app/src/lib/data.ts:286-341 — buildMoveTables method ordering/sorting untested"
+      ],
+      "rationale": "No tests at all, and the untested code is precisely the risky kind: API error/cache handling, filtering, pagination, and sort ordering. A latent ReferenceError bug in the error path proves the gap is already costing."
+    },
+    "behaviour_not_implementation": {
+      "score": 1,
+      "evidence": [
+        "app/src — zero test files anywhere (find/grep for it(/describe(/test( returns no test code)"
+      ],
+      "rationale": "There are no tests to classify; per the rubric, no tests scores 1."
+    },
+    "regression_power": {
+      "score": 1,
+      "evidence": [
+        "app/src/lib/format.ts:1-31 — pure helpers (humanize, dexNumber, latestEnglishFlavor) with no assertions",
+        "app/src/lib/data.ts:247-270 — default-game selection via versionGroups.at(-1) after sort, unguarded",
+        "app/src/client/interactions.ts:90-125 — client-side sort (missing-last, numeric vs text, aria-sort) unguarded"
+      ],
+      "rationale": "Nothing the app owns can fail under any change; every regression guard currently lives in the acceptance suite the team won't keep running per-commit for app-internal refactors."
+    },
+    "signal_to_noise": {
+      "score": 3,
+      "evidence": [
+        "app/src — no tests, hence no noise"
+      ],
+      "rationale": "Per the rubric, no tests scores 3: no padding, but also nothing earning its keep."
+    }
+  },
+  "overall": 1,
+  "findings": [
+    { "severity": "high", "location": "app/src/lib/api.ts:22", "issue": "Non-ok responses throw `ReferenceError` on undefined `res` (parameter is `response`); intended error message and ApiError are never produced", "suggestion": "Fix to `response.status/statusText` and add a unit test driving a non-ok response through `api()`/`tryApi()`" },
+    { "severity": "high", "location": "app/src/lib/api.ts:25", "issue": "Promise cached before settling, so one transient API failure permanently poisons that URL until restart", "suggestion": "Evict from the cache on rejection (e.g. `request.catch(() => cache.delete(url))`) and test the retry-after-failure behaviour" },
+    { "severity": "high", "location": "app/package.json:6-12", "issue": "Zero tests and no test infrastructure despite ~500 LOC of pure, easily testable logic (format.ts, buildMoveTables, evolutionTree, pagination math)", "suggestion": "Add `node:test` (bundled with Node 24) unit tests for the lib/ pure functions; no new dependency needed" },
+    { "severity": "medium", "location": "app/src/routes/(home).ts:74-79", "issue": "Pagination clamping (page=0, NaN, beyond-total) and filter-param preservation in pageUrl are untested", "suggestion": "Extract page-clamp/pageUrl into lib and unit-test edge cases: out-of-range pages, empty filters, page param dropped" },
+    { "severity": "medium", "location": "app/src/lib/data.ts:286-341", "issue": "buildMoveTables fixed method order (level-up/machine/egg/tutor) and level-up tie-break rely on array order with no test", "suggestion": "Table-driven test over a small fixture asserting method order, level sort, and tie-break by move label" },
+    { "severity": "medium", "location": "app/src/lib/data.ts:247-270", "issue": "Default game = highest-order version group via at(-1) after sort; a sort-key change silently alters every Pokémon page's default table", "suggestion": "Unit test getMoveSectionData ordering/default with a two-group fixture" },
+    { "severity": "medium", "location": "app/src/client/interactions.ts:90-125", "issue": "Click-sort behaviour (missing-values-last in both directions, numeric vs text, aria-sort reset) has no fast guard", "suggestion": "Test cellValue/sort comparator against row fixtures with empty data-sort-value cells" },
+    { "severity": "medium", "location": "app/src/lib/data.ts:18-29", "issue": "Species list dedup, <10000 boundary filter and id sort are only covered end-to-end by the acceptance overlay", "suggestion": "Unit test getSpeciesList with mocked api responses including a >10000 id and a duplicate" },
+    { "severity": "low", "location": "app/src/lib/api.ts:4-8", "issue": "Exported ApiError class is dead code, never thrown", "suggestion": "Throw ApiError in the non-ok branch (after fixing `res`) and assert on its status in tests" },
+    { "severity": "low", "location": "app/src/routes/(home).ts:53-63", "issue": "Inline re-implementation of idFromUrl/isSpeciesId for the type filter; drift between the two copies is unguarded", "suggestion": "Reuse idFromUrl/isSpeciesId from api.ts and unit-test the shared filter helper" }
+  ],
+  "summary": "The app ships no tests of any kind — no runner, no script, no assertions — while its riskiest layers (API caching/error handling, filtering, pagination, sort ordering) go completely unguarded. Two latent bugs in exactly that untested layer (an undefined-variable ReferenceError in the error path and permanently-cached rejected promises) show the cost of the gap concretely. The saving grace is that the risky logic is mostly pure functions in lib/ that could be covered with Node's built-in test runner in an afternoon.",
+  "wroteTests": false,
+  "testCount": 0,
+  "valuableTests": [],
+  "lowValueTests": [],
+  "untested": [
+    { "area": "API error paths and response caching (app/src/lib/api.ts)", "risk": "high", "likelyBug": "Non-ok responses throw ReferenceError (res vs response) and rejected promises are cached forever; a refactor of tryApi/catch handling could turn working 404 pages into 500s, or transient API blips into permanent failures" },
+    { "area": "Pagination and filter URL state (app/src/routes/(home).ts)", "risk": "medium", "likelyBug": "Off-by-one in page clamping, filter params dropped from Previous/Next links, page param not reset when filters change" },
+    { "area": "Move-table construction: method ordering, level sort, default game selection (app/src/lib/data.ts:247-341)", "risk": "medium", "likelyBug": "Wrong default version group, methods listed out of the required fixed order, level-up rows unsorted or tie-break lost" },
+    { "area": "Client-side column sorting (app/src/client/interactions.ts)", "risk": "medium", "likelyBug": "Missing values no longer sort last, numeric columns compared as text (10 before 9), aria-sort not cleared on sibling headers" },
+    { "area": "Formatting helpers: humanize, dexNumber, flavor whitespace collapse, displayValue em dash (app/src/lib/format.ts)", "risk": "low", "likelyBug": "Name casing regressions (mr-mime → MR Mime), dex number padding to 3 digits, \\f not collapsed in flavor text" },
+    { "area": "Evolution tree recursion and species-list dedup/boundary (app/src/lib/data.ts)", "risk": "low", "likelyBug": "Alternate forms (id > 10000) leaking into lists, infinite recursion or dropped branches on malformed chains" }
+  ]
+}
+```

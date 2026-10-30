@@ -1,0 +1,162 @@
+I've read all the source under `app/`, the spec, and the data layout needed to trace the sprite/card pipeline. A few structural notes verified along the way: the app is idiomatic Nuxt 4 (default `app/` srcDir, `server/` routes, `shared/` with `#shared` alias, `useFetch` to its own `/api` endpoints as an anti-corruption layer, `runtimeConfig` for the API base). Here's my assessment.
+
+## Dimension: editability
+
+**Scenario walkthroughs (evidence-backed):**
+
+1. **Remove Abilities** — delete `app/app/pages/abilities/[name].vue` and `app/server/api/abilities/[name].get.ts`, strip the "Abilities" `PageSection` in `app/app/pages/pokemon/[name].vue:71`, drop `AbilityData` from `app/shared/types/pokedex.ts:73`. Optional cleanup: the `hidden` flag that abilities threads through the generic card pipeline (`app/server/utils/data.ts:76`, `app/app/components/CardList.vue:6`, `app/app/components/PokemonCard.vue:16`). No nav links, no other references. Genuinely close to "delete a route + one section".
+
+2. **Sprite bug** — the sprite URL is computed in exactly one place, `app/app/components/PokemonCard.vue:5`, and every card list (home via `index.vue:103`, moves/abilities/types via `CardList.vue:5`) renders `PokemonCard`. One fix covers everything.
+
+3. **Sort cards by name** — server-side, `speciesCards` already sorts in one place (`app/server/utils/data.ts:89`), covering the moves/abilities/type lists; but the home page bypasses `CardList` and inlines its own `card-grid` (`app/app/pages/index.vue:101`), so it needs a second edit (plus pagination interacts with sorting). Two places, findable.
+
+4. **Items section** — you'd copy the ~30-line moves page (`app/app/pages/moves/[name].vue`) and ~25-line endpoint (`app/server/api/moves/[name].get.ts`), add an `ItemData` type, plus a nav link. But the real machinery — `fetchResource`/`fetchList`/`mapLimit` (`app/server/utils/pokeapi.ts`), `englishName`/`shortEffect`/`speciesCards` (`app/server/utils/data.ts`), `PageSection`, `TypeBadge`, `NotFound`, `display`/`humanize` — is all reusable. Copy is thin-pattern, not logic duplication.
+
+5. **Data source change** — base URL: `app/nuxt.config.ts:16` (runtimeConfig), `app/package.json:8` (env mapping), `app/server/utils/pokeapi.ts:14-20` (server client), and `app/app/components/PokemonCard.vue:5` (client-side sprite URL construction — the API media scheme leaks into a component; the server DTOs carry sprite URLs everywhere else, e.g. `app/server/api/pokemon/[name].get.ts:33`). Caching rules (TTL, concurrency, in-flight dedupe) are centralized in `pokeapi.ts:9-13` — one place. So ~3 files know the base URL, 1 knows the cache.
+
+```json
+{
+  "dimension": "editability",
+  "criteria": {
+    "removability": {
+      "score": 4,
+      "evidence": [
+        "app/app/pages/abilities/[name].vue:1 — self-contained page; delete the directory",
+        "app/server/api/abilities/[name].get.ts:1 — matching endpoint; delete alongside",
+        "app/app/pages/pokemon/[name].vue:71 — the only inbound reference (Abilities section links)",
+        "app/shared/types/pokedex.ts:73 — AbilityData interface left dead unless manually pruned",
+        "app/server/utils/data.ts:76-79 — ability-specific `hidden` flag threaded through generic speciesCards/Card pipeline"
+      ],
+      "rationale": "Feature removal is essentially delete-two-files plus one page section; slightly short of clean because the 'Hidden ability' flag permeates the shared Card type, CardList, PokemonCard and data.ts, leaving cross-cutting dead code if you remove abilities fully."
+    },
+    "changeability": {
+      "score": 4,
+      "evidence": [
+        "app/app/components/PokemonCard.vue:5 — sprite URL in one component; every list (index.vue:103, CardList.vue:5) renders it, so one fix covers all",
+        "app/shared/utils/format.ts:9-21 — humanize/dexNumber/display shared by all pages",
+        "app/server/utils/data.ts:36-49 — latestFlavorText/shortEffect single implementations reused by pokemon, moves and abilities endpoints",
+        "app/app/pages/moves/[name].vue:9-11 — NotFound/error/data template triple duplicated in pokemon, abilities, types pages too",
+        "app/app/pages/index.vue:19,106 — client rebuilds type-label map and re-implements the typeRef fallback (cf. app/server/utils/data.ts:66)"
+      ],
+      "rationale": "Data-shaping and display rules each live in one obvious place, so most fixes land once; a couple of small render conventions (404/error handling, type-label fallback) are duplicated across pages and would need N small edits."
+    },
+    "coupling": {
+      "score": 4,
+      "evidence": [
+        "app/server/utils/pokeapi.ts:38-53 — all upstream fetching, caching, concurrency and 404 semantics behind one narrow client",
+        "app/shared/types/pokedex.ts:1-92 — single DTO contract shared by server endpoints and client pages; pages render DTOs and touch nothing internal",
+        "app/app/components/CardList.vue:1-10 — components take small props (Card[], TypeRef) with no reach into each other",
+        "app/app/components/PokemonCard.vue:5 — client component knows the API media path scheme directly (server otherwise hides the upstream URL behind DTOs, e.g. app/server/api/pokemon/[name].get.ts:33)",
+        "app/shared/types/pokedex.ts:44 — Card.hidden is one feature's concept inside the generic card type"
+      ],
+      "rationale": "Server and client are cleanly separated by the /api DTO layer with a shared type contract, and components are prop-driven; deductions for the ability-specific `hidden` flag in the generic Card type and for the sprite-media URL scheme leaking into a client component."
+    },
+    "abstraction_design": {
+      "score": 4,
+      "evidence": [
+        "app/server/utils/data.ts:70-92 — speciesCards captures the real cross-feature variation (alternate forms, pokemon→species mapping, dex order) once, reused by moves, abilities and types",
+        "app/app/components/PageSection.vue:5 — useId-generated aria-labelledby section; the spec's most repeated pattern is one component",
+        "app/app/components/MovesTable.vue:9,25 — column model + key-based sort generalized; showLevel is one justified flag rather than flag creep",
+        "app/app/components/CardList.vue:1-10 — nearly-right list abstraction, but it can't forward `types`, so app/app/pages/index.vue:101 inlines a copy of the card-grid markup",
+        "app/app/pages/moves/[name].vue — thin page + app/server/api/moves/[name].get.ts thin endpoint: an Items section reuses all helpers and copies ~55 lines of pattern"
+      ],
+      "rationale": "Abstractions track the app's genuine variation well (cards, sections, type refs, move tables) and stretch to a new section with mostly reuse; the one miss is CardList's missing types pass-through, which forced the home page to duplicate the list markup."
+    }
+  },
+  "overall": 4,
+  "findings": [
+    {
+      "severity": "medium",
+      "location": "app/app/pages/index.vue:101",
+      "issue": "Home page inlines its own `<ul class=\"card-grid\">` with PokemonCard instead of reusing CardList, because CardList can't forward the `types` prop",
+      "suggestion": "Add an optional per-card types mapping to CardList (or accept a typed card DTO) and delete the inline copy, so card lists exist once"
+    },
+    {
+      "severity": "medium",
+      "location": "app/app/components/PokemonCard.vue:5",
+      "issue": "Client component hardcodes the API media sprite scheme (`${apiBase}/media/sprites/pokemon/<id>.png`), duplicating data-source knowledge that the server layer otherwise owns",
+      "suggestion": "Include the sprite URL in the Card/IndexEntry DTOs produced server-side (as already done for artwork in app/server/api/pokemon/[name].get.ts:33) so the component just renders it"
+    },
+    {
+      "severity": "low",
+      "location": "app/app/pages/moves/[name].vue:9",
+      "issue": "The NotFound/error-state/data template triple is duplicated across pokemon, moves, abilities and types pages",
+      "suggestion": "Extract a small wrapper or composable handling 404→NotFound, other-error message, and the data branch"
+    },
+    {
+      "severity": "low",
+      "location": "app/shared/types/pokedex.ts:44",
+      "issue": "Ability-specific `hidden` flag is threaded through the generic Card type, CardList, PokemonCard and speciesCards",
+      "suggestion": "Keep the card DTO generic; pass the 'Hidden ability' note as slot/prop at the one call site that needs it"
+    },
+    {
+      "severity": "low",
+      "location": "app/app/pages/index.vue:106",
+      "issue": "Client re-implements the typeRef label fallback (`typeLabels.get(t) ?? humanize(t)`), duplicating app/server/utils/data.ts:66",
+      "suggestion": "Have /api/species return TypeRef objects (or move the fallback into #shared) so the mapping exists once"
+    },
+    {
+      "severity": "low",
+      "location": "app/app/error.vue:14",
+      "issue": "error.vue duplicates app.vue's header/nav/footer markup (incl. the legal footer text in two files)",
+      "suggestion": "Extract a layout component (AppHeader/AppFooter) used by both app.vue and error.vue"
+    },
+    {
+      "severity": "low",
+      "location": "app/server/utils/data.ts:52",
+      "issue": "typeLabels()/allTypes() re-fetch and re-map all type details on every request that calls them (species, pokemon, moves endpoints)",
+      "suggestion": "Cache the derived label map (or the TypeInfo list) alongside the raw-response cache in pokeapi.ts"
+    }
+  ],
+  "summary": "This is a well-seamed Nuxt 4 app: an anti-corruption /api layer with a shared DTO contract, one PokeAPI client owning fetching/caching, and small prop-driven components, so most fixes and removals land in one obvious place. The main editability gaps are the home page bypassing CardList (duplicated card-grid markup), the sprite URL scheme leaking into PokemonCard, and small render conventions (404 handling, type-label fallback) duplicated across pages. Extending to a new section is mostly reuse with only a thin pattern copy.",
+  "scenarios": [
+    {
+      "change": "Remove the Abilities pages and every link to them",
+      "files": [
+        "app/app/pages/abilities/[name].vue",
+        "app/server/api/abilities/[name].get.ts",
+        "app/app/pages/pokemon/[name].vue",
+        "app/shared/types/pokedex.ts",
+        "app/server/utils/data.ts",
+        "app/app/components/PokemonCard.vue"
+      ],
+      "difficulty": 4,
+      "notes": "Delete the page and endpoint, remove one PageSection and the AbilityData type; only cross-cutting residue is the `hidden` flag threaded through the card pipeline (Card, CardList, PokemonCard, speciesCards), which becomes dead code if cleaned properly"
+    },
+    {
+      "change": "Fix the sprite for species whose default Pokémon has a different name (e.g. Deoxys)",
+      "files": ["app/app/components/PokemonCard.vue"],
+      "difficulty": 5,
+      "notes": "Sprite URL is computed solely from the card id at PokemonCard.vue:5, and every list (home, moves, abilities, types) renders this one component, so a single fix covers all lists"
+    },
+    {
+      "change": "Add sorting by name to every list of Pokémon cards",
+      "files": ["app/server/utils/data.ts", "app/app/pages/index.vue"],
+      "difficulty": 4,
+      "notes": "speciesCards (data.ts:89) already centralizes ordering for the move/ability/type lists — one sort change; but the home page sorts/paginates independently in index.vue:82, so it needs its own edit, and sorting interacts with pagination"
+    },
+    {
+      "change": "Add an Items section (/items, /items/:name) shaped like Moves",
+      "files": [
+        "app/shared/types/pokedex.ts",
+        "app/server/api/items/[name].get.ts",
+        "app/app/pages/items/[name].vue",
+        "app/app/app.vue"
+      ],
+      "difficulty": 3,
+      "notes": "All machinery is reusable (pokeapi client, englishName/shortEffect/speciesCards, PageSection, TypeBadge, NotFound, format utils); you copy the ~55-line moves page+endpoint pattern into new files and add a nav link — thin copy, no logic duplication"
+    },
+    {
+      "change": "Change the API base URL and caching rules",
+      "files": [
+        "app/nuxt.config.ts",
+        "app/package.json",
+        "app/server/utils/pokeapi.ts",
+        "app/app/components/PokemonCard.vue"
+      ],
+      "difficulty": 3,
+      "notes": "Caching (TTL, concurrency, dedupe) lives only in pokeapi.ts — one place. The base URL is known in four spots: runtimeConfig default, the npm start env mapping, the server client, and the client-side sprite URL construction in PokemonCard, which is the one that would be missed"
+    }
+  ]
+}
+```

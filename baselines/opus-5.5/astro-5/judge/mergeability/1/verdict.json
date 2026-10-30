@@ -1,0 +1,109 @@
+{
+  "dimension": "mergeability",
+  "criteria": {
+    "idiomatic": {
+      "score": 4,
+      "evidence": [
+        "app/package.json:10 — astro ^7.4.2 / @astrojs/node ^11, the current stable majors",
+        "app/astro.config.mjs:6-7 — output 'server' + node standalone adapter, exactly the documented SSR setup for 'npm start' on $PORT",
+        "app/astro.config.mjs:8 — session: false matches the 7.4 SessionSchema comment ('opts out… tree-shaken from the SSR bundle')",
+        "app/src/pages/pokemon/[name].astro:36 — 404s via Astro.response.status, the documented pattern for server output",
+        "app/src/components/EvolutionNode.astro:25 — recursive rendering with <Astro.self>, the framework's own idiom for trees",
+        "app/src/lib/api.ts:5-63 — hand-rolled stale-while-revalidate cache and semaphore, where Astro 7 stabilised route caching (routeRules { swr } + cache provider) that would cover this declaratively",
+        "app/astro.config.mjs:9 — security.checkOrigin: false diverges from the security default with no POST endpoints to justify it"
+      ],
+      "rationale": "Reads like current Astro 7 docs — frontmatter data loading, typed Props, processed TS <script> modules, proper 404s — with one dated choice: a hand-built SWR data cache where the framework now ships stable route caching."
+    },
+    "correctness_risks": {
+      "score": 4,
+      "evidence": [
+        "app/src/lib/api.ts:30-32 — 404 → null with body cancellation, so every route can render a clean Not found",
+        "app/src/pages/index.astro:90-113 — fetch race guarded by a request counter, DOMParser swap with location.assign fallback, popstate resync of form state",
+        "app/src/scripts/sortable.ts:14-19 — missing values (data-sort='') sort last in both directions, as the spec requires",
+        "app/src/lib/api.ts:62-63 — cache is bounded (5000 entries) with FIFO eviction",
+        "app/src/lib/api.ts:34 — a non-404 upstream failure throws straight out of the page; there is no 500 page or catch, so an API blip renders Astro's default error page",
+        "app/src/pages/index.astro:87 — non-null assertion on a DOM lookup in a client script would throw if the form markup ever changes",
+        "app/src/lib/api.ts:50-56 — the SWR refresh path re-sets the cache entry without the MAX_ENTRIES eviction check used on the initial insert"
+      ],
+      "rationale": "Careful, defensive work — races, stale caches, missing values and 404s are all handled — with only minor gaps around upstream failure handling and one unguarded DOM lookup."
+    },
+    "global_abstractions": {
+      "score": 4,
+      "evidence": [
+        "app/src/lib/api.ts:25-78 — transport concerns (base URL, fetch, cache, concurrency) fully isolated from domain logic",
+        "app/src/lib/pokedex.ts:1-141 — domain helpers (humanize, localized names, dex rules, form exclusion) kept out of pages; no 'utils' dumping ground",
+        "app/src/lib/pokedex.ts:70-111 — getSpeciesIndex is the one fat shared module: five pages rebuild the 1025-species index on every request, only the HTTP responses being cached",
+        "app/src/lib/api.ts:78 — mapAll is a zero-value wrapper over Promise.all that five call sites depend on for no added semantics",
+        "app/src/components/Section.astro:1-11 — thin, single-purpose components (Section, TypeBadge, CardGrid) reused consistently across pages"
+      ],
+      "rationale": "Boundaries are clean and the two lib modules earn their keep; the only cross-cutting concerns are the per-request index rebuild and the vestigial mapAll."
+    },
+    "readability": {
+      "score": 4,
+      "evidence": [
+        "app/src/lib/api.ts:1-2, 11-12 — comments explain the why (runtime-only cache, semaphore purpose) rather than the what",
+        "app/src/lib/pokedex.ts:9-10 — MAX_DEFAULT_ID documents the alternate-form rule from the spec next to the constant",
+        "app/src/pages/pokemon/[name].astro:14-137 — frontmatter is one 120-line block building a large untyped `page` object; a new teammate needs a while to trace it",
+        "app/src/layouts/Layout.astro:8-18 — one layout owns the title rule, landmarks and shell markup, consistently used by all nine pages",
+        "app/src/scripts/sortable.ts:1-3 — the header comment states the data-sort contract and the delegation reason up front"
+      ],
+      "rationale": "Consistent organisation, good naming, and comments that capture intent; the Pokemon page's monolithic frontmatter and `any` types on its page object are the rough spots."
+    },
+    "review_cost": {
+      "score": 4,
+      "evidence": [
+        "app/src/lib/pokedex.ts:70-111 — reviewer would ask to memoize the derived index or move to Astro's stable route cache",
+        "app/astro.config.mjs:9 — reviewer would ask why the CSRF default is disabled in a GET-only app",
+        "app/src/lib/api.ts:78 — one-line nit to inline or delete mapAll",
+        "app/src/pages/pokemon/[name].astro:36-137 — reviewer would suggest a type for the `page` object and maybe splitting data prep from the template"
+      ],
+      "rationale": "Nothing structural to rework; this is a nits-and-questions round — memoisation, config justifications, and a couple of small deletions — before an approve."
+    }
+  },
+  "overall": 4,
+  "findings": [
+    {
+      "severity": "medium",
+      "location": "app/src/lib/pokedex.ts:70",
+      "issue": "getSpeciesIndex rebuilds the full 1025-species index (species list, 18 type records, 9 generation records, type-slot mapping) on every request across five pages; only the raw HTTP responses are cached, the derived work is not.",
+      "suggestion": "Memoize the derived SpeciesIndex on a short TTL alongside the HTTP cache, or use Astro 7's now-stable route caching (routeRules with swr + a cache provider) so repeat requests skip the derivation."
+    },
+    {
+      "severity": "low",
+      "location": "app/astro.config.mjs:9",
+      "issue": "security.checkOrigin: false disables Astro's CSRF protection, but the app has no POST endpoints (the one form uses method='get' and is preventDefaulted), so the opt-out buys nothing and weakens the default if endpoints are added later.",
+      "suggestion": "Drop the security block and keep the default true, or comment why it must be off."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/lib/api.ts:78",
+      "issue": "mapAll(items, fn) is Promise.all(items.map(fn)) with zero added semantics; five call sites depend on it for no benefit and it obscures that the real concurrency limit lives in the semaphore.",
+      "suggestion": "Delete it and call Promise.all directly at the call sites."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/lib/api.ts:34",
+      "issue": "Non-404 upstream failures throw out of every page handler, so an API blip surfaces Astro's default error page with no project-level handling or custom 500.",
+      "suggestion": "Catch upstream errors at the route level (or add a 500 page / retry for transient statuses) and log with Astro.logger."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/pages/index.astro:87",
+      "issue": "Non-null DOM assertion on the form lookup in the client script; a template refactor would turn this into a runtime TypeError instead of a graceful no-op.",
+      "suggestion": "Use optional chaining plus an early return, as the Pokemon page already does for its select at pages/pokemon/[name].astro:221."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/lib/api.ts:52",
+      "issue": "The stale-while-revalidate refresh path re-inserts the cache entry without the MAX_ENTRIES eviction check applied on first insert, so the bound can drift on the refresh path.",
+      "suggestion": "Route the refresh write through the same eviction logic used at line 63."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/pages/pokemon/[name].astro:58",
+      "issue": "Each Pokemon page request fans out over every version-group record and every move record for the selected game (potentially 100+ upstream calls per request), relying on the semaphore and 60s cache to keep it sane.",
+      "suggestion": "Cache the per-game derived move tables (or use route-level swr) so a burst of traffic to one Pokemon page doesn't stampede the API."
+    }
+  ],
+  "summary": "This is a clean, current-Astro-7 SSR app I'd merge after a nits round: boundaries between transport and domain logic are clear, 404s, races, caches and missing-value sorting are all handled defensively, and the only structural ask is memoising the per-request species-index derivation. The hand-rolled stale-while-revalidate data cache works but overlaps with Astro 7's newly stable route caching, and a couple of config choices (checkOrigin: false) and the mapAll wrapper would draw review questions. No correctness bugs serious enough to block."
+}

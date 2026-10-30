@@ -1,0 +1,159 @@
+# Review: Editability of the Pokédex app (`app/`)
+
+The app is Framework Mode React Router on the current stable line (`react-router@^8.5.1`, `@react-router/dev`, `app/routes.ts` — verified against the 8.5.1 release notes). Data access is centralized in one server-only module, formatting in one pure module, and UI in two shared components. The main editability liabilities are: pervasive `any` typing that discards the framework's generated `Route.*` types, a duplicated card-building loop in the ability route, two independent sprite-resolution paths, and a `notFound` sentinel pattern repeated in every route.
+
+## Scenario walkthroughs
+
+**1. Remove the Abilities pages** — Delete `app/app/routes/ability.tsx` and one line in `app/app/routes.ts:5`. But the feature also owns: the Abilities section and its loader block in `app/app/routes/pokemon.tsx:258`–`265` and `381`–`388`, the `hidden` flag rendered by `app/app/components/ui.tsx:69`–`71`, and the `hidden?: boolean` field on the shared `SpeciesCard` type (`app/app/lib/data.server.ts:86`). Five files, all small and greppable via `/abilities`/`is_hidden`. **Difficulty 3.**
+
+**2. Fix the wrong-sprite bug** — Card sprites come from two independent paths: the species-ID URL pattern in `app/app/lib/data.server.ts:99` (feeds the ability, move and type lists via `getSpeciesCardMap`/`cardsFromRefs`), and the `front_default` override fetched per-Pokémon in `app/app/routes/home.tsx:90`. A fix in `data.server.ts` covers three lists, but a fixer must discover that home has its own path — one fix does *not* automatically cover every list, and the two paths can drift (they already disagree in behavior: only home consults the Pokémon record). **Difficulty 3.**
+
+**3. Sort every card list by name** — Ordering by dex number is decided in three places: `app/app/lib/data.server.ts:117` (`cardsFromRefs`, serves move/type), `app/app/routes/ability.tsx:39`, and the implicit species-index order that home paginates over (`app/app/routes/home.tsx:86`–`89`). Sorting inside `PokemonCardList` (`app/app/components/ui.tsx:74`) would be one edit but would only re-sort the current 48-item page on home. **Difficulty 3.**
+
+**4. Add an Items section shaped like Moves** — High reuse of the seams: `getResource`/`getList`/`cardsFromRefs` (`data.server.ts:54`, `:47`, `:106`), `displayName`/`orDash`/`titleFor` (`format.ts`), `PokemonCardList`/`TypeBadge` (`ui.tsx`), and the `NotFound` component. What gets copied is the per-route glue: the identical `meta` function, the `notFound` guard, and section markup (compare `move.tsx:17`–`55`). New `routes/item.tsx` + two lines in `routes.ts`. **Difficulty 4.**
+
+**5. Change the API base URL / caching rules** — `API_BASE_URL`, the `absoluteUrl` resolver, the `/api/v2` path prefix, the media-sprite pattern, and the promise cache all live in `app/app/lib/data.server.ts:7`–`99`. Nothing else in `app/` knows the origin (grep confirms). The `.server.ts` naming also guarantees the data layer can't leak into client code. **Difficulty 5.**
+
+## Criteria
+
+**removability — 3.** The ability *route* is self-contained, but removing the feature ripples into four more files (`pokemon.tsx:258,381`, `ui.tsx:69`, `data.server.ts:86`) because one card variant flag lives in shared code. A pure "delete route + nav link" removal isn't available for any feature that touches the shared card abstraction.
+
+**changeability — 3.** Formatting and naming fixes are exemplary — one place each (`format.ts:5,24,37`). But card-related rules are duplicated: card construction (`ability.tsx:22`–`31` vs `cardsFromRefs` at `data.server.ts:106`–`118`, differing only in the `hidden` flag), sprite resolution (`data.server.ts:99` vs `home.tsx:90`), and sort order (`data.server.ts:117`, `ability.tsx:39`). The N-times-fix risk is real but localized to two files each.
+
+**coupling — 4.** Server/client separation is enforced by the `.server.ts` convention (`data.server.ts`) and the framework's loader boundary; UI components (`ui.tsx:32,60,74`) consume plain card objects, not API payloads; shared state is explicit loader data. The deduction: `any` erases every interface boundary — `PokemonCardList` takes `cards: any[]` (`ui.tsx:63`) even though `SpeciesCard` exists, and all loaders/meta are `({ loaderData }: any)` (`home.tsx:21,110`, `pokemon.tsx:142,292`), so payload-shape changes fail silently rather than at compile time.
+
+**abstraction_design — 4.** The helpers are designed around the app's real variation: data-driven tables (`COLUMNS` `pokemon.tsx:70`, `FIXED_METHODS` `:31`, `RELATIONS` `type.tsx:16`), a cached generic fetch layer, and one card component stretching across four lists with a single `showTypes` flag. The miss: the ability route's hidden-ability variation was copy-pasted into its loader instead of extending `cardsFromRefs`, and `SpeciesCard.hidden` (`data.server.ts:86`) is a one-consumer flag tacked onto a shared type — mild boolean-flag creep.
+
+**overall — 4.** Most changes land in one or two obvious, greppable files; the duplicated card/sprite/sort logic and the discarded type generation are the traps a maintainer will actually hit.
+
+```json
+{
+  "dimension": "editability",
+  "criteria": {
+    "removability": {
+      "score": 3,
+      "evidence": [
+        "app/app/routes/ability.tsx:1 — the feature's route file, cleanly deletable",
+        "app/app/routes.ts:5 — one route-config line to remove",
+        "app/app/routes/pokemon.tsx:258 — abilities loader block must also go",
+        "app/app/routes/pokemon.tsx:381 — Abilities section with the only /abilities links in the app",
+        "app/app/components/ui.tsx:69 — 'Hidden ability' card flag exists only for this feature and lingers if the route is deleted",
+        "app/app/lib/data.server.ts:86 — SpeciesCard.hidden field is ability-only"
+      ],
+      "rationale": "Deleting the route file is trivial, but the feature leaks a flag into the shared card type and component, so removal means small edits across five files instead of two."
+    },
+    "changeability": {
+      "score": 3,
+      "evidence": [
+        "app/app/lib/format.ts:5 — humanize, englishName, dexNumber, orDash all single-source; naming/format fixes land in one file",
+        "app/app/lib/data.server.ts:99 — sprite from species-ID pattern feeds ability/move/type cards",
+        "app/app/routes/home.tsx:90 — independent front_default sprite override; a sprite bug has two code paths to find",
+        "app/app/routes/ability.tsx:22 — card dedup/form-filter loop duplicates cardsFromRefs (data.server.ts:106)",
+        "app/app/lib/data.server.ts:117 and app/app/routes/ability.tsx:39 — by-dex sort implemented twice"
+      ],
+      "rationale": "Formatting and display-name rules are exemplary single-point changes, but card construction, sprite resolution and sort order each exist in two or three places, so those fixes land N times."
+    },
+    "coupling": {
+      "score": 4,
+      "evidence": [
+        "app/app/lib/data.server.ts:1 — all API knowledge isolated in a .server.ts module the bundler keeps out of the client",
+        "app/app/components/ui.tsx:60 — PokemonCard consumes a plain card object, not API payloads",
+        "app/app/routes/home.tsx:21 — loader typed ({ request }: any) instead of Route.LoaderArgs from ./+types",
+        "app/app/components/ui.tsx:63 — cards: any[] bypasses the existing SpeciesCard interface",
+        "app/app/routes/pokemon.tsx:142,292 — loader and component both any-typed; payload changes are not compiler-caught"
+      ],
+      "rationale": "Server/client split is clean and UI is decoupled from the API, but pervasive any typing erases the interface boundaries between loaders and components, which is where coupling bites during edits."
+    },
+    "abstraction_design": {
+      "score": 4,
+      "evidence": [
+        "app/app/lib/data.server.ts:13 — cached() + getResource/getList/getByUrl stretch to any future resource (e.g. items) with no changes",
+        "app/app/routes/pokemon.tsx:70 — COLUMNS array drives the sortable table; adding a column is data, not code",
+        "app/app/routes/pokemon.tsx:31 — FIXED_METHODS + alphabetical fallback handles method-order variation declaratively",
+        "app/app/routes/type.tsx:16 — RELATIONS array declaratively maps the six damage-relation rows",
+        "app/app/routes/ability.tsx:22 — hidden-ability variation copy-pasted instead of parameterizing cardsFromRefs; SpeciesCard.hidden is a one-consumer flag (data.server.ts:86)"
+      ],
+      "rationale": "The data/format/UI helpers genuinely stretch to similar cases and the tables are data-driven; the one real miss is the ability route duplicating the card pipeline rather than extending it."
+    }
+  },
+  "overall": 4,
+  "findings": [
+    {
+      "severity": "medium",
+      "location": "app/app/routes/ability.tsx:22",
+      "issue": "Card-building loop (refId, id>10000 filter, dedup, sort) duplicates cardsFromRefs in app/app/lib/data.server.ts:106, differing only in the hidden flag — future card rules (sprite fix, new exclusion, sorting) must be applied in both.",
+      "suggestion": "Extend cardsFromRefs with an optional per-entry transform or a cardsFromAbility wrapper in data.server.ts so all card lists flow through one pipeline."
+    },
+    {
+      "severity": "medium",
+      "location": "app/app/routes/home.tsx:21",
+      "issue": "Every loader, meta and component is typed with any (home.tsx:21,110; pokemon.tsx:142,292; move.tsx:22; type.tsx:26; ability.tsx:15), discarding the framework's generated Route.LoaderArgs/ComponentProps types — changing a loader payload shape compiles cleanly and breaks silently.",
+      "suggestion": "Use `import type { Route } from \"./+types/home\"` and type loader args and component props, plus SpeciesCard for the card arrays (ui.tsx:63)."
+    },
+    {
+      "severity": "medium",
+      "location": "app/app/lib/data.server.ts:99",
+      "issue": "Card sprite resolution has two independent paths: the species-ID URL pattern here and the front_default override in app/app/routes/home.tsx:90; a sprite bug fix in one path leaves the other stale.",
+      "suggestion": "Resolve card sprites in one place (ideally in getSpeciesCardMap or a shared enrichCard helper) and have home consume it like the other lists."
+    },
+    {
+      "severity": "low",
+      "location": "app/app/lib/data.server.ts:117",
+      "issue": "Dex-number ordering of card lists is implemented here, in ability.tsx:39, and implicitly via the species index on home — a global order change (e.g., sort by name) needs three coordinated edits.",
+      "suggestion": "Centralize ordering in the card pipeline (or sort once inside PokemonCardList) so all four lists share it."
+    },
+    {
+      "severity": "low",
+      "location": "app/app/routes/move.tsx:27",
+      "issue": "The { notFound: true } sentinel + meta guard + component guard pattern is repeated in four routes (move.tsx:27,36,55; type.tsx:31,51,60; pokemon.tsx:144,270,295; ability.tsx:20,37,45) instead of throwing a 404 Response handled by an ErrorBoundary.",
+      "suggestion": "Throw new Response(null, { status: 404 }) from loaders and render the 404 UI in the root ErrorBoundary (app/app/root.tsx:92); this also gives the encouraged real 404 status."
+    },
+    {
+      "severity": "low",
+      "location": "app/app/routes/move.tsx:17",
+      "issue": "Identical meta functions are duplicated across four route modules; only the titleFor helper (app/app/lib/format.ts:37) is shared.",
+      "suggestion": "Minor, but a shared resourceMeta(title) helper in lib/format.ts would make title changes one-edit."
+    },
+    {
+      "severity": "low",
+      "location": "app/app/routes/pokemon.tsx:142",
+      "issue": "The loader is ~150 lines of inline data shaping (stats, abilities, evolution, games, move tables) in one function; nothing in it is extractable for an Items-shaped page that needs the same move-table shaping.",
+      "suggestion": "Extract move/version-group shaping into lib (e.g., buildMoveTables) so both Pokémon and future detail pages reuse it."
+    }
+  ],
+  "summary": "This is a well-organized Framework Mode app: one server-only data module, one formatting module, and shared UI components mean most changes are findable and small, and the data-driven tables indicate good instincts. The editability risks are concrete and fixable: card construction, sprite resolution and card ordering are each duplicated in 2–3 places, and the pervasive any typing throws away the compiler help the framework's generated route types would give during exactly the kind of edits this app will need. I'd approve it after the card-pipeline dedup and typed loaders."
+  ,
+  "scenarios": [
+    {
+      "change": "Remove the Abilities pages and all links to them",
+      "files": ["app/app/routes/ability.tsx", "app/app/routes.ts", "app/app/routes/pokemon.tsx", "app/app/components/ui.tsx", "app/app/lib/data.server.ts"],
+      "difficulty": 3,
+      "notes": "Route file and config line are trivial; the feature also owns the Abilities section + loader block in pokemon.tsx:258/381 and the hidden-ability flag in ui.tsx:69 and data.server.ts:86, so removal is a five-file scattered (but greppable) edit."
+    },
+    {
+      "change": "Fix wrong sprites on cards for species whose default Pokémon differs (e.g. Deoxys)",
+      "files": ["app/app/lib/data.server.ts", "app/app/routes/home.tsx"],
+      "difficulty": 3,
+      "notes": "The pattern in data.server.ts:99 covers the ability/move/type lists, but home.tsx:90 resolves sprites independently from the Pokémon record — a fixer must find and reconcile both paths before one fix covers every list."
+    },
+    {
+      "change": "Add sorting by name to every list of Pokémon cards",
+      "files": ["app/app/lib/data.server.ts", "app/app/routes/ability.tsx", "app/app/routes/home.tsx"],
+      "difficulty": 3,
+      "notes": "Order is decided in cardsFromRefs (data.server.ts:117), the ability loader (ability.tsx:39) and home's species-index pagination; sorting in the shared PokemonCardList is one edit but would only re-sort the visible page on home."
+    },
+    {
+      "change": "Add an Items section (/items, /items/:name) shaped like Moves",
+      "files": ["app/app/routes.ts", "app/app/lib/data.server.ts", "app/app/lib/format.ts", "app/app/components/ui.tsx"],
+      "difficulty": 4,
+      "notes": "The data layer (getResource/getList/cardsFromRefs), formatting helpers and card components are directly reusable; only the per-route glue (meta, notFound guard, section markup — duplicated in every existing route) must be written fresh."
+    },
+    {
+      "change": "Change the API base URL and caching rules",
+      "files": ["app/app/lib/data.server.ts"],
+      "difficulty": 5,
+      "notes": "API_BASE_URL, absoluteUrl, the /api/v2 prefix, the media-sprite pattern and the promise cache are all confined to data.server.ts:7-99; nothing else in app/ knows the origin."
+    }
+  ]
+}
+```

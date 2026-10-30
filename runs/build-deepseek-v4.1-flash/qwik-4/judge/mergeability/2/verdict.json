@@ -1,0 +1,120 @@
+{
+  "dimension": "mergeability",
+  "criteria": {
+    "idiomatic": {
+      "score": 4,
+      "evidence": [
+        "app/src/routes/index.tsx:11-17 — routeLoader$ + signals/useComputed$ for the home page, current recommended primitives",
+        "app/src/routes/pokemon/[name]/index.tsx:425 — DocumentHead as a function with resolveValue, the documented head pattern",
+        "app/src/entry.ssr.tsx:13-17 — lang=\"en\" via containerAttributes, the documented way to set <html> attributes in Qwik City",
+        "app/src/routes/pokemon/[name]/index.tsx:417 — window.location.assign instead of useNavigate: full reload where SPA navigation exists",
+        "app/src/routes/index.tsx:64 — hand-rolled window.history.replaceState for query params (defensible: no framework equivalent that skips loader re-run)"
+      ],
+      "rationale": "Data loading, routing and state all use the current recommended Qwik City primitives on the current stable version (1.20.3); only URL updates bypass the router, one of them unnecessarily."
+    },
+    "correctness_risks": {
+      "score": 3,
+      "evidence": [
+        "app/src/lib/data.ts:74-75 — catch{} swallows fetch errors into null, so transient API failures render 'Not found' pages",
+        "app/src/lib/data.ts:66-79 — failed/404 responses are cached permanently in store.promises; a bad first fetch bricks the catalogue until restart",
+        "app/src/lib/data.ts:78 — cache keyed by raw user-supplied URLs with no eviction: unbounded growth vector",
+        "app/src/lib/data.ts:238-241 — cold start fires ~1075 fetches (1025 pokemon + generations + types) before the first home response",
+        "app/src/routes/[...catchall]/index.tsx:5 — not-found responds with HTTP 200 (spec says 404 is optional, but the framework supports it)"
+      ],
+      "rationale": "One serious fragility (swallowed errors plus permanent caching of failures) and a couple of minor ones (unbounded cache, 200-for-404); no races, leaks, or SSR/CSR mismatches."
+    },
+    "global_abstractions": {
+      "score": 3,
+      "evidence": [
+        "app/src/lib/data.ts:46-50 — hidden global state on globalThis (__pokedexStore) shared by every route",
+        "app/src/lib/data.ts — single 300-line module mixing server data access, cache, humanization, formatting and query parsing",
+        "app/src/components/ui.tsx:2 — client component imports from that module, dragging server fetch code into the browser graph",
+        "app/src/components/ui.tsx:14 — PokemonCard renders its own <li>, coupling the component to a list context (minor)"
+      ],
+      "rationale": "Locally the module is reasonable and helpers like speciesCardsFromRefs are reused well, but the server/client boundary leak and the single god data module will need untangling as the app grows."
+    },
+    "readability": {
+      "score": 4,
+      "evidence": [
+        "app/src/routes/ — one file per spec page, structure mirrors the domain; helpers named for what they do (humanize, latestEnglishFlavor, speciesCardsFromRefs)",
+        "app/src/lib/data.ts:1-6 — the only real comment, but it explains the caching intent well",
+        "app/src/lib/data.ts:95,101 and throughout — pervasive `any` for API records, so field typos fail silently and readers learn the schema from usage"
+      ],
+      "rationale": "A new teammate finds their way in minutes: clean naming, small functions, consistent style. The universal `any` typing is the one rough spot."
+    },
+    "review_cost": {
+      "score": 3,
+      "evidence": [
+        "app/src/routes/pokemon/[name]/index.tsx:417 — must switch to useNavigate before merge",
+        "app/src/lib/data.ts:66-79 — must stop caching failures and distinguish 404 from transient error",
+        "app/src/lib/data.ts vs app/src/components/ui.tsx:2 — must split client-safe helpers from server data access",
+        "app/src/routes/index.tsx:12-17 — needs discussion on shipping the full 1025-entry catalogue per request and per SPA pagination"
+      ],
+      "rationale": "Approvable after one round: split the data module, fix error/cache semantics, and use the router's navigation API. No architectural rework needed."
+    }
+  },
+  "overall": 3,
+  "findings": [
+    {
+      "severity": "high",
+      "location": "app/src/lib/data.ts:66-79",
+      "issue": "fetchJson caches every result — including nulls from !response.ok and caught errors — forever in a globalThis promise map, so a transient API failure permanently poisons the home catalogue or any resource page until process restart",
+      "suggestion": "Only cache successful responses; on failure remove the promise from the map (retry-in-flight semantics) and surface transient errors differently from genuine 404s"
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/lib/data.ts:74-75",
+      "issue": "All fetch errors are swallowed to null, so an API outage renders 'Not found' pages instead of an error state",
+      "suggestion": "Let non-404 errors reject (or return a tagged error) and render a server error page; reserve null for real 404s"
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/lib/data.ts:78",
+      "issue": "In-memory cache keyed by raw user-supplied URLs (/pokemon/<anything>) with no eviction — unbounded memory growth under URL fuzzing",
+      "suggestion": "Only cache known-resource URLs (ids from the species index), or add an LRU bound; never cache misses keyed by user input"
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/routes/pokemon/[name]/index.tsx:417",
+      "issue": "Game select navigates with window.location.assign, forcing a full document reload and defeating Qwik's SPA navigation and resumability",
+      "suggestion": "Use useNavigate() to set the path with the ?game= query param; keep the #moves hash"
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/routes/index.tsx:12-17",
+      "issue": "The routeLoader returns the full 1,025-entry catalogue, so it is serialized into every home HTML response and re-fetched from the server on every pagination SPA navigation",
+      "suggestion": "Acceptable for the first paint, but consider a lighter loader for query-only SPA navigations or paginated server filtering with client-side search on the current page's data"
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/components/ui.tsx:2",
+      "issue": "Client components import humanize/displayDex from the same module that holds server-only fetch code and the globalThis store (data.ts:48-50 side effects execute in the browser)",
+      "suggestion": "Split pure formatters (humanize, displayDex, formatValue, latestEnglishFlavor) into a client-safe module; keep fetchJson and the store in a server-only module"
+    },
+    {
+      "severity": "low",
+      "location": "app/src/lib/data.ts:95",
+      "issue": "API records are typed `any` throughout, so typos like flavor_text_entries fail silently at runtime",
+      "suggestion": "Define minimal interfaces for the handful of PokeAPI records actually consumed; strict mode is on, so this is cheap"
+    },
+    {
+      "severity": "low",
+      "location": "app/src/routes/[...catchall]/index.tsx:5",
+      "issue": "Not-found routes respond with HTTP 200; framework supports fail(404) in routeLoader$ or the qwik-city not-found flow",
+      "suggestion": "Throw a 404 error from the loaders when the resource is missing so the server responds with a real status code"
+    },
+    {
+      "severity": "low",
+      "location": "app/src/lib/data.ts:238-241",
+      "issue": "Cold start fetches ~1,075 URLs (1025 pokemon records + generations + types) before the first home response, a multi-second first-byte latency",
+      "suggestion": "Reduce per-entry pokemon fetches to just type/sprite needs, or warm the cache at server start instead of on first request"
+    },
+    {
+      "severity": "low",
+      "location": "app/src/routes/index.tsx:64",
+      "issue": "Three different URL-mutation mechanisms across the app (window.history.replaceState here, window.location.assign on the pokemon page, plain <a> links elsewhere)",
+      "suggestion": "Standardise on useNavigate()/Link; keep raw history.replaceState only where the router genuinely can't do it, with a comment saying why"
+    }
+  ],
+  "summary": "A well-organised, current-version Qwik City app that uses routeLoader$, signals and DocumentHead the way the docs recommend, with clean readable routes that map one-to-one to the spec. The merge blockers are in the data layer: swallowed fetch errors that are cached forever, an unbounded user-keyed cache, and a server/client module boundary leak. One round of review changes — cache/error fixes, a data-module split, and useNavigate for the game picker — gets this to approvable."
+}

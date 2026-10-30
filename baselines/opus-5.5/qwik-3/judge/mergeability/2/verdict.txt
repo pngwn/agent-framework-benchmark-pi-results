@@ -1,0 +1,131 @@
+## Review
+
+**Framework version check**: The app pins `@builder.io/qwik`/`@builder.io/qwik-city` to `^1.20.3` (`app/package.json:11-12`). As of today (2026-10-30) `1.20.3` is the latest **stable** release (Qwik 2.0 is still at `rc`). So the app targets the current stable framework and its docs.
+
+**What's good**
+
+- Data loading is exactly the recommended shape: every page uses `routeLoader$` (`app/src/routes/index.tsx:25`, `app/src/routes/pokemon/[name]/index.tsx:22`, `types`, `moves`, `abilities`), with no client-side fetching of API data, no hand-rolled routing. Server-only code (`process.env.API_BASE_URL`) stays inside loader bodies; components only `import type` from the server module (`app/src/components/pokemon-cards.tsx:3`), keeping the server/client boundary clean.
+- 404 handling is idiomatic and complete: `status(404)` inside each loader (`app/src/routes/moves/[name]/index.tsx:8`) plus a `[...catchall]` route that sets the status (`app/src/routes/[...catchall]/index.tsx:6`), and `head` uses `resolveValue` to title even the not-found case (`app/src/routes/pokemon/[name]/index.tsx:224`).
+- URL-as-state is done thoughtfully: filters serialize via `listUrl` (`app/src/routes/index.tsx:18-24`), page clamping happens server-side (`index.tsx:40-41`), typing uses `replaceState` while select changes push history (`index.tsx:84`), and the `method="get"` form doubles as a no-JS fallback.
+- The shared pieces are small and earn their keep: `Section` (`app/src/components/section.tsx:11`), `MovesTable` with `useComputed$` sorting and missing-values-last logic (`app/src/components/moves-table.tsx:37-52`), `cardsForPokemon` reused by three routes (`app/src/lib/api.ts:103`).
+- Comments explain *why* (cache TTL rationale at `app/src/lib/api.ts:3-4`, search-sync rationale at `app/src/routes/index.tsx:67`, `no-store` rationale at `app/src/routes/layout.tsx:5-7`).
+
+**What I'd ask about**
+
+- The API layer is untyped: `api<T = any>` (`app/src/lib/api.ts:14`) plus 13 `any`s in loaders (`app/src/routes/pokemon/[name]/index.tsx:38,103,120-126`). A typo in `flavor_text_entries` or `version_group_details` silently renders `—` and tests only catch the ones they check. This is my main ask.
+- The Pokémon loader fans out ~1 fetch per learnable move per version group plus every version group and all types (`app/src/routes/pokemon/[name]/index.tsx:54-61, 90-95`), and a single non-404 failure bubbles up as an opaque 500 — there's no per-fetch resilience and no error surface other than the framework default.
+- `go()` reads the selects out of the DOM via magic `name` strings (`app/src/routes/index.tsx:75-82`) instead of tracked signals — pragmatic for the no-JS form, but it couples behavior to markup.
+- Cache eviction `cache.clear()`s the whole map when full (`app/src/lib/api.ts:30-32`) — a thundering-herd edge under a >5000-path crawl; an LRU would be kinder. Starter cruft also lingers (commented `ssr` block in `app/vite.config.ts:31-52`, unused `undici` devDependency at `app/package.json:35`).
+
+I found no actual bug: JSX-escaped text everywhere, 404s cached as `null` only briefly, page params validated, no leaked listeners, sort/filter logic matches the spec's edge cases (missing values last in both directions, dedup of `method:level`, default game = highest `order`).
+
+```json
+{
+  "dimension": "mergeability",
+  "criteria": {
+    "idiomatic": {
+      "score": 5,
+      "evidence": [
+        "app/src/routes/index.tsx:25 — every page loads data via routeLoader$; no client fetches of API data",
+        "app/src/routes/[...catchall]/index.tsx:6 — catchall route sets status(404), the documented 404 pattern",
+        "app/src/routes/pokemon/[name]/index.tsx:224 — head uses resolveValue to title from the loader",
+        "app/package.json:11-12 — pins @builder.io/qwik 1.20.3, the current stable (Oct 2026; 2.0 is still rc)",
+        "app/src/routes/index.tsx:92-98 — preventdefault:submit + onSubmit$ plus method=\"get\" no-JS fallback",
+        "app/src/components/moves-table.tsx:37 — useComputed$ for client-only sort state"
+      ],
+      "rationale": "Routing, data loading, head resolution, 404s and client state all use the framework's recommended primitives at the current stable version; the only home-grown touch is reading select values from the DOM in go()."
+    },
+    "correctness_risks": {
+      "score": 4,
+      "evidence": [
+        "app/src/lib/api.ts:14 — api<T = any>: payload typos silently yield undefined and render '—' instead of failing loudly",
+        "app/src/routes/pokemon/[name]/index.tsx:90-95 — one api('move/<n>') per learnable move per cold request; any single non-404 failure 500s the page with no error surface",
+        "app/src/lib/api.ts:30-32 — cache.clear() when full causes a full cold-stampede rather than evicting oldest entries",
+        "app/src/lib/api.ts:24-25 — 404s are cached as null for only 60s and failed fetches are evicted, correctly",
+        "app/src/routes/index.tsx:39-41 — page param parsed and clamped, so ?page=abc/-1/9999 all behave",
+        "app/src/components/moves-table.tsx:44-47 — missing values sort last in both directions, matching spec edge case"
+      ],
+      "rationale": "No concrete bug found (text is JSX-escaped, 404s handled, params validated, listeners bounded), but the untyped payloads and the all-or-nothing move fan-out are genuine fragility a future change could trip over."
+    },
+    "global_abstractions": {
+      "score": 4,
+      "evidence": [
+        "app/src/lib/api.ts:3-4 — single documented server-only data module; components never import its values",
+        "app/src/components/pokemon-cards.tsx:3 — import type only, keeping the server/client boundary clean",
+        "app/src/lib/format.ts:1-60 — pure helpers, no state, reused everywhere without coupling",
+        "app/src/lib/api.ts:101-112 — cardsForPokemon shared by moves/abilities/types routes and earns its keep",
+        "app/src/lib/api.ts:133-158 — speciesIndex mixes plumbing with page-shaped option lists; slight god-module tendency"
+      ],
+      "rationale": "Two lib modules with clear roles, small focused components, no premature layers; the only untangling risk is api.ts slowly accumulating endpoint semantics and page-shaped data assembly in one file."
+    },
+    "readability": {
+      "score": 4,
+      "evidence": [
+        "app/src/routes/layout.tsx:5-7 — comment explains why no-store is set, not what",
+        "app/src/routes/index.tsx:67-69 — comment explains the URL/search sync rule",
+        "app/src/components/section.tsx:11 — tiny, self-documenting landmark component",
+        "app/src/routes/pokemon/[name]/index.tsx:22-110 — ~110-line loader doing all data shaping inline, dense but linear",
+        "app/src/routes/pokemon/[name]/index.tsx:38 — (v: any) hides the API shape a reader needs most"
+      ],
+      "rationale": "Consistent naming, BEM CSS, and why-comments make orientation fast; the dense loaders plus untyped payloads are the rough spots that cost a reader time."
+    },
+    "review_cost": {
+      "score": 4,
+      "evidence": [
+        "app/src/lib/api.ts:14 — main ask: type the API payloads so property typos fail at compile time",
+        "app/src/routes/index.tsx:75-82 — prefer tracked signals over form.elements.namedItem DOM reads",
+        "app/src/lib/api.ts:32 — replace cache.clear() with oldest-entry eviction",
+        "app/package.json:35 — drop unused undici devDependency (Node 24 has native fetch)",
+        "app/vite.config.ts:31-52 — starter cruft (commented ssr block) could be trimmed"
+      ],
+      "rationale": "I'd approve after one round of nits: type the payloads, tidy the filter-state mechanism, and trim starter leftovers; nothing needs structural rework."
+    }
+  },
+  "overall": 4,
+  "findings": [
+    {
+      "severity": "medium",
+      "location": "app/src/lib/api.ts:14",
+      "issue": "All PokeAPI payloads are typed `any` (api<T = any>, plus 13 anys across route loaders), so a mistyped property like flavor_text_entries resolves to undefined and silently renders '—' instead of failing.",
+      "suggestion": "Define response interfaces for the handful of resources the app consumes (species, pokemon, move, ability, type, generation, version-group) and type api<T> at each call site."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/routes/pokemon/[name]/index.tsx:90",
+      "issue": "The loader issues one fetch per learnable move for the selected game (plus version-group and all-type fan-out) on every cold request; a single non-404 failure rejects the whole page as an opaque 500.",
+      "suggestion": "Catch per-fetch failures (fall back to null and humanized labels, as partially done at index.tsx:94) and consider error handling at the loader boundary so upstream hiccups degrade instead of 500ing."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/routes/index.tsx:75",
+      "issue": "Filter state is read out of the DOM via form.elements.namedItem(\"type\"/\"generation\") magic strings, coupling navigation behavior to markup names.",
+      "suggestion": "Track the select values in useSignal state (initialised from data.value.filters) and keep the method=\"get\" form purely as the no-JS fallback."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/lib/api.ts:30",
+      "issue": "When the cache hits MAX_ENTRIES with no expired entries it clears everything, causing a thundering-herd of refetches under a large crawl.",
+      "suggestion": "Evict oldest entries (Map preserves insertion order) instead of cache.clear()."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/lib/api.ts:47",
+      "issue": "Card sprite URLs are constructed from an assumed /media/sprites/pokemon/<id>.png pattern instead of the API-provided sprites.front_default URL.",
+      "suggestion": "Spec-sanctioned and avoids per-Pokémon fetches, so acceptable; if kept, note the assumption at spriteUrl() and consider a null-sprite fallback for missing sets."
+    },
+    {
+      "severity": "low",
+      "location": "app/package.json:35",
+      "issue": "undici is a devDependency but never imported; Node 24 has native fetch.",
+      "suggestion": "Remove it from devDependencies."
+    },
+    {
+      "severity": "low",
+      "location": "app/vite.config.ts:31",
+      "issue": "Starter-template cruft remains: ~20 lines of commented-out ssr config and the errorOnDuplicatesPkgDeps utility add noise to a file the team will touch.",
+      "suggestion": "Delete the commented ssr block and unused utils, keeping the config minimal."
+    }
+  ],
+  "summary": "A genuinely idiomatic Qwik City app on the current stable 1.20.x: routeLoader$-based server data loading, correct 404 status handling, clean head resolution, and thoughtful URL-state work with a no-JS fallback. My approval would hinge on one round of changes: typing the API payloads (the pervasive any is the only real long-term liability) and adding resilience around the move-detail fan-out. Everything else — structure, naming, comments, CSS — I'd merge as-is."
+}
+```

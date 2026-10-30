@@ -1,0 +1,133 @@
+## Review
+
+The app contains **zero tests of its own** — no test script in `app/package.json`, no test files anywhere under `app/` (confirmed by grep for `*.test.*`/`*.spec.*` and by the measured counts). All quality gating was done by leaning on the acceptance suite in `tests/`, which is broad but lives outside the app and won't guard future refactors of `app/`'s own logic.
+
+That's a real loss here, because a large share of this codebase is *pure, trivially unit-testable transformation logic*:
+
+- `humanize`, `latestEnglishFlavor`, `dexNumber`, `statLabel`, `displayValue` — `app/src/lib/format.ts:1-39`
+- method ordering / row sorting for the moves tables — `app/src/lib/data.ts:225-283`
+- evolution-chain recursion — `app/src/lib/data.ts:220-221`
+- ID parsing and the `<10000` species rule — `app/src/lib/api.ts:37-43`
+- pagination clamping (NaN, out-of-range, zero matches) — `app/src/routes/(home).ts:73-77`
+- client-side table sorting and aria-sort toggling — `app/src/client/interactions.ts:66-92`
+
+And the absence of tests has already let a genuine bug through: `app/src/lib/api.ts:22` throws `HTTP ${res.status} ${res.statusText}` inside a callback whose parameter is `response` — any non-OK API response raises a `ReferenceError` instead of the intended `Error`. It's masked today only because every caller wraps `api()` in `tryApi`/`.catch(() => null)`, so the blanket catch converts the `ReferenceError` into a "not found". The `ApiError` class at `app/src/lib/api.ts:8-12` is defined but never thrown — evidence the error path was written and then never actually exercised. One unit test (`api('nonexistent/')` rejects with status info) would have caught both.
+
+Other latent risks with no local safety net: the promise-level cache in `app/src/lib/api.ts:27-33` caches *rejected* promises forever, so a single transient API failure poisons that resource for the process lifetime; the home route re-implements ID parsing with a subtly different regex instead of reusing `idFromUrl`/`isSpeciesId` (`app/src/routes/(home).ts:53-57` vs `app/src/lib/api.ts:37-43`); and `getMoveSectionData`'s fallback `Number(detail?.order ?? idFromUrl(ref.url) ?? 0)` produces `NaN` when a version-group detail fetch fails (`app/src/lib/data.ts:251`), making game ordering unstable — precisely the kind of edge the acceptance suite (happy-path Pikachu/Scarlet-Violet) won't revisit.
+
+Since there are no tests, `coverage_of_risk` and `regression_power` score 1, `behaviour_not_implementation` scores 1 (no tests), and `signal_to_noise` is 3 per the rubric.
+
+```json
+{
+  "dimension": "tests",
+  "criteria": {
+    "coverage_of_risk": {
+      "score": 1,
+      "evidence": [
+        "app/package.json:6-8 — only build/start scripts; no test script or runner",
+        "app/src/lib/format.ts:1-39 — humanize/flavor/dex formatting logic fully untested",
+        "app/src/lib/data.ts:225-283 — buildMoveTables method order + row sort untested",
+        "app/src/client/interactions.ts:66-92 — client table sorting and aria-sort toggling untested"
+      ],
+      "rationale": "No tests exist at all, so none of the risky logic (filtering, pagination, sorting, URL state, API error paths) is covered by the app itself."
+    },
+    "behaviour_not_implementation": {
+      "score": 1,
+      "evidence": ["app/ — zero test files, zero assertions (grep for *.test.*/*.spec.* returns nothing)"],
+      "rationale": "No tests means nothing asserts behaviour, observable or otherwise."
+    },
+    "regression_power": {
+      "score": 1,
+      "evidence": [
+        "app/src/lib/api.ts:22 — live bug: `res.status` referenced where only `response` is in scope; throws ReferenceError on any non-OK response, masked by tryApi's blanket catch",
+        "app/src/lib/api.ts:27-33 — rejected promises are cached forever; a single transient failure would silently break that resource with no test to catch it",
+        "app/src/lib/api.ts:37-43 vs app/src/routes/(home).ts:53-57 — id-parsing logic duplicated with a different regex; refactoring one won't fix the other"
+      ],
+      "rationale": "There are no tests to fail; a real regression (the api.ts ReferenceError) already shipped, which proves the current guard is zero."
+    },
+    "signal_to_noise": {
+      "score": 3,
+      "evidence": ["app/ — no test files at all"],
+      "rationale": "No tests means no noise, but also no signal; per the rubric this scores 3."
+    }
+  },
+  "overall": 1,
+  "findings": [
+    {
+      "severity": "high",
+      "location": "app/src/lib/api.ts:22",
+      "issue": "Error message interpolates `res.status`/`res.statusText` but the fetch callback parameter is `response`; any non-OK API response throws a ReferenceError instead of the intended error. It is only masked because every caller catches all errors and treats them as 'not found', which also misclassifies server errors as 404s.",
+      "suggestion": "Use `response.status`/`response.statusText` (or throw the existing ApiError class), and add a unit test that a 404 rejects with the status in the message."
+    },
+    {
+      "severity": "high",
+      "location": "app/package.json:6-8",
+      "issue": "No test script, runner, or single test file despite ~780 lines of script logic, most of it pure data transformation that is trivially unit-testable (format.ts, buildMoveTables, evolutionTree, pagination).",
+      "suggestion": "Add vitest (already using vite) with unit tests for format.ts, data.ts's pure functions, and the api.ts error/cache paths; add a `test` script."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/lib/api.ts:27-33",
+      "issue": "The in-memory cache stores the promise, so a rejected fetch is cached forever: one transient API hiccup permanently poisons that endpoint for the process lifetime, and callers that don't catch (e.g. getPokemonCard via api) will 500 on every subsequent render.",
+      "suggestion": "Delete the cache entry when the promise rejects, and add a test for the failure-then-retry path."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/routes/(home).ts:53-57",
+      "issue": "Type filter re-implements URL-id parsing with an inline regex (`/\\/(\\d+)\\/?$/`) instead of reusing idFromUrl/isSpeciesId from app/src/lib/api.ts:37-43; the two implementations differ subtly (query-string handling) and will drift.",
+      "suggestion": "Reuse idFromUrl/isSpeciesId and cover both with one test."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/lib/data.ts:225-283",
+      "issue": "buildMoveTables encodes many spec rules (fixed method order Level Up/Machine/Egg/Tutor then alphabetical, level-up sorted by level then name, others by name) with no tests; a future tweak to sorting will only be caught by the external e2e suite, if at all.",
+      "suggestion": "Unit-test buildMoveTables with a small fixture covering method order, level-up ordering, and unexpected methods."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/client/interactions.ts:66-92",
+      "issue": "Client-side sorting relies on empty-string data-sort-value to detect missing values, manual numeric parsing, and aria-sort attribute toggling; none is tested, and regressions here (e.g. '10' < '9' string sort) would surface only in full e2e runs.",
+      "suggestion": "Add Playwright component/DOM tests (or extract the comparator into a pure function and unit-test missing-last, numeric vs text, and direction flip)."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/lib/data.ts:157-170",
+      "issue": "Hidden-ability aggregation ORs is_hidden across duplicate pokemon entries via a Map; this subtle logic is untested, and a refactor could silently flip 'Hidden ability' markers.",
+      "suggestion": "Unit-test with a fixture where the same pokemon appears twice, once hidden and once not."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/lib/data.ts:251",
+      "issue": "Fallback `Number(detail?.order ?? idFromUrl(ref.url) ?? 0)` yields NaN when the version-group detail fetch fails, making version-group sort order unstable (NaN comparisons).",
+      "suggestion": "Coalesce to a finite number and test the null-detail path."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/routes/(home).ts:73-77",
+      "issue": "Pagination clamping (page beyond last, page=abc → NaN, empty ?page= → 0, zero-match totalPages) is untested edge logic.",
+      "suggestion": "Unit-test the clamp expression or extract it into a pure helper with tests."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/lib/api.ts:8-12",
+      "issue": "ApiError is defined but never thrown — dead code indicating the error path was written and never wired up or exercised.",
+      "suggestion": "Throw ApiError in api() and assert on it in a unit test, or delete the class."
+    }
+  ],
+  "summary": "The app contains no tests of its own — no runner, no script, not a single assertion — and relies entirely on the external acceptance suite. That has already let a real bug ship: a ReferenceError in api.ts's error path (res vs response) that is silently masked by blanket catches. The codebase is unusually rich in pure, easily testable transform logic (formatting, move-table ordering, pagination, filtering), so adding a small vitest suite plus a few DOM tests for client sorting would be low-cost and high-value.",
+  "wroteTests": false,
+  "testCount": 0,
+  "valuableTests": [],
+  "lowValueTests": [],
+  "untested": [
+    { "area": "API client error handling (app/src/lib/api.ts)", "risk": "high", "likelyBug": "Already present: ReferenceError on any non-OK response; also rejected promises cached forever, so a transient failure permanently poisons a resource and misclassifies server errors as 404s." },
+    { "area": "Home filtering, search and pagination (app/src/routes/(home).ts)", "risk": "high", "likelyBug": "Off-by-one in 48-per-page slicing, wrong totalPages/page clamping for NaN or out-of-range ?page=, type/generation filter set logic drifting from the duplicated ID parsing." },
+    { "area": "Move table construction: method order and row sort (app/src/lib/data.ts buildMoveTables)", "risk": "medium", "likelyBug": "Level-up rows sorted by name instead of level, non-fixed methods not alphabetical, level-up sort ignoring name tiebreak." },
+    { "area": "Client-side sortable tables (app/src/client/interactions.ts)", "risk": "medium", "likelyBug": "String-vs-numeric comparison ('10' before '9'), missing values not sorting last, aria-sort not cleared on other headers, direction not flipping." },
+    { "area": "Hidden-ability aggregation on the ability page (app/src/lib/data.ts getAbilityPage)", "risk": "medium", "likelyBug": "A pokemon appearing twice (hidden and normal) losing or wrongly gaining the 'Hidden ability' marker." },
+    { "area": "Formatting helpers: humanize, latestEnglishFlavor, dexNumber, displayValue, statLabel (app/src/lib/format.ts)", "risk": "low", "likelyBug": "Whitespace collapsing regressions in flavor text, em-dash fallback dropped, stat label map typos." },
+    { "area": "Evolution chain recursion (evolutionTree, app/src/lib/data.ts)", "risk": "low", "likelyBug": "Branching chains (Eevee) losing branches or infinite loops on malformed chains." },
+    { "area": "Version-group ordering and default game selection (getMoveSectionData, app/src/lib/data.ts)", "risk": "low", "likelyBug": "NaN order fallback making game order unstable when a detail fetch fails; wrong default game (not highest order)." }
+  ]
+}
+```

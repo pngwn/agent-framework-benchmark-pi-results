@@ -1,0 +1,143 @@
+No local docs in the tree; the skill's framework-mode reference and the v8 changelog/upgrade guide I already fetched confirm the app's idioms (`app/routes.ts` manual config, `./+types/*` generated types, `Route.ComponentProps` with `loaderData`, `throw data(..., {status:404})`, root `Layout`/`ErrorBoundary` exports) are all current for v8.
+
+## Review
+
+The app is a clean, idiomatic React Router v8 framework-mode codebase: thin route modules whose loaders call a single server-only API module, and a small set of shared UI components. The layering means most changes land in one file. The main weakness is that the home route builds its Pokémon cards inline instead of using the shared `cardsFromPokemon` helper, so card-level fixes (sprites, form filtering, sorting) land twice, and `SpeciesIndex` conflates Pokémon IDs with species IDs — which is exactly the seam the "Deoxys sprite" scenario would have to break open.
+
+### Scenario walkthroughs
+
+1. **Remove Abilities**: delete `app/app/routes/ability.tsx`, one line in `app/app/routes.ts:7`, the Abilities section at `app/app/routes/pokemon.tsx:197-207`, and optionally `ApiAbility`/`getAbility` (`app/app/lib/api.server.ts:106,150`) plus the now-dead `Card.hidden` rendering (`app/app/components/ui.tsx:55`). Contained, but more than "a route + a nav link".
+2. **Sprite bug (default Pokémon ≠ species)**: the fix belongs in `cardsFromPokemon` (`app/app/lib/api.server.ts:240-252`), but that covers only 3 of the 4 card lists — the home list is built separately at `app/app/routes/home.tsx:60-67`, and both depend on `SpeciesIndex` (`api.server.ts:162`) being ID-keyed, so the index itself has to change shape.
+3. **Sort by name**: all four lists render through `CardList` (`app/app/components/ui.tsx`), so one edit covers them visually — though home's pagination is dex-ordered in its loader (`home.tsx:41,60`), so doing it in data means two edits.
+4. **Items section**: new `routes/item.tsx` modeled on `move.tsx`, one line in `routes.ts`, `ApiItem` + one `getRecord` line in `api.server.ts`. Section/Count/facts/`orDash`/meta/404 all reuse; only the page module is new code.
+5. **Data source / caching**: `apiBase()` (`api.server.ts:11-13`), `CACHE_TTL_MS` and the cache map (`api.server.ts:9,19-31`), and `spriteUrl` (`api.server.ts:232`) — one file, everything else flows through it.
+
+```json
+{
+  "dimension": "editability",
+  "criteria": {
+    "removability": {
+      "score": 4,
+      "evidence": [
+        "app/app/routes.ts:7 — the ability route is a single deletable line in a short manual config",
+        "app/app/routes/ability.tsx:1-46 — the route module is fully self-contained (loader, meta, component)",
+        "app/app/routes/pokemon.tsx:197-207 — the only in-content links to /abilities live in one Section",
+        "app/app/lib/api.server.ts:106,150 — ApiAbility/getAbility would be left as dead code unless cleaned up",
+        "app/app/components/ui.tsx:55 — Card.hidden ('Hidden ability' note) is ability-specific and would survive as dead presentation"
+      ],
+      "rationale": "Removing Abilities is four obvious, local edits with no risk of breaking unrelated pages; the only deductions are leftover dead code in the shared API module and card type."
+    },
+    "changeability": {
+      "score": 3,
+      "evidence": [
+        "app/app/lib/api.server.ts:240-252 — cardsFromPokemon is the single sprite/form-filter site for move/ability/type cards",
+        "app/app/routes/home.tsx:60-67 — but the home page builds its cards inline with its own spriteUrl call, so a sprite or card-shape fix lands twice",
+        "app/app/lib/api.server.ts:162 — SpeciesIndex is Map<id,name>, conflating Pokémon ID and species ID; the Deoxys-style fix requires reshaping this index, not a local edit",
+        "app/app/lib/api.server.ts:11-13,232 — good news: base URL, cache TTL and sprite URL pattern are each exactly one place",
+        "app/app/routes/pokemon.tsx:37, app/app/routes/move.tsx:15, app/app/routes/ability.tsx:14, app/app/routes/type.tsx:17 — the 'Not found – Pokédex' title fallback is duplicated in four metas"
+      ],
+      "rationale": "Infrastructure-level changes are beautifully centralized, but the app's own domain seams are split: card construction exists twice and the species/pokémon identity conflation makes the most likely data bug a two-file, design-level fix rather than a one-liner."
+    },
+    "coupling": {
+      "score": 4,
+      "evidence": [
+        "app/app/lib/api.server.ts:168-231 — routes consume narrow per-resource getters (getMove, getType…) rather than each other's internals",
+        "app/app/components/ui.tsx:3, app/app/routes/home.tsx:9-10 — type-only imports keep the server module out of the client bundle; server/client separation is clean",
+        "app/app/routes/home.tsx:20-23,74-76 — filter state is explicit in the URL, re-parsed in the loader, no hidden shared client state",
+        "app/app/components/move-tables.tsx:88-97 — sorting state is local to MoveTable, communicated only via props",
+        "app/app/routes/pokemon.tsx:234 — MoveTables sort reset via key={p.game} is an implicit cross-component contract (works, but invisible)"
+      ],
+      "rationale": "Loose coupling with clear seams: loaders own fetching, components own rendering, and all shared state is URL-derived. Only minor implicit couplings (key-based state reset, Card shape living in the server module) keep it from a 5."
+    },
+    "abstraction_design": {
+      "score": 4,
+      "evidence": [
+        "app/app/lib/api.server.ts:240-252 — cardsFromPokemon's generic ref type plus `extra` callback absorbs the real variation (hidden-ability flag, type slots) without boolean-flag creep",
+        "app/app/components/ui.tsx:16-31,52-77,89-99 — Section/CardList/PokemonCard are small, prop-driven and reused by every route",
+        "app/app/components/move-tables.tsx:19-39 — column-driven table with declarative sort values stretches to any column set",
+        "app/app/routes/home.tsx:60-67 — the one place the abstraction is bypassed: home re-implements card building instead of sharing a species-index variant",
+        "app/app/components/ui.tsx:5-13 — TypeBadge's `link` boolean is mild flag creep (two render modes in one component)"
+      ],
+      "rationale": "The abstractions are designed around the app's actual variation and mostly stretch well (an Items page would reuse nearly everything); the home-page card duplication and the ID-keyed SpeciesIndex are the seams that would force copying under the next similar-but-different requirement."
+    }
+  },
+  "overall": 4,
+  "findings": [
+    {
+      "severity": "medium",
+      "location": "app/app/routes/home.tsx:60-67",
+      "issue": "Home builds Pokémon cards inline (id/name/sprite/types) instead of going through cardsFromPokemon, duplicating card construction in a second place.",
+      "suggestion": "Extract a shared species-index card builder in lib/api.server.ts (or let cardsFromPokemon accept pre-resolved ids) so all four card lists share one construction path."
+    },
+    {
+      "severity": "medium",
+      "location": "app/app/lib/api.server.ts:162",
+      "issue": "SpeciesIndex is Map<number,string> keyed by a single 'id' that is used both as species ID (home.tsx:41,62) and Pokémon ID (cardsFromPokemon, api.server.ts:247-249), conflating two identities that the spec warns can differ (deoxys vs deoxys-normal).",
+      "suggestion": "Key the index by Pokémon name (or carry {speciesName, pokemonId} per entry) so sprite ID and species name can diverge without redesigning the index."
+    },
+    {
+      "severity": "medium",
+      "location": "app/app/routes/home.tsx:41",
+      "issue": "The alternate-form exclusion rule is duplicated as two magic literals (id <= 10000 here, id > 10000 at api.server.ts:249).",
+      "suggestion": "Export a named constant (e.g. MAX_SPECIES_ID) or a shared isAlternateForm(id) helper from lib/api.server.ts and use it in both places."
+    },
+    {
+      "severity": "low",
+      "location": "app/app/routes/pokemon.tsx:37",
+      "issue": "The 'Not found – Pokédex' meta fallback is repeated verbatim in four route modules (also move.tsx:15, ability.tsx:14, type.tsx:17), plus root.tsx computes its own error heading.",
+      "suggestion": "Add a shared metaFor(heading | 'not-found') helper in lib/format.ts (or a small route-helper module) and use it from all metas."
+    },
+    {
+      "severity": "low",
+      "location": "app/app/routes/pokemon.tsx:47",
+      "issue": "The type-label fallback `typeNames[name] ?? humanize(name)` is re-implemented in pokemon.tsx:47, type.tsx:23, move.tsx:23 and home.tsx:66, and home builds its own label map at home.tsx:31.",
+      "suggestion": "Move label lookup into lib/api.server.ts next to getTypeNames (e.g. a typeLabel(name, typeNames) helper) so one place owns the fallback rule."
+    },
+    {
+      "severity": "low",
+      "location": "app/app/components/ui.tsx:55",
+      "issue": "Card.hidden and its 'Hidden ability' rendering are ability-specific concerns baked into the generic Card type and card component; removing abilities leaves dead presentation code.",
+      "suggestion": "Either accept it as a generic card annotation or render the hidden-ability note from the ability route via a slot/child prop instead of a Card field."
+    },
+    {
+      "severity": "low",
+      "location": "app/app/routes/pokemon.tsx:234",
+      "issue": "MoveTables sort-state reset relies on the implicit key={p.game} remount; a future refactor of MoveTables props could silently break the reset.",
+      "suggestion": "Keep it but add a short comment stating the key intentionally resets sort state on game change."
+    }
+  ],
+  "summary": "A tidy, idiomatic React Router v8 codebase where loaders, an API module and shared UI components form clean seams, so infrastructure changes (base URL, caching, sprite URL, formatting) are one-file edits. The main editability cost is the Pokémon-card domain: home builds cards inline while the other three lists use cardsFromPokemon, and SpeciesIndex conflates Pokémon and species IDs, so the likeliest data bug is a two-file fix rather than a one-liner. Everything else — adding an Items page, sorting, removing a route — is straightforward because the abstractions are small and reused rather than copied.",
+  "scenarios": [
+    {
+      "change": "Remove the Abilities pages and every link to them",
+      "files": ["app/app/routes/ability.tsx", "app/app/routes.ts", "app/app/routes/pokemon.tsx", "app/app/lib/api.server.ts", "app/app/components/ui.tsx"],
+      "difficulty": 4,
+      "notes": "Delete the route module and its routes.ts line, remove the Abilities Section on the Pokémon page; cleaning up ApiAbility/getAbility and Card.hidden is optional but needed to avoid dead code. All edits are local and greppable."
+    },
+    {
+      "change": "Fix the sprite for species whose default Pokémon has a different name (Deoxys)",
+      "files": ["app/app/lib/api.server.ts", "app/app/routes/home.tsx"],
+      "difficulty": 3,
+      "notes": "cardsFromPokemon (api.server.ts:240-252) covers move/ability/type lists, but home.tsx:60-67 builds cards separately, and both lean on the ID-keyed SpeciesIndex (api.server.ts:162) that conflates Pokémon ID with species ID — the fix requires reshaping the index, not just a local change."
+    },
+    {
+      "change": "Add sorting by name to every list of Pokémon cards",
+      "files": ["app/app/components/ui.tsx", "app/app/lib/api.server.ts", "app/app/routes/home.tsx"],
+      "difficulty": 4,
+      "notes": "All four lists render through CardList, so a single edit there covers every list visually; if sorting must apply to the data (home paginates by dex order in its loader), it becomes two edits: cardsFromPokemon and home's inline card build."
+    },
+    {
+      "change": "Add an Items section (/items, /items/:name) shaped like Moves",
+      "files": ["app/app/routes/item.tsx", "app/app/routes.ts", "app/app/lib/api.server.ts"],
+      "difficulty": 4,
+      "notes": "Mostly a new thin route module reusing getRecord's 404 handling, Section/Count/CardList, the facts dl, orDash, pageTitle and the meta pattern; only a one-line route entry and an ApiItem type + getter are shared-file touches."
+    },
+    {
+      "change": "Change the API base URL and caching rules",
+      "files": ["app/app/lib/api.server.ts"],
+      "difficulty": 5,
+      "notes": "apiBase() (line 11), CACHE_TTL_MS (line 9), the in-memory cache (lines 19-31) and spriteUrl (line 232) are all in one module; no route or component knows any of these details."
+    }
+  ]
+}
+```

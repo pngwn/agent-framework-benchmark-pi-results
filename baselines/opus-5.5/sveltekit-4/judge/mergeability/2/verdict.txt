@@ -1,0 +1,123 @@
+I've now reviewed the full app (`app/src/routes/**`, `app/src/lib/**`, config, and HTML shell) and verified the framework-specific claims against current documentation: the app targets SvelteKit 3 / Svelte 5.57 (current stable as of 2026-10), and its conventions match — config lives in `vite.config.ts` via the `sveltekit()` plugin with `adapter` and parametric `compilerOptions.runes` (sveltejs/svelte#17951), `#lib` subpath imports with explicit extensions, `tsconfig` extending `$app/tsconfig`, `$app/state` instead of the removed `$app/stores`, and `goto(..., { replace, reset: false })` using the Kit-3 option names. Load functions are all `+page.server.ts` with `error(404)` guards, which is the recommended data-loading shape.
+
+A few things I dug into specifically:
+
+- **Search/state sync on `/`** (`app/src/routes/+page.svelte`): the `afterNavigate` guard against `goto`-typed navigations plus `reset: false` shows real care about the URL-state-vs-input race, and the native GET form means it degrades gracefully without JS. The one real bug I found is that the 150 ms debounce timer is never cancelled on navigation/unmount — a user who types then clicks a card within the window gets hijacked back to `/` by the pending `goto`.
+- **Server cache** (`app/src/lib/server/api.ts`): module-level `Map` with promise dedup and rejection cleanup; bounded in practice by the dataset size (~a few thousand URLs) but never evicts expired entries.
+- **Idiom gaps**: `process.env.API_BASE_URL` instead of SvelteKit's `$app/env/private` (deprecated `$env/dynamic/private` replacement), and inconsistent import style between `#lib/util.ts` (routes) and relative `../util.ts` (components).
+- **Abstractions**: `lib/server/api.ts` is a ~250-line module mixing transport/caching, English-localization helpers, three index builders, and the card factory — server-scoped and section-commented, so locally fine, but it's the one module every load funnels through and the natural place future entanglement starts. `lib/util.ts` is small, typed, and shared cleanly across the server/client boundary, and the three components (`CardList`, `MoveTable`, `TypeBadge`) are well-factored and reused everywhere with no duplication.
+
+```json
+{
+  "dimension": "mergeability",
+  "criteria": {
+    "idiomatic": {
+      "score": 4,
+      "evidence": [
+        "app/vite.config.ts:1-17 — SvelteKit 3 config in the sveltekit() Vite plugin with adapter and parametric compilerOptions.runes, exactly the current recommended shape",
+        "app/package.json:31-33 — '#lib/*' subpath imports per Kit 3; imports carry .ts/.css extensions as required",
+        "app/src/routes/+page.svelte:57 — goto(..., { replace, reset: false }) uses the Kit-3 option names (replace/reset)",
+        "app/src/routes/+error.svelte:2 — page from '$app/state' (fine-grained state), not the removed $app/stores",
+        "app/src/routes/pokemon/[name]/+page.svelte:20-29 — {#snippet} recursion for the evolution tree, keyed each blocks, $derived for the stat total",
+        "app/src/lib/server/api.ts:9-11 — home-grown process.env access where the framework feature ($app/env/private) exists"
+      ],
+      "rationale": "Reads like current Kit 3 / Svelte 5 docs: runes everywhere, snippets, server loads with error(404), page from $app/state. Only small deductions: process.env instead of $app/env/private, and relative imports in components vs #lib elsewhere."
+    },
+    "correctness_risks": {
+      "score": 4,
+      "evidence": [
+        "app/src/routes/+page.svelte:41-45 — debounce timer is never cancelled on navigation or unmount; a pending setTimeout after a link click fires goto('/') and hijacks the navigation",
+        "app/src/lib/server/api.ts:22-43 — module-level cache never evicts expired entries; bounded in practice by the dataset but could use a sweep",
+        "app/src/routes/pokemon/[name]/+page.server.ts:92-95 — getOrThrow per move detail turns one missing move into a 500 for the whole Pokémon page",
+        "app/src/routes/+page.svelte:14-16 — afterNavigate guard prevents stale results from overwriting newer keystrokes (good race handling)",
+        "app/src/lib/server/api.ts:41-43 — rejected promises are removed from the cache so failures aren't sticky (good)",
+        "app/src/routes/+page.server.ts:26-29 — every load 404s via error() when the resource is missing; unmatched URLs fall through to +error.svelte"
+      ],
+      "rationale": "No serious bugs found — 404 handling is thorough, promise dedup cleans up rejections, and the search-input race is consciously handled. The uncancelled debounce timer is a real but narrow (150 ms) defect, plus two minor robustness nits."
+    },
+    "global_abstractions": {
+      "score": 4,
+      "evidence": [
+        "app/src/lib/server/api.ts:1-250 — single server module mixes transport+cache, English-localization helpers, three index builders, and the card factory; every load funnels through it",
+        "app/src/lib/util.ts:1-33 — small typed shared module (humanize, dexNumber, display, Card/TypeRef) with a clean server/client boundary",
+        "app/src/lib/components/CardList.svelte, MoveTable.svelte, TypeBadge.svelte — three focused, reused components; no duplicated helpers across routes",
+        "app/src/lib/server/api.ts:88 — 'server' directory keeps the cache off the client; constants (PAGE_SIZE, STAT_LABELS, METHOD_ORDER) live at their point of use in route loads"
+      ],
+      "rationale": "Abstractions earn their keep: types shared via util.ts, one component per repeated visual, and constants next to usage. api.ts is a mild god module — coherent but the place future coupling would grow."
+    },
+    "readability": {
+      "score": 4,
+      "evidence": [
+        "app/src/routes/+page.svelte:8-12 — comment explains exactly why the search input keeps its own state (the race being avoided)",
+        "app/src/lib/server/api.ts:1-8, 71-73 — comments state intent (request-time fetching, cache TTL, why node_modules is excluded from runes mode in vite.config.ts:7-9)",
+        "app/src/lib/components/MoveTable.svelte:19-71 — sorting logic is small named functions (value/compare/byName), missing-values-last called out in a comment",
+        "app/src/routes/pokemon/[name]/+page.server.ts:21-140 — the one dense file: ~150 linear lines covering stats, abilities, evolution, and the moves tables; would benefit from extracting the moves block",
+        "app/src/lib/components/MoveTable.svelte:2 vs app/src/routes/moves/[name]/+page.svelte:2 — inconsistent import style ('../util.ts' in components, '#lib/util.ts' in routes)"
+      ],
+      "rationale": "Clear naming, why-comments where they matter, files organized exactly along routes, and consistent formatting. Only rough spots: the large Pokémon load function and mixed relative/alias import paths."
+    },
+    "review_cost": {
+      "score": 4,
+      "evidence": [
+        "app/src/routes/+page.svelte:41-45 — the one change I'd request: cancel the timer in onNavigate/afterNavigate or on destroy",
+        "app/src/lib/server/api.ts:9-11 — switch to $app/env/private for API_BASE_URL",
+        "app/src/lib/components/CardList.svelte:2 — unify import paths on #lib/*",
+        "app/src/routes/pokemon/[name]/+page.server.ts:21-140 — optional: extract move-table building into lib/server"
+      ],
+      "rationale": "I'd approve after a nits-only round: cancel the debounce timer, use the framework's env module, unify import paths. Nothing structural needs rework."
+    }
+  },
+  "overall": 4,
+  "findings": [
+    {
+      "severity": "medium",
+      "location": "app/src/routes/+page.svelte:41-45",
+      "issue": "The 150 ms search debounce timer is never cleared on navigation or component teardown; if the user clicks a card or pagination link within the window, the pending apply() fires goto('/', { replace: true }) and hijacks the navigation they just initiated.",
+      "suggestion": "Clear the timer in onNavigate/afterNavigate (or in a cleanup callback), and guard apply() so it only runs if the home route is still active."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/lib/server/api.ts:9-11",
+      "issue": "API_BASE_URL is read from process.env directly instead of the framework's environment module.",
+      "suggestion": "Use $app/env/private (the Kit 3 replacement for the deprecated $env/dynamic/private) so env access is typed and framework-idiomatic."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/lib/server/api.ts:22-43",
+      "issue": "The in-memory cache Map never evicts expired entries; memory grows to the number of distinct URLs ever fetched and stale entries linger until re-requested.",
+      "suggestion": "Sweep expired entries opportunistically (e.g. prune during cache writes) or cap the Map; the URL space is bounded by the dataset, so this is hygiene rather than a leak."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/routes/pokemon/[name]/+page.server.ts:92-95",
+      "issue": "getOrThrow('move/<name>') for every move in the selected version group means a single missing move resource turns the whole Pokémon page into a 500.",
+      "suggestion": "Use get() and degrade gracefully (fallback to the humanized move name and em dashes), as pokemonCards already does for missing species."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/routes/pokemon/[name]/+page.server.ts:21-140",
+      "issue": "The Pokémon load function handles stats, abilities, evolution, version groups, and move-table construction in one ~150-line body.",
+      "suggestion": "Extract the moves/version-group block into a helper in lib/server so the load reads like the other, shorter route loads."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/lib/components/CardList.svelte:2",
+      "issue": "Components import shared code via relative paths ('../util.ts') while routes use the '#lib/*' alias, so there are two conventions for the same thing.",
+      "suggestion": "Standardize on '#lib/util.ts' across the codebase."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/app.html:6",
+      "issue": "<meta name=\"text-scale\" content=\"scale\" /> is not a standard meta tag and does nothing.",
+      "suggestion": "Remove it, or document why it's there."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/lib/components/MoveTable.svelte:99-101",
+      "issue": "The component styles its own hypothetical siblings via '.scroller + :global(.scroller)', coupling spacing to page markup rather than letting the page own it.",
+      "suggestion": "Give the moves section a wrapper class and apply the gap there, or use CSS sibling selectors in the page's scoped style."
+    }
+  ],
+  "summary": "A genuinely current, idiomatic SvelteKit 3 + Svelte 5 codebase: config in vite.config.ts, #lib subpath imports, $app/state, runes throughout, clean server loads with 404s, and well-factored shared components. The only real defect is an uncancelled debounce timer that can hijack navigation, and the rest is nits (env-module usage, import-path consistency, one oversized load function). I'd merge after a small nits-only round."
+}
+```

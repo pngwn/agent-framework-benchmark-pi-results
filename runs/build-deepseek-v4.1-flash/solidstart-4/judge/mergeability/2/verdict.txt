@@ -1,0 +1,125 @@
+## Review summary
+
+**Stack conformance.** The app is on the current stable release: SolidStart v2 (stable since Aug 2026) with the exact setup the v2 docs prescribe — `vite.config.ts` with `solidStart()` + `nitro()` from `nitro/vite` (`app/vite.config.ts:1-10`), Vite 8, Node `>=24` engines, `vite dev/build` scripts, and default `entry-client`/`entry-server` (`app/src/entry-client.tsx:3`, `app/src/entry-server.tsx:3`). Data loading uses the recommended `query` + `createAsync` pattern with `"use server"` fetchers (`app/src/lib/queries.ts:331-333`), routes use `FileRoutes` with the documented route-layout `Router` root (`app/src/app.tsx:6-25`), 404s use `HttpStatusCode` (`app/src/components/NotFound.tsx:4`). This reads like the framework's own examples.
+
+**What I'd push back on.** The one substantive ask: no `ErrorBoundary` anywhere. The router docs explicitly state that a throwing query is "caught by the nearest `<ErrorBoundary>`" — the app only wraps routes in `Suspense` (`app/src/app.tsx:26`), so an API 500 (`app/src/lib/queries.ts:163-171` throws) becomes an unhandled rejection with a stuck loading state. Everything else is nits: the 700-line `queries.ts` god module is coherent but big; the search-input debounce is hand-rolled with a manual URL-sync effect instead of leaning on reactive search params; `id > 10000` and the method-priority table deserve a "why" comment; zero comments in the whole codebase.
+
+**Abstractions are otherwise healthy**: server data layer with typed DTOs, four small reused components, pure `format.ts` helpers, no utils soup, no leaked server code into client (types-only imports where needed). The three-layer caching (router `query` cache, `jsonCache`, per-builder promise singletons) is deliberate and each layer earns its keep — the module singletons are the spec-sanctioned cross-request cache, and rejected promises are properly evicted for retry (`app/src/lib/queries.ts:169-171`, `217-219`).
+
+```json
+{
+  "dimension": "mergeability",
+  "criteria": {
+    "idiomatic": {
+      "score": 4,
+      "evidence": [
+        "app/vite.config.ts:1-10 — matches SolidStart v2 stable docs exactly: solidStart() then nitro() from nitro/vite",
+        "app/package.json:8-9 — vite build / vite dev scripts and Node >=24 engines, per v2 migration guide",
+        "app/src/lib/queries.ts:331-337 — query() with 'use server' fetchers; createAsync consumption in routes (app/src/routes/index.tsx:195)",
+        "app/src/app.tsx:6-25 — Router with route-layout root, MetaProvider, FileRoutes; documented pattern",
+        "app/src/components/NotFound.tsx:4 — HttpStatusCode from @solidjs/start for 404 status",
+        "app/src/routes/index.tsx:60-73 — hand-rolled debounce + manual input sync effect instead of leaning on router's reactive search params",
+        "app/src/routes/pokemon/[name].tsx:157-164 — manual requestAnimationFrame scroll-to-#moves workaround"
+      ],
+      "rationale": "Uses the current stable framework's recommended primitives throughout (query+createAsync, FileRoutes, Meta, HttpStatusCode, v2 vite/nitro config); the only non-doc patterns are small, defensible workarounds (debounced uncontrolled input, hash scroll for streamed content)."
+    },
+    "correctness_risks": {
+      "score": 3,
+      "evidence": [
+        "app/src/app.tsx:26 — only Suspense, no ErrorBoundary anywhere (grep: zero ErrorBoundary); docs say query throws are caught by the nearest ErrorBoundary",
+        "app/src/lib/queries.ts:163-171 — fetchJson throws on non-OK; rejection propagates unhandled to the client",
+        "app/src/routes/index.tsx:181-189 — pageHref built from searchText() signal, can diverge from URL q while a debounce is pending",
+        "app/src/routes/pokemon/[name].tsx:157-164 — scroll effect re-fires on every data change (game switch) while hash is #moves",
+        "app/src/lib/queries.ts:159-171 — rejected fetches evicted from cache for retry; 404 → null handled, so missing resources are covered",
+        "app/src/routes/index.tsx:82-90 — onCleanup clears the debounce timer; no leaked timers",
+        "app/src/lib/queries.ts:458-462 — invalid ?game= falls back to highest-order game rather than 500ing"
+      ],
+      "rationale": "Missing-404 handling, stale-result races (createAsync guards), timer cleanup and cache eviction are all done carefully, but the absence of any ErrorBoundary means one API hiccup produces unhandled rejections and a permanently stuck loading state — a real fragility the tests wouldn't catch."
+    },
+    "global_abstractions": {
+      "score": 4,
+      "evidence": [
+        "app/src/lib/queries.ts:1-710 — single 700-line data module holds caching, shaping and query functions for all six route types; coherent but is the app's god module",
+        "app/src/lib/queries.ts:139-141 — jsonCache module-level Map; spec-sanctioned runtime cache, server-side only (inside 'use server' functions), not leaked to client",
+        "app/src/components/PokemonCard.tsx:5-40 — one card component reused across home/type/move/ability pages with props for variants; no duplication of card markup",
+        "app/src/lib/format.ts:1-43 — small, pure, dependency-free helpers; no utils dumping ground",
+        "app/src/lib/queries.ts:196-220 — speciesDirectoryPromise singleton shared by every page query; clear boundary but everything funnels through it"
+      ],
+      "rationale": "Abstractions are few with clean server/client boundaries and good component reuse; the only structural concern is that all data logic lives in one large module, which will need splitting per resource as it grows."
+    },
+    "readability": {
+      "score": 4,
+      "evidence": [
+        "app/src/lib/format.ts:1-43 — well-named pure functions with clear signatures",
+        "app/src/routes/index.tsx:12-23 — HomeContent props typed inline rather than importing the shared HomeData interface; minor drift risk",
+        "app/src/lib/queries.ts:491-494 — magic methodPriority table and app/src/lib/queries.ts:292-293 id > 10000 filter carry no 'why' comments",
+        "app/src/routes/moves/[name].tsx — route files follow a consistent View + Page(loading/404) pattern across pokemon/types/abilities",
+        "app/src/components/MoveTable.tsx:66-79 — column rendering is a chain of six if-returns; readable but repetitive"
+      ],
+      "rationale": "Consistent file organisation, good names and thorough typing make navigation easy; the costs are the 700-line queries.ts, zero comments anywhere in the codebase, and a few spec-mandated magic values that go unexplained."
+    },
+    "review_cost": {
+      "score": 4,
+      "evidence": [
+        "app/src/app.tsx:26 — the one blocking ask: wrap route children in an ErrorBoundary",
+        "app/src/lib/queries.ts:1-710 — ask to split per resource (species/pokemon/move/ability/type) before it grows",
+        "app/src/routes/index.tsx:9-15 and app/src/routes/pokemon/[name].tsx:155-158 — duplicated search-param string|array coercion helpers; extract to lib",
+        "app/package.json:12-14 — nitro pinned as exact beta version '3.0.260610-beta' in dependencies; vite/nitro arguably devDependencies"
+      ],
+      "rationale": "I'd approve after one small round: add an ErrorBoundary, extract the duplicated param coercion, and either split queries.ts or accept it as the data layer with a comment on its caching strategy; nothing else rises above nits."
+    }
+  },
+  "overall": 4,
+  "findings": [
+    {
+      "severity": "medium",
+      "location": "app/src/app.tsx:26",
+      "issue": "No ErrorBoundary anywhere; @solidjs/router docs state a throwing query is caught by the nearest ErrorBoundary, so API failures (fetchJson throws on non-OK, app/src/lib/queries.ts:163-171) become unhandled rejections with a stuck Suspense fallback.",
+      "suggestion": "Wrap {props.children} in an <ErrorBoundary> with a fallback (e.g. 'Something went wrong' plus a link home) inside the Router root."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/lib/queries.ts:1-710",
+      "issue": "Single 700-line data module holds HTTP caching, three module-level caches, DTO types and all six page queries; the god data module everything else imports.",
+      "suggestion": "Split per resource (species.ts, moves.ts, types.ts …) with a shared api.ts for fetchJson/apiBase; keeps per-page queries reviewable as pages evolve."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/routes/index.tsx:60-90",
+      "issue": "Debounced search is hand-rolled: signal + manual lastUrlSearch tracking + createEffect DOM sync, a home-grown equivalent of reactive search params; pagination hrefs (index.tsx:181) read the signal, so they can diverge from the URL q while a debounce is pending.",
+      "suggestion": "Derive the displayed list and hrefs from the URL params (or commit the debounced value before building hrefs), and isolate the input-sync logic behind a small useDebouncedSearchParam helper with a comment on why attr:value is used."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/routes/pokemon/[name].tsx:157-164",
+      "issue": "Manual scroll-to-#moves effect refires whenever data() changes (e.g. switching game re-scrolls to #moves) and races image layout shifts.",
+      "suggestion": "Track the last-scrolled hash so the effect runs once per hash entry, or rely on the browser anchor after the streaming Suspense resolves."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/routes/index.tsx:9-15",
+      "issue": "paramValue coercion duplicated (gameParam variant in app/src/routes/pokemon/[name].tsx:155-158); two near-identical helpers for useSearchParams values.",
+      "suggestion": "Move a single paramValue helper to src/lib/ (e.g. router.ts) and use it in both routes."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/lib/queries.ts:491-494",
+      "issue": "Unexplained domain constants scattered in code: methodPriority, EXCLUDED_TYPES, the id > 10000 alternate-form cutoff; the codebase has zero comments (commentLines: 0).",
+      "suggestion": "One-line comments on why (spec rules: alternate forms excluded, fixed method ordering, excluded pseudo-types) so future maintainers don't re-derive them from SPEC.md."
+    },
+    {
+      "severity": "low",
+      "location": "app/package.json:12-14",
+      "issue": "Build tooling (vite, nitro) declared as runtime dependencies, with nitro pinned to an exact beta build '3.0.260610-beta'.",
+      "suggestion": "Move vite and nitro to devDependencies (they're build-time plugins) and use a caret range for nitro, or document why the exact pin is required."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/routes/moves/[name].tsx:47-53",
+      "issue": "Fact-list dl markup duplicated between move and pokemon summary sections (class names differ: fact-list vs measures), a small near-identical-helper risk as pages grow.",
+      "suggestion": "Optional: extract a small FactList component for labelled key/value description lists shared across routes."
+    }
+  ],
+  "summary": "A clean, current-stable SolidStart v2 app that uses the framework's documented primitives correctly (query+createAsync, FileRoutes, Nitro-via-Vite config, HttpStatusCode 404s) and passes review with only one substantive change request: an ErrorBoundary, whose absence turns API errors into unhandled rejections. The single 700-line queries.ts data module is the main structural nit, and the hand-rolled search-input debounce and #moves scroll are small workarounds worth tidying. I'd merge after a light round of fixes."
+}
+```

@@ -1,0 +1,152 @@
+I've read the spec, all of `app/`'s data layer, routes, and components, and confirmed the measured facts: `app/` contains zero test files, no test runner dependency, and no test script (`app/package.json:6-8` defines only `dev`, `build`, `start`; deps are just the Solid stack plus `@types/node` and `typescript`). The measured `tests` block agrees (0 files, 0 cases, runner `[]`). So this review focuses on what the acceptance suite no longer guards once it stops being the only safety net.
+
+The code under test-free conditions is substantial and logic-dense: a ~250-line server-side view-model builder (`app/src/lib/server/model.ts`), a caching HTTP client with a concurrency limiter (`app/src/lib/server/pokeapi.ts`), URL-synced filter/pagination state with debouncing (`app/src/routes/index.tsx`), and client-side sortable tables with missing-values-last semantics (`app/src/components/MoveTable.tsx`). None of it has a single app-owned assertion.
+
+```json
+{
+  "dimension": "tests",
+  "criteria": {
+    "coverage_of_risk": {
+      "score": 1,
+      "evidence": [
+        "app/package.json:6-8 — no test script, no test runner in devDependencies",
+        "app/src/lib/server/model.ts:135-158 — homeData search/type/generation filtering and 48-per-page slice with clamping: zero tests",
+        "app/src/components/MoveTable.tsx:29-45 — missing-values-last comparator and aria-sort toggle: zero tests"
+      ],
+      "rationale": "No tests exist at all, and the riskiest logic (filtering, pagination, sorting, URL state) is precisely the untested code."
+    },
+    "behaviour_not_implementation": {
+      "score": 1,
+      "evidence": [
+        "app/src/lib/format.ts:1-16 — pure helpers (humanize, dexNumber, display) that would be the natural behavioural unit tests, none written",
+        "app/src/lib/server/model.ts:186-239 — pokemonMovesData game-default/method-order/dedup logic has no behavioural assertions"
+      ],
+      "rationale": "The rubric anchors 'or no tests' at 1; there is nothing behavioural or otherwise."
+    },
+    "regression_power": {
+      "score": 1,
+      "evidence": [
+        "app/src/lib/server/pokeapi.ts:33-52 — cache TTL and rejected-promise eviction: a refactor that cached 404s or dropped eviction would not be caught by anything the team owns",
+        "app/src/routes/index.tsx:47-66 — debounce plus pushedQuery sync effect: fast-typing and back/forward regressions would pass silently"
+      ],
+      "rationale": "With no app-owned tests, every covered-by-nothing behaviour can break without a failing test; only the borrowed acceptance suite notices anything."
+    },
+    "signal_to_noise": {
+      "score": 3,
+      "evidence": [
+        "app/ — zero test files (measured facts: tests.files 0, cases 0)"
+      ],
+      "rationale": "Per the rubric, no tests scores 3: there is no noise, but also no signal."
+    }
+  },
+  "overall": 1,
+  "findings": [
+    {
+      "severity": "high",
+      "location": "app/package.json:6",
+      "issue": "No test infrastructure whatsoever: no test script, no runner (vitest/@solidjs testing utilities), no test files; ~730 LOC of significant logic including a whole server data layer is unguarded by anything the team owns.",
+      "suggestion": "Add vitest with unit tests for model.ts and format.ts (both are pure-ish and easily covered against fixture JSON), plus a couple of component tests for MoveTable sorting and the home filter/URL sync."
+    },
+    {
+      "severity": "high",
+      "location": "app/src/lib/server/model.ts:152-158",
+      "issue": "Pagination math — totalPages = Math.max(1, Math.ceil(...)), the clamp Math.min(Math.max(1, ...), totalPages), and the slice((page-1)*48, page*48) — is untested; an off-by-one, a swapped clamp bound, or NaN-page handling (Number('2.7') → floor 2) would only be caught by end-to-end acceptance tests for a couple of fixtures.",
+      "suggestion": "Unit-test homeData against fixture data: empty results, page beyond range, page=0/'abc'/fractional, exactly-48 boundary, and the combined-filters case."
+    },
+    {
+      "severity": "high",
+      "location": "app/src/components/MoveTable.tsx:29-45",
+      "issue": "The trickiest pure logic in the app — sort comparator where missing values go last in both directions, sign application, and label tie-break — is client-side and untested; a refactor that, say, applies the sign before the null check would silently push missing values first when descending.",
+      "suggestion": "Extract rows() into a testable sort function and unit-test asc/desc per column, null-handling, and tie-break order; assert aria-sort state via a rendered component test."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/lib/server/model.ts:186-239",
+      "issue": "pokemonMovesData encodes several spec-critical choices: version-group filtering by learned set, default = highest order (games[games.length-1] after ascending sort), METHOD_ORDER ranking with others alphabetical, and the move|method|level dedup key — none tested; a reorder of the sort or a change to the default pick would break 'defaults to the latest game' invisibly.",
+      "suggestion": "Unit tests against fixture move/version-group data, asserting game list order, default selection, ?game override, table order, and row sort (level then name)."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/lib/server/model.ts:96-110",
+      "issue": "cardsFor silently drops alternate forms (id > 10000) and remaps Pokémon IDs to species names via speciesNames(); a regression here (e.g. removing the remap, or off-by-one on 10000) shows up only for edge species like deoxys-normal and would otherwise render wrong links with no test failing.",
+      "suggestion": "Table-driven test with entries including ID 10000 boundary, an ID >10000 form, and a default-Pokémon-name ≠ species-name case (deoxys)."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/routes/index.tsx:47-66",
+      "issue": "URL-state sync uses a manual pushedQuery flag, a 150 ms debounce, and a deferred effect to re-sync from the URL; this stateful dance (typing during a pending fetch, back/forward navigation, filter-change resetting page) is exactly the kind of code that regresses on refactor and has no test.",
+      "suggestion": "A component test driving the input (typing, fast successive keys) and popstate/back navigation, asserting the URL, the input value, and the rendered page stay consistent."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/lib/server/pokeapi.ts:33-52",
+      "issue": "The in-memory cache has subtle invariants — TTL expiry, eviction of rejected promises so failures aren't cached, sharing in-flight promises, and the MAX_CONCURRENT limiter's waiting-queue handoff; none are tested, and a bug (e.g. caching 404s or a stale entry surviving an API data change) would poison every page served for 60 s.",
+      "suggestion": "Unit tests with a stubbed fetch: 404 rejection, non-404 rejection then retry, coalesced concurrent requests, and TTL expiry using fake timers."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/routes/pokemon/[name].tsx:36",
+      "issue": "Error handling only covers the null/not-found branch; a non-404 API failure (pokeapi.ts:44 throws) is never handled or tested, so an API hiccup renders an empty page rather than an error state — and no test would notice.",
+      "suggestion": "Add an ErrorBoundary (or route-level error component) and a test that a 500 from the API shows an error page instead of a blank main."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/lib/format.ts:4-16",
+      "issue": "Spec-critical pure helpers (humanize with consecutive/leading hyphens, dexNumber padding, display of ''/null/0) are trivially testable and untested; note display(0) renders '0' correctly but the null check is easy to break ('|| value' style refactor would turn 0 into an em dash).",
+      "suggestion": "A dozen one-line unit cases here is nearly free and guards against exactly that refactor."
+    }
+  ],
+  "summary": "The app ships zero tests of its own — no runner, no script, no assertions — while containing genuinely risky logic: server-side filtering/pagination, a caching HTTP client, debounced URL state, and a client-side sortable table. Everything currently depends on the borrowed acceptance suite, so any refactor of the data layer would land unguarded. Overall 1: for a long-lived codebase this is the first thing to fix before touching anything else.",
+  "wroteTests": false,
+  "testCount": 0,
+  "valuableTests": [],
+  "lowValueTests": [],
+  "untested": [
+    {
+      "area": "Home filtering and pagination (app/src/lib/server/model.ts:135-158): search substring match on humanized names, type-slot matching, generation filtering, page clamping, 48-per-page slicing",
+      "risk": "high",
+      "likelyBug": "Off-by-one in page slicing, page clamp inverted, or a search that stops matching after a refactor to humanization; empty-type/gen param treated as a real filter"
+    },
+    {
+      "area": "Move table sorting and aria-sort (app/src/components/MoveTable.tsx:29-45): missing-values-last in both directions, asc/desc toggle, label tie-break",
+      "risk": "high",
+      "likelyBug": "Descending sort putting nulls first, tie-break flipping direction, or aria-sort left stale on the previously sorted column"
+    },
+    {
+      "area": "Moves data assembly (app/src/lib/server/model.ts:186-239): default game = highest order, method table order, per-method row order, dedup of repeated version-group entries",
+      "risk": "high",
+      "likelyBug": "Default game becoming the lowest-order group, machine methods ordered alphabetically before egg, or duplicate rows appearing for multi-form entries"
+    },
+    {
+      "area": "Species/Pokémon mapping (app/src/lib/server/model.ts:89-110): alternate-form exclusion at ID 10000 boundary, Pokémon-ID → species-name remap, dedup per species",
+      "risk": "medium",
+      "likelyBug": "Alternate forms leaking into lists, or deoxys-normal links replacing deoxys links; boundary condition flipped to >= 10000"
+    },
+    {
+      "area": "URL state sync on home (app/src/routes/index.tsx:47-66): debounce, replace-vs-push, page reset on filter change, input/URL resync on back/forward",
+      "risk": "medium",
+      "likelyBug": "Typed input clobbered by an in-flight fetch resolving, double history entries, or page=1 not restored when a filter changes"
+    },
+    {
+      "area": "HTTP client cache and limiter (app/src/lib/server/pokeapi.ts:14-66): 60 s TTL, rejected-promise eviction, request coalescing, 24-slot concurrency queue",
+      "risk": "medium",
+      "likelyBug": "404s or transient 500s cached for a minute, stale data surviving the live-data overlay swap, or limiter deadlock when a queued waiter is never released"
+    },
+    {
+      "area": "Not-found and error paths (app/src/routes/*/[name].tsx, pokeapi.ts:44): 404 → NotFound branch tested only via acceptance; non-404 API errors unhandled everywhere",
+      "risk": "medium",
+      "likelyBug": "Blank page or unhandled server exception when the API is degraded; an apiOrNull change that swallows all errors instead of only NotFoundError"
+    },
+    {
+      "area": "Pure formatting helpers (app/src/lib/format.ts:4-16): humanize, dexNumber padding, MISSING/em-dash rendering including 0 values",
+      "risk": "low",
+      "likelyBug": "display(0) regressing to an em dash after a falsy-value refactor; dex padding broken for IDs > 9999"
+    },
+    {
+      "area": "Evolution tree construction (app/src/lib/server/model.ts:117-121) and nested rendering (app/src/routes/pokemon/[name].tsx:44-58)",
+      "risk": "low",
+      "likelyBug": "Branching chains (Eevee) flattened or children dropped if evolves_to iteration order changes; cycles in chain data would now hang the recursion"
+    }
+  ]
+}
+```

@@ -1,0 +1,136 @@
+I've reviewed the full app (`server.mjs` 812 lines, `lib/api.mjs`, `lib/format.mjs`, `views/layout.mjs`, build script, styles) against the Hono skill/docs (hono 4.13 `html` helper, `@hono/node-server` 2.x `serveStatic`, `app.onError`/`app.notFound`) and current htmx 2.x practices. Key evidence-backed observations:
+
+- **Genuinely idiomatic**: `hono/html` with auto-escaping everywhere (no `raw()` anywhere, quotes escaped), promise-cached API client with failure eviction, `HX-Request`/`HX-Push-Url` partials, `hx-sync="this:replace"` to suppress stale responses, clean URL normalization in `buildQuery`.
+- **Real bug**: the filter form triggers on `input changed delay:200ms, change` — selects in Chromium fire both `input` and `change`, so each select change issues two requests and pushes the same URL twice (double history entries).
+- **Fan-out**: `getPokemonMoveInfo` fires one fetch per unique move of the selected game concurrently (~150–200 for e.g. Mew) on first visit; unbounded global `Map` cache.
+- **Duplication/dead code**: three near-identical species dedupe→sort→card blocks; a `hiddenBySpecies` parameter with a function-value branch whose only call site passes nothing; unused `capitalize`, `byName`, `typeBadge` import.
+- **Boilerplate**: five identical `try/catch (NotFoundError)` blocks instead of handling it once in `app.onError`; `String()` wrapping every `html`` result contrary to the documented `c.html(html\`...\`)` pattern.
+
+```json
+{
+  "dimension": "mergeability",
+  "criteria": {
+    "idiomatic": {
+      "score": 4,
+      "evidence": [
+        "app/views/layout.mjs:2 — hono/html html helper used throughout, matching current docs",
+        "app/lib/api.mjs:23-38 — promise-based in-memory cache with eviction on failure; API client cleanly separated",
+        "app/server.mjs:434-436, 586-592 — isHtmx via HX-Request header plus HX-Push-Url response header, canonical htmx partial pattern",
+        "app/server.mjs:495 — hx-sync='this:replace' correctly prevents stale filter responses racing",
+        "app/server.mjs:50-53 — three hand-rolled serveStatic routes instead of one serveStatic middleware",
+        "app/server.mjs:430,473,567 — String() wrapped around every html template result instead of passing HtmlEscapedString directly to c.html as the docs show",
+        "app/server.mjs:567,599,647,705,796 — five identical per-route NotFoundError try/catch blocks instead of handling it once in app.onError (which exists at :804)"
+      ],
+      "rationale": "Framework usage is recognisably current and careful (hono/html, htmx 2.x headers and extended selectors, node-server serveStatic), with a few home-grown workarounds where a framework feature exists (centralised error handling, static middleware, String() noise)."
+    },
+    "correctness_risks": {
+      "score": 3,
+      "evidence": [
+        "app/server.mjs:495 — hx-trigger='input changed delay:200ms, change' on a form containing selects; Chromium fires both input and change for selects, causing duplicate requests and duplicate history pushes",
+        "app/server.mjs:151-155 — Promise.all over every unique move of the selected game: ~150-200 concurrent fetches on first visit to a move-heavy Pokémon (e.g. Mew)",
+        "app/lib/api.mjs:23,27 — module-level unbounded Map cache, no TTL/eviction (bounded only by the fixed dataset; spec permits in-memory caching)",
+        "app/server.mjs:310,261 — outerHTML swaps of the moves section/table drop keyboard focus after every game change or column sort",
+        "app/server.mjs:560-562 — /pokemon/:name/moves-table throws NotFoundError when rows are empty, swapping a full 404 document into a table position (unreachable via normal clicks)",
+        "app/lib/api.mjs:48-57 — URL/HTML escaping is sound: no raw() usage anywhere, hono/html escapes quotes in attributes (verified against hono's escapeToBuffer)"
+      ],
+      "rationale": "No escaping or 404 holes and a race-safe cache, but the select double-fire/double history push is a real user-visible bug, and the unbounded per-request fetch fan-out plus a never-evicting global cache are fragility a reviewer would ask about."
+    },
+    "global_abstractions": {
+      "score": 3,
+      "evidence": [
+        "app/server.mjs:87-115 vs app/server.mjs:660-682 vs app/server.mjs:742-757 — three near-identical 'refs → dedupe by species id → sort → cards' blocks, each slightly different",
+        "app/server.mjs:87-99 — speciesCardsForRefs takes a hiddenBySpecies option with a function-value branch; its single call site (server.mjs:615) passes no options, so the whole parameter is dead speculative generality",
+        "app/lib/api.mjs:23 — hidden module-level cache Map is the app's only global state; at least it is contained in the API client and documented",
+        "app/views/layout.mjs:1 — module named layout.mjs actually holds all shared components (cards, badges, countText, section), while renderMoveTable/renderPokemonPage live in server.mjs — rendering split across an arbitrary boundary"
+      ],
+      "rationale": "Module boundaries (api/format/views) are mostly sane and earn their keep, but the triplicated species-dedupe logic and dead-option machinery in speciesCardsForRefs will need untangling the first time a card list changes."
+    },
+    "readability": {
+      "score": 3,
+      "evidence": [
+        "app/server.mjs:1-812 — single 812-line file holding routes, data shaping, sorting, and half the HTML rendering",
+        "app/lib/format.mjs — small, well-named pure helpers (englishOrHumanized, latestEnglishFlavorText, heightInMetres); easy to review",
+        "app/lib/api.mjs:1-2 — the only explanatory comments in the app, and they are good ones",
+        "app/lib/format.mjs:63 — unused capitalize; app/lib/api.mjs:88-89 — byName map built and never used; app/server.mjs:44 — typeBadge imported and unused",
+        "app/views/layout.mjs:1-45 — renderLayout and notFoundPage are clear and compact"
+      ],
+      "rationale": "Naming is consistently good and helpers are small, but the monolithic server.mjs, the misleading views/layout.mjs name, and a handful of dead exports mean a new teammate needs a tour to find where things live."
+    },
+    "review_cost": {
+      "score": 3,
+      "evidence": [
+        "app/server.mjs:495 — hx-trigger fix required (double history pushes on select changes)",
+        "app/server.mjs:87-115,660-682,742-757 — dedupe helper consolidation requested before merge",
+        "app/server.mjs:567,599,647,705,796 — replace five try/catch blocks with NotFoundError handling in the existing app.onError (app/server.mjs:804)",
+        "app/server.mjs:430 et al. — drop pervasive String() coercion to match documented c.html(html`...`) usage",
+        "app/lib/format.mjs:63, app/lib/api.mjs:88-89, app/server.mjs:44 — delete dead exports"
+      ],
+      "rationale": "A round of small-to-moderate changes before approving: fix the trigger bug, consolidate the duplicated card-building code, centralise NotFoundError handling, and remove dead code — nothing structural."
+    }
+  },
+  "overall": 3,
+  "findings": [
+    {
+      "severity": "medium",
+      "location": "app/server.mjs:495",
+      "issue": "Filter form's hx-trigger='input changed delay:200ms, change' double-fires for selects (Chromium emits both input and change), issuing two requests and pushing the same URL twice, so Back needs two presses after changing Type/Generation.",
+      "suggestion": "Split triggers per control (delayed input on the search field, change on the selects) or gate the input trigger to the search input, e.g. hx-trigger=\"search changed delay:250ms from:#search, change from:select\"."
+    },
+    {
+      "severity": "medium",
+      "location": "app/server.mjs:151-155",
+      "issue": "getPokemonMoveInfo fires one fetch per unique move of the selected game via Promise.all — a move-heavy Pokémon (Mew, ~190 moves) triggers ~200 concurrent API requests on first render, with no concurrency limit.",
+      "suggestion": "Fetch move details with a bounded concurrency pool (e.g. batched chunks), or lazily fetch only per method group rendered; the cache makes this a first-hit cost only, but it is still a burst on the request path."
+    },
+    {
+      "severity": "medium",
+      "location": "app/server.mjs:87-115",
+      "issue": "The 'refs → dedupe by species id → sort → pokemonCard' logic is implemented three times with slight variations (speciesCardsForRefs, the /abilities route, the /types route), and speciesCardsForRefs' hiddenBySpecies option — including its function-value branch — is dead code (only call site at server.mjs:615 passes nothing).",
+      "suggestion": "Keep one shared helper that takes an optional hidden-set, delete the function-value branch, and use it from all three routes."
+    },
+    {
+      "severity": "low",
+      "location": "app/server.mjs:567,599,647,705,796",
+      "issue": "Five identical per-route try/catch blocks translating NotFoundError into the 404 page, next to an app.onError that already centralises error responses.",
+      "suggestion": "Handle NotFoundError once in app.onError (checking error instanceof NotFoundError) and drop the per-route try/catch."
+    },
+    {
+      "severity": "low",
+      "location": "app/server.mjs:430",
+      "issue": "Every c.html(...) call wraps the html`...` result in String(), deviating from the documented c.html(html`...`) pattern; the coercion is harmless but adds noise in ~12 places and discards Hono's HtmlEscapedString metadata.",
+      "suggestion": "Return the html template result directly from c.html() as the hono/html docs demonstrate."
+    },
+    {
+      "severity": "low",
+      "location": "app/server.mjs:310,261",
+      "issue": "outerHTML swaps of #moves and the moves tables remove the focused element (game select, sort button) on every interaction, losing keyboard focus.",
+      "suggestion": "Swap a narrower container (e.g. the tables wrapper, leaving the select in place) or re-focus the triggering element after the swap."
+    },
+    {
+      "severity": "low",
+      "location": "app/lib/api.mjs:23-27",
+      "issue": "Unbounded module-level promise cache with no eviction or TTL; fine for the fixed snapshot but silently unbounded if the API data grows.",
+      "suggestion": "Acceptable given the spec explicitly allows runtime in-memory caching; optionally add a size cap or TTL to future-proof."
+    },
+    {
+      "severity": "low",
+      "location": "app/server.mjs:44, app/lib/format.mjs:63, app/lib/api.mjs:88-89",
+      "issue": "Dead code: typeBadge imported but unused in server.mjs, capitalize exported but never called, and the species catalog builds a byName map that is never read.",
+      "suggestion": "Delete the unused import and exports."
+    },
+    {
+      "severity": "low",
+      "location": "app/server.mjs:50-53",
+      "issue": "Three hand-written serveStatic routes for the three static assets instead of one middleware; every new asset needs a new route.",
+      "suggestion": "Use a single app.use('/static/*', serveStatic({ root: ... })) or app.use('*', serveStatic(...)) pattern per @hono/node-server docs."
+    },
+    {
+      "severity": "low",
+      "location": "app/server.mjs:560-562",
+      "issue": "The moves-table partial throws NotFoundError when a method has no rows, which would swap a full 404 HTML document into the table position; unreachable via normal clicks but a landmine if the endpoint is reused.",
+      "suggestion": "Render an empty table (or 204) instead of throwing for empty method rows in a partial endpoint."
+    }
+  ],
+  "summary": "A careful, current-idiom Hono + htmx app: sound escaping, thorough 404 handling, a race-safe promise cache, and clean URL state management, wrapped in a well-named api/format/views layer. The main merge blockers are a select double-fire that pushes duplicate history entries, an unbounded fetch fan-out for move details on first render, triplicated card-list building with dead option machinery, and a monolithic 812-line server.mjs. Approvable after one round of focused cleanups; nothing structural needs rework."
+}
+```

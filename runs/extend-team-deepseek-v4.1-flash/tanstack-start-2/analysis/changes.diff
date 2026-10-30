@@ -1,0 +1,617 @@
+diff --git a/app/src/components/PokemonCard.tsx b/app/src/components/PokemonCard.tsx
+index 8ced022..c404c11 100644
+--- a/app/src/components/PokemonCard.tsx
++++ b/app/src/components/PokemonCard.tsx
+@@ -1,10 +1,19 @@
++import type { ReactNode } from 'react'
+ import { Link } from '@tanstack/react-router'
+ import { dexNumber, humanize, spriteUrl } from '../lib/format'
+ import type { CardData, TypeRef } from '../lib/types'
+ import { useMediaBase } from '../lib/config'
+ import { TypeBadge } from './TypeBadge'
+ 
+-export function PokemonCardList({ cards, typeLabels }: { cards: CardData[]; typeLabels?: Map<string, string> }) {
++export function PokemonCardList({
++  cards,
++  typeLabels,
++  action,
++}: {
++  cards: CardData[]
++  typeLabels?: Map<string, string>
++  action?: (card: CardData) => ReactNode
++}) {
+   const mediaBase = useMediaBase()
+   return (
+     <ul className="card-grid">
+@@ -32,6 +41,7 @@ export function PokemonCardList({ cards, typeLabels }: { cards: CardData[]; type
+             </span>
+           )}
+           {card.hidden && <span className="card-note">Hidden ability</span>}
++          {action?.(card)}
+         </li>
+       ))}
+     </ul>
+diff --git a/app/src/components/TeamCoverage.tsx b/app/src/components/TeamCoverage.tsx
+new file mode 100644
+index 0000000..7621ebf
+--- /dev/null
++++ b/app/src/components/TeamCoverage.tsx
+@@ -0,0 +1,63 @@
++import type { CardData, TypeRef } from '../lib/types'
++
++export interface TypeCoverageRelations {
++  double: string[]
++  half: string[]
++  none: string[]
++}
++
++interface CoverageRow {
++  label: string
++  weak: number
++  resistant: number
++}
++
++export function TeamCoverage({
++  members,
++  types,
++  relations,
++}: {
++  members: CardData[]
++  types: TypeRef[]
++  relations: Record<string, TypeCoverageRelations>
++}) {
++  const rows: CoverageRow[] = types.map((type) => {
++    const relation = relations[type.name]
++    let weak = 0
++    let resistant = 0
++    for (const member of members) {
++      let multiplier = 1
++      for (const defending of member.types ?? []) {
++        if (relation.double.includes(defending)) multiplier *= 2
++        else if (relation.half.includes(defending)) multiplier *= 0.5
++        else if (relation.none.includes(defending)) multiplier *= 0
++      }
++      if (multiplier > 1) weak += 1
++      else if (multiplier < 1) resistant += 1
++    }
++    return { label: type.label, weak, resistant }
++  })
++
++  return (
++    <div className="table-scroll">
++      <table className="coverage-table">
++        <thead>
++          <tr>
++            <th scope="col">Type</th>
++            <th scope="col">Weak</th>
++            <th scope="col">Resistant</th>
++          </tr>
++        </thead>
++        <tbody>
++          {rows.map((row) => (
++            <tr key={row.label}>
++              <th scope="row">{row.label}</th>
++              <td>{row.weak}</td>
++              <td>{row.resistant}</td>
++            </tr>
++          ))}
++        </tbody>
++      </table>
++    </div>
++  )
++}
+diff --git a/app/src/lib/team-context.tsx b/app/src/lib/team-context.tsx
+new file mode 100644
+index 0000000..2036ebc
+--- /dev/null
++++ b/app/src/lib/team-context.tsx
+@@ -0,0 +1,45 @@
++import { createContext, useCallback, useContext, useMemo, useState, type ReactNode } from 'react'
++import { useLoaderData } from '@tanstack/react-router'
++import { TEAM_SIZE, writeTeamCookie } from './team'
++
++interface TeamContextValue {
++  team: string[]
++  has: (name: string) => boolean
++  isFull: boolean
++  add: (name: string) => void
++  remove: (name: string) => void
++}
++
++const TeamContext = createContext<TeamContextValue | null>(null)
++
++export function TeamProvider({ children }: { children: ReactNode }) {
++  const initialTeam = useLoaderData({ from: '__root__' }).team
++  const [team, setTeam] = useState(initialTeam)
++
++  const commit = useCallback((next: string[]) => {
++    setTeam(next)
++    writeTeamCookie(next)
++  }, [])
++
++  const value = useMemo<TeamContextValue>(
++    () => ({
++      team,
++      has: (name) => team.includes(name),
++      isFull: team.length >= TEAM_SIZE,
++      add: (name) => {
++        if (team.includes(name) || team.length >= TEAM_SIZE) return
++        commit([...team, name])
++      },
++      remove: (name) => commit(team.filter((member) => member !== name)),
++    }),
++    [team, commit],
++  )
++
++  return <TeamContext.Provider value={value}>{children}</TeamContext.Provider>
++}
++
++export function useTeam(): TeamContextValue {
++  const value = useContext(TeamContext)
++  if (!value) throw new Error('useTeam must be used inside TeamProvider')
++  return value
++}
+diff --git a/app/src/lib/team.ts b/app/src/lib/team.ts
+new file mode 100644
+index 0000000..8b41edd
+--- /dev/null
++++ b/app/src/lib/team.ts
+@@ -0,0 +1,51 @@
++import { humanize } from './format'
++
++// The team lives in a first-party cookie so the server can render the right state on
++// every request. The client keeps a copy in React state and writes the cookie on change.
++export const TEAM_COOKIE = 'team'
++export const TEAM_SIZE = 6
++
++function decode(value: string): string {
++  try {
++    return decodeURIComponent(value)
++  } catch {
++    return value
++  }
++}
++
++export function parseTeam(value: string | undefined | null): string[] {
++  if (!value) return []
++  let parsed: unknown
++  try {
++    parsed = JSON.parse(value)
++  } catch {
++    try {
++      parsed = JSON.parse(decode(value))
++    } catch {
++      return []
++    }
++  }
++  if (!Array.isArray(parsed)) return []
++  const names: string[] = []
++  for (const item of parsed) {
++    if (typeof item !== 'string') continue
++    const name = item.trim().toLowerCase()
++    if (!name || names.includes(name)) continue
++    names.push(name)
++    if (names.length >= TEAM_SIZE) break
++  }
++  return names
++}
++
++export function serializeTeam(names: string[]): string {
++  return encodeURIComponent(JSON.stringify(names.slice(0, TEAM_SIZE)))
++}
++
++export function writeTeamCookie(names: string[]): void {
++  if (typeof document === 'undefined') return
++  document.cookie = `${TEAM_COOKIE}=${serializeTeam(names)}; path=/; max-age=31536000; samesite=lax`
++}
++
++export function removeButtonName(name: string): string {
++  return `Remove ${humanize(name)}`
++}
+diff --git a/app/src/routeTree.gen.ts b/app/src/routeTree.gen.ts
+index 56fb8a0..ddb36c5 100644
+--- a/app/src/routeTree.gen.ts
++++ b/app/src/routeTree.gen.ts
+@@ -10,6 +10,7 @@
+ 
+ import { Route as rootRouteImport } from './routes/__root'
+ import { Route as IndexRouteImport } from './routes/index'
++import { Route as TeamRouteImport } from './routes/team'
+ import { Route as AbilitiesNameRouteImport } from './routes/abilities.$name'
+ import { Route as MovesNameRouteImport } from './routes/moves.$name'
+ import { Route as PokemonNameRouteImport } from './routes/pokemon.$name'
+@@ -21,6 +22,11 @@ const IndexRoute = IndexRouteImport.update({
+   path: '/',
+   getParentRoute: () => rootRouteImport,
+ } as any)
++const TeamRoute = TeamRouteImport.update({
++  id: '/team',
++  path: '/team',
++  getParentRoute: () => rootRouteImport,
++} as any)
+ const AbilitiesNameRoute = AbilitiesNameRouteImport.update({
+   id: '/abilities/$name',
+   path: '/abilities/$name',
+@@ -49,6 +55,7 @@ const TypesNameRoute = TypesNameRouteImport.update({
+ 
+ export interface FileRoutesByFullPath {
+   '/': typeof IndexRoute
++  '/team': typeof TeamRoute
+   '/abilities/$name': typeof AbilitiesNameRoute
+   '/moves/$name': typeof MovesNameRoute
+   '/pokemon/$name': typeof PokemonNameRoute
+@@ -57,6 +64,7 @@ export interface FileRoutesByFullPath {
+ }
+ export interface FileRoutesByTo {
+   '/': typeof IndexRoute
++  '/team': typeof TeamRoute
+   '/abilities/$name': typeof AbilitiesNameRoute
+   '/moves/$name': typeof MovesNameRoute
+   '/pokemon/$name': typeof PokemonNameRoute
+@@ -66,6 +74,7 @@ export interface FileRoutesByTo {
+ export interface FileRoutesById {
+   __root__: typeof rootRouteImport
+   '/': typeof IndexRoute
++  '/team': typeof TeamRoute
+   '/abilities/$name': typeof AbilitiesNameRoute
+   '/moves/$name': typeof MovesNameRoute
+   '/pokemon/$name': typeof PokemonNameRoute
+@@ -76,6 +85,7 @@ export interface FileRouteTypes {
+   fileRoutesByFullPath: FileRoutesByFullPath
+   fullPaths:
+     | '/'
++    | '/team'
+     | '/abilities/$name'
+     | '/moves/$name'
+     | '/pokemon/$name'
+@@ -84,6 +94,7 @@ export interface FileRouteTypes {
+   fileRoutesByTo: FileRoutesByTo
+   to:
+     | '/'
++    | '/team'
+     | '/abilities/$name'
+     | '/moves/$name'
+     | '/pokemon/$name'
+@@ -92,6 +103,7 @@ export interface FileRouteTypes {
+   id:
+     | '__root__'
+     | '/'
++    | '/team'
+     | '/abilities/$name'
+     | '/moves/$name'
+     | '/pokemon/$name'
+@@ -101,6 +113,7 @@ export interface FileRouteTypes {
+ }
+ export interface RootRouteChildren {
+   IndexRoute: typeof IndexRoute
++  TeamRoute: typeof TeamRoute
+   AbilitiesNameRoute: typeof AbilitiesNameRoute
+   MovesNameRoute: typeof MovesNameRoute
+   PokemonNameRoute: typeof PokemonNameRoute
+@@ -117,6 +130,13 @@ declare module '@tanstack/react-router' {
+       preLoaderRoute: typeof IndexRouteImport
+       parentRoute: typeof rootRouteImport
+     }
++    '/team': {
++      id: '/team'
++      path: '/team'
++      fullPath: '/team'
++      preLoaderRoute: typeof TeamRouteImport
++      parentRoute: typeof rootRouteImport
++    }
+     '/abilities/$name': {
+       id: '/abilities/$name'
+       path: '/abilities/$name'
+@@ -157,6 +177,7 @@ declare module '@tanstack/react-router' {
+ 
+ const rootRouteChildren: RootRouteChildren = {
+   IndexRoute: IndexRoute,
++  TeamRoute: TeamRoute,
+   AbilitiesNameRoute: AbilitiesNameRoute,
+   MovesNameRoute: MovesNameRoute,
+   PokemonNameRoute: PokemonNameRoute,
+diff --git a/app/src/routes/__root.tsx b/app/src/routes/__root.tsx
+index 0a2c1d4..f7f3ba7 100644
+--- a/app/src/routes/__root.tsx
++++ b/app/src/routes/__root.tsx
+@@ -2,6 +2,7 @@ import type { ReactNode } from 'react'
+ import { HeadContent, Link, Outlet, Scripts, createRootRoute } from '@tanstack/react-router'
+ import { getConfig } from '../server/functions'
+ import { pageTitle } from '../lib/format'
++import { TeamProvider } from '../lib/team-context'
+ import tokensCss from '../tokens.css?url'
+ import appCss from '../styles.css?url'
+ 
+@@ -29,7 +30,9 @@ export const Route = createRootRoute({
+ function RootComponent() {
+   return (
+     <RootDocument>
+-      <Outlet />
++      <TeamProvider>
++        <Outlet />
++      </TeamProvider>
+     </RootDocument>
+   )
+ }
+@@ -54,6 +57,9 @@ function RootDocument({ children }: { children: ReactNode }) {
+                 <li>
+                   <Link to="/types">Types</Link>
+                 </li>
++                <li>
++                  <Link to="/team">Team</Link>
++                </li>
+               </ul>
+             </nav>
+           </div>
+diff --git a/app/src/routes/pokemon.$name.tsx b/app/src/routes/pokemon.$name.tsx
+index 61770ab..06ba0f7 100644
+--- a/app/src/routes/pokemon.$name.tsx
++++ b/app/src/routes/pokemon.$name.tsx
+@@ -6,6 +6,7 @@ import { Section } from '../components/Section'
+ import { TypeBadge } from '../components/TypeBadge'
+ import { MoveTable } from '../components/MoveTable'
+ import { NotFound } from '../components/NotFound'
++import { useTeam } from '../lib/team-context'
+ 
+ const MAX_STAT = 255
+ 
+@@ -53,6 +54,8 @@ function PokemonPage() {
+   const p = Route.useLoaderData()
+   const search = Route.useSearch()
+   const navigate = Route.useNavigate()
++  const team = useTeam()
++  const inTeam = team.has(p.name)
+   const total = p.stats.reduce((sum, s) => sum + s.value, 0)
+ 
+   return (
+@@ -64,6 +67,23 @@ function PokemonPage() {
+         <div className="summary-text">
+           <p className="dex-number">{dexNumber(p.id)}</p>
+           <h1>{p.label}</h1>
++          <div className="team-actions">
++            {inTeam ? (
++              <button type="button" className="team-button" onClick={() => team.remove(p.name)}>
++                Remove from team
++              </button>
++            ) : (
++              <button
++                type="button"
++                className="team-button"
++                onClick={() => team.add(p.name)}
++                disabled={team.isFull}
++              >
++                Add to team
++              </button>
++            )}
++            {!inTeam && team.isFull && <span className="team-note">Team is full</span>}
++          </div>
+           {p.genus && <p className="genus">{p.genus}</p>}
+           <p className="badge-row">
+             {p.types.map((t) => (
+diff --git a/app/src/routes/team.tsx b/app/src/routes/team.tsx
+new file mode 100644
+index 0000000..79d5908
+--- /dev/null
++++ b/app/src/routes/team.tsx
+@@ -0,0 +1,61 @@
++import { Link, createFileRoute } from '@tanstack/react-router'
++import { getTeamPage } from '../server/functions'
++import { pageTitle } from '../lib/format'
++import { removeButtonName, TEAM_SIZE } from '../lib/team'
++import { useTeam } from '../lib/team-context'
++import type { CardData } from '../lib/types'
++
++type TeamMember = CardData & { types: string[] }
++import { PokemonCardList } from '../components/PokemonCard'
++import { Section } from '../components/Section'
++import { TeamCoverage } from '../components/TeamCoverage'
++
++export const Route = createFileRoute('/team')({
++  loader: () => getTeamPage(),
++  head: () => ({ meta: [{ title: pageTitle('Team') }] }),
++  component: TeamPage,
++})
++
++function TeamPage() {
++  const data = Route.useLoaderData()
++  const { team, remove } = useTeam()
++
++  const loaded = new Map(data.members.map((member) => [member.name, member]))
++  const members = team
++    .map((name) => loaded.get(name))
++    .filter((member): member is TeamMember => Boolean(member))
++  const typeLabels = new Map(data.types.map((type) => [type.name, type.label]))
++
++  return (
++    <div className="page">
++      <h1>Team</h1>
++      <p className="count">
++        {team.length} of {TEAM_SIZE}
++      </p>
++
++      {team.length === 0 ? (
++        <div className="empty-team">
++          <p>Your team is empty</p>
++          <p>
++            <Link to="/">Browse Pokémon</Link>
++          </p>
++        </div>
++      ) : (
++        <>
++          <PokemonCardList
++            cards={members}
++            typeLabels={typeLabels}
++            action={(card) => (
++              <button type="button" className="card-action" onClick={() => remove(card.name)}>
++                {removeButtonName(card.name)}
++              </button>
++            )}
++          />
++          <Section title="Type coverage">
++            <TeamCoverage members={members} types={data.types} relations={data.relations} />
++          </Section>
++        </>
++      )}
++    </div>
++  )
++}
+diff --git a/app/src/server/functions.ts b/app/src/server/functions.ts
+index ab1d1e5..cd001f0 100644
+--- a/app/src/server/functions.ts
++++ b/app/src/server/functions.ts
+@@ -1,5 +1,7 @@
+ import { createServerFn } from '@tanstack/react-start'
++import { getCookie } from '@tanstack/react-start/server'
+ import { humanize, EM_DASH } from '../lib/format'
++import { parseTeam, TEAM_COOKIE } from '../lib/team'
+ import type { LearnTable } from '../lib/types'
+ import {
+   apiBase,
+@@ -36,7 +38,12 @@ const METHOD_ORDER = ['level-up', 'machine', 'egg', 'tutor']
+ 
+ const nameInput = (data: { name: string }) => ({ name: String(data.name).toLowerCase() })
+ 
+-export const getConfig = createServerFn({ method: 'GET' }).handler(async () => ({ mediaBase: apiBase() }))
++const readTeam = () => parseTeam(getCookie(TEAM_COOKIE))
++
++export const getConfig = createServerFn({ method: 'GET' }).handler(async () => ({
++  mediaBase: apiBase(),
++  team: readTeam(),
++}))
+ 
+ export const getHomeData = createServerFn({ method: 'GET' }).handler(async () => {
+   const [species, types, generations] = await Promise.all([speciesIndex(), typeList(), generationList()])
+@@ -149,6 +156,41 @@ export const getAbilityPage = createServerFn({ method: 'GET' })
+     }
+   })
+ 
++export const getTeamPage = createServerFn({ method: 'GET' }).handler(async () => {
++  const names = readTeam()
++  const [types, members] = await Promise.all([
++    typeList(),
++    Promise.all(
++      names.map(async (name) => {
++        const species = await orNull(getSpecies(name))
++        if (!species) return null
++        const pokemon = await getPokemonById(species.id)
++        return {
++          id: species.id,
++          name: species.name,
++          types: [...pokemon.types].sort((a, b) => a.slot - b.slot).map((t) => t.type.name),
++        }
++      }),
++    ),
++  ])
++  const typeDocs = await Promise.all(types.map((t) => getType(t.name)))
++  const relations = Object.fromEntries(
++    typeDocs.map((type) => [
++      type.name,
++      {
++        double: type.damage_relations.double_damage_to.map((t) => t.name),
++        half: type.damage_relations.half_damage_to.map((t) => t.name),
++        none: type.damage_relations.no_damage_to.map((t) => t.name),
++      },
++    ]),
++  )
++  return {
++    types,
++    members: members.filter((member): member is NonNullable<typeof member> => member !== null),
++    relations,
++  }
++})
++
+ export const getTypesPage = createServerFn({ method: 'GET' }).handler(() => typeList())
+ 
+ const RELATIONS = [
+diff --git a/app/src/styles.css b/app/src/styles.css
+index 98edfe0..aacfd36 100644
+--- a/app/src/styles.css
++++ b/app/src/styles.css
+@@ -544,3 +544,87 @@ a.type-badge:hover {
+   break-inside: avoid;
+   padding: var(--space-1) 0;
+ }
++
++/* ---- Team builder ---- */
++
++.team-actions {
++  display: flex;
++  flex-wrap: wrap;
++  align-items: center;
++  gap: var(--space-3);
++  margin-top: var(--space-3);
++}
++
++.team-button,
++.card-action {
++  padding: var(--space-2) var(--space-4);
++  border: 1px solid var(--color-border);
++  border-radius: var(--radius-md);
++  background: var(--color-surface);
++  color: var(--color-link);
++  font: inherit;
++  line-height: var(--leading-tight);
++  cursor: pointer;
++}
++
++.team-button:hover:not(:disabled),
++.card-action:hover {
++  border-color: var(--color-link);
++}
++
++.team-button:disabled {
++  color: var(--color-text-muted);
++  cursor: not-allowed;
++  opacity: 0.65;
++}
++
++.team-note {
++  color: var(--color-text-muted);
++  font-size: var(--text-sm);
++}
++
++.card-action {
++  margin-top: var(--space-1);
++  padding: var(--space-1) var(--space-3);
++  font-size: var(--text-xs);
++}
++
++.empty-team {
++  display: flex;
++  flex-direction: column;
++  gap: var(--space-2);
++  color: var(--color-text-muted);
++}
++
++.coverage-table {
++  width: 100%;
++  border-collapse: collapse;
++  font-size: var(--text-sm);
++}
++
++.coverage-table th,
++.coverage-table td {
++  padding: var(--space-2) var(--space-3);
++  border-bottom: 1px solid var(--color-border);
++  text-align: left;
++}
++
++.coverage-table thead th {
++  color: var(--color-text-muted);
++  font-weight: var(--weight-normal);
++  white-space: nowrap;
++}
++
++.coverage-table th[scope='row'] {
++  font-weight: var(--weight-normal);
++}
++
++.coverage-table td {
++  width: 5rem;
++}
++
++@media (min-width: 48rem) {
++  .coverage-table th[scope='row'] {
++    width: 12rem;
++  }
++}

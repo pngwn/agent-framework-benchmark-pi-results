@@ -1,0 +1,125 @@
+{
+  "dimension": "mergeability",
+  "criteria": {
+    "idiomatic": {
+      "score": 4,
+      "evidence": [
+        "app/package.json:11 — astro 7.4.4 / @astrojs/node 11.1.9, the current stable pair",
+        "app/astro.config.mjs:2-7 — output: 'server' + node({mode:'standalone'}) with host:true, the documented SSR setup",
+        "app/src/pages/pokemon/[name].astro:30-38 — Astro.params + Astro.response.status = 404 on NotFoundError, idiomatic",
+        "app/src/lib/pokeapi.ts:1 — raw process.env.API_BASE_URL instead of astro:env's getSecret(), which current docs recommend for programmatic env access",
+        "app/src/pages/index.astro:104-120 — hand-rolled fetch+DOMParser+innerHTML SPA swap rather than Astro's island/navigation primitives",
+        "app/src/styles/global.css:1 — one global stylesheet for every component instead of Astro's favored scoped <style> blocks (forced by the innerHTML swap)"
+      ],
+      "rationale": "Core Astro usage (routing, params, SSR data loading in frontmatter, status codes, bundled scripts) matches current docs exactly; the deductions are the raw process.env access and the home-brewed DOM-swap navigation that also drove the global-CSS choice."
+    },
+    "correctness_risks": {
+      "score": 4,
+      "evidence": [
+        "app/src/pages/index.astro:120 — pushState with no popstate listener: back/forward changes the URL but leaves stale filtered results rendered",
+        "app/src/pages/index.astro:110-115 — requestId guard correctly discards out-of-order search responses",
+        "app/src/lib/pokeapi.ts:45-49 — cached promise is evicted on failure so a transient API error isn't sticky",
+        "app/src/pages/pokemon/[name].astro:88-95 — getVersionGroup/getMove fetches sit outside any try/catch; a single 404/5xx from the API turns into an uncaught 500 instead of a graceful page",
+        "app/src/pages/pokemon/[name].astro:381 — text-column sort uses plain localeCompare, so empty type/category values sort first ascending, violating the spec's 'missing values sort last in both directions' for non-numeric columns"
+      ],
+      "rationale": "Error handling and races are handled more carefully than most submissions (typed 404 path, cache eviction, request sequencing); the one real user-facing bug is the history desync, plus two narrow edge cases."
+    },
+    "global_abstractions": {
+      "score": 3,
+      "evidence": [
+        "app/src/lib/data.ts:29-35 — seven module-scoped memoized promise variables forming a central god data module every page imports",
+        "app/src/lib/data.ts:39-183 — the identical catch-and-reset-the-promise boilerplate repeated seven times; a cached() helper would collapse it",
+        "app/src/lib/pokeapi.ts — single module mixing HTTP client, URL building, humanization, formatting and a concurrency helper",
+        "app/src/pages/index.astro:99,119 — client script coupled to server markup by an implicit contract (the #results id and form field names), a leaky server/client boundary",
+        "app/src/lib/data.ts:137-190 — getHomeIndex builds type/generation maps from 9+18 detail fetches instead of 1025 pokemon fetches: a good abstraction that earns its keep"
+      ],
+      "rationale": "The boundaries between lib, components and pages are mostly clean and the home index is a genuinely smart abstraction, but data.ts is a god module built on seven copies of the same memoization boilerplate, and the home page's DOM swap creates an implicit coupling that will bite whoever edits the markup next."
+    },
+    "readability": {
+      "score": 3,
+      "evidence": [
+        "app/src/pages/pokemon/[name].astro:1-188 — ~190-line frontmatter doing every layer of data shaping (games, moves, types, method grouping, sorting) inline in the page",
+        "app/src/lib/pokeapi.ts:20,120 — Promise<any>/any[] for every API payload; almost no types in a TypeScript project",
+        "app/tsconfig.json:4-7 — strict:false overrides the astro/tsconfigs/base defaults the framework recommends",
+        "app/src/pages/pokemon/[name].astro:198 — dex-number padding duplicated inline instead of reusing dexNumber() from pokeapi.ts",
+        "app/src/lib/data.ts:39-49 — clear names and small functions throughout lib; organisation (layouts/components/lib/pages) is conventional"
+      ],
+      "rationale": "Naming and file layout are good and a teammate would find their way quickly, but the Pokémon page concentrates too much logic in one file, the any-typing erases the data contracts, and there is essentially no explanatory commentary anywhere."
+    },
+    "review_cost": {
+      "score": 3,
+      "evidence": [
+        "app/src/pages/index.astro:120 — popstate handling or a documented decision to drop pushState",
+        "app/src/pages/pokemon/[name].astro:88-186 — move-table shaping should move into lib before anyone else extends the page",
+        "app/src/lib/data.ts:39-183 — deduplicate the seven memoization blocks",
+        "app/src/lib/pokeapi.ts:1 — swap process.env for astro:env/getSecret or define a schema",
+        "app/tsconfig.json:5 — restore strict mode"
+      ],
+      "rationale": "Nothing structural needs rework, but the history bug, the oversized page component and the tsconfig downgrade are things I'd ask for before approving — one round of changes, all small."
+    }
+  },
+  "overall": 4,
+  "findings": [
+    {
+      "severity": "medium",
+      "location": "app/src/pages/index.astro:120",
+      "issue": "Filter changes use history.pushState but there is no popstate handler, so pressing back/forward updates the URL while the page keeps showing stale results.",
+      "suggestion": "Listen for popstate and re-run the fetch-and-swap, or use replaceState and let back/forward do full navigations."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/pages/pokemon/[name].astro:1-188",
+      "issue": "The detail page is ~390 lines with all move/version-group/type shaping inline in frontmatter; the heaviest logic in the app lives in a route file.",
+      "suggestion": "Extract version-group selection and move-row shaping (lines 88-186) into src/lib/moves.ts so the page is mostly markup."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/lib/pokeapi.ts:1",
+      "issue": "API_BASE_URL is read straight from process.env; since Astro 5 the docs recommend astro:env (getSecret or a schema) for programmatic env access.",
+      "suggestion": "Define an envField.string schema in astro.config.mjs and read it via astro:env/server, keeping the adapter-swap benefit."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/lib/data.ts:39-183",
+      "issue": "The same memoize-and-reset-on-error boilerplate is duplicated for all seven cached resources.",
+      "suggestion": "Add a small `cached(fn)` wrapper in lib and let each getter use it."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/pages/pokemon/[name].astro:88-95",
+      "issue": "getVersionGroup/getMove/getTypeDetail fetches run outside any error handling; a single bad API response becomes an uncaught 500.",
+      "suggestion": "Wrap the enrichment block and degrade gracefully (omit type labels / render '—') rather than failing the whole page."
+    },
+    {
+      "severity": "low",
+      "location": "app/tsconfig.json:5",
+      "issue": "strict:false disables the type checking astro/tsconfigs/base enables by default, weakening every downstream edit.",
+      "suggestion": "Remove the override and type the API payloads in lib/data.ts."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/pages/pokemon/[name].astro:381",
+      "issue": "Text-column sorting uses plain localeCompare, so an empty type/category value sorts first when ascending instead of last as the spec requires for missing values.",
+      "suggestion": "Apply the same empty-value guard used for numericKeys to the text branch of compare()."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/styles/global.css:213,683",
+      "issue": "The 18 per-type color rules are duplicated verbatim for .type-badge and .type-link.",
+      "suggestion": "Share one selector list (.type-badge, .type-link) or generate the rules from the token names."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/pages/pokemon/[name].astro:198",
+      "issue": "Dex-number formatting is repeated inline instead of reusing the existing dexNumber() helper.",
+      "suggestion": "Import dexNumber from ../../lib/pokeapi and use it here."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/pages/index.astro:104-119",
+      "issue": "The client script fetches and parses the entire rendered page on every (debounced) keystroke just to replace #results, and its coupling to the server markup makes the template hard to change safely.",
+      "suggestion": "Consider replacing the swap with Astro's standard navigation or a small fetch endpoint that returns only the results fragment."
+    }
+  ],
+  "summary": "This is a solid, current-version Astro SSR app: routing, params, status codes and data loading all follow the documented patterns, and the error handling and race guards show real care. The main reservations are a hand-rolled DOM-swap navigation with a history desync bug, a god data module built on seven copies of the same memoization boilerplate, and a 390-line detail page. I'd merge it after one round of small, well-scoped changes."
+}

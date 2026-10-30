@@ -1,0 +1,179 @@
+## Review
+
+The app contains **zero tests of its own**. `app/package.json` has no `test` script and no test runner among its dependencies (only build/dev/start); there are no spec files anywhere under `app/` (confirmed by the measured facts: `tests.files: 0`, `script: null`, and by grep). The comprehensive Playwright suite in `tests/` is harness-provided and doesn't count.
+
+What makes the absence painful is that the code is *eminently* testable — pure helpers (`app/src/lib/format.ts:3-21`), pure transforms over API shapes (`app/src/server/pokeapi.ts`), and a thin component layer — so a handful of unit tests against small JSON fixtures would have covered nearly all the risky logic at near-zero cost. As it stands, once the acceptance suite is retired, a refactor of the data layer would land unguarded.
+
+The riskiest untested spots I found while reading:
+
+- **Move-table sorting** — `app/src/components/MoveTable.tsx:47-62`: null-last in *both* directions (`:58`), stable-index tie-break (`:59`), default order level-then-name (`:47`). One flipped comparison silently breaks the spec's "missing values sort last".
+- **The species-index join** — `app/src/server/pokeapi.ts:172-198`: cross-joins species × 18 type lists × generations, with slot-ordering at `:196` and a fallback of `[]` for species with no types. This feeds *every* home card; a slot-sort typo or a wrong id filter misorders or empties type badges everywhere.
+- **Search/debounce/URL/page interplay** — `app/src/routes/index.tsx:33-46,63-68`: the page shown depends on `query === (search.q ?? '')` (a race between typed input and the debounced URL push); regressions here reintroduce typing lag or break "changing a filter resets to page 1".
+- **Alternate-form exclusion & dedupe** — `app/src/server/pokeapi.ts:96-107`: the `id > 10000` cutoff, map dedupe, and the `species.get(id) ?? ref.pokemon.name` fallback (`:105`) protect the ability/type/move card lists from duplicates and wrong species links.
+- **Default-game selection** — `app/src/server/functions.ts:52-64`: unknown version groups get `MAX_SAFE_INTEGER` order and therefore sort last, making them the *default* game via `games.at(-1)` at `:64` — a subtle behavior nothing would catch.
+- **Latest-English extraction** — `app/src/server/pokeapi.ts:75-79`: `.at(-1)` vs `.find()` is the classic silent regression (first vs last English entry), plus whitespace collapse.
+- **The runtime cache** — `app/src/server/pokeapi.ts:18-31`: rejected-promise eviction, TTL vs the live-data overlay, and the >5000 prune; a refactor that caches resolved values instead of promises would pin a 404/500 for the TTL.
+
+The acceptance tests happen to cover much of the *rendered* behaviour, so I scored the criteria on the app's own contribution as instructed.
+
+```json
+{
+  "dimension": "tests",
+  "criteria": {
+    "coverage_of_risk": {
+      "score": 1,
+      "evidence": [
+        "app/package.json:6-9 — only dev/build/start scripts, no test script or test runner",
+        "app/src/components/MoveTable.tsx:47-62 — sorting logic with null-last and stable tie-break, fully untested",
+        "app/src/server/pokeapi.ts:172-198 — speciesIndex join (slot ordering, generation mapping) untested",
+        "app/src/lib/format.ts:3-21 — pure helpers (humanize, dexNumber, display) trivially unit-testable, none written"
+      ],
+      "rationale": "No tests exist at all; the riskiest logic (data joins, sorting, pagination, URL state) has no coverage from the app's own work."
+    },
+    "behaviour_not_implementation": {
+      "score": 1,
+      "evidence": [
+        "app/src — zero spec/test files anywhere in the app tree",
+        "app/package.json:19-28 — devDependencies contain no test framework"
+      ],
+      "rationale": "No tests to evaluate; scored at the floor per instructions."
+    },
+    "regression_power": {
+      "score": 1,
+      "evidence": [
+        "app/src/server/functions.ts:64 — default game chosen via games.at(-1) with unknown version groups sorted last by MAX_SAFE_INTEGER (functions.ts:59); nothing would catch a change here",
+        "app/src/routes/index.tsx:63-68 — page clamp and the query-vs-URL race decide what's rendered; unprotected against refactor",
+        "app/src/server/pokeapi.ts:96-107 — id > 10000 alternate-form cutoff and dedupe guard every card list; unprotected"
+      ],
+      "rationale": "With no tests, any regression in these behaviours would ship silently once the acceptance suite is no longer run against the app."
+    },
+    "signal_to_noise": {
+      "score": 3,
+      "evidence": [
+        "app/package.json:6-9 — no test script, so no low-value tests either"
+      ],
+      "rationale": "No tests means no noise; per the rubric, no tests scores 3 on signal-to-noise."
+    }
+  },
+  "overall": 1,
+  "findings": [
+    {
+      "severity": "high",
+      "location": "app/package.json:6-9",
+      "issue": "The app ships with no test script, runner, or single test file; all quality gating is deferred to the harness-provided acceptance suite.",
+      "suggestion": "Add vitest plus a few unit suites for app/src/lib/format.ts and the pure transforms in app/src/server/pokeapi.ts (they take plain objects, so small JSON fixtures suffice)."
+    },
+    {
+      "severity": "high",
+      "location": "app/src/components/MoveTable.tsx:47-62",
+      "issue": "Sorting correctness (missing values last in both directions, stable tie-break, ascending-first toggling, aria-sort) is enforced only by acceptance tests.",
+      "suggestion": "Unit-test the sort comparator directly with mixed null/number/string rows for both directions; it is a pure function of (rows, sort)."
+    },
+    {
+      "severity": "high",
+      "location": "app/src/server/pokeapi.ts:172-198",
+      "issue": "speciesIndex builds the home list by joining species names, 18 type pokemon lists and generations; slot ordering, empty-type fallback and generation assignment are all untested.",
+      "suggestion": "Extract the join into a pure function taking the three raw payloads and test ordering/dedup with a fixture including an alternate form and a species missing from a type list."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/routes/index.tsx:33-46",
+      "issue": "Debounced URL sync and the query === (search.q ?? '') gate at line 64 are a race-prone design with no regression net; a refactor could reintroduce typing lag or break the reset-to-page-1 rule.",
+      "suggestion": "Cover with a component test: type a query, assert results update before the URL settles; change a select, assert page resets."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/server/pokeapi.ts:96-107",
+      "issue": "Alternate-form exclusion (id > 10000), dedupe-by-id, and the species-name fallback in toCards protect every 'Learned by'/'Pokémon of type' card list from duplicates and wrong links.",
+      "suggestion": "Unit-test toCards with refs including an id above 10000, a duplicate id, and an id absent from the species map."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/server/functions.ts:52-64",
+      "issue": "The default game is the highest-order version group, but unknown version groups fall back to MAX_SAFE_INTEGER and sort last, silently becoming the default; tie-breaks by name. Nothing pins this.",
+      "suggestion": "Test the games/default selection with a fixture containing two version groups of equal order and one missing from /version-group/."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/server/pokeapi.ts:18-31",
+      "issue": "The cache memo's semantics (shared promise, eviction of rejections, 60s TTL vs live-data changes) are untested; a refactor caching resolved values would pin a 404/500 or serve stale data past the TTL.",
+      "suggestion": "Unit-test memo with a fake timer: concurrent callers share one promise, a rejection is evicted and retried, an expired entry recomputes."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/server/pokeapi.ts:75-79",
+      "issue": "latestEnglish uses .at(-1) and collapse uses a \\s+ regex; the classic silent regression is switching to the first English entry or dropping the collapse, and no test would notice.",
+      "suggestion": "One-line unit tests for both helpers with multi-language entries containing \\n and \\f."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/routes/index.tsx:17-26",
+      "issue": "validateSearch coerces page (NaN, 0, 1 all normalised to undefined); a regression would make ?page=0 slice to an empty list.",
+      "suggestion": "Unit-test validateSearch with ?page=0, ?page=abc, ?page=1 and blank q/type/generation."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/routes/__root.tsx:13",
+      "issue": "The root head reads the router-internal m._notFound field to pick the 404 title; nothing would catch this breaking on a router upgrade.",
+      "suggestion": "Add a smoke test asserting the document title for a not-found URL, or drop the private field in favour of the documented m.status."
+    }
+  ],
+  "summary": "The app contains no tests of its own: no test script, no runner, and no spec files anywhere in app/. That is a significant miss because the code is deliberately structured for cheap testing — pure helpers in app/src/lib/format.ts and pure transforms in app/src/server/pokeapi.ts that accept plain objects. The riskiest logic (the species-index join, move-table sorting, debounce/URL/page interplay, alternate-form exclusion, and the runtime cache) is entirely unguarded once the acceptance suite is no longer the gate.",
+  "wroteTests": false,
+  "testCount": 0,
+  "valuableTests": [],
+  "lowValueTests": [],
+  "untested": [
+    {
+      "area": "Move-table sorting (app/src/components/MoveTable.tsx:47-62): null-last in both directions, stable-index tie-break, ascending-first toggle, aria-sort state",
+      "risk": "high",
+      "likelyBug": "A flipped comparison or reordered null check makes missing power/accuracy sort first when descending, or breaks the second-click direction flip — visually correct tables become wrong with no failing test."
+    },
+    {
+      "area": "Species-index construction (app/src/server/pokeapi.ts:172-198): joining species names × 18 type pokemon lists × generations, slot ordering, empty-type and missing-generation fallbacks",
+      "risk": "high",
+      "likelyBug": "A slot-sort typo or an id-filter change reorders or empties the type badges on every home-page card, or drops species whose types are absent (e.g. data added after the build)."
+    },
+    {
+      "area": "Search + debounce + URL sync + page clamp (app/src/routes/index.tsx:33-46, 63-68)",
+      "risk": "high",
+      "likelyBug": "Regating on search.q instead of the typed query reintroduces typing lag; a broken clamp makes ?page=0 or an out-of-range page render an empty list or duplicate page numbers."
+    },
+    {
+      "area": "toCards alternate-form exclusion and dedupe (app/src/server/pokeapi.ts:96-107)",
+      "risk": "medium",
+      "likelyBug": "Changing id > 10000 to >= 10000, or losing the map dedupe, duplicates or wrongly links cards on ability, type and move 'Learned by' lists (e.g. deoxys-normal pointing at the wrong species)."
+    },
+    {
+      "area": "Default game selection and version-group ordering (app/src/server/functions.ts:52-64)",
+      "risk": "medium",
+      "likelyBug": "Unknown version groups fall back to MAX_SAFE_INTEGER and sort last, silently becoming the default game; a tie-break change picks the wrong default and reorders the Game select."
+    },
+    {
+      "area": "Method ordering for learn tables (app/src/server/functions.ts:67-83): Level Up, Machine, Egg, Tutor, then others alphabetically",
+      "risk": "medium",
+      "likelyBug": "A typo in METHOD_ORDER or switching to raw-name sort puts Egg before Machine or alphabetises the fixed four, breaking the required table order."
+    },
+    {
+      "area": "English-name / latest-flavor extraction and whitespace collapse (app/src/server/pokeapi.ts:75-79)",
+      "risk": "medium",
+      "likelyBug": "Switching .at(-1) to .find() silently picks the first English entry instead of the latest, or dropping collapse leaves raw \\n/\\f in flavor text."
+    },
+    {
+      "area": "Runtime cache memo (app/src/server/pokeapi.ts:18-31): shared promises, rejection eviction, TTL vs live data, size pruning",
+      "risk": "medium",
+      "likelyBug": "A refactor that caches resolved values instead of promises pins a 404/500 for the TTL or serves stale data past it, breaking the live-data-overlay requirement."
+    },
+    {
+      "area": "Search-param validation and filter defaults (app/src/routes/index.tsx:17-26, 56-63)",
+      "risk": "low",
+      "likelyBug": "page=0/NaN coercion regressions slice to an empty list; matching raw s.name instead of humanize(name) breaks 'Mr Mime' search."
+    },
+    {
+      "area": "Root head/title logic including the private m._notFound field (app/src/routes/__root.tsx:13)",
+      "risk": "low",
+      "likelyBug": "A router upgrade renames the internal field and every 404 page silently gets the wrong document title."
+    }
+  ]
+}
+```

@@ -1,0 +1,139 @@
+## Review — dimension: test quality (Gracile + Lit Pokédex app)
+
+**The app contains zero tests of its own.** `app/package.json` has no `test` script and no dev dependencies (no runner installed anywhere in `app/`); `grep` for test/spec across `app/src` finds only the word "special" — and the measured facts agree (`testLoc: 0`, `tests: {files: 0}`). The acceptance suite in `tests/specs/` (which the agent didn't write) is genuinely broad — 50+ cases across home, Pokémon, detail and layout specs — but it lives outside `app/`, is owned by the harness, and won't guard a refactor of the app's own code.
+
+That's a real loss here, because the app is unusually *testable*: `app/src/lib/api.js` is a clean module of pure, side-effect-light functions (`humanize`, `latestEnglishFlavorText`, `dexNumber`, `displayValue`, `idFromUrl`, `uniqueSpeciesFromPokemonReferences`) used by all five routes. A handful of Vitest unit tests against fixtures would have pinned most of the spec's tricky rules for near-zero cost.
+
+**What isn't tested, and the bugs that will hide once the data layer is refactored:**
+
+- **Alternate-form exclusion** — the `id < 10000` filter (`app/src/lib/api.js:109`, applied at `api.js:115`, `api.js:194`, `api.js:230`). Drop or change this constant and Mega Evolutions silently appear in every list; the acceptance tests only assert the happy case for a few named species.
+- **Pokémon→species mapping** — `uniqueSpeciesFromPokemonReferences` (`app/src/lib/api.js:226-242`) dedups by ID and maps Pokémon references back to species (deoxys-normal → deoxys). A refactor that loses the dedup or the sort yields duplicate cards or wrong-order lists.
+- **Pagination/filter math** — `app/src/routes/(home).js:76-79` (page clamp with `Math.min`, slice) and `homeHref` (`(home).js:27-34`, which drops `page` ≤ 1 and empty params). Off-by-one errors and "Next page" links that forget the active `q`/`type` filters would only be caught by the harness's narrow URL fixtures.
+- **Error handling conflates everything with "not found"** — every route catches *all* errors and renders the 404 template: `app/src/routes/pokemon/[name].js:272-275`, `moves/[name].js:45-48`, `abilities/[name].js:43-46`, `types/[name].js:69-72`. A 500 or network failure from the API shows as "Not found" with status 404. `app/src/routes/(home).js:99-111` is the sole exception (500), but its fallback renders "0 Pokémon". Without tests, nobody will notice when an outage starts masquerading as missing data.
+- **Moves table construction** — method ordering (`pokemon/[name].js:210-223`), level-then-name sort (`[name].js:60-69`), and the client-side DOM comparator (`app/src/routes/pokemon/[name].client.js:13-37`, missing-values-last in both directions, numeric vs text). These are dense, easy to break, and the "other methods alphabetically" branch is barely exercised by the harness.
+- **Search race/debounce** — `app/src/routes/(home).client.js:37-46` guards stale fetches with a `requestId`; a refactor that drops it produces flickering stale results that no acceptance test reliably catches.
+- **Formatting rules** — `latestEnglishFlavorText` whitespace collapse (`api.js:85-94`), height/weight ÷10 with one decimal (`pokemon/[name].js:251-252`), hidden-ability marking via `idFromUrl` sets (`abilities/[name].js:28-33`). All spec-mandated, all unpinned.
+
+Scores follow the anchors for a no-test submission: coverage and regression power at 1, behaviour-vs-implementation at 1 (no tests), signal-to-noise at 3 (anchor: "no tests: 3").
+
+```json
+{
+  "dimension": "tests",
+  "criteria": {
+    "coverage_of_risk": {
+      "score": 1,
+      "evidence": [
+        "app/package.json:1-20 — no test script, no test runner in devDependencies; zero test files anywhere under app/",
+        "app/src/lib/api.js:226-242 — uniqueSpeciesFromPokemonReferences (dedup, alternate-form exclusion, Pokémon→species mapping) has no tests",
+        "app/src/routes/(home).js:76-79 — pagination clamp/slice and (home).js:27-34 homeHref param handling have no tests"
+      ],
+      "rationale": "No tests exist at all; none of the risky data-layer logic is covered by anything the app owns."
+    },
+    "behaviour_not_implementation": {
+      "score": 1,
+      "evidence": [
+        "app/src/ — zero test files; nothing behavioural or implementation-level was written",
+        "tests/specs/ — the only behavioural coverage is the harness's acceptance suite, not app code"
+      ],
+      "rationale": "The anchor assigns 1 when there are no tests."
+    },
+    "regression_power": {
+      "score": 1,
+      "evidence": [
+        "app/src/lib/api.js:64-106 — humanize/latestEnglishFlavorText/dexNumber/displayValue/idFromUrl are pure and trivially unit-testable, yet untested; a refactor would break silently",
+        "app/src/routes/pokemon/[name].client.js:13-37 — the DOM sort comparator (missing-last, numeric, direction) is fully unguarded"
+      ],
+      "rationale": "Nothing in app/ would fail if behaviour broke; protection is entirely borrowed from the external acceptance suite."
+    },
+    "signal_to_noise": {
+      "score": 3,
+      "evidence": [
+        "app/src/ — no test files, so no noise either",
+        "app/src/lib/api.js:1-247 — notably modular, dependency-light code that unit tests could have covered cheaply"
+      ],
+      "rationale": "Per the anchor, no tests scores 3: no low-value tests, but no signal either."
+    }
+  },
+  "overall": 1,
+  "findings": [
+    {
+      "severity": "high",
+      "location": "app/package.json:6-11",
+      "issue": "No test script, no test runner, and no test files anywhere in app/ — the app relies entirely on the external acceptance suite.",
+      "suggestion": "Add Vitest (or similar) with unit tests for src/lib/api.js's pure helpers and a few route-handler tests against fixture JSON, wired to a \"test\" script."
+    },
+    {
+      "severity": "high",
+      "location": "app/src/lib/api.js:109-125, 226-242",
+      "issue": "The alternate-form cutoff (id < 10000), Pokémon→species mapping, and dedup/sort in uniqueSpeciesFromPokemonReferences are the most reused and least guarded logic in the app.",
+      "suggestion": "Unit-test with fixture URLs covering deoxys-normal (10001), duplicates, and out-of-order input; assert species mapping and dex ordering."
+    },
+    {
+      "severity": "high",
+      "location": "app/src/routes/(home).js:76-79, 27-34",
+      "issue": "Pagination math (page clamp, slice bounds) and homeHref's rule of omitting default params are untested; 'Next page' links that drop active filters would slip through the acceptance fixtures.",
+      "suggestion": "Test the handler with parametrized query strings (out-of-range page, empty/unknown type, combined filters) and assert resulting props and hrefs."
+    },
+    {
+      "severity": "high",
+      "location": "app/src/routes/pokemon/[name].js:272-275, moves/[name].js:45-48, abilities/[name].js:43-46, types/[name].js:69-72",
+      "issue": "Every error — including API 500s and network failures — is rendered as the 404 'Not found' page, masking real outages as missing data.",
+      "suggestion": "Distinguish ApiError.status === 404 from other failures (500 page or rethrow), and add tests asserting a 500 API response doesn't render 'Not found'."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/routes/pokemon/[name].client.js:13-37",
+      "issue": "The DOM sort comparator (missing-values-last in both directions, numeric vs text, aria-sort flip) is untested and easy to regress during a rewrite.",
+      "suggestion": "Extract compareRows/sorting into a testable module and unit-test missing values, numbers as strings, and direction toggling."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/routes/pokemon/[name].js:210-223, 63-69",
+      "issue": "Method-table ordering (Level Up, Machine, Egg, Tutor, then others alphabetically) and the level-then-name default sort are untested; the acceptance suite only exercises Pikachu.",
+      "suggestion": "Unit-test orderedMethods construction and sortMoveRows with a synthetic method mix including an 'other' method."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/routes/(home).client.js:37-56",
+      "issue": "The debounce/race guard (requestId) and DOM-swap refresh have no tests; dropping the stale-response guard produces flickering wrong results the acceptance suite may not reliably catch.",
+      "suggestion": "Add a small integration test (or extract the fetch-and-swap logic) covering rapid successive inputs and a slow second response arriving first."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/lib/api.js:85-94, 96-106",
+      "issue": "Spec-critical formatting — whitespace collapse of flavor text (\\n, \\f), dex-number padding, em dash for nulls — is only pinned by the harness's specific fixtures.",
+      "suggestion": "Straightforward table-driven unit tests: humanize('mr-mime'), dexNumber(25), displayValue(null), flavor text with \\f and trailing spaces."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/lib/api.js:31-40",
+      "issue": "The request cache's promise-based behavior (failed requests evicted so retries work, successes cached forever) is subtle and untested; a refactor to cache resolved values could break retry-after-failure.",
+      "suggestion": "Unit-test with a stubbed fetch: failure then success returns data; success is not re-fetched."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/routes/abilities/[name].js:28-36",
+      "issue": "Hidden-ability marking (is_hidden entries collected by id, then joined to species) has no test; a Pokémon with the ability both normally and hidden is an easy edge case to get wrong.",
+      "suggestion": "Unit-test the mapping with a fixture where one Pokémon has the ability in both slots."
+    }
+  ],
+  "summary": "The app ships zero tests of its own — no runner, no script, no test files — so all protection comes from the harness's acceptance suite, which the team won't control. This hurts more than usual because the code is cleanly modular: src/lib/api.js is a suite of pure functions that a day of unit tests would pin cheaply. Highest-value gaps are the alternate-form/species-mapping filters, home pagination and URL-param handling, the error paths that render every API failure as 'Not found', and the client-side table sorting.",
+  "wroteTests": false,
+  "testCount": 0,
+  "valuableTests": [],
+  "lowValueTests": [],
+  "untested": [
+    { "area": "Pure data helpers in app/src/lib/api.js (humanize, latestEnglishFlavorText, dexNumber, displayValue, idFromUrl, englishName)", "risk": "high", "likelyBug": "Name formatting regressions (mr-mime → 'Mr Mime'), un-collapsed \\f in flavor text, wrong dex padding — every page's headings and text change subtly." },
+    { "area": "Species index construction and alternate-form exclusion (id < 10000) in getSpeciesIndex/uniqueSpeciesFromPokemonReferences/getPokemonTypeMap", "risk": "high", "likelyBug": "Mega/alternate forms (IDs ≥ 10000) leak into lists, or Pokémon references stop mapping to their species (deoxys-normal → Deoxys), producing duplicate or mislinked cards." },
+    { "area": "Home filtering, search matching, pagination clamp and URL-parameter handling (app/src/routes/(home).js)", "risk": "high", "likelyBug": "Off-by-one pages, out-of-range page=999 showing an empty list, 'Next page' links dropping active q/type/generation filters, unknown filter values 500ing instead of being ignored." },
+    { "area": "Error paths: all API errors rendered as 404 'Not found'; home's 500 fallback shows '0 Pokémon'", "risk": "high", "likelyBug": "An API outage looks like missing data (status 404, 'Not found' page), so production incidents go undetected and unfixed." },
+    { "area": "Moves table construction: method ordering, per-method row splitting, level-then-name default sort (app/src/routes/pokemon/[name].js)", "risk": "medium", "likelyBug": "'Other' methods missing from the alphabetical tail, level ties sorted by internal name, empty method tables not omitted, default game selection off." },
+    { "area": "Client-side table sorting comparator and aria-sort state (app/src/routes/pokemon/[name].client.js)", "risk": "medium", "likelyBug": "Missing values sort first descending, numeric columns compared lexicographically ('10' < '9'), aria-sort left stale on other headers." },
+    { "area": "Search debounce, stale-response race guard and DOM-swap refresh (app/src/routes/(home).client.js)", "risk": "medium", "likelyBug": "Rapid typing shows results for an earlier query; back/forward navigation leaves controls and results out of sync." },
+    { "area": "Request cache semantics in getJson (promise caching, eviction on failure)", "risk": "medium", "likelyBug": "A failed request gets cached so retries never succeed, or the overlay 'extra Pokémon' stops appearing because an earlier response was cached wrongly." },
+    { "area": "Hidden-ability marking on the ability page (is_hidden → species id set join)", "risk": "medium", "likelyBug": "Pokémon with both a normal and hidden slot for the ability get the 'Hidden ability' text dropped or wrongly applied to all cards." },
+    { "area": "Type map slot ordering and 18-type filtering (EXCLUDED_TYPES, getPokemonTypeMap)", "risk": "low", "likelyBug": "Types shown in wrong slot order on cards, or a new pseudo-type slipping into the filter dropdown." },
+    { "area": "Height/weight conversion and stat total (÷10 with one decimal, stats sum)", "risk": "low", "likelyBug": "'0.4 m' becomes '0.40 m' or '4 m', Total row sums the wrong slice of stats." }
+  ]
+}
+```

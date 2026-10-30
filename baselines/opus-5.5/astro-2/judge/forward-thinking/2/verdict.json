@@ -1,0 +1,147 @@
+{
+  "dimension": "forward-thinking",
+  "criteria": {
+    "latest_apis": {
+      "score": 5,
+      "evidence": [
+        "app/package.json:12 — astro ^7.4.2 / @astrojs/node ^11.1.9, the current stable major (7.4.4 is latest, per withastro/astro releases 2026-10-28)",
+        "app/astro.config.mjs:4-6 — output:'server' + node adapter standalone + devToolbar:{enabled:false}; both option names verified current in Astro 7 docs",
+        "app/src/pages/pokemon/[name].astro:31 — Astro.response.status = 404, the documented on-demand 404 pattern (Astro render context docs)",
+        "app/src/components/EvolutionTree.astro:19 — <Astro.self> recursion for the evolution chain, current documented API",
+        "app/src/components/Section.astro:11 — class:list directive, current",
+        "app/src/pages/pokemon/[name].astro:109 — {a.is_hidden && ' (hidden)'} uses explicit space-bearing string literals, correct under Astro 7's new compressHTML:'jsx' default (docs.astro.build upgrade-to-v7)",
+        "app/tsconfig.json:2-4 — extends astro/tsconfigs/strict and includes .astro/types.d.ts, the current astro-sync convention"
+      ],
+      "rationale": "Written against Astro 7's current generation, not an older one: it even handles the brand-new 'jsx' whitespace compression correctly with explicit space strings. Astro 7's stable route caching / routeRules is not used, but the hand-rolled per-record cache (app/src/lib/api.ts:14) shares API records across many pages, which per-URL route caching cannot do; not using advanced routing (src/fetch.ts) is a legitimate omission, not legacy usage."
+    },
+    "platform": {
+      "score": 5,
+      "evidence": [
+        "app/src/pages/index.astro:124-133 — client refresh uses fetch + AbortController (in-flight cancellation) + DOMParser instead of a framework router",
+        "app/src/pages/index.astro:105-109 — iterates new FormData(form) directly and uses URLSearchParams",
+        "app/src/components/MoveTables.astro:152-153 — new URL(location.href) mutation for query params",
+        "app/src/pages/index.astro:34-38 — native GET form with noscript fallback; app works without JS, then enhances",
+        "app/src/styles/global.css:399-405 — content: ' ▲' / '' alternative-text syntax for generated glyphs",
+        "app/src/styles/global.css:288 — aspect-ratio; global.css:29 :focus-visible; global.css:253 image-rendering: pixelated",
+        "app/src/lib/api.ts:45-47,53 — padStart, arrow helpers, numeric separators (60_000 at api.ts:7)"
+      ],
+      "rationale": "Reaches for the platform first everywhere: fetch/AbortController/URL/URLSearchParams/DOMParser/FormData, native form semantics with a <noscript> fallback, and modern CSS (custom properties, aspect-ratio, :focus-visible, alt-text in content). No polyfills, no hand-rolled router or state manager. The only hand-rolled platform stand-in is the regex id parser at app/src/lib/api.ts:45 where new URL().pathname would be more robust."
+    },
+    "dependencies": {
+      "score": 5,
+      "evidence": [
+        "app/package.json:12-15 — exactly two dependencies: astro ^7.4.2 and @astrojs/node ^11.1.9; zero runtime client packages",
+        "app/package.json:7-10 — build/start scripts delegate to astro build and the adapter's dist/server/entry.mjs; no ad-hoc tooling"
+      ],
+      "rationale": "Minimal and modern: two deps, both at the current major/minor, and the client enhancement is hand-written vanilla JS/TS so there is no framework runtime shipped to the browser. The only gap is dev-side: no typescript/@astrojs/check devDependency means nothing ever enforces the strict tsconfig."
+    },
+    "churn_resistance": {
+      "score": 4,
+      "evidence": [
+        "app/src/lib/api.ts:21,37,83,109,122,151 — all API access funnels through one module (getJson/getList/getTypes/getGenerations/getPokemonIndex); no page fetches directly",
+        "app/src/lib/api.ts:21 — getJson<T = any> returns Promise<T | null> with a typed default of any, and app/src/pages/pokemon/[name].astro:36-45 plus app/src/pages/types/[name].astro:28 use (x: any) casts on the main record shapes",
+        "app/astro.config.mjs:1-9 — 8-line config, no experimental flags, no internals",
+        "app/src/pages/index.astro:27-35 — pageHref (server) and app/src/pages/index.astro:104-112 urlFromForm (client) build the same q/type/generation/page contract twice in one file",
+        "app/src/components/MoveTables.astro:58-63 — client sort keys come from server-rendered data-value attributes; a row-template change silently breaks sorting",
+        "app/src/lib/api.ts:32 — cache.set never evicts expired entries (see findings)"
+      ],
+      "rationale": "Data access is behind one well-defined module, config lives in one place, and nothing touches framework internals, so an Astro upgrade would touch almost nothing. It loses a point because the dominant boundary — the raw PokeAPI JSON records — is typed as any, so a shape change surfaces as runtime breakage instead of a type error, and the filter-URL contract exists in both server and client forms."
+    }
+  },
+  "overall": 4,
+  "findings": [
+    {
+      "severity": "medium",
+      "location": "app/src/lib/api.ts:32",
+      "issue": "The in-memory cache never evicts: expired entries are only overwritten on next access, and there is no size cap. A long-lived server accumulates every distinct API URL ever requested (species, pokemon, ~900 moves, types, version groups), holding resolved JSON indefinitely.",
+      "suggestion": "Sweep expired entries on write (cheap linear pass, entries are already timestamped) or wrap the Map in a small LRU with a bounded entry count."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/lib/api.ts:21",
+      "issue": "getJson<T = any> plus pervasive (x: any) casts in page frontmatter (app/src/pages/pokemon/[name].astro:36-45, app/src/pages/types/[name].astro:28, app/src/pages/abilities/[name].astro:13) leave the primary API boundary untyped; a PokeAPI shape change fails at render time, not compile time.",
+      "suggestion": "Define interfaces for the consumed records (Species, Pokemon, Move, Ability, Type) in lib/api.ts and type getJson against them so the boundary the whole app depends on is checked."
+    },
+    {
+      "severity": "low",
+      "location": "app/package.json:11",
+      "issue": "No devDependencies: the strict tsconfig at app/tsconfig.json:2 is never enforced — astro build transpiles but does not typecheck, and astro check requires @astrojs/check + typescript.",
+      "suggestion": "Add @astrojs/check and typescript as devDependencies with a `check` script so the TypeScript the code is written in actually runs somewhere."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/pages/index.astro:104",
+      "issue": "The query contract (q/type/generation/page, omit empty/default) is implemented twice — pageHref at line 27 on the server and urlFromForm at line 104 in the client script.",
+      "suggestion": "Extract one buildQuery helper and import it in the <script> (Astro bundles page scripts, so a shared module import works) so the contract lives in one place."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/components/MoveTables.astro:58",
+      "issue": "Client-side sorting reads per-cell data-value/data-col attributes rendered by the server; a row-template change (renaming or dropping an attribute) makes the sort key silently resolve to '' with no error.",
+      "suggestion": "Name the contract explicitly with a comment in both the template and the script, or assert on the expected columns before sorting."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/lib/api.ts:45",
+      "issue": "idFromUrl parses ids with a regex over the URL string, yielding NaN for URLs that don't end in the numeric segment rather than a distinguishable error.",
+      "suggestion": "Use new URL(url).pathname segments, and filter/flag non-numeric ids explicitly instead of relying on NaN comparisons downstream."
+    }
+  ],
+  "summary": "This is a forward-looking Astro app: it is on the current stable release (7.4), uses only current documented APIs, ships no client framework and just two server dependencies, and reaches for the platform first (fetch/AbortController/URL/DOMParser, native GET forms with a noscript fallback). All data access sits behind one module, so framework upgrades would ripple almost nowhere. What keeps it from being exemplary is an unbounded in-memory cache and an any-typed API boundary, which convert future API or data changes into silent runtime failures instead of build-time errors.",
+  "apis": [
+    {
+      "api": "astro defineConfig / output:'server' / node adapter (standalone)",
+      "location": "app/astro.config.mjs:4-5",
+      "status": "current",
+      "replacement": ""
+    },
+    {
+      "api": "devToolbar.enabled",
+      "location": "app/astro.config.mjs:6",
+      "status": "current",
+      "replacement": ""
+    },
+    {
+      "api": "Astro.response.status",
+      "location": "app/src/pages/pokemon/[name].astro:31",
+      "status": "current",
+      "replacement": ""
+    },
+    {
+      "api": "Astro.self (recursive component)",
+      "location": "app/src/components/EvolutionTree.astro:19",
+      "status": "current",
+      "replacement": ""
+    },
+    {
+      "api": "class:list directive",
+      "location": "app/src/components/Section.astro:11",
+      "status": "current",
+      "replacement": ""
+    },
+    {
+      "api": "astro/tsconfigs/strict + .astro/types.d.ts include",
+      "location": "app/tsconfig.json:2-4",
+      "status": "current",
+      "replacement": ""
+    },
+    {
+      "api": "Astro.url.searchParams / Astro.params",
+      "location": "app/src/pages/index.astro:8",
+      "status": "current",
+      "replacement": ""
+    }
+  ],
+  "dependencies": [
+    {
+      "name": "astro",
+      "verdict": "modern",
+      "note": "^7.4.2 is the current stable line (7.4.4 released 2026-10-28); verified against withastro/astro releases"
+    },
+    {
+      "name": "@astrojs/node",
+      "verdict": "modern",
+      "note": "^11.1.9 matches the astro 7 peer range (11.x, current adapter generation); mode:'standalone' is the right choice for the spec's `npm start` on $PORT"
+    }
+  ]
+}

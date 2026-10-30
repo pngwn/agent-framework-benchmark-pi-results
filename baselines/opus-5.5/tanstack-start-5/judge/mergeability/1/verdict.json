@@ -1,0 +1,114 @@
+{
+  "dimension": "mergeability",
+  "criteria": {
+    "idiomatic": {
+      "score": 5,
+      "evidence": [
+        "app/src/lib/pokedex.functions.ts:7-28 — createServerFn({ method: 'GET' }).validator().handler() with { data } calls, matching current docs (validator is canonical as of 1.168.25+)",
+        "app/src/routes/index.tsx:35-38 — createFileRoute with validateSearch + loaderDeps + loader calling a server fn: exactly the documented data-loading pattern",
+        "app/src/routes/pokemon.$name.tsx:22-26 — loader returns null → throw notFound(), rendered by __root notFoundComponent; proper 404 flow",
+        "app/src/routes/__root.tsx:8-22 — head() with meta/links, HeadContent/Scripts/Outlet; current head API, not the deprecated route meta option",
+        "app/src/lib/pokedex.server.ts + pokedex.functions.ts + types.ts — the .server.ts/.functions.ts/shared-types split matches official import-protection and file-separation guidance",
+        "app/server.mjs:5-19 — srvx server wrapping dist/server/server.js's fetch handler; a documented self-hosting convention",
+        "app/src/router.tsx:5-11 — createRouter with scrollRestoration and defaultPreload: 'intent'"
+      ],
+      "rationale": "This reads like the framework's own examples: file-based routing, loaders-into-server-functions, validateSearch-driven URL state, head/notFound components, and the recommended server/client file separation, all on the current stable APIs."
+    },
+    "correctness_risks": {
+      "score": 4,
+      "evidence": [
+        "app/src/lib/pokedex.server.ts:30-50 — promise-caching dedupes concurrent fetches, 404s cached as null, rejects evicted from the cache; sound design",
+        "app/src/lib/pokedex.server.ts:44-46 — eviction only runs lazily when size > 5000 and only removes already-expired entries, so entries can linger; bounded by the API's resource count, so not a true leak",
+        "app/src/lib/pokedex.server.ts:36-42 — fetch has no timeout/AbortSignal; a hung upstream API stalls SSR requests",
+        "app/src/routes/pokemon.$name.tsx:28 — head falls back to 'Not found – Pokédex' for any loader failure, so an API 500 page gets a misleading 'Not found' title (same pattern in moves/abilities/types routes)",
+        "app/src/routes/index.tsx:40-51 — debounce timer survives a pagination click: a keystroke within 150ms fires setFilters(q, replace:true) right after a push, clobbering the just-pushed page-2 history entry",
+        "app/src/lib/pokedex.server.ts:58,163 — validName() guard plus page clamping before filters hit the API; no SSR/CSR mismatch risks found and listeners are cleaned up (index.tsx:46)"
+      ],
+      "rationale": "Careful look found only minor fragility: lazy cache eviction, no upstream fetch timeout, a misleading error-page title, and a narrow debounce/history interplay. No races, mismatches, leaks or unbounded growth of consequence."
+    },
+    "global_abstractions": {
+      "score": 4,
+      "evidence": [
+        "app/src/lib/pokedex.server.ts:78-150 — three shared indexes (speciesList, typeIndex, generationIndex) built on the same cached get(); reused across all page loaders with clear boundaries",
+        "app/src/lib/pokedex.server.ts:24-349 — single ~350-line data module holding the cache, all indexes and all six page loaders (loadList, loadPokemon, loadMove, loadAbility, loadTypes, loadType)",
+        "app/src/lib/pokedex.server.ts:30,97-115,196+ — internals are any-typed (get<T = any>, record: any, link: any) while the client boundary (types.ts) is fully typed; the contract is only enforced at the RPC edge",
+        "app/src/components/ui.tsx:7-46 — small, well-scoped shared components (Section, TypeBadge, PokemonCard, Count, NotFound); no god component",
+        "app/src/lib/pokedex.server.ts:24-27 — module-level cache is hidden global state, but it is server-only and documented by the header comment at lines 1-4"
+      ],
+      "rationale": "Layering is clean and boundaries are sharp, but pokedex.server.ts is on its way to being a god data module: everything data-related lives in one file and its any-typed internals undermine the otherwise strong typed contract."
+    },
+    "readability": {
+      "score": 5,
+      "evidence": [
+        "app/src/lib/pokedex.server.ts:1-4,78 — section banners ('Shared indexes') and a header comment explaining the cache TTL tradeoff",
+        "app/src/routes/pokemon.$name.tsx:197 — 'Missing values go last whichever way the column is sorted' — comments explain why, not what",
+        "app/src/routes/__root.tsx:16-17 — comment explaining the title fallback logic for unmatched routes",
+        "app/src/lib/format.ts — tiny, purposeful helpers (humanize, dexNumber, orDash, pageTitle) each used consistently across all routes",
+        "app/src/routes/* and app/src/components/ui.tsx — consistent per-route structure: Route config, then page component, then subcomponents"
+      ],
+      "rationale": "Naming, organisation and comments are uniformly good; a new teammate can find any page's data flow in minutes via route → server fn → loader."
+    },
+    "review_cost": {
+      "score": 4,
+      "evidence": [
+        "app/src/lib/pokedex.functions.ts:9-22 — validators are identity casts ((data) => data, String(data.name)) rather than real validation; quick fix or drop",
+        "app/src/routes/__root.tsx:14 — reads private m._notFound alongside the public m.status === 'notFound'; one-line cleanup",
+        "app/package.json:6-8 — no typecheck script; vite build uses esbuild and never checks types despite strict tsconfig.json",
+        "app/src/lib/pokedex.server.ts — data module split and any-cleanup are the only non-trivial asks"
+      ],
+      "rationale": "I'd approve after one light round: real (or removed) validators, drop the private match flag, add tsc --noEmit, and a fetch timeout. The data-module refactor is worth requesting but not blocking."
+    }
+  },
+  "overall": 4,
+  "findings": [
+    {
+      "severity": "medium",
+      "location": "app/src/lib/pokedex.server.ts:24-349",
+      "issue": "Single ~350-line data module holds the cache, three indexes and all six page loaders, with any-typed internals (get<T = any>, record: any, link: any) behind a fully typed client contract.",
+      "suggestion": "Split per resource (pokemon/move/ability/type) under lib/server/, type the API record shapes once, and keep the cached get() in its own module."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/lib/pokedex.functions.ts:9-22",
+      "issue": ".validator() is used as an identity cast ((data) => data) or loose coercion (String(data.name)), so it validates nothing; malformed input passes straight to the server.",
+      "suggestion": "Either validate the shape (e.g. name matches the API-name pattern used in pokedex.server.ts:58) or drop the validator so its absence signals 'unvalidated' honestly."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/routes/__root.tsx:14",
+      "issue": "Reads the private m._notFound match flag in addition to the public m.status === 'notFound'.",
+      "suggestion": "Keep only the documented public status check."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/lib/pokedex.server.ts:36-42",
+      "issue": "Upstream fetch has no timeout/AbortSignal; a hanging PokeAPI connection stalls SSR indefinitely.",
+      "suggestion": "Pass AbortSignal.timeout(...) to fetch and treat a timeout as a failed request."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/lib/pokedex.server.ts:44-46",
+      "issue": "Cache eviction only runs lazily when size exceeds 5000 and only removes already-expired entries, so growth policy is implicit.",
+      "suggestion": "Sweep expired entries on each miss (or bound the map with an LRU) so the limit is self-evidently enforced."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/routes/pokemon.$name.tsx:28",
+      "issue": "head() title falls back to 'Not found – Pokédex' for any loader failure (e.g. an API 500), labelling an error page as not-found; same pattern in moves/abilities/types routes.",
+      "suggestion": "Distinguish error from notFound (e.g. only use the label fallback when a value exists, or set an explicit error title via a defaultErrorComponent head)."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/routes/index.tsx:48-51",
+      "issue": "The 150ms debounce timer survives a pagination click: a keystroke landing after a push-based navigation fires a replace:true search update that overwrites the just-pushed history entry.",
+      "suggestion": "Clear the pending timer in setFilters (or key it to the navigation) so filter typing can't rewrite an unrelated history entry."
+    },
+    {
+      "severity": "low",
+      "location": "app/package.json:6-8",
+      "issue": "No typecheck script; vite build uses esbuild and never checks types, so tsconfig strict (app/tsconfig.json) is unverified by the app's own commands.",
+      "suggestion": "Add a \"typecheck\": \"tsc --noEmit\" script and run it in CI alongside build."
+    }
+  ],
+  "summary": "A genuinely idiomatic TanStack Start app on the current stable APIs: file-based routes with validateSearch-driven URL state, loaders calling server functions, canonical .validator() usage, proper notFound flow, and the officially recommended server/client file separation. The only structural concern is a single god data module whose any-typed internals sit behind an otherwise strong typed contract, plus a handful of minor fragilities (no fetch timeout, identity validators, a private match flag, a debounce/history edge case). I'd merge after one light round of fixes."
+}

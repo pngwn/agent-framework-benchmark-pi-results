@@ -1,0 +1,100 @@
+## Review: experimentalness of `app/` (SvelteKit 3.1 / Svelte 5.57, judged against the current stable release)
+
+**Verification context (sources checked):** SvelteKit 3.0 shipped 2026-10-01 (`svelte.dev/blog/sveltekit-3-is-here`, GitHub release tag `@sveltejs/kit@3.0.0`), so this app is on the current stable line, four weeks old. Per the Kit 3 migration guide: config now lives in the `sveltekit()` Vite plugin (`vite.config.js`), `$lib` is replaced by `#lib` subpath imports, `$app/stores` is removed in favour of `$app/state`, `error(status, message)` is the new signature, and `goto` gained `shallow`/`replace`/`reset` while **`noScroll`/`keepFocus` were removed** (#16558, Kit error `goto_options_removed`).
+
+**What I found in the code:**
+
+- **No experimental/preview/RC/canary APIs anywhere.** No `experimental.*` config flags in `app/vite.config.js`, no remote functions, no `compilerOptions.experimental.async`, no unstable names (`grep` across `app/src` came back empty except false positives). The measured `experimental` markers list is empty — confirmed.
+- Svelte 5 runes, snippets, `untrack`, `style:`/`class:` directives are all stable since Svelte 5.0 (Oct 2024) — e.g. `app/src/lib/components/MoveTable.svelte:28` uses `untrack` for its documented purpose, `app/src/lib/components/EvolutionList.svelte:7-21` uses a recursive snippet.
+- The only "new" surface is Kit-3-era: `sveltekit({ adapter })` plugin config (`app/vite.config.js:7`), `#lib` imports (`app/package.json:18-21`), `$app/state#page` (stable since 2.12, long-stable now), and `goto(..., { shallow: true, reset: false })` on the home page — the newest API in the app, and a justified one (keeps per-keystroke URL sync from re-running the dex load / a server round trip).
+- **One stale-API slip:** `app/src/routes/pokemon/[name]/+page.svelte:14` calls `goto(url, { noScroll: true, keepFocus: true, replace: true })` — `noScroll`/`keepFocus` were *removed* in Kit 3 (replaced by `reset: false`), and Kit ships the dedicated error `goto_options_removed` for exactly this call. This is the opposite of leaning on experimental APIs — it's holding on to a removed one — but it's the one place the app isn't aligned with the current release.
+- Minor: `app/src/lib/server/pokeapi.js:3` reads `process.env.API_BASE_URL` directly, bypassing Kit 3's newly-stable explicit env vars (`src/env.js` + `$app/env/private`). Works fine under adapter-node; just skips validation and the framework's dev-time `.env` support.
+
+Risk profile overall: very conservative. Zero experimental dependencies; the only exposure is that the whole app sits on a major version four weeks post-release, plus one removed-options bug.
+
+```json
+{
+  "dimension": "experimental",
+  "criteria": {
+    "reach": {
+      "score": 3,
+      "evidence": [
+        "app/package.json:12-16 — @sveltejs/kit 3.1.0 / svelte 5.57.3 / vite 8.3.5: the entire app rests on the current stable line, but SvelteKit 3.0 was released 2026-10-01, i.e. ~4 weeks before today",
+        "app/vite.config.js:7 — sveltekit({ adapter: adapter() }) plugin config, the Kit-3-only configuration style (svelte.config.js no longer supported)",
+        "app/src/routes/+page.svelte:45-52 — goto(url, { shallow: true, replace, reset: false, state }) — the shallow-routing goto options added in 3.0.0-next.13 and first stable in 3.0.0 (Oct 2026), used centrally for home-page filter/pagination URL sync",
+        "app/package.json:18-21 — '#lib' subpath import alias, the alias Kit 3 introduced to replace $lib",
+        "app/src/routes/moves/[name]/+page.server.js:14 — error(404, 'Not found'), the new Kit 3 error(status, message) signature (object form deprecated)",
+        "app/src/lib/server/pokeapi.js — server data layer is plain fetch + Map memoisation; no experimental framework surface at all"
+      ],
+      "rationale": "No experimental, preview, RC or canary APIs — but two central features (home-page URL sync via new goto options, and the Kit-3 config/import pattern) rest on APIs stable only since the 3.0 release four weeks ago, which lands squarely on the 'recently-stable in central places' anchor."
+    },
+    "containment": {
+      "score": 5,
+      "evidence": [
+        "app/src/routes/+page.svelte:45-52 and app/src/routes/pokemon/[name]/+page.svelte:14 — the only two goto call sites in the app; everything else uses long-stable runes, snippets and load functions",
+        "app/src/lib/components/MoveTable.svelte:28 — untrack (stable since Svelte 5.0) isolated to one state initialisation line",
+        "app/vite.config.js:1-10 — the only configuration file; contains no experimental flags or compiler options to unwind",
+        "grep across app/src for unstable|experimental|preview|beta — zero hits; the measured experimental marker list is empty"
+      ],
+      "rationale": "There is essentially nothing experimental to contain, and what is new (Kit 3 goto options, plugin config) is confined to two components and one config file, so a future API shift would touch a handful of lines."
+    },
+    "justification": {
+      "score": 4,
+      "evidence": [
+        "app/src/routes/+page.svelte:45-52 — shallow: true is well chosen: per-keystroke URL sync skips re-running the dex load and a server round trip, something a plain goto cannot do",
+        "app/src/routes/+page.svelte:78-80 — afterNavigate filters popstate to resync filter state from the URL, i.e. the new navigation is used deliberately, not decoratively",
+        "app/src/lib/components/MoveTable.svelte:28 — untrack used exactly as documented (initialising $state from props without creating a reactive dependency)",
+        "app/src/routes/pokemon/[name]/+page.svelte:14 — goto(url, { noScroll: true, keepFocus: true, replace: true }) buys nothing: those options were removed in Kit 3 in favour of reset: false",
+        "app/src/lib/server/pokeapi.js:3 — process.env.API_BASE_URL read directly instead of Kit 3's explicit env vars (src/env.js + $app/env/private), skipping the framework feature gratuitously"
+      ],
+      "rationale": "The genuinely new APIs are each justified by behaviour a long-stable API can't provide (shallow routing avoids needless load re-runs). The one unjustified use is the removed noScroll/keepFocus pair, which should simply be reset: false, plus a bypass of the framework's env mechanism."
+    }
+  },
+  "overall": 4,
+  "findings": [
+    {
+      "severity": "medium",
+      "location": "app/src/routes/pokemon/[name]/+page.svelte:14",
+      "issue": "goto(url, { noScroll: true, keepFocus: true, replace: true }) passes options that SvelteKit 3 removed (replaced by a single reset option); Kit ships the dedicated error kit/goto_options_removed for this call, so at best the options are ignored and the page scroll/focus resets on every Game selection, at worst goto rejects",
+      "suggestion": "Replace with goto(url, { replace: true, reset: false }) — the Kit 3 equivalent that actually preserves scroll and focus"
+    },
+    {
+      "severity": "low",
+      "location": "app/src/lib/server/pokeapi.js:3",
+      "issue": "Reads process.env.API_BASE_URL directly, bypassing SvelteKit 3's explicit environment variables (src/env.js with defineEnvVars + $app/env/private), so there is no declaration, validation or dev-time .env support for the app's one config input",
+      "suggestion": "Declare API_BASE_URL in src/env.js via defineEnvVars and import it from $app/env/private, keeping a fallback for local runs"
+    },
+    {
+      "severity": "low",
+      "location": "app/src/routes/+page.svelte:47",
+      "issue": "The home page's filter/pagination sync depends on goto's shallow routing options, stable only since SvelteKit 3.0 (Oct 2026); a breaking change to these options would break URL-sync behaviour on the app's main page",
+      "suggestion": "Acceptable as-is (it is the intended use), but consider isolating the option object in one helper so the shape can be updated in a single place if the API moves"
+    }
+  ],
+  "summary": "The app is conservative: zero experimental, preview, RC or canary APIs, with all Svelte 5 rune/snippet usage long-stable and idiomatic. Its only exposure is that it is written entirely against SvelteKit 3.1 — the current stable line, released four weeks before today — including new-in-3.0 goto options used deliberately and correctly on the home page. The single misalignment with the current release is a medium-severity use of goto options (noScroll/keepFocus) that Kit 3 removed in favour of reset: false.",
+  "experimentalApis": [
+    {
+      "api": "goto(url, { shallow, reset, replace, state }) — shallow routing options",
+      "location": "app/src/routes/+page.svelte:47",
+      "status": "recently-stable",
+      "since": "@sveltejs/kit 3.0.0 (2026-10-01); added in 3.0.0-next.13 (2026-07-29)",
+      "source": "https://svelte.dev/docs/kit/migrating-to-sveltekit-3 ('goto options are updated', 'shallow routing'); https://github.com/sveltejs/kit/releases/tag/@sveltejs%2Fkit@3.0.0 (#16449, #16558)"
+    },
+    {
+      "api": "sveltekit({ adapter }) Vite-plugin configuration (svelte.config.js removed)",
+      "location": "app/vite.config.js:7",
+      "status": "recently-stable",
+      "since": "@sveltejs/kit 3.0.0 (2026-10-01); previewed as experimental in 2.62 (July 2026)",
+      "source": "https://svelte.dev/docs/kit/migrating-to-sveltekit-3; https://svelte.dev/blog/sveltekit-3-is-here; https://svelte.dev/blog/whats-new-in-svelte-july-2026"
+    },
+    {
+      "api": "#lib subpath import alias (replaces $lib)",
+      "location": "app/package.json:18-21",
+      "status": "recently-stable",
+      "since": "@sveltejs/kit 3.0.0 (2026-10-01), #16360",
+      "source": "https://svelte.dev/docs/kit/migrating-to-sveltekit-3 ('$lib is now #lib'); https://github.com/sveltejs/kit/releases/tag/@sveltejs%2Fkit@3.0.0"
+    }
+  ],
+  "count": 0
+}
+```

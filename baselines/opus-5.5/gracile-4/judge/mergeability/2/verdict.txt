@@ -1,0 +1,115 @@
+I've now read the whole app, the acceptance tests, and verified the framework's current APIs against the released sources (`@gracile/gracile` 0.11.0 is the current stable; the app pins `^0.11.0`). Key verifications:
+
+- `defineRoute({ handler, document, template })` with a bare-function `handler` returning props, and `responseInit.status` for 404s, match `@gracile/server@0.7.6`'s `route.d.ts` exactly (handler-first ordering matters for inference — the app respects it in every route).
+- `server.js` (Hono + `gracile.honoAdapter` + `getClientBuildPath`) mirrors the official `minimal-server-hono` starter almost verbatim.
+- The app's `isBuildRender(url)` (`hostname === 'gracile-static'`) is accurate: the engine really does invoke route handlers at build time with `new URL(pattern, 'http://gracile-static')` (verified in `@gracile/engine` `routes/render.ts`) — so skipping data loads there is necessary to satisfy the "no build-time data fetching" rule.
+- The documented way to reference a global stylesheet is a root-relative source path (`href="/src/document.css"`); the app instead computes `new URL('./document.css', import.meta.url).pathname`, which in the SSR runtime resolves inside `dist/server/` (Vite's `assetImportMetaUrl` plugin only applies to `consumer === 'client'` environments), and only survives in production because Gracile strips runtime `<link rel=stylesheet>` tags and re-injects build-time-collected assets (`injectServerAssets`).
+
+```json
+{
+  "dimension": "mergeability",
+  "criteria": {
+    "idiomatic": {
+      "score": 4,
+      "evidence": [
+        "app/server.js:1-24 — Hono + gracile.honoAdapter + getClientBuildPath, matches the official minimal-server-hono starter nearly line-for-line",
+        "app/src/routes/pokemon/[name].ts:282-287 — handler→document→template order, bare-function handler, responseInit.status = 404: all current documented APIs",
+        "app/src/document.ts:24 — <route-template-outlet> used as the docs require",
+        "app/src/routes/(home).client.ts — route sibling client script convention plus vanilla custom elements for progressive enhancement, a documented Gracile mode",
+        "app/src/document.ts:13 — stylesheet linked via new URL('./document.css', import.meta.url).pathname instead of the documented root-relative '/src/document.css'",
+        "app/src/lib/build.ts:6 — isBuildRender keys on the framework's internal build-time stub hostname 'gracile-static', an undocumented internal"
+      ],
+      "rationale": "Reads like Gracile's own examples for routing, data loading and rendering, on the current stable version; two deviations — the stylesheet-link trick and reliance on the internal build-render hostname — keep it from a 5."
+    },
+    "correctness_risks": {
+      "score": 3,
+      "evidence": [
+        "app/src/document.ts:13 — runtime href resolves into dist/server/ (nonexistent); only works because Gracile strips runtime stylesheet links in server mode, and the same absolute FS path in dev is not servable by the Vite dev server",
+        "app/src/routes/(home).client.ts:28 — window 'popstate' listener added in connectedCallback with no disconnectedCallback removal",
+        "app/src/lib/api.ts:44-47 — any non-404 API error throws; app/src/routes/pokemon/[name].ts:130-138 fans out ~100 move-detail fetches, so one transient failure 500s the whole page",
+        "app/src/routes/pokemon/[name].client.ts:27-33 — sort tie-break uses current DOM positions, so ties inherit the previous sort order",
+        "app/src/lib/api.ts:9-11 — cache is bounded (5000 entries, 60s TTL) with in-flight dedup; no unbounded growth",
+        "app/src/lib/templates.ts:13-27 — all interpolation goes through Lit SSR html, so no unescaped HTML; app/src/lib/templates.ts:30 is a static string"
+      ],
+      "rationale": "No XSS, races are properly aborted, cache is bounded and 404s are handled via responseInit; but the stylesheet link depends on undocumented asset-stripping machinery, a global listener is leaked, and there is no error containment around a ~100-request fan-out."
+    },
+    "global_abstractions": {
+      "score": 4,
+      "evidence": [
+        "app/src/lib/api.ts — one small client (cache, concurrency, URL helpers), no god module",
+        "app/src/lib/data.ts — cohesive domain layer; getPokemonIndex composes species/types/generations in one place",
+        "app/src/lib/format.ts, home-url.ts, templates.ts — pure, single-purpose helpers shared by all routes",
+        "app/src/lib/home-url.ts:1 — shared by both (home).ts (server) and (home).client.ts (client) as a pure function; API client stays server-only",
+        "app/src/lib/build.ts:6 — the isBuildRender sentinel is repeated at the top of all five handlers (routes/(home).ts:14, pokemon/[name].ts:284, moves/[name].ts:57, abilities/[name].ts:36, types/[name].ts:39)"
+      ],
+      "rationale": "Boundaries are clean and every module earns its keep; the only cross-cutting smell is the build-render guard sprinkled through every handler rather than pushed into the data layer."
+    },
+    "readability": {
+      "score": 5,
+      "evidence": [
+        "app/src/lib/api.ts:1-3, app/src/lib/build.ts:1-5 — comments explain why (cache freshness, build-render skipping), not what",
+        "app/src/lib/format.ts:5-11 — humanize/dexNumber documented with concrete examples",
+        "app/src/routes/pokemon/[name].ts — longest file, but sectioned: types, loader, render helpers, route export; naming is precise (latestEnglishFlavorText, pokemonRefsToSpecies)",
+        "app/src/document.css:46 — MARK: section comments; all styling flows through design tokens (app/src/tokens.css)",
+        "consistent style across all route files: loadX() + defineRoute(handler/document/template) triple"
+      ],
+      "rationale": "A new teammate can find any page's data, markup and enhancement in minutes; naming, comments and file layout are consistent and purposeful."
+    },
+    "review_cost": {
+      "score": 4,
+      "evidence": [
+        "app/src/document.ts:13 — one-line fix: use the documented '/src/document.css' href",
+        "app/src/routes/(home).client.ts:28 — add disconnectedCallback to drop the popstate listener",
+        "app/src/routes/pokemon/[name].ts:51 and app/src/routes/moves/[name].ts:19 — duplicate Move type declarations to consolidate"
+      ],
+      "rationale": "Nits-to-one-round: the changes I'd ask for are small, local and unambiguous, and nothing requires restructuring."
+    }
+  },
+  "overall": 4,
+  "findings": [
+    {
+      "severity": "medium",
+      "location": "app/src/document.ts:13",
+      "issue": "The global stylesheet href is computed as new URL('./document.css', import.meta.url).pathname. In the SSR runtime import.meta.url points at dist/server, so the emitted href is an absolute filesystem path under dist/server that never exists; the page is styled in production only because Gracile strips runtime <link rel=stylesheet> tags and re-injects build-time-collected ones, and the same absolute path is not servable by the Vite dev server.",
+      "suggestion": "Use the documented root-relative source path, e.g. <link rel=\"stylesheet\" href=\"/src/document.css\" />, which Gracile/Vite resolves in both dev and the client build."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/lib/build.ts:6",
+      "issue": "isBuildRender depends on the framework's internal build-time stub hostname 'gracile-static'. It is correct today (verified against @gracile/engine's build render), but it is an undocumented internal that can change without notice, and the guard is repeated in every route handler.",
+      "suggestion": "Keep the helper but move the branch into the data layer (e.g. getPokemonIndex/loadPokemonPage no-op on build render) or centralize it in one place, and pin the assumption with a comment referencing the engine version it was verified against."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/routes/(home).client.ts:28",
+      "issue": "The 'popstate' listener is registered in connectedCallback and never removed; there is no disconnectedCallback, so the element leaks a window listener if it is ever detached.",
+      "suggestion": "Store the bound handler and remove it in disconnectedCallback, or register the listener once against the form's document lifecycle explicitly."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/lib/api.ts:44-47",
+      "issue": "Any non-404 API error throws and the routes do not catch it, so a single failed fetch among the ~100 move-detail requests on a Pokémon page (app/src/routes/pokemon/[name].ts:130-138) turns the whole page into a framework 500 with no retry or partial rendering.",
+      "suggestion": "Wrap per-resource fetches with a tolerated-failure policy (render '—' for a missing move row) or add a bounded retry, and log the failing URL."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/routes/pokemon/[name].client.ts:27-33",
+      "issue": "Sorting ties are broken by current DOM position, so after sorting by one column, ties in a second sort inherit the previous column's order rather than the server's default order.",
+      "suggestion": "Snapshot the original row index once at connect time and break ties on that, with a comment explaining the intent."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/routes/pokemon/[name].ts:51",
+      "issue": "The Move API shape is declared twice with slightly different fields (also app/src/routes/moves/[name].ts:19), a drift risk when the schema is touched.",
+      "suggestion": "Move the API response types into a shared lib/types module (or lib/data.ts) alongside the other domain types."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/lib/templates.ts:30",
+      "issue": "An inline onerror=\"this.style.visibility='hidden'\" attribute defeats any strict CSP and silently swallows broken sprites.",
+      "suggestion": "Handle broken images in the existing client-side enhancement script, or at least keep the CSP caveat in a comment."
+    }
+  ],
+  "summary": "This is a disciplined, current-version Gracile app: handler/document/template routes with proper 404 statuses, a small well-bounded lib layer, escaping left to Lit SSR, bounded caching and correctly aborted client fetches, plus real progressive enhancement for the filters, game picker and sortable tables. The two real concerns are the stylesheet link, which relies on an import.meta.url trick and on Gracile's undocumented runtime asset-stripping rather than the documented root-relative path, and the isBuildRender guard keyed to an internal framework hostname. I'd ask for those two fixes plus listener cleanup before approving, which is otherwise a quick, low-friction review."
+}
+```

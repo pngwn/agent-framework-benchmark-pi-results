@@ -1,0 +1,393 @@
+diff --git a/app/public/style.css b/app/public/style.css
+index 7129796..9472dc2 100644
+--- a/app/public/style.css
++++ b/app/public/style.css
+@@ -183,6 +183,42 @@ main {
+   max-width: 100%;
+ }
+ 
++.button {
++  font: inherit;
++  font-size: var(--text-sm);
++  color: var(--color-on-accent);
++  background: var(--color-accent);
++  border: 1px solid var(--color-accent);
++  border-radius: var(--radius-md);
++  padding: var(--space-2) var(--space-4);
++  cursor: pointer;
++}
++
++.button:disabled {
++  color: var(--color-text-muted);
++  background: var(--color-border);
++  border-color: var(--color-border);
++  cursor: not-allowed;
++}
++
++.button-small {
++  font-size: var(--text-xs);
++  padding: var(--space-1) var(--space-3);
++}
++
++.team-actions {
++  display: flex;
++  flex-wrap: wrap;
++  align-items: center;
++  gap: var(--space-3);
++  margin-bottom: var(--space-4);
++}
++
++.team-full {
++  color: var(--color-text-muted);
++  font-size: var(--text-sm);
++}
++
+ /* Type badges */
+ 
+ .type-badge {
+@@ -278,6 +314,11 @@ a.type-badge:hover {
+   margin-top: var(--space-1);
+ }
+ 
++.card-action {
++  margin-top: var(--space-2);
++  text-align: center;
++}
++
+ .pagination {
+   display: flex;
+   justify-content: center;
+@@ -455,6 +496,32 @@ a.type-badge:hover {
+   white-space: nowrap;
+ }
+ 
++.coverage-table {
++  width: 100%;
++  border-collapse: collapse;
++  font-size: var(--text-sm);
++}
++
++.coverage-table th,
++.coverage-table td {
++  padding: calc(var(--space-2) + 1px) var(--space-3);
++  border-bottom: 1px solid var(--color-border);
++  text-align: left;
++}
++
++.coverage-table thead th {
++  color: var(--color-text-muted);
++  font-weight: var(--weight-normal);
++}
++
++.coverage-table tbody th {
++  font-weight: var(--weight-normal);
++}
++
++.coverage-table td {
++  width: 6rem;
++}
++
+ .sort-button {
+   font: inherit;
+   color: inherit;
+diff --git a/app/src/index.tsx b/app/src/index.tsx
+index f253cf4..fba58b5 100644
+--- a/app/src/index.tsx
++++ b/app/src/index.tsx
+@@ -1,12 +1,15 @@
+ import { serve } from '@hono/node-server';
+ import { serveStatic } from '@hono/node-server/serve-static';
+ import { Hono, type Context } from 'hono';
++import { api } from './api';
+ import { englishName, mainTypes } from './data';
++import { TEAM_SIZE, loadCoverage, loadTeam, saveTeam, teamFromCookie } from './team';
+ import { NotFound } from './views/components';
+ import { AbilityPage, MovePage, TypePage, TypesPage, loadAbility, loadMove, loadType } from './views/details';
+ import { HomePage, Results, homeUrl, loadHome, parseHomeQuery } from './views/home';
+ import { renderer } from './views/layout';
+ import { MoveTable, MoveTables, PokemonPage, loadMoves, loadPokemon, type SortDir, type SortKey } from './views/pokemon';
++import { TeamPage } from './views/team';
+ 
+ const app = new Hono();
+ 
+@@ -35,7 +38,7 @@ app.get('/pokemon/:name', async (c) => {
+   const data = await loadPokemon(c.req.param('name'));
+   if (!data) return notFound(c);
+   const moves = await loadMoves(data.pokemon, c.req.query('game'));
+-  return c.render(<PokemonPage data={data} moves={moves} />, { title: englishName(data.species) });
++  return c.render(<PokemonPage data={data} moves={moves} team={teamFromCookie(c)} />, { title: englishName(data.species) });
+ });
+ 
+ app.get('/pokemon/:name/moves', async (c) => {
+@@ -80,6 +83,34 @@ app.get('/abilities/:name', async (c) => {
+   return c.render(<AbilityPage data={data} />, { title: englishName(data.ability) });
+ });
+ 
++app.get('/team', async (c) => {
++  const members = await loadTeam(teamFromCookie(c));
++  const coverage = await loadCoverage(members);
++  return c.render(<TeamPage members={members} coverage={coverage} />, { title: 'Team' });
++});
++
++app.post('/team/add', async (c) => {
++  const body = await c.req.parseBody();
++  const name = String(body.name ?? '').toLowerCase();
++  const species = name ? await api<{ name: string }>(`pokemon-species/${encodeURIComponent(name)}`) : null;
++  if (!species) return notFound(c);
++  const team = teamFromCookie(c);
++  if (!team.includes(species.name) && team.length < TEAM_SIZE) saveTeam(c, [...team, species.name]);
++  return c.redirect(`/pokemon/${species.name}`, 303);
++});
++
++app.post('/team/remove', async (c) => {
++  const body = await c.req.parseBody();
++  const name = String(body.name ?? '').toLowerCase();
++  const next = String(body.next ?? '');
++  const target = next === '/team' || /^\/pokemon\/[a-z0-9-]+$/.test(next) ? next : '/team';
++  saveTeam(
++    c,
++    teamFromCookie(c).filter((member) => member !== name),
++  );
++  return c.redirect(target, 303);
++});
++
+ app.get('/types', async (c) => c.render(<TypesPage types={await mainTypes()} />, { title: 'Types' }));
+ 
+ app.get('/types/:name', async (c) => {
+diff --git a/app/src/team.ts b/app/src/team.ts
+new file mode 100644
+index 0000000..f6a6829
+--- /dev/null
++++ b/app/src/team.ts
+@@ -0,0 +1,77 @@
++import type { Context } from 'hono';
++import { getCookie, setCookie } from 'hono/cookie';
++import { api } from './api';
++import { type Card, type TypeInfo, mainTypes, typesByPokemonId } from './data';
++
++export const TEAM_SIZE = 6;
++
++const TEAM_COOKIE = 'team';
++
++/** The species names on the visitor's team, in the order they were added. */
++export function teamFromCookie(c: Context): string[] {
++  const raw = getCookie(c, TEAM_COOKIE);
++  if (!raw) return [];
++  try {
++    const parsed: unknown = JSON.parse(raw);
++    if (!Array.isArray(parsed)) return [];
++    const names = parsed.filter((name): name is string => typeof name === 'string' && name.length > 0);
++    return [...new Set(names)].slice(0, TEAM_SIZE);
++  } catch {
++    return [];
++  }
++}
++
++export function saveTeam(c: Context, names: string[]) {
++  setCookie(c, TEAM_COOKIE, JSON.stringify(names.slice(0, TEAM_SIZE)), {
++    path: '/',
++    httpOnly: true,
++    sameSite: 'Lax',
++    maxAge: 60 * 60 * 24 * 365,
++  });
++}
++
++export type TeamMember = Card & { types: TypeInfo[] };
++
++/** Loads team members from the API, preserving their saved order. */
++export async function loadTeam(names: string[]): Promise<TeamMember[]> {
++  if (names.length === 0) return [];
++  const [species, typesById] = await Promise.all([
++    Promise.all(names.map((name) => api(`pokemon-species/${encodeURIComponent(name.toLowerCase())}`))),
++    typesByPokemonId(),
++  ]);
++  return species.flatMap((s) =>
++    s ? [{ id: s.id as number, name: s.name as string, types: typesById.get(s.id) ?? [] }] : [],
++  );
++}
++
++type DamageRelations = {
++  double_damage_to?: { name: string }[];
++  half_damage_to?: { name: string }[];
++  no_damage_to?: { name: string }[];
++};
++
++const multiplierFor = (relations: DamageRelations, type: string) => {
++  if (relations.double_damage_to?.some((t) => t.name === type)) return 2;
++  if (relations.half_damage_to?.some((t) => t.name === type)) return 0.5;
++  if (relations.no_damage_to?.some((t) => t.name === type)) return 0;
++  return 1;
++};
++
++export type CoverageRow = { name: string; label: string; weak: number; resistant: number };
++
++/** How many team members are weak to or resist each attacking type. */
++export async function loadCoverage(members: TeamMember[]): Promise<CoverageRow[]> {
++  if (members.length === 0) return [];
++  const types = await mainTypes();
++  return types.map((attacking) => {
++    const relations = attacking.record.damage_relations as DamageRelations;
++    let weak = 0;
++    let resistant = 0;
++    for (const member of members) {
++      const multiplier = member.types.reduce((product, type) => product * multiplierFor(relations, type.name), 1);
++      if (multiplier > 1) weak++;
++      else if (multiplier < 1) resistant++;
++    }
++    return { name: attacking.name, label: attacking.label, weak, resistant };
++  });
++}
+diff --git a/app/src/views/components.tsx b/app/src/views/components.tsx
+index 808dc8f..303d1f6 100644
+--- a/app/src/views/components.tsx
++++ b/app/src/views/components.tsx
+@@ -17,7 +17,7 @@ export const TypeBadge = ({ type, link = false }: { type: TypeInfo; link?: boole
+     <span class={`type-badge type-${type.name}`}>{type.label}</span>
+   );
+ 
+-export const CardList = ({ cards }: { cards: Card[] }) => (
++export const CardList = ({ cards, action }: { cards: Card[]; action?: (card: Card) => Child }) => (
+   <ul class="card-grid">
+     {cards.map((card) => (
+       <li>
+@@ -34,6 +34,7 @@ export const CardList = ({ cards }: { cards: Card[] }) => (
+           )}
+           {card.note && <span class="card-note">{card.note}</span>}
+         </a>
++        {action && <div class="card-action">{action(card)}</div>}
+       </li>
+     ))}
+   </ul>
+diff --git a/app/src/views/layout.tsx b/app/src/views/layout.tsx
+index 1eb1b76..d58754f 100644
+--- a/app/src/views/layout.tsx
++++ b/app/src/views/layout.tsx
+@@ -30,6 +30,9 @@ export const renderer = jsxRenderer(({ children, title }) => (
+               <li>
+                 <a href="/types">Types</a>
+               </li>
++              <li>
++                <a href="/team">Team</a>
++              </li>
+             </ul>
+           </nav>
+         </div>
+diff --git a/app/src/views/pokemon.tsx b/app/src/views/pokemon.tsx
+index 6f7c377..426766d 100644
+--- a/app/src/views/pokemon.tsx
++++ b/app/src/views/pokemon.tsx
+@@ -1,6 +1,7 @@
+ import { api, apiUrl } from '../api';
+ import { dexNumber, englishName, humanize, latestFlavorText, typeLabel, typeLabels } from '../data';
+ import { Dash, Section, TypeBadge, orDash } from './components';
++import { TeamButton } from './team';
+ 
+ const STAT_LABELS: Record<string, string> = {
+   hp: 'HP',
+@@ -217,7 +218,7 @@ const Evolution = ({ node }: { node: Chain }) => (
+ 
+ type PokemonData = NonNullable<Awaited<ReturnType<typeof loadPokemon>>>;
+ 
+-export const PokemonPage = ({ data, moves }: { data: PokemonData; moves: MovesData }) => {
++export const PokemonPage = ({ data, moves, team }: { data: PokemonData; moves: MovesData; team: string[] }) => {
+   const { species, pokemon, chain, labels } = data;
+   const name = englishName(species);
+   const genus = species.genera?.find((g: any) => g.language.name === 'en')?.genus;
+@@ -240,6 +241,7 @@ export const PokemonPage = ({ data, moves }: { data: PokemonData; moves: MovesDa
+               <TypeBadge type={{ name: t.type.name, label: typeLabel(labels, t.type.name) }} link />
+             ))}
+           </p>
++          <TeamButton species={species.name} team={team} />
+           <dl class="facts">
+             <div>
+               <dt>Height</dt>
+diff --git a/app/src/views/team.tsx b/app/src/views/team.tsx
+new file mode 100644
+index 0000000..dbd3e3b
+--- /dev/null
++++ b/app/src/views/team.tsx
+@@ -0,0 +1,84 @@
++import { humanize } from '../data';
++import { TEAM_SIZE, type CoverageRow, type TeamMember } from '../team';
++import { CardList, Section } from './components';
++
++export const TeamButton = ({ species, team }: { species: string; team: string[] }) => {
++  const inTeam = team.includes(species);
++  const full = team.length >= TEAM_SIZE;
++  return (
++    <div class="team-actions">
++      {inTeam ? (
++        <form method="post" action="/team/remove">
++          <input type="hidden" name="name" value={species} />
++          <input type="hidden" name="next" value={`/pokemon/${species}`} />
++          <button class="button" type="submit">
++            Remove from team
++          </button>
++        </form>
++      ) : (
++        <form method="post" action="/team/add">
++          <input type="hidden" name="name" value={species} />
++          <button class="button" type="submit" disabled={full}>
++            Add to team
++          </button>
++        </form>
++      )}
++      {!inTeam && full && <span class="team-full">Team is full</span>}
++    </div>
++  );
++};
++
++const CoverageTable = ({ rows }: { rows: CoverageRow[] }) => (
++  <div class="table-scroll">
++    <table class="coverage-table">
++      <thead>
++        <tr>
++          <th scope="col">Type</th>
++          <th scope="col">Weak</th>
++          <th scope="col">Resistant</th>
++        </tr>
++      </thead>
++      <tbody>
++        {rows.map((row) => (
++          <tr>
++            <th scope="row">{row.label}</th>
++            <td>{row.weak}</td>
++            <td>{row.resistant}</td>
++          </tr>
++        ))}
++      </tbody>
++    </table>
++  </div>
++);
++
++export const TeamPage = ({ members, coverage }: { members: TeamMember[]; coverage: CoverageRow[] }) => (
++  <>
++    <h1>Team</h1>
++    <p class="count">
++      {members.length} of {TEAM_SIZE}
++    </p>
++    {members.length === 0 ? (
++      <p>
++        Your team is empty. <a href="/">Browse the Pokédex</a>
++      </p>
++    ) : (
++      <>
++        <CardList
++          cards={members}
++          action={(card) => (
++            <form method="post" action="/team/remove">
++              <input type="hidden" name="name" value={card.name} />
++              <input type="hidden" name="next" value="/team" />
++              <button class="button button-small" type="submit">
++                Remove {humanize(card.name)}
++              </button>
++            </form>
++          )}
++        />
++        <Section id="coverage" title="Type coverage">
++          <CoverageTable rows={coverage} />
++        </Section>
++      </>
++    )}
++  </>
++);

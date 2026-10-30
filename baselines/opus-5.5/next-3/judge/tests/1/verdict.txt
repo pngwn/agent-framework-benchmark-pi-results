@@ -1,0 +1,132 @@
+## Test quality review
+
+**The app contains no tests of its own.** `app/package.json` has no `test` script and no test runner (vitest/jest/playwright) among its devDependencies (`app/package.json:7-22`); the only Playwright reference in `app/package-lock.json` is Next's optional *peer* dependency (`app/package-lock.json:872-883`). `grep` for `test(`/`describe(`/`expect(` across `app/` finds only incidental matches (`lib/format.ts:35`, `lib/api.ts:28`, etc.), never a test case. That matches the measured facts (`tests.files: 0`). So the entire risk surface is guarded only by the acceptance suite, which the repo won't run in CI once the task is over.
+
+What makes this painful is that a large share of the riskiest logic is **pure functions that cost nothing to test** — `lib/format.ts` (humanize, dexNumber, idFromUrl, latestFlavorText, collapseWhitespace, orMissing), `lib/data.ts` (alternate-form exclusion, card dedupe, index building), and the move-table comparator. Instead, that logic lives inline in pages and client components where only full-browser tests would reach it:
+
+- Home filtering, pagination math and page clamping are inline in the server component (`app/app/page.tsx:41-56`) — the "48 per page", the combined predicate, and `Math.min(Math.max(requested, 1), totalPages)` clamp. A one-token refactor of `IndexEntry`'s shape (`lib/data.ts:72`) or the `slice((page-1)*PAGE_SIZE, page*PAGE_SIZE)` bounds shifts every page boundary, and nothing in `app/` fails.
+- `idFromUrl`'s regex (`app/lib/format.ts:45-48`) is the linchpin mapping Pokémon→species and excluding alternate forms everywhere (`lib/data.ts:57-61`); a refactor to e.g. `parseInt(url)` would silently drop or admit forms in every card list on the site.
+- `cardsForPokemon` dedupes by first occurrence (`lib/data.ts:62-68`): if a Pokémon appears twice in `ability.pokemon` (normal + hidden instance of the same ability), only the *first* entry's `note` wins (`app/abilities/[name]/page.tsx:34-36`) — an order-dependent mislabel that no test would catch.
+- The "omit empty/default params" URL rule is duplicated in two hand-rolled builders (`app/app/page.tsx:61-69` and `app/components/Filters.tsx:12-18`); they already disagree subtly (one handles `page`, the other doesn't need to), and one being fixed without the other is a classic future regression.
+- The API cache's TTL, in-flight dedupe, failed-request eviction and the size-cap sweep (`app/lib/api.ts:17-50`) implement the spec's "live data" requirement; a "cleanup" to Next's fetch cache or a broken eviction break would only be caught by the overlay fixture for the specific overlaid records.
+- Client-side risk is equally bare: the `sentQuery`-ref reconciliation in `Filters` that avoids clobbering in-flight typing (`app/components/Filters.tsx:20-46`) and back/forward restoration of the search input are only touched incidentally by acceptance; `MoveTable`'s missing-last comparator and string-descending direction (`app/components/MoveTable.tsx:39-52`) are exercised for one column of one table; `getMoves`' default-game tie-break (`a.order - b.order || a.id - b.id`, `app/app/pokemon/[name]/page.tsx:173-177`) is validated only for Pikachu.
+- `error.tsx` (`app/app/error.tsx:1-15`) — the API-down path — is never exercised by anything: acceptance never stops the API.
+
+For the criteria: with zero tests, `coverage_of_risk`, `behaviour_not_implementation` and `regression_power` score 1 by the anchors (nothing covered, so "what would be caught" is nothing), and `signal_to_noise` gets the prescribed 3. The pure helpers in `lib/` are exactly the functions a five-minute vitest setup would have covered, which is what keeps this at the bottom of the scale rather than "merely thin".
+
+```json
+{
+  "dimension": "tests",
+  "criteria": {
+    "coverage_of_risk": {
+      "score": 1,
+      "evidence": [
+        "app/package.json:7-22 — no test script, no test runner in devDependencies",
+        "app/app/page.tsx:41-56 — filtering, pagination and page-clamp logic inline in the page, untested",
+        "app/lib/data.ts:52-70 — alternate-form exclusion and card dedupe, untested",
+        "app/components/MoveTable.tsx:39-52 — sort comparator with missing-last semantics, untested"
+      ],
+      "rationale": "No tests exist; the riskiest logic (filtering, pagination, species mapping, sorting) has zero coverage of its own."
+    },
+    "behaviour_not_implementation": {
+      "score": 1,
+      "evidence": ["app/package.json:7-22 — no test infrastructure; tests.files measured 0"],
+      "rationale": "There are no tests to be behavioural or implementation-coupled; the score anchors treat 'no tests' as 1."
+    },
+    "regression_power": {
+      "score": 1,
+      "evidence": [
+        "app/lib/format.ts:45-48 — idFromUrl regex backs every Pokémon→species mapping; nothing fails if broken",
+        "app/lib/api.ts:17-50 — cache TTL/eviction implements the live-data requirement; untested",
+        "app/components/Filters.tsx:20-46 — sentQuery reconciliation guards against clobbering typed input; untested"
+      ],
+      "rationale": "Nothing in app/ would fail on any regression; the acceptance suite is the only guard and it leaves for the repo."
+    },
+    "signal_to_noise": {
+      "score": 3,
+      "evidence": ["app/ — zero test files, so zero noise"],
+      "rationale": "Prescribed 3 for the no-tests case: no low-value tests, because there are no tests at all."
+    }
+  },
+  "overall": 1,
+  "findings": [
+    {
+      "severity": "high",
+      "location": "app/package.json:7-22",
+      "issue": "No test runner, no test script, zero tests despite the app containing a large amount of pure, trivially testable logic",
+      "suggestion": "Add vitest (or node:test) and unit-test lib/format.ts, lib/data.ts and the move-table comparator — none need a browser."
+    },
+    {
+      "severity": "high",
+      "location": "app/app/page.tsx:41-56",
+      "issue": "Filter predicate, 48-per-page slicing and out-of-range page clamping live inline in the page component",
+      "suggestion": "Extract filter/paginate into a lib function with unit tests covering page=0, page=999, empty filters and combined filters."
+    },
+    {
+      "severity": "high",
+      "location": "app/lib/format.ts:45-48",
+      "issue": "idFromUrl's regex is the linchpin of Pokémon→species mapping and alternate-form exclusion; a refactor here silently corrupts every card list",
+      "suggestion": "Unit-test it against URLs with and without trailing slashes, non-numeric ids, and form URLs (id > 10000)."
+    },
+    {
+      "severity": "medium",
+      "location": "app/lib/data.ts:62-68",
+      "issue": "cardsForPokemon dedupes by first occurrence, so the hidden-ability note is order-dependent when a Pokémon has the same ability in two slots",
+      "suggestion": "Test duplicate entries (one hidden, one not) and make the note sticky when any entry is hidden."
+    },
+    {
+      "severity": "medium",
+      "location": "app/components/Filters.tsx:12-18",
+      "issue": "URL-state building is duplicated between Filters.href and the page's pageHref; the omit-defaults rule can drift between them",
+      "suggestion": "Single shared query builder with unit tests asserting q/type/generation/page omission rules."
+    },
+    {
+      "severity": "medium",
+      "location": "app/lib/api.ts:17-50",
+      "issue": "Cache TTL, in-flight dedupe and eviction are hand-rolled and untested; a refactor to fetch caching would break the live-data requirement silently",
+      "suggestion": "Unit tests with a stubbed fetch covering 404→NotFoundError, rejection eviction, and TTL expiry."
+    },
+    {
+      "severity": "medium",
+      "location": "app/app/pokemon/[name]/page.tsx:173-177",
+      "issue": "Default-game selection (highest order, tie-break by id) and method ordering rank are untested beyond Pikachu's data",
+      "suggestion": "Extract getMoves' ordering logic and test it with synthetic order ties and non-standard method names."
+    },
+    {
+      "severity": "medium",
+      "location": "app/components/MoveTable.tsx:39-52",
+      "issue": "Sort comparator's missing-last and string-descending behaviour is only exercised for the Power column of one table",
+      "suggestion": "Unit-test the comparator for nulls in both directions and for string vs numeric columns."
+    },
+    {
+      "severity": "low",
+      "location": "app/app/error.tsx:1-15",
+      "issue": "The API-failure path (error boundary) is never exercised by any test",
+      "suggestion": "One Playwright test with a dead API_BASE_URL asserting the error page renders inside the layout landmarks."
+    },
+    {
+      "severity": "low",
+      "location": "app/app/page.tsx:37-38",
+      "issue": "Invalid ?type/?generation values are silently ignored (unfiltered view) — unspecified, untested URL-state edge",
+      "suggestion": "Decide and test the behaviour for bogus filter values."
+    }
+  ],
+  "summary": "The app ships zero tests of its own — no runner, no script, no cases — so its substantial risky logic (filtering, pagination, species mapping, caching, sorting) is guarded only by the acceptance suite. Most of that logic is pure functions that a minimal vitest setup would cover cheaply, so the gap is easily closed. Until then, any data-layer refactor can break every page silently.",
+  "wroteTests": false,
+  "testCount": 0,
+  "valuableTests": [],
+  "lowValueTests": [],
+  "untested": [
+    { "area": "Home filtering predicate and 48-per-page pagination with page clamping (app/app/page.tsx:41-56)", "risk": "high", "likelyBug": "Off-by-one in slice bounds or a broken out-of-range page clamp, showing wrong cards or 'Page 999 of 22' after an index refactor." },
+    { "area": "Alternate-form exclusion and Pokémon→species mapping via idFromUrl (app/lib/format.ts:45-48, app/lib/data.ts:52-70)", "risk": "high", "likelyBug": "Mega/alternate forms leaking into card lists, or species silently dropped from lists when the URL-parsing regex changes." },
+    { "area": "URL state construction and omission of default params (app/app/page.tsx:61-69, app/components/Filters.tsx:12-18)", "risk": "medium", "likelyBug": "page=1 or empty q appearing in URLs, breaking back/forward and filter-resets-to-page-1 after one builder is changed." },
+    { "area": "Debounced search and slow-navigation input reconciliation in Filters (app/components/Filters.tsx:20-46)", "risk": "medium", "likelyBug": "Typed input clobbered by a finishing navigation, or lost keystrokes on back/forward — only incidentally touched by acceptance." },
+    { "area": "Move-table sorting comparator: missing-last in both directions, string descending, aria-sort toggling (app/components/MoveTable.tsx:39-52)", "risk": "medium", "likelyBug": "Null values sorting first in descending order, or string columns sorting only ascending, after a comparator tweak." },
+    { "area": "Default game selection (highest version-group order), method ordering and per-method table assembly (app/app/pokemon/[name]/page.tsx:167-232)", "risk": "medium", "likelyBug": "Wrong default game after a sort removal, or method tables ordered alphabetically instead of Level Up/Machine/Egg/Tutor." },
+    { "area": "In-memory API cache: TTL, in-flight dedupe, failed-request eviction, size cap (app/lib/api.ts:17-50)", "risk": "medium", "likelyBug": "Stale cached responses violating the live-data requirement, or rejected promises cached and reused after a transient failure." },
+    { "area": "Cards for hidden abilities: first-occurrence dedupe of note text (app/lib/data.ts:62-68, app/app/abilities/[name]/page.tsx:34-36)", "risk": "medium", "likelyBug": "A Pokémon with both a normal and hidden instance of the same ability gets the wrong 'Hidden ability' label depending on API order." },
+    { "area": "Error boundary / API-down path (app/app/error.tsx)", "risk": "low", "likelyBug": "A blank or landmark-less error page when the API 500s, since no test ever stops the API." },
+    { "area": "Invalid filter param handling: bogus ?type/?generation silently ignored (app/app/page.tsx:37-38)", "risk": "low", "likelyBug": "Refactor to strict validation turning /?type=bogus into a 404 or an unfiltered list — either way unverified." }
+  ]
+}
+```

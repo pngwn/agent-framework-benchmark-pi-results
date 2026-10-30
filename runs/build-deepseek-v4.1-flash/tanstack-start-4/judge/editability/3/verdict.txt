@@ -1,0 +1,166 @@
+## Review: Pokédex app (editability)
+
+Framework check first: the app's shape matches the **current stable TanStack Start** conventions, not stale ones. `createServerFn({ method: 'GET' }).validator(...)` (`app/src/lib/data.functions.ts:8-14`) uses `validator()`, which became the canonical method when `inputValidator()` was deprecated (router #7566, June 2026) and is the only option in Start 1.169 stable. `createRootRoute({ head, shellComponent, ... })` (`app/src/routes/__root.tsx:8-16`) is the current root-document API, and the `lib/api.server.ts` / `lib/data.functions.ts` / shared `lib/model.ts` split exactly mirrors the framework's recommended file-separation pattern (`*.server.*` files are denied in client bundles by Start's import protection). So the foundation an editor inherits is idiomatic; the deductions below are about duplication the agent introduced itself.
+
+### Scenario walkthroughs
+
+1. **Remove the Abilities pages.** No nav link exists (nav is only Pokémon/Types, `__root.tsx:26-35`), so no header edit. But the removal is more than "delete a route": you must also delete `app/src/routes/abilities.$name.tsx`, strip the Abilities *section* from `app/src/routes/pokemon.$name.tsx:110-122`, and then chase down the data chain or leave dead code: `loadAbilityPage`/`getAbility` (`api.server.ts:522, 173`), `getAbilityData` (`data.functions.ts:24`), `AbilityPageData` (`model.ts:53`). The Pokémon-page section is spec-mandated so some of this entanglement is inherent, but the loader/server-fn/model trail has to be found by grep. **Difficulty 3.**
+
+2. **Sprite fix (Deoxys-style).** Excellent seam: the sprite URL is derived in exactly one function, `spriteForId` (`api.server.ts:80`), called only from `cardFromSpecies` (`api.server.ts:219`), which every card list funnels through — home (`api.server.ts:314`), moves/types via `cardsFromPokemonRefs` (`api.server.ts:237`), abilities (`api.server.ts:541`). One fix in one file covers every list. **Difficulty 5.**
+
+3. **Sort cards by name.** All four card lists render through the shared `PokemonCardList` (`components/PokemonCard.tsx:26`), so the sort itself is a one-line change there and lands on home, move, ability and type pages simultaneously. If a visible sort *control* per list is wanted, each page component needs a few lines. **Difficulty 4.**
+
+4. **Items section shaped like Moves.** The pattern is legible and repeatable: new `items.index.tsx` (clone of `types.index.tsx`, 26 lines), new `items.$name.tsx` (clone of `moves.$name.tsx`), a nav link in `__root.tsx`, plus one block each in `model.ts`, `api.server.ts` (a `getItem` memo + `loadItemPage` + `loadItemList`) and `data.functions.ts`. Reusable as-is: `NotFound`, `PokemonCardList`, `displayOrDash`/`humanize`, the `memo` cache and the `.server.ts`/`.functions.ts` seam. Not reusable: the page body itself — there is no generic "detail page" abstraction, so the panel/`<dl>`/section markup is copied and adapted. **Difficulty 3.**
+
+5. **Change API base URL / caching.** `API_BASE_URL` is read once (`api.server.ts:23`) and every URL builder (`apiGet:59`, `mediaUrl:76-77`, `spriteForId:81`) goes through it; caching is one `memo` function with a single default TTL (`api.server.ts:37-56`) and no per-call-site TTL overrides. The `/api/v2/` path prefix is also only in `apiGet`. One file. **Difficulty 5.**
+
+### Findings driving the scores
+
+The recurring weakness is that when a variant appeared (hidden ability cards, type badges in links), the agent **copied the loop instead of extending the helper** — the same trait appears three times:
+
+- `loadAbilityPage` re-implements the pokemon-ref→card loop (ID ≤ 10000 filter, `speciesById` lookup, `byId` dedup) inline (`api.server.ts:528-542`) rather than extending `cardsFromPokemonRefs` (`api.server.ts:228`) to carry the hidden flag. Any future change to card membership rules must be made twice.
+- `type-badge type-${name}` markup is hand-inlined in five spots across four files (`MovesSection.tsx:109`, `pokemon.$name.tsx:76`, `moves.$name.tsx:31`, `types.$name.tsx:36`, plus the one shared `TypePill` at `PokemonCard.tsx:6` which is only a `<span>` and used by nothing but cards). Renaming or restyling type badges touches all of them.
+- `loadTypePage` rebuilds `typeMap` by hand (`api.server.ts:563`) when `getTypeMap()` (`api.server.ts:139`) already exists.
+
+Smaller copy-paste: the power/accuracy/pp null→`Number` coercion is duplicated between `loadPokemonPage` and `loadMovePage` (`api.server.ts:386-390` and `:511-515`), and the home-search shape is known in three places (`index.tsx:13` `validateSearch`, `data.functions.ts:14` validator, and the defensive `typeof input.*` re-checks in `api.server.ts:272-274`). None of these will surprise an editor — everything is grep-able and honestly named — but they're the reason changeability isn't a 5.
+
+On the plus side, the design choices around real variation are genuinely good: `PokemonCardData` makes `types` and `hidden` optional (`model.ts:8-15`) instead of spawning flag parameters; `MovesTable` computes its column list from `table.method` (`MovesSection.tsx:52`) rather than taking booleans; `MovesSection` takes an `onGameChange` callback (`MovesSection.tsx:127`) instead of importing `useNavigate`, so the component stays route-agnostic; and `model.ts` view-models mean the pages never see raw API JSON, so API-shape changes are quarantined in `api.server.ts`.
+
+```json
+{
+  "dimension": "editability",
+  "criteria": {
+    "removability": {
+      "score": 3,
+      "evidence": [
+        "app/src/routes/abilities.$name.tsx:8 — self-contained route file, deletes cleanly; nav has no Abilities link (app/src/routes/__root.tsx:26-35)",
+        "app/src/routes/pokemon.$name.tsx:110-122 — spec-mandated Abilities section on the Pokémon page must be edited separately",
+        "app/src/lib/api.server.ts:522 — loadAbilityPage/getAbility (api.server.ts:173) left as dead code unless chased",
+        "app/src/lib/data.functions.ts:24 — getAbilityData and AbilityPageData (model.ts:53-58) also orphaned by route deletion"
+      ],
+      "rationale": "The route itself is one delete, but the data-layer chain (loader, server fn, model type) plus the Pokémon-page section mean a handful of scattered edits; all findable by grep, none risky."
+    },
+    "changeability": {
+      "score": 4,
+      "evidence": [
+        "app/src/lib/api.server.ts:80-81 — spriteForId is the single sprite derivation; cardFromSpecies (api.server.ts:219) is the single card constructor used by home (314), moves/types (237) and abilities (541)",
+        "app/src/components/PokemonCard.tsx:26 — PokemonCardList is the one render seam for every card list",
+        "app/src/lib/api.server.ts:528-542 — ability card building re-implements the ref→card loop instead of reusing cardsFromPokemonRefs (228)",
+        "app/src/lib/api.server.ts:386-390 — power/accuracy/pp null coercion duplicated verbatim at :511-515"
+      ],
+      "rationale": "The most likely fixes (sprites, card content, list rendering, caching) each land in one obvious place; the deductions are small duplications that force a fix into two nearby spots."
+    },
+    "coupling": {
+      "score": 4,
+      "evidence": [
+        "app/src/lib/api.server.ts — *.server.ts naming rides Start's default import protection (denied in client bundles); app/src/lib/data.functions.ts:8 is the only client-visible seam",
+        "app/src/lib/model.ts:1-88 — typed view models; routes/components never touch raw API JSON",
+        "app/src/components/MovesSection.tsx:127 — onGameChange callback prop keeps the component free of useNavigate/router internals",
+        "app/src/components/MovesSection.tsx:109 — `type-badge type-${name}` class scheme inlined in 4 files (also pokemon.$name.tsx:76, moves.$name.tsx:31, types.$name.tsx:36), coupling components to CSS naming"
+      ],
+      "rationale": "Server/client separation follows the framework's official pattern and modules meet through narrow typed interfaces; the only real tangle is styling knowledge (badge class names) leaked into five call sites."
+    },
+    "abstraction_design": {
+      "score": 4,
+      "evidence": [
+        "app/src/lib/model.ts:8-15 — PokemonCardData models actual variation with optional types/hidden, no flag-parameter creep",
+        "app/src/components/MovesSection.tsx:52 — columns computed from table.method instead of boolean props; compareRows (MovesSection.tsx:39-58) is a single generic sorter",
+        "app/src/lib/api.server.ts:40-56 — memo dedupes in-flight requests and centralizes TTL for all loaders",
+        "app/src/lib/api.server.ts:563 — loadTypePage rebuilds typeMap by hand instead of using getTypeMap (139)",
+        "app/src/routes/moves.$name.tsx:10-56 — detail-page panel/section markup is copy-adapted per route rather than factored, so new similar pages clone it"
+      ],
+      "rationale": "Abstractions sit where the app genuinely varies (card data, sortable tables, cache) and stretch to similar cases without flags; a couple of near-miss reuse points (typeMap, card loop) were re-implemented instead of extended."
+    }
+  },
+  "overall": 4,
+  "findings": [
+    {
+      "severity": "medium",
+      "location": "app/src/lib/api.server.ts:528",
+      "issue": "loadAbilityPage re-implements the pokemon-ref→card loop (id≤10000 filter, speciesById lookup, dedup) inline to add the hidden flag, instead of extending cardsFromPokemonRefs",
+      "suggestion": "Extend cardsFromPokemonRefs with an optional per-ref decorator (or have it accept raw entries carrying is_hidden) so card membership rules live in one function"
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/components/MovesSection.tsx:109",
+      "issue": "Type badge markup `type-badge type-${name}` is inlined in five places across four files (PokemonCard.tsx:6, pokemon.$name.tsx:76, moves.$name.tsx:31, types.$name.tsx:36)",
+      "suggestion": "Promote TypePill into a shared TypeBadge that renders either a span or a Link, and use it everywhere"
+    },
+    {
+      "severity": "low",
+      "location": "app/src/lib/api.server.ts:511",
+      "issue": "power/accuracy/pp null→Number coercion duplicated verbatim between loadMovePage and loadPokemonPage (also at :386-390)",
+      "suggestion": "Extract a small nullableNumber(value) helper in format.ts"
+    },
+    {
+      "severity": "low",
+      "location": "app/src/lib/api.server.ts:272",
+      "issue": "Home search shape (q/type/generation/page) is known in three places: validateSearch (index.tsx:13), the server-fn validator (data.functions.ts:14), and defensive typeof re-checks here",
+      "suggestion": "Move the param parsing into the server fn's validator so loadHome receives already-normalized values"
+    },
+    {
+      "severity": "low",
+      "location": "app/src/lib/api.server.ts:563",
+      "issue": "loadTypePage rebuilds typeMap inline when getTypeMap() (line 139) already exists",
+      "suggestion": "Call getTypeMap(); delete the duplicate"
+    },
+    {
+      "severity": "low",
+      "location": "app/src/lib/api.server.ts:401",
+      "issue": "rowsByMethod typed Map<string, any[]> and rows carry a `method` field absent from the MoveRow interface (model.ts:39-48) — type drift around the moves tables",
+      "suggestion": "Type the map as Map<string, MoveRow[]> and drop the stray method field from the row objects"
+    },
+    {
+      "severity": "low",
+      "location": "app/src/routes/pokemon.$name.tsx:39",
+      "issue": "#moves anchor scroll implemented as a manual window.location.hash effect (rAF + scrollIntoView), a special case embedded in the route while the router already sets scrollRestoration (router.tsx:11)",
+      "suggestion": "Use TanStack Router's hash/scroll handling (or a small shared hook) so the route component doesn't own scroll wiring"
+    },
+    {
+      "severity": "low",
+      "location": "app/src/routes/index.tsx:48",
+      "issue": "Two parallel builders of the home query object: updateSearch (line 48, always resets page) and pageSearch (line 66, preserves filters)",
+      "suggestion": "Extract one query-builder that takes the next filter/page deltas so the URL contract is defined once"
+    },
+    {
+      "severity": "low",
+      "location": "app/src/routes/index.tsx:34",
+      "issue": "head title 'Pokédex' duplicates the root route default (app/src/routes/__root.tsx:13) — harmless but a redundant override to trip over",
+      "suggestion": "Drop the override and let the root title stand"
+    }
+  ],
+  "summary": "This is an idiomatic current-stable TanStack Start app — the .server.ts/.functions.ts/model.ts layering, validator()-based server fns and shellComponent root document are all the shape a maintainer would want, and data-source, caching and card-construction changes each land in one file. The editability cost is concentrated in a few copy-paste seams: the ability card loop, inlined type-badge markup, duplicated nullable-number coercion and a triple-known search schema. Those are cheap to fix now and would be easy to navigate later, so the codebase is comfortably above average to change.",
+  "scenarios": [
+    {
+      "change": "Remove the Abilities pages and every link to them",
+      "files": ["app/src/routes/abilities.$name.tsx", "app/src/routes/pokemon.$name.tsx", "app/src/lib/api.server.ts", "app/src/lib/data.functions.ts", "app/src/lib/model.ts"],
+      "difficulty": 3,
+      "notes": "Route deletes cleanly and no nav link exists, but the Pokémon page's Abilities section and the loader/server-fn/model-type chain must be chased by hand or left as dead code"
+    },
+    {
+      "change": "Fix the wrong-sprite bug for species whose default Pokémon has a different name (Deoxys)",
+      "files": ["app/src/lib/api.server.ts"],
+      "difficulty": 5,
+      "notes": "spriteForId (line 80) and cardFromSpecies (line 214) are the only sprite derivation; every card list — home, moves, abilities, types — flows through cardFromSpecies, so one fix covers all"
+    },
+    {
+      "change": "Add sorting by name to every list of Pokémon cards",
+      "files": ["app/src/components/PokemonCard.tsx"],
+      "difficulty": 4,
+      "notes": "PokemonCardList is the single render path for all four lists; the sort is one change there — only a per-page sort *control* would touch the route components"
+    },
+    {
+      "change": "Add an Items section (/items, /items/:name) shaped like Moves",
+      "files": ["app/src/routes/items.index.tsx", "app/src/routes/items.$name.tsx", "app/src/routes/__root.tsx", "app/src/lib/model.ts", "app/src/lib/api.server.ts", "app/src/lib/data.functions.ts"],
+      "difficulty": 3,
+      "notes": "Card list, NotFound, format helpers, memo cache and the server-fn seam all reuse, but the detail-page markup must be cloned from moves.$name.tsx — no generic detail-page abstraction exists"
+    },
+    {
+      "change": "Change the API base URL and caching rules",
+      "files": ["app/src/lib/api.server.ts"],
+      "difficulty": 5,
+      "notes": "API_BASE_URL read once (line 23) and used only via apiGet/mediaUrl/spriteForId; caching is one memo function with a single TTL default and no per-call-site overrides"
+    }
+  ]
+}
+```

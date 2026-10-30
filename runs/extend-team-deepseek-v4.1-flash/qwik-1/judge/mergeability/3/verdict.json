@@ -1,0 +1,114 @@
+{
+  "dimension": "mergeability",
+  "criteria": {
+    "idiomatic": {
+      "score": 5,
+      "evidence": [
+        "app/src/routes/index.tsx:11 — routeLoader$ with URLSearchParams, the recommended data-loading primitive; no client fetches",
+        "app/src/routes/moves/[name]/index.tsx:8-11 — routeLoader$ sets status(404) and head uses resolveValue, matching Qwik City docs",
+        "app/src/routes/[...catchall]/index.tsx:6-8 — catchall route with onGet status(404), the documented not-found pattern",
+        "app/src/routes/index.tsx:63 — preventdefault:submit plus typed onInput$ with a 200ms debounce signal; native selects drive nav",
+        "app/src/components/ui.tsx:43-49 — class array syntax, which current Qwik docs explicitly support",
+        "app/src/lib/team.ts:12-13 — cookie-backed team state read in the loader (app/src/routes/pokemon/[name]/index.tsx:12-15) so SSR paints the correct label; comment at team.ts:43-45 explains the isomorphic boundary",
+        "app/package.json:23-24 — ^1.20.3 is the current stable Qwik release (verified against npm/releases, 2026-10-25)"
+      ],
+      "rationale": "This is textbook current Qwik City: server-side route loaders, URL-as-state, SPA navigation, lazy components, and a starter-standard node-server adapter; the only home-grown wrinkle (document.activeElement guard, index.tsx:34) is justified by a comment."
+    },
+    "correctness_risks": {
+      "score": 3,
+      "evidence": [
+        "app/src/routes/index.tsx:40 — applyFilters reads home.value.filters, which is the last *resolved* loader value; changing two filters within the q-data round-trip window builds the second URL from stale values and silently drops the first filter",
+        "app/src/lib/data.ts:198-214 — moveRow fetches every move individually (plus typeRef per row) — hundreds of parallel fetches per cold Pokémon page for move-heavy species, bounded only by the 30s cache",
+        "app/src/lib/api.ts:19 — no timeout/AbortSignal on fetch; a hung upstream stalls SSR indefinitely",
+        "app/src/lib/api.ts:34-60 — cache is bounded by the API's resource set, failed entries are evicted (api.ts:56-58), and the timer at index.tsx:77-79 is always cleared — no leaks found",
+        "app/src/lib/team.ts:16-28 — cookie parsing tolerates malformed input (decodeURIComponent guarded, duplicates/limit enforced)"
+      ],
+      "rationale": "No XSS, no SSR/CSR mismatch, no leaked timers, bounded caches and solid 404 handling; but the filter-staleness race is user-visible and the per-move fan-out makes cold Pokémon pages heavy."
+    },
+    "global_abstractions": {
+      "score": 4,
+      "evidence": [
+        "app/src/lib/data.ts:1-450 — single page-builder module for all six routes; well-sectioned with banner comments (data.ts:87, 154, 320, 339) but will need splitting per route as it grows",
+        "app/src/lib/api.ts:10-30 — the in-memory cache is deliberate, documented, TTL-bounded and evicts failures; not a hidden surprise",
+        "app/src/lib/data.ts:216 vs 384-386 — default-variety resolution duplicated between pokemonPage and defaultPokemon",
+        "app/src/lib/format.ts:1-44 — pure, dependency-free helpers shared by server and client; correct boundary",
+        "app/src/lib/team.ts:33-47 — the one isomorphic module is small, guarded and self-explaining"
+      ],
+      "rationale": "Abstraction layers (api/data/format/team/components) have clear responsibilities and the server/client boundary is genuinely clean; the only untangling later is splitting the 450-line data.ts and deduplicating the variety lookup."
+    },
+    "readability": {
+      "score": 4,
+      "evidence": [
+        "app/src/components/ui.tsx:14-64 — small, well-named components (TypeBadge, PokemonCard, CardList, Section, Evolution, NotFound) matching the spec's vocabulary",
+        "app/src/lib/data.ts:99-105 — typed Card/TypeRef interfaces make loader payloads self-documenting",
+        "app/src/lib/api.ts:36, app/src/lib/team.ts:44-45, app/src/routes/index.tsx:42-43,52 — comments explain *why* (cache refresh, cookie duplication in client code, history-entry policy), not what",
+        "app/src/routes/layout.tsx:1-30 — tiny, obvious layout; nav matches the spec landmarks",
+        "app/src/lib/data.ts:154-316 — pokemonPage is ~160 lines doing many jobs (types, stats, abilities, version groups, move tables); the longest function in the app"
+      ],
+      "rationale": "Consistent naming aligned with the spec's terms, why-comments where they matter, and a new teammate would find any page in minutes; the long data.ts functions are the only rough spot."
+    },
+    "review_cost": {
+      "score": 4,
+      "evidence": [
+        "app/src/routes/index.tsx:40 — one real change request (derive filters from loc.url.searchParams instead of home.value.filters)",
+        "app/src/lib/data.ts:198-214 — reviewer would ask to cap or batch the per-move fan-out",
+        "app/src/lib/data.ts:216,384-386 — extract the shared default-variety helper",
+        "app/.gitignore:1-50 — add tmp/ (tsc outDir per app/tsconfig.json:17; app/tmp/ already contains a build artifact)",
+        "app/package.json:35 — undici devDependency is unreferenced anywhere in src/"
+      ],
+      "rationale": "One small behavioral fix plus nits (dedup, gitignore, unused dep, no unit tests for the easily-tested pure helpers); everything else I'd approve as-is."
+    }
+  },
+  "overall": 4,
+  "findings": [
+    {
+      "severity": "medium",
+      "location": "app/src/routes/index.tsx:40",
+      "issue": "applyFilters builds URLs from home.value.filters, which lags behind the last navigation until its loader resolves; changing two filters in quick succession (e.g. type then generation) drops the first one from the URL.",
+      "suggestion": "Read the current type/generation from useLocation().url.searchParams instead of home.value.filters."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/lib/data.ts:198-214",
+      "issue": "One fetch per move plus one typeRef per row: move-heavy Pokémon trigger hundreds of parallel upstream fetches on a cold cache for a single page render.",
+      "suggestion": "Derive type labels from the already-fetched type records (mainTypes) instead of refetching per row, and consider pre-warming or batching move lookups."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/lib/api.ts:19",
+      "issue": "fetch has no timeout or AbortController, so a slow upstream API stalls SSR responses indefinitely.",
+      "suggestion": "Add AbortSignal.timeout() (or a shared AbortController) with a generous limit."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/lib/data.ts:216",
+      "issue": "Default-variety resolution is duplicated verbatim at data.ts:384-386 (pokemonPage vs defaultPokemon).",
+      "suggestion": "Extract a single defaultVariety(species) helper."
+    },
+    {
+      "severity": "low",
+      "location": "app/.gitignore:1",
+      "issue": "tmp/ (the tsc incremental outDir, app/tsconfig.json:17) is not ignored; app/tmp/tsconfig.tsbuildinfo is present in the working tree.",
+      "suggestion": "Add /tmp to .gitignore and delete the committed artifact."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/lib/data.ts:1",
+      "issue": "A single 450-line module builds page data for all six routes; locally fine, but it will become a merge hotspot.",
+      "suggestion": "Split page builders per route (lib/pages/<route>.ts) before it grows further."
+    },
+    {
+      "severity": "low",
+      "location": "app/package.json:35",
+      "issue": "undici is declared as a devDependency but never imported in src/.",
+      "suggestion": "Remove it or add a comment if it's kept for a Node-version workaround."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/lib/format.ts:1",
+      "issue": "No app-level unit tests, although format.ts and team.ts are pure and trivially testable (acceptance tests live outside app/).",
+      "suggestion": "Add a small vitest suite for humanize/latestFlavorText/typeCoverage edge cases."
+    }
+  ],
+  "summary": "This is clean, current-release Qwik City used exactly as the docs intend — server-side routeLoaders, URL-driven state, lazy components, cookie-based SSR team state — and I'd merge it after one small fix. The notable risks are a home-page filter race built from stale loader values and heavy per-move fetch fan-out on cold Pokémon pages. Everything else is nits: a duplicated helper, an unignored tsc outDir, an unused dependency, and the absence of app-level unit tests."
+}

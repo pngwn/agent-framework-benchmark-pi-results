@@ -1,0 +1,109 @@
+{
+  "dimension": "mergeability",
+  "criteria": {
+    "idiomatic": {
+      "score": 5,
+      "evidence": [
+        "app/vite.config.ts:1-17 — config in the sveltekit Vite plugin with adapter as a plugin option and the current runes-mode compilerOptions; matches the current sv create template exactly",
+        "app/package.json:23-25 — '#lib/*' subpath imports per the SvelteKit 3 migration guide replacing $lib",
+        "app/src/env.ts:1-7 — defineEnvVars + $app/env/private, the current env-var API ($env/* modules are deprecated)",
+        "app/src/routes/+error.svelte:2 — page from $app/state (not the removed $app/stores)",
+        "app/src/routes/+page.svelte:38,64 — goto with Kit 3's combined reset:false and replace options for filter updates",
+        "app/src/routes/pokemon/[name]/+page.svelte:19-30 — recursive {#snippet} for the evolution tree instead of a recursive component",
+        "app/src/lib/server/api.ts:1-3 — server-only module under lib/server importing the private env var; no client code touches fetch or the API base URL"
+      ],
+      "rationale": "The app reads like the framework's own docs — SvelteKit 3 config, #lib imports, defineEnvVars, $app/state, runes-mode Svelte 5 with snippets and keyed each-blocks. Nothing fights the framework or uses a pattern the docs warn against."
+    },
+    "correctness_risks": {
+      "score": 4,
+      "evidence": [
+        "app/src/routes/+page.svelte:62-64 — debounce timer is never cleared on destroy; typing then clicking a card within 200ms fires goto() from the unmounted page and yanks the user back to /",
+        "app/src/lib/server/api.ts:44-48 — failed fetches reject the cached promise and the .catch at :58 deletes the entry, so errors are neither cached nor silently swallowed; 503/502 via error()",
+        "app/src/lib/server/api.ts:91-93 — name params validated against /^[a-z0-9-]+$/i before hitting the API, and 404s map to error(404)",
+        "app/src/routes/+page.server.ts:24-25 — filter params validated against fetched type/generation lists; page clamped to [1, totalPages] at :61",
+        "app/src/lib/components/MovesTable.svelte:92-103 — null-safe comparator keeps missing values last in both directions with stable tie-breakers",
+        "app/src/lib/server/api.ts:53-57 — cache pruning only runs when size > 5000 and only drops expired entries, so a burst of unique URLs inside a TTL window grows the map without bound until the next prune"
+      ],
+      "rationale": "One real (narrow-window) bug — the un-cleared debounce timer survives unmount and triggers a navigation — plus a mild cache-growth edge; everything else (error paths, 404s, input validation, dedupe, sort stability) is handled carefully."
+    },
+    "global_abstractions": {
+      "score": 5,
+      "evidence": [
+        "app/src/lib/server/api.ts — the single shared module is a cohesive API client (fetch + TTL cache + derived lists), sectioned and documented, with page-specific shaping left in each +page.server.ts",
+        "app/src/lib/types.ts — thin, shared DTOs between server loads and pages, no god data module",
+        "app/src/lib/format.ts — four tiny pure formatters used on both server and client",
+        "app/src/lib/components/Section.svelte — Section/TypeBadge/TypeList/CardList/MovesTable are small single-purpose components with no prop drilling or god component",
+        "app/src/lib/server/api.ts:9-12 — the one piece of hidden global state (the cache) is declared with a why-comment and bounded by TTL"
+      ],
+      "rationale": "Abstractions are few, each earns its keep, and the server/client boundary (lib/server, env vars, fetch-in-load) is airtight; nothing will need untangling later."
+    },
+    "readability": {
+      "score": 5,
+      "evidence": [
+        "app/src/lib/server/api.ts:8-9 — comment explains the caching rationale in one line",
+        "app/src/routes/+page.svelte:17-27 — comment explains why the search box keeps local state and syncs via afterNavigate (a genuinely subtle decision, documented)",
+        "app/src/routes/types/[name]/+page.server.ts:8-16 — the RELATIONS table maps spec terminology to API keys; declarative and obvious",
+        "app/src/routes/pokemon/[name]/+page.server.ts:91 — 'Version groups in which the Pokémon learns moves, oldest first' — comments explain why, not what",
+        "app/src/lib/components/Section.svelte — the whole component is 8 lines; consistent naming (TypeRef, Card, MoveRow, EvolutionNode) across server and client code"
+      ],
+      "rationale": "Names match the spec's vocabulary, files are small, and the few comments that exist explain the non-obvious decisions. A new teammate would find their way in minutes."
+    },
+    "review_cost": {
+      "score": 4,
+      "evidence": [
+        "app/src/routes/+page.svelte:62-64 — the leaked debounce timer is the one change I'd require before approving",
+        "app/src/lib/components/MovesTable.svelte:91 — each-block key embeds the loop index, so re-sorting re-creates every row; a nit",
+        "app/src/routes/+page.server.ts:30 — typeLabels is rebuilt inline although getTypeLabels() already exists in api.ts; a nit",
+        "app/src/routes/pokemon/[name]/+page.server.ts:53-60 — Move interface overlaps the one in moves/[name]/+page.server.ts:9-16; a nit",
+        "app/src/routes/pokemon/[name]/+page.server.ts:113-118 — up to a few hundred parallel move fetches per first view of a game (mitigated by the 60s cache)"
+      ],
+      "rationale": "One small, easily-fixed bug plus a handful of nits; everything else I'd approve as-is. This is an 'approve after one small revision' pull request, not a rework."
+    }
+  },
+  "overall": 4,
+  "findings": [
+    {
+      "severity": "medium",
+      "location": "app/src/routes/+page.svelte:62",
+      "issue": "The search-debounce setTimeout is never cleared when the component unmounts; typing in the search box and then clicking a card within the debounce window fires goto() from the dead page's closure and navigates the app back to '/'.",
+      "suggestion": "Clear the timer on destroy (e.g. $effect(() => () => clearTimeout(timer)), or onDestroy), or drive the debounce from an $effect on query so cleanup is automatic."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/lib/server/api.ts:53",
+      "issue": "Cache eviction only runs when size exceeds 5000 and only removes entries already expired at that moment, so a burst of unique URLs inside a single 60s TTL window grows the map without bound.",
+      "suggestion": "Sweep expired entries on every insert (they're already cheap to check) or use a small LRU, so the cache has a hard cap."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/lib/components/MovesTable.svelte:91",
+      "issue": "The each-block key includes the loop index ('${row.name}-${row.level}-${i}'), so every sort re-creates all rows instead of moving them; the official Svelte guidance is not to key by index.",
+      "suggestion": "Key by '${row.name}-${row.level}' — the load function already dedupes by (move, method, level), so this is unique per row."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/routes/+page.server.ts:30",
+      "issue": "The type-label map is rebuilt inline here even though getTypeLabels() in lib/server/api.ts does the same thing, duplicating a helper.",
+      "suggestion": "Call getTypeLabels() (like pokemon/[name]/+page.server.ts does) and delete the inline rebuild."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/routes/pokemon/[name]/+page.server.ts:113",
+      "issue": "A Pokémon with many moves in the selected game triggers a fan-out of up to a few hundred parallel fetches on first view.",
+      "suggestion": "Acceptable given the local API and the 60s cache, but consider chunking the Promise.all or noting the burst profile in a comment."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/routes/pokemon/[name]/+page.server.ts:53",
+      "issue": "The Move interface duplicates most of the one in moves/[name]/+page.server.ts:9-16; the two can drift apart silently.",
+      "suggestion": "Move the shared shape into lib/types.ts alongside MoveRow, or keep one route importing the other's shape."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/routes/+page.svelte:26",
+      "issue": "afterNavigate only resyncs the local query for non-goto navigations, so a whitespace-only search string stays in the input while the URL omits q — a cosmetic desync between input and URL.",
+      "suggestion": "Trim when syncing (query = data.q as-is is fine, but consider omitting the trim mismatch by making href()'s condition match applyFilters' value)."
+    }
+  ],
+  "summary": "A genuinely current SvelteKit 3 + Svelte 5 runes codebase: config, aliases, env vars and navigation APIs all match the docs of this month's stable release, with clean server/client boundaries and small, well-named modules. I found exactly one real bug (an un-cleared debounce timer that can fire a navigation from an unmounted page) plus a few nits around cache eviction, an index-based each key and minor duplication. I'd merge after one small revision."
+}

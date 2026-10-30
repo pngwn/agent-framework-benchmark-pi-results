@@ -1,0 +1,126 @@
+I've reviewed the full app (`app/src/**`), verified Astro's current stable release (7.4.4 — the app pins exactly this, with @astrojs/node 11.1.9, both current), and checked the APIs in use (`output: 'server'`, `Astro.response.status`, `Astro.self` recursion, bundled `<script>`, rest-param catch-all routes) against current docs — all still valid in Astro 7.
+
+**What's strong:** the app is recognisably idiomatic Astro — file-based routing with `[name].astro` / `[...path].astro`, `Astro.params` / `Astro.url.searchParams` for URL state, `Astro.response.status = 404` with rendered content, `Astro.self` for the recursive evolution tree, small presentational components (`Section.astro`, `PokemonCard.astro`), a single global stylesheet built on the design tokens. Errors are triaged (`isNotFound`) so real API failures surface as 500s instead of fake 404s, missing values get the em dash, and the moves sorting handles missing-values-last correctly with proper `aria-sort` management.
+
+**What I'd push back on before merging:**
+
+1. **Rejected-promise poisoning** — `pokeapi.ts:117-121` caches module-level promises (`speciesIndexPromise`, `typeInfoPromise`, `pokedexDataPromise`) that are never reset on rejection. The per-URL `cache` deletes failed entries (`pokeapi.ts:44-46`), but these singletons keep the rejected promise forever, so one transient API hiccup turns every page into a permanent 500 until restart.
+2. **Two implementations of the home page** — `index.astro` server-renders filtering/pagination/cards (lines 14-122) *and* ships the entire 1,025-species dataset as JSON (line 124) plus a ~185-line inline client script (lines 126-313) that reimplements the filter, pagination, `humanize` (duplicated from `pokeapi.ts:61` at ~line 148) and card markup (`createCard` at line 188 duplicates `PokemonCard.astro`). This fights Astro's server-render-first model — a form GET, link navigation, or a shared template would keep one implementation — and it's the biggest drift risk in the codebase.
+3. **View shaping in the data layer** — `getPokemonMovesData` (`pokeapi.ts:289-380`) is a 90-line function that owns labels, method ordering and default sort, i.e. presentation policy inside the god data module every page imports.
+4. Smaller items: unreachable `404.astro` (the `[...path]` catch-all wins), `set:html` with `JSON.stringify` (breaks if API data ever contains `</script>`), `strict: false` + ~40 `any`s, redundant `prerender = false` under `output: 'server'`, and a full `window.location.assign` reload on game select.
+
+None of this is reject-worthy; it's a competent pass that needs one round of changes, mainly de-duplicating the home-page logic and fixing the cache poisoning.
+
+```json
+{
+  "dimension": "mergeability",
+  "criteria": {
+    "idiomatic": {
+      "score": 3,
+      "evidence": [
+        "app/astro.config.mjs:1-5 — output:'server' + @astrojs/node standalone, current Astro 7.4.4; correct for the spec",
+        "app/src/pages/pokemon/[name].astro:1-3 — file-based dynamic routes and Astro.params used as the framework intends",
+        "app/src/pages/index.astro:14-122 — server-side filtering from Astro.url.searchParams is idiomatic URL-as-state",
+        "app/src/pages/index.astro:124,128-313 — but the page then ships the full dataset and a hand-rolled client reimplementation instead of using server navigation/form GET; createCard (line 188) and humanize (~line 148) duplicate PokemonCard.astro and pokeapi.ts:61",
+        "app/src/pages/[...path].astro:1-7 — rest-param catch-all with Astro.response.status = 404 is the documented not-found pattern"
+      ],
+      "rationale": "Routing, params, SSR status codes and components all read like the docs, but the home page works around the framework by duplicating the entire render/filter pipeline in vanilla JS instead of letting the server own it."
+    },
+    "correctness_risks": {
+      "score": 3,
+      "evidence": [
+        "app/src/lib/pokeapi.ts:117-121 — module-level promise singletons (speciesIndex/typeInfo/pokedexData) are never reset on rejection; one transient API failure permanently 500s every page until restart (the per-URL cache at lines 44-46 does evict, these don't)",
+        "app/src/pages/index.astro:124 — set:html={JSON.stringify(payload)} breaks (or worse) if API data ever contains '</script>'; no escaping applied",
+        "app/src/pages/404.astro:1-7 — dead code; the [...path].astro catch-all (app/src/pages/[...path].astro) already matches every unmatched URL, so 404.astro can never render",
+        "app/src/lib/pokeapi.ts:289-380 — unbounded Promise.all fan-out per Pokémon page (~all moves in a game) on first hit; mitigated by the cache but a slow first paint per (pokemon, game) pair",
+        "app/src/lib/pokeapi.ts:96-100,44-46 — 404s are distinguished from other errors and failed fetches are evicted from the cache, so error handling is otherwise solid"
+      ],
+      "rationale": "No SSR/CSR mismatch or race bugs and not-found handling is thorough, but the permanently-poisoned module caches after a transient API error is a real fragility, plus a couple of minor edge cases."
+    },
+    "global_abstractions": {
+      "score": 3,
+      "evidence": [
+        "app/src/lib/pokeapi.ts:1-380 — a single god data module every page imports, mixing transport, caching, formatting and view shaping",
+        "app/src/lib/pokeapi.ts:289-380 — getPokemonMovesData owns presentation policy (English labels, method ordering, default sort) deep inside the data layer",
+        "app/src/pages/index.astro:128-313 — a second, parallel implementation of filtering/pagination/card rendering that must stay in sync with pokeapi.ts and PokemonCard.astro by hand",
+        "app/src/components/Section.astro:1-15 — Section and PokemonCard are the good kind: small, single-purpose, no hidden state"
+      ],
+      "rationale": "The module boundaries are clear and naming is consistent, so it's untangleable later, but the data layer carries view concerns and the home page has a shadow copy of the domain logic."
+    },
+    "readability": {
+      "score": 3,
+      "evidence": [
+        "app/src/pages/index.astro — 313 lines with ~190 lines of inline JS in one file; the largest and hardest file to scan",
+        "app/src/lib/pokeapi.ts:61-110 — helpers are short, well-named and documented (humanize, latestEnglishFlavorText)",
+        "app/src/pages/pokemon/[name].astro:1-215 — clear separation of data fetch, shaping and template; easy to follow",
+        "app/src/lib/pokeapi.ts:289-380 — a 90-line function with nested loops and maps is the outlier",
+        "app/tsconfig.json:4 — strict:false plus ~40 ': any' usages (grep) means the reader can't trust the shapes"
+      ],
+      "rationale": "Names and file organisation are good and a teammate would find their way around quickly, but the oversized home page, the 90-line moves builder and the pervasive any-typing are rough spots."
+    },
+    "review_cost": {
+      "score": 3,
+      "evidence": [
+        "app/src/lib/pokeapi.ts:117-121 — must fix cache poisoning before merge; a one-line reset-on-rejection per getter",
+        "app/src/pages/index.astro:128-313 — would ask to drop the duplicated client pipeline in favour of server navigation or a shared module; the biggest ask but scoped to one file",
+        "app/src/pages/404.astro:1-7 — delete unreachable file",
+        "app/src/pages/*.astro:5 — drop redundant 'export const prerender = false' (implied by output:'server')",
+        "app/src/pages/types/[name].astro, moves/[name].astro, abilities/[name].astro — the four detail pages follow one consistent pattern; nothing to change there"
+      ],
+      "rationale": "A round of changes: fix the cache poisoning, de-duplicate the home page's client code, remove dead code and tighten a few types. Everything else approves as-is."
+    }
+  },
+  "overall": 3,
+  "findings": [
+    {
+      "severity": "medium",
+      "location": "app/src/lib/pokeapi.ts:117",
+      "issue": "Module-level promise singletons (speciesIndexPromise, typeInfoPromise, generationInfoPromise, pokedexDataPromise) are never cleared on rejection, so a transient API failure on first hit poisons every page render with a cached rejection until the process restarts.",
+      "suggestion": "Reset the singleton in a .catch() (e.g. speciesIndexPromise = api(...).then(...).catch((e) => { speciesIndexPromise = undefined; throw e; })) so the next request retries."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/pages/index.astro:128",
+      "issue": "The entire 1,025-species dataset is embedded as JSON on every page load and the client script (~185 lines) reimplements filtering, pagination, humanization and card markup that already exist server-side, creating a second copy of the view that will drift from the Astro implementation.",
+      "suggestion": "Let the server own rendering: submit filters via a plain form GET (or link navigation with the ClientRouter), and keep a single card/filter implementation; if instant search is required, extract the shared logic into one module imported by both."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/lib/pokeapi.ts:289",
+      "issue": "getPokemonMovesData is a 90-line function that mixes data fetching with presentation policy (English labels, method ordering, default sort order) inside the shared data module.",
+      "suggestion": "Return raw move/method data and move labels and ordering into the page or a small presentation helper next to statLabels in [name].astro."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/pages/index.astro:124",
+      "issue": "set:html={JSON.stringify(payload)} will terminate the script element early (and could inject markup) if any API string ever contains '</script>'.",
+      "suggestion": "Escape it: JSON.stringify(payload).replace(/</g, '\\\\u003c'), or pass data via a data- attribute / fetch on load."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/pages/404.astro:1",
+      "issue": "404.astro is unreachable dead code: the [...path].astro catch-all already matches every unmatched URL and renders its own not-found page.",
+      "suggestion": "Delete 404.astro, or move the not-found rendering into it and have the catch-all and per-page handlers share it via a component."
+    },
+    {
+      "severity": "low",
+      "location": "app/tsconfig.json:4",
+      "issue": "strict:false combined with ~40 ': any' annotations means API shapes are unverified and typos in property access fail silently at runtime.",
+      "suggestion": "Extend 'astro/tsconfigs/strict', define interfaces for the PokeAPI payloads used (species, pokemon, move, type), and use them in api<T>."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/pages/types/index.astro:5",
+      "issue": "'export const prerender = false' is repeated on every page even though output:'server' already makes on-demand rendering the default.",
+      "suggestion": "Remove the redundant declarations (or, if the explicitness is wanted, note it once in the config/README rather than per page)."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/pages/pokemon/[name].astro:235",
+      "issue": "Changing the Game select triggers window.location.assign — a full page reload — where a plain <form method=\"get\"> around the select would work without JavaScript.",
+      "suggestion": "Wrap the select in a native GET form pointing at the current path, or use the ClientRouter for a soft navigation."
+    }
+  ],
+  "summary": "A competent, current-version Astro app: correct routing, status handling and components, with a genuinely good shared data layer that needs one real robustness fix (poisoned promise caches). The home page is the weak spot, duplicating the server render in ~185 lines of inline JS that ships the whole dataset and will drift from the Astro implementation. I'd request one round of changes — cache retry, home-page de-duplication, dead-code and typing cleanup — then merge."
+}
+```

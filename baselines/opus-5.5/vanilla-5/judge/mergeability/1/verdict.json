@@ -1,0 +1,100 @@
+{
+  "dimension": "mergeability",
+  "criteria": {
+    "idiomatic": {
+      "score": 5,
+      "evidence": [
+        "app/package.json:11-14 — vite 8 + typescript 7, both verified current stable; build is `tsc --noEmit && vite build`",
+        "app/tsconfig.json:7-12 — strict, isolatedModules, `types: [\"vite/client\"]` per Vite's TS guidance",
+        "app/src/api.ts:11-13 — `import.meta.env.VITE_API_BASE_URL` with runtime `window.__API_BASE_URL__` override instead of baking config at build time",
+        "app/src/main.ts:20-27 — routing is a tiny regex table; given the no-framework constraint there is no framework router to use, and nothing is reimplemented that Vite provides",
+        "app/server.mjs:1-8 — custom start server is justified (SPA fallback + per-request API base injection), and keeps `vite build` output pristine"
+      ],
+      "rationale": "Uses exactly the primitives Vite/vanilla-TS recommends for a frameworkless app: index.html entry, import.meta.env, vite/client types, no build-time data embedding. Nothing fights the toolchain."
+    },
+    "correctness_risks": {
+      "score": 3,
+      "evidence": [
+        "app/src/pages/home.ts:108-118 — debounce timer is never cleared when the page unmounts; navigating away within 150 ms of typing still fires `update()`, whose `updateUrl(..., true)` replaceState's the *old* filter URL onto the new page (app/src/url-state.ts:15-18)",
+        "app/src/main.ts:88-91 — popstate renders asynchronously with scroll 'none'; with `scrollRestoration='auto'` the browser restores scroll before the new content exists, so back/forward on long pages can land at the wrong offset",
+        "app/src/pages/home.ts:74-76 — `page` above the total is clamped for display but the stale `page=999` stays in the URL, and pagination links are computed from the clamped value",
+        "app/src/pages/not-found.ts:24 — the `Try again` link (`href: location.href`) is intercepted by the global click handler (app/src/main.ts:53-62) and pushes a duplicate history entry rather than reloading",
+        "app/src/pages/pokemon.ts:187-188 — one parallel fetch per move record of the selected game (≈100 requests); deduped by the in-flight cache (app/src/api.ts:114-120) but unthrottled",
+        "app/src/api.ts:110-125 — cache evicts failures and dedupes in-flight requests; no leaked listeners or unbounded growth given the fixed snapshot; DOM-built HTML means no injection risk"
+      ],
+      "rationale": "One real race (debounce timer surviving navigation and clobbering the URL) plus a handful of small fragilities; error paths, 404s, and escaping are otherwise handled deliberately."
+    },
+    "global_abstractions": {
+      "score": 5,
+      "evidence": [
+        "app/src/dom.ts:1-29 — the only 'utils' module, 29 lines, no dependencies, used everywhere and earning it",
+        "app/src/api.ts:110-125 — data cache is module-local, keyed by URL, failures evicted; not a hidden god store",
+        "app/src/url-state.ts:1-18 — the one piece of cross-module mutable state ('shown'), 18 lines, documented, with a single clear purpose",
+        "app/src/components.ts:42-57 — `speciesCards` centralises the alternate-forms/dedup/order rule once instead of duplicating it across move, ability and type pages (app/src/pages/move.ts:11, ability.ts:10, types.ts:42)",
+        "app/server.mjs:20-27 — API base URL is config injected at serve time, not buried in client code"
+      ],
+      "rationale": "Abstractions are few, small, and each has one obvious job; the alternate-forms rule is written exactly once. Nothing here will need untangling."
+    },
+    "readability": {
+      "score": 4,
+      "evidence": [
+        "app/src/format.ts:1-37 — pure, tiny, well-named helpers (`humanize`, `latestFlavorText`, `orMissing`) matching the spec's definitions",
+        "app/src/pages/pokemon.ts:57-96 — movesSection/moveTables is the densest code (~90 lines, closure token counter at line 78, method ordering at 143-147); correct but takes real effort to follow",
+        "app/src/pages/home.ts:46-107 — homePage is ~100 lines with nested closures; the filter→URL→render loop is clear but would benefit from splitting",
+        "app/src/main.ts:29-47 — render() documents its race-guard (`navigation` counter) implicitly via the `current === navigation` checks",
+        "app/src/api.ts:107-109, app/src/url-state.ts:1 — the few comments present explain *why* (cache eviction policy, what `shown` is), not what"
+      ],
+      "rationale": "Consistent naming and file layout a new teammate can follow in minutes; two page functions are long enough to warrant extraction, keeping it a 4."
+    },
+    "review_cost": {
+      "score": 4,
+      "evidence": [
+        "app/src/pages/home.ts:118 — the one change I'd require: cancel `searchTimer` when the page is replaced (e.g., via the Page teardown/mounted hook at app/src/components.ts:7-11)",
+        "app/src/pages/home.ts:74-76 — nit: keep URL and displayed page in sync when clamping",
+        "app/server.mjs:35-46 — nit: the per-request API probe for 404s adds latency to every deep link; worth a comment or a short memo cache",
+        "app/src/table.ts:31-53 — sortableTable handles aria-sort and nulls-last correctly; no comments needed there"
+      ],
+      "rationale": "I'd approve after one small, well-localised fix (debounce leak) and a couple of nits; no structural rework required."
+    }
+  },
+  "overall": 4,
+  "findings": [
+    {
+      "severity": "medium",
+      "location": "app/src/pages/home.ts:118",
+      "issue": "The 150 ms search debounce timer is never cancelled when the home page is navigated away from; if the user types and then clicks a card within the window, the timer fires `update()` which `history.replaceState`s the home filter URL (e.g. `/?q=pika`) while the Pokémon page is on screen.",
+      "suggestion": "Cancel the timer when the page is discarded — e.g. extend `Page` (app/src/components.ts:7-11) with a `teardown` called from `render()` in app/src/main.ts:33 before replacing content, and `clearTimeout(searchTimer)` there."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/main.ts:88-91",
+      "issue": "On popstate the browser restores scroll synchronously ('auto' restoration) but the content is replaced asynchronously, so back/forward to long lists can land at the wrong scroll offset.",
+      "suggestion": "Capture `location.href` on popstate and scroll to the stored/hash position after `replaceChildren`, or set `history.scrollRestoration = 'manual'` and manage it explicitly."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/pages/home.ts:74-76",
+      "issue": "A `page` parameter beyond the last page is clamped for display but left stale in the URL, and pagination links are built from the clamped value — URL and view disagree.",
+      "suggestion": "When `filters.page > totalPages`, redirect/replace the URL with the clamped page."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/pages/not-found.ts:24",
+      "issue": "The error page's `Try again` link uses `href: location.href`; the global click handler (app/src/main.ts:53-62) intercepts it and pushes a duplicate history entry instead of actually retrying a full load.",
+      "suggestion": "Use a `reload` action (e.g. an `onClick` that calls `location.reload()`) or bypass the link interceptor for self-referential links."
+    },
+    {
+      "severity": "low",
+      "location": "app/server.mjs:35-46",
+      "issue": "Every deep-link HTML request performs a blocking API probe (up to 3 s timeout) just to decide the 404 status, adding latency to all page loads.",
+      "suggestion": "Memoise the probe per (resource, name) for the process lifetime, or drop it and serve 200 always — the spec says the status isn't tested."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/pages/pokemon.ts:187-188",
+      "issue": "Selecting a game issues one parallel request per distinct move (~100 for a modern game) with no concurrency limit.",
+      "suggestion": "Acceptable given the in-flight dedupe cache (app/src/api.ts:114-120), but a small batched limiter would smooth the burst; at minimum note the intent in a comment."
+    }
+  ],
+  "summary": "A clean, framework-free Vite 8/TypeScript 7 SPA with genuinely small, well-bounded modules and correct handling of the spec's fiddliest rules (alternate forms, humanized vs English names, sortable tables, aria-sort). The one merge blocker is a leaked debounce timer on the home page that can clobber the URL after navigation; everything else is nits. I'd approve after that one localised fix."
+}

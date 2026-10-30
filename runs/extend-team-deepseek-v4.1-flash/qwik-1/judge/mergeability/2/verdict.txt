@@ -1,0 +1,131 @@
+I've reviewed the app thoroughly against Qwik/Qwik City 1.20.3 (the current stable release as of 2026-10-30; 2.0 is still RC) and the official docs. Here's my assessment.
+
+## What's good
+
+The app is recognisably idiomatic, current Qwik City: `routeLoader$` per page with `status(404)` + shared `NotFound` component (`app/src/routes/pokemon/[name]/index.tsx:12`), `head` exports using the documented `resolveValue` pattern (`app/src/routes/types/[name]/index.tsx:37`), URL-as-state filters driven by `useNavigate` with `replaceState`/`scroll` options (`app/src/routes/index.tsx:39-40` — both confirmed valid on the current `RouteNavigate` options), `preventdefault:submit` on the native form, and a node server entry that matches the official starter template byte-for-byte in structure (`app/src/entry.node-server.tsx:20-30`). Server/client boundaries are unusually well thought out: `lib/api.ts`/`lib/data.ts` are server-only, `lib/format.ts`/`lib/team.ts` are shared, and `team.ts` even documents why cookie attributes are duplicated (`app/src/lib/team.ts:39-41`). The team feature uses a cookie rather than localStorage specifically so SSR paints the right button label — exactly the right call for the "no flash" requirement (`app/src/routes/pokemon/[name]/index.tsx:12-15`). The diff in `CHANGES.diff` is small and follows existing conventions.
+
+## What I'd flag
+
+Main risks: a debounce timer that isn't cleaned up on unmount (so a late `nav()` can hijack a just-clicked card navigation and replace the history entry), a process-lifetime unbounded fetch cache, an `any`-typed API layer that undercuts `strict: true`, and a dead `coverage` field shipped in the team loader payload while the client recomputes it.
+
+```json
+{
+  "dimension": "mergeability",
+  "criteria": {
+    "idiomatic": {
+      "score": 5,
+      "evidence": [
+        "app/src/routes/index.tsx:31 — URL-driven filter state via useNavigate with { replaceState, scroll: false }, matching the current RouteNavigate options",
+        "app/src/routes/pokemon/[name]/index.tsx:12-15 — routeLoader$ reading params/url/cookie and calling status(404) for unknown resources",
+        "app/src/routes/types/[name]/index.tsx:37-39 — DocumentHead as a function using resolveValue, the documented dynamic-head pattern",
+        "app/src/entry.node-server.tsx:20-30 — node adapter entry structurally identical to the official 1.20 starter (createQwikCity + staticFile/router/notFound)",
+        "app/src/routes/layout.tsx:4-7 — cacheControl({ noCache: true }) on the root layout, correct for live API data",
+        "app/package.json:16-17 — @builder.io/qwik ^1.20.3, the current stable release (2.0 is still RC)"
+      ],
+      "rationale": "Data loading, routing, head management, and state all use the framework's recommended primitives at the current stable version; deviations are stylistic nits, not workarounds."
+    },
+    "correctness_risks": {
+      "score": 3,
+      "evidence": [
+        "app/src/routes/index.tsx:61 — debounced window.setTimeout stored in a signal, never cleared on unmount; a pending timer can call nav() after the user has clicked a card, replacing the history entry and bouncing them back to the filtered home",
+        "app/src/lib/api.ts:13 — module-level cache Map with no eviction; can grow to every pokemon/move/evolution-chain record for the process lifetime",
+        "app/src/lib/team.ts:29-31 — decodeURIComponent applied again although Qwik City already decodes cookie values (PR #4915), a latent double-decode that is harmless only because names match [a-z0-9-]",
+        "app/src/lib/data.ts:43-47 — find() swallows NotFoundError; upstream 5xx/network errors propagate and surface as the framework's default 500 page with no app-level handling",
+        "app/src/lib/data.ts:52-66 — stale-while-revalidate returns data up to 30s old, acceptable given the spec but a freshness edge tests don't cover"
+      ],
+      "rationale": "One genuine race (the unmount timer) plus several bounded-but-real minor fragilities; nothing serious or data-corrupting."
+    },
+    "global_abstractions": {
+      "score": 4,
+      "evidence": [
+        "app/src/lib/data.ts:1-450 — one 450-line server module building page data for all six page types; sectioned and cohesive but it is the single hub every route depends on and is growing with each feature",
+        "app/src/lib/data.ts:215-217 vs app/src/lib/data.ts:384-417 — default-variety resolution and slot-sorted type mapping duplicated between pokemonPage and teamPage",
+        "app/src/lib/api.ts:13 — hidden module-level cache global, but server-only, documented in the header comment, and behind a single get/find API",
+        "app/src/lib/team.ts:1-73 — shared client/server module with an explicit boundary comment; data.ts (server) imports it, never the reverse — leak-free direction",
+        "app/src/components/ui.tsx:18-46 — Section/PokemonCard/CardList are small, reused primitives with clear contracts"
+      ],
+      "rationale": "Boundaries between server and client code are unusually clean; the only real untangling risk is data.ts slowly becoming the god module as features accumulate."
+    },
+    "readability": {
+      "score": 4,
+      "evidence": [
+        "app/src/lib/api.ts:1-2, app/src/lib/team.ts:1-2 — comments explain why (request-time fetching, cookie-for-SSR choice), not what",
+        "app/src/lib/data.ts:199-206, 216-234 — API responses are consumed as any with ad-hoc casts despite strict mode, so the reader can't rely on the compiler for the API shape",
+        "app/src/routes/* — one small file per URL mirroring the route tree, consistent component/style conventions across all eight pages",
+        "app/src/lib/format.ts:1-44 — tiny, well-named pure helpers (humanize, latestFlavorText, orDash) with accurate doc comments",
+        "app/src/lib/data.ts:25-30, 96-99 — section separator comments keep the long data module navigable"
+      ],
+      "rationale": "A new teammate can navigate the route tree and lib modules within minutes; the any-typed data layer and data.ts's length are the only rough spots."
+    },
+    "review_cost": {
+      "score": 4,
+      "evidence": [
+        "app/src/routes/index.tsx:61 — one change requested: clear the debounce timer via useTask$ cleanup or useOnDestroy$",
+        "app/src/routes/team/index.tsx:34 — drop the unused loader coverage field or use it, removing redundant computation and payload",
+        "app/src/lib/data.ts:19-23 — I'd ask for typed interfaces on the API resources the app actually reads",
+        "app/package.json:34 — remove the unused \"undici\": \"*\" devDependency",
+        "app/src/lib/data.ts:384-387 — extract the duplicated default-variety/types logic into a shared helper"
+      ],
+      "rationale": "Approve after one short round of nits and one small timer fix; nothing requires architectural rework."
+    }
+  },
+  "overall": 4,
+  "findings": [
+    {
+      "severity": "medium",
+      "location": "app/src/routes/index.tsx:61",
+      "issue": "The search debounce timer is stored in a signal but never cleared when the component unmounts; if the user types and then clicks a card link within the debounce window, the pending nav() fires after navigation, hijacking the SPA route and replacing the history entry.",
+      "suggestion": "Move the debounce into a useTask$ with cleanup(() => clearTimeout(timer)) or clear it in useOnDestroy$."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/lib/api.ts:13",
+      "issue": "Module-level cache Map has no size limit or eviction; over a long-running server it retains every fetched resource (potentially thousands of large pokemon/move records, tens of MB) for the process lifetime.",
+      "suggestion": "Cap the map (simple LRU or evict entries not touched within N minutes); the API surface is finite but the cache should still be bounded explicitly."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/lib/data.ts:199",
+      "issue": "The API response types are effectively any (find<T = any>) and page builders rely on ad-hoc casts and optional chaining despite strict mode; renames or shape changes in the API are invisible to the compiler.",
+      "suggestion": "Define interfaces for the PokeAPI resources the app reads (species, pokemon, move, type, generation) and type get/find with them."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/routes/team/index.tsx:34",
+      "issue": "The team loader computes and returns coverage (data.ts:443), but the component recomputes it with useComputed$ and never reads loader.value.coverage, so 18 dead rows ship in every payload.",
+      "suggestion": "Either render the loader-provided coverage or stop returning it from teamPage."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/lib/team.ts:29",
+      "issue": "parseTeam applies decodeURIComponent a second time even though Qwik City already decodes cookie values (contradicting the comment above it); harmless for the current name alphabet but latent.",
+      "suggestion": "Drop the extra decode and split on ',' directly, keeping the comment accurate."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/lib/data.ts:384",
+      "issue": "defaultPokemon() plus the slot-sorted types mapping duplicates logic already present in pokemonPage (data.ts:215-224); two copies of the default-variety rule will drift.",
+      "suggestion": "Extract a shared helper (e.g. defaultPokemonWithTypes(species)) used by both pokemonPage and teamPage."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/routes/team/index.tsx:22",
+      "issue": "The 'copy loader value into a signal and re-sync with useTask$' pattern is duplicated between the team page and the pokemon page with slightly different identity-comparison semantics.",
+      "suggestion": "Factor into a small shared hook (e.g. useLoaderBackedSignal) or use the same reference-comparison approach in both."
+    },
+    {
+      "severity": "low",
+      "location": "app/package.json:34",
+      "issue": "\"undici\": \"*\" is declared but never imported anywhere in src; Node 24 ships a global fetch.",
+      "suggestion": "Remove the dependency (and the unused starter 'engines-annotation' boilerplate) from package.json."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/components/move-table.tsx:40",
+      "issue": "Rows are re-sorted inline in render on every re-render rather than via useComputed$, so the sort runs even when unrelated state changes.",
+      "suggestion": "Derive rows with useComputed$ keyed on the sort signal; it also reads more idiomatically."
+    }
+  ],
+  "summary": "This is idiomatic, current-stable Qwik City that I'd merge after one short round of comments: SSR-first data loading, URL-driven state, and a cookie-backed team that renders correctly on first paint. The real risks are a debounce timer that can hijack navigation after unmount, an unbounded server-side fetch cache, and an any-typed API layer that squanders strict mode. Everything else is nits about dead payload, duplicated helpers, and an unused dependency."
+}
+```

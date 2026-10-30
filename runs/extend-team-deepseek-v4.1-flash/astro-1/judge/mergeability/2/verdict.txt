@@ -1,0 +1,76 @@
+I've reviewed the app end to end and verified framework practices against the current stable release (Astro 7.4 / `@astrojs/node` 11.x, Oct 2026). The app is on the current majors and follows documented patterns closely: `output: 'server'` with the Node adapter (`app/astro.config.mjs:4`), `Astro.response.status = 404` exactly as the on-demand rendering docs prescribe, `Astro.cookies` for the team cookie, `Astro.self` recursion for the evolution tree, and hoisted `<script>` blocks for progressive enhancement (with `AbortController` races handled and focus restored after fragment swaps — `app/src/components/MovesSection.astro:131`).
+
+The main things a reviewer would flag: the team-cookie protocol exists three times (server `lib/team.ts`, and two near-identical client copies with re-hardcoded `'team'`/`TEAM_SIZE` literals), and all three dynamic-fragment behaviors (home filtering, game picker, team removal) fetch the *full* page HTML and carve it out with `DOMParser` where Astro's current docs recommend page partials (`export const partial = true`) for exactly this use case. Minor fragility: `load()` in `index.astro` never checks `res.ok` and can silently desync the URL from the content; the clamped `page` param can also desync from the URL.
+
+```json
+{
+  "dimension": "mergeability",
+  "criteria": {
+    "idiomatic": {
+      "score": 4,
+      "evidence": [
+        "app/astro.config.mjs:4 — output: 'server' + @astrojs/node standalone, matching current Astro 7 docs",
+        "app/src/pages/moves/[name].astro:10 — Astro.response.status = 404, the documented on-demand 404 pattern",
+        "app/src/components/Evolution.astro:18 — Astro.self recursion, the documented recursive-component feature",
+        "app/src/pages/index.astro:86 — full-page fetch + DOMParser fragment swap instead of Astro page partials (export const partial = true), which current docs recommend for this exact pattern",
+        "app/src/lib/pokedex.ts:52 — pervasive `any` API payloads under astro/tsconfigs/strict"
+      ],
+      "rationale": "Current versions (astro 7.4, @astrojs/node 11) and recognisably idiomatic routing, 404 handling, cookies and scripts; deductions for hand-rolled fragment swapping where partials exist and for untyped API data despite a strict tsconfig."
+    },
+    "correctness_risks": {
+      "score": 4,
+      "evidence": [
+        "app/src/pages/index.astro:86-93 — load() ignores res.ok; a failed swap still leaves the URL updated, silently desyncing content",
+        "app/src/pages/index.astro:17-20 — requestedPage clamped to totalPages but URL keeps the out-of-range page param",
+        "app/src/lib/api.ts:44-51 — stale-while-revalidate cache handles rejection cleanup and dedupes correctly; concurrency limiter (lines 14-24) sound",
+        "app/src/components/MovesSection.astro:78-93 — sortTable keeps missing values last in both directions and preserves stable tiebreak order",
+        "app/src/components/TeamButton.astro:41-46 — team toggle guards the full-team case and syncs button/note state"
+      ],
+      "rationale": "Careful edge-case work (abort races, dedupe, NaN ids, alternate forms, focus restoration) with only a couple of minor desync possibilities; nothing serious found."
+    },
+    "global_abstractions": {
+      "score": 4,
+      "evidence": [
+        "app/src/lib/api.ts:8-10 — one module-level in-memory cache with clear boundary; spec-sanctioned and documented by comment",
+        "app/src/lib/team.ts vs app/src/components/TeamButton.astro:11-16 vs app/src/pages/team.astro:52-59 — the same cookie read/write protocol implemented three times with re-hardcoded 'team' and 6 literals",
+        "app/src/components/CardList.astro — single parameterised card list reused by five pages; small and earns its keep",
+        "app/src/components/MovesSection.astro:104-106 — show/sortValue helpers duplicated with app/src/pages/moves/[name].astro:23"
+      ],
+      "rationale": "Layering is clean (api / domain / team, no god modules), but the team-cookie protocol is triplicated across server and two client scripts, which will drift."
+    },
+    "readability": {
+      "score": 4,
+      "evidence": [
+        "app/src/lib/pokedex.ts:26-50 — well-named one-line helpers (humanize, englishName, dexNumber) with section banners",
+        "app/src/pages/pokemon/[name].astro:23-30 — chained ?./? fallbacks for species/variety/chain are dense but followable",
+        "app/src/pages/types/[name].astro:15-22 — RELATIONS table maps spec terms to API keys declaratively",
+        "app/src/lib/api.ts:1-2 — comment explains the caching strategy (why, not what)"
+      ],
+      "rationale": "Consistent frontmatter-data → template structure across pages, good names, spec concepts encoded as tables; a few dense fallback chains and untyped payloads cost some trust."
+    },
+    "review_cost": {
+      "score": 4,
+      "evidence": [
+        "app/src/pages/team.astro:52-59 — duplicated readTeam/writeTeam to extract before approval",
+        "app/src/pages/index.astro:86 — add res.ok check / use a partial route",
+        "app/src/pages/404.astro:1 — 404 handled everywhere; only nit is no 500.astro for API failures",
+        "app/src/components/MovesSection.astro:138-140 — popstate full-reload vs home page's fetch-swap, inconsistent history handling"
+      ],
+      "rationale": "All requested changes are nits-level: extract the shared team client module, replace DOMParser carving with partials, type the API payloads. Nothing blocks merge."
+    }
+  },
+  "overall": 4,
+  "findings": [
+    { "severity": "medium", "location": "app/src/components/TeamButton.astro:11-16", "issue": "Team cookie protocol (read/write, cookie name, TEAM_SIZE) duplicated across two client scripts and lib/team.ts, with magic strings that can drift from the server constants", "suggestion": "Extract one shared client module (e.g. src/scripts/team-cookie.ts) imported by both scripts, or set the cookie via a small server endpoint" },
+    { "severity": "medium", "location": "app/src/pages/index.astro:86-93", "issue": "Dynamic filtering fetches the full page HTML and carves out #results with DOMParser; same pattern in team.astro and MovesSection.astro", "suggestion": "Use Astro page partials (export const partial = true, e.g. /partials/results) as the current docs recommend for swapping HTML fragments client-side" },
+    { "severity": "low", "location": "app/src/pages/index.astro:86", "issue": "load() never checks res.ok; on a 5xx the URL updates but results silently stay stale", "suggestion": "Check res.ok (and the presence of the fragment) and fall back to location.assign as the catch already does" },
+    { "severity": "low", "location": "app/src/pages/index.astro:17-20", "issue": "Requested page is clamped to totalPages but the URL keeps the out-of-range page param, desyncing URL and content", "suggestion": "Replace the history entry with the clamped URL (or serve the 404/last page and normalize the query)" },
+    { "severity": "low", "location": "app/src/lib/pokedex.ts:52", "issue": "API payloads typed as `any` throughout despite astro/tsconfigs/strict, weakening the compiler's help at call sites (e.g. `v: any` in team.ts, `a: any` in pokemon page)", "suggestion": "Add a small types module for the handful of API shapes actually consumed (Named, TypeInfo record, species, pokemon, move)" },
+    { "severity": "low", "location": "app/src/components/MovesSection.astro:104-106", "issue": "show/sortValue helpers duplicated with app/src/pages/moves/[name].astro:23", "suggestion": "Move the `show`/missing-value formatter into lib/pokedex.ts next to DASH" },
+    { "severity": "low", "location": "app/src/components/TypeBadge.astro:9", "issue": "API-provided type name interpolated into an inline CSS custom property without validation", "suggestion": "Assert the slug shape (or CSS.escape the identifier) before interpolating" },
+    { "severity": "low", "location": "app/src/components/MovesSection.astro:138-140", "issue": "popstate triggers a full location.reload while the home page handles popstate with a fetch-swap; navigation semantics are inconsistent between pages", "suggestion": "Unify history handling, ideally via one shared client navigation helper" },
+    { "severity": "low", "location": "app/src/pages/404.astro", "issue": "No 500.astro, so upstream API failures surface as the default error page rather than an in-app one", "suggestion": "Add a small 500.astro (Astro supports it for on-demand pages) that mirrors the Base layout" }
+  ],
+  "summary": "A clean, current-Astro (7.4) server-rendered app: documented 404/cookie/SSR patterns, sensible lib layering, and careful progressive enhancement with correct race handling. The notable nits are the triplicated team-cookie protocol, full-page-fetch-and-carve where page partials are the documented primitive, and `any`-typed API payloads. I'd merge after one round of small changes."
+}
+```

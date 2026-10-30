@@ -1,0 +1,124 @@
+The app contains zero tests of its own: `tests` counts in the measured facts are `files: 0, cases: 0`, `testLoc: 0`, and `app/package.json` has only `dev`/`build`/`start` scripts — no test runner, no test script. The entire risk-bearing surface — API-response transformation, filtering, pagination, URL state, sorting — is guarded only by the acceptance suite in `tests/`.
+
+What I read to ground the risk assessment:
+
+- `app/src/lib/api.server.ts` — ~550 lines of untested data transformation: memoized fetching (lines 35–53), species/type/generation list assembly and the `id > 10000` alternate-form exclusion (lines 126–149, 222–235), home filtering + pagination at 48/page (lines 276–345), the Pokémon page's version-group selection, move-table grouping, deduping (`seen` key at line 407) and method ordering (`level-up/machine/egg/tutor` at line 429–436), move/ability/type page loaders with card building and hidden-ability merging (lines 462–545).
+- `app/src/lib/format.ts` — pure, trivially unit-testable helpers (`humanize`, `idFromUrl`, `latestEnglishFlavor`'s reverse-find-and-collapse, `englishEntry`) with zero coverage.
+- `app/src/components/MovesSection.tsx:33-55` — the client-side sort comparator, including the "missing sorts last in both directions" rule and the descending flip, plus `aria-sort` state; the most regression-prone interactive logic in the app.
+- `app/src/routes/index.tsx:19-27, 54-76` — URL search validation (`page > 1` truncation), the filter-change-resets-page-1 behavior (`page: undefined` in `updateSearch`), and pagination link search reconstruction.
+- `app/src/routes/pokemon.$name.tsx:31-42, 47-54` — `game` query-param sync and the `#moves` scroll effect.
+- `app/src/lib/api.server.ts:41-53` — the `memo` cache: TTL expiry, in-flight dedup, unbounded growth; a stale-data bug here would be invisible without tests.
+- Not-found paths (`app/src/lib/api.server.ts:80-86` returning `null` on 404 → `app/src/routes/pokemon.$name.tsx:52` `if (!data) return <NotFound />`, and `app/src/routes/$.tsx`).
+
+Concrete bug classes that nothing in `app/` would catch: a refactor of `cardsFromPokemonRefs` dropping the `id > 10000` filter (silent flooding of lists with Mega forms); the dedupe key at `api.server.ts:407` being changed to `${method}|${move.name}` (duplicate rows when a move is learned at two levels); the `totalPages = 0` vs `page = 1` clamp at `api.server.ts:338-340`; `compareRows` flipping missing-values-first in descending mode; `updateSearch` losing the page-reset; `latestEnglishFlavor` picking the *first* English entry instead of the last (off-by-one on the `.reverse()`); `memo` never expiring after a TTL refactor. All of these are exactly the kind of breakage that slips through when "the acceptance tests still pass because the same code path is green."
+
+Judgment per the instructions: no tests in `app/`, so `coverage_of_risk` and `regression_power` score 1, `behaviour_not_implementation` 1 (no tests to evaluate), and `signal_to_noise` 3 (nothing, so no noise either). The pure functions in `format.ts` and the comparator in `MovesSection.tsx` could have been tested with a five-minute vitest setup and would have earned their cost; the agent chose not to install any runner at all.
+
+```json
+{
+  "dimension": "tests",
+  "criteria": {
+    "coverage_of_risk": {
+      "score": 1,
+      "evidence": [
+        "app/package.json:6-9 — only dev/build/start scripts, no test runner or test script",
+        "app/src/lib/api.server.ts:276-345 — untested filtering, 48/page pagination and page clamping in loadHome",
+        "app/src/lib/api.server.ts:380-455 — untested version-group selection, move dedupe (seen key line 407) and method ordering (lines 429-436)",
+        "app/src/lib/format.ts:4-37 — humanize/idFromUrl/latestEnglishFlavor are pure and trivially testable, untested"
+      ],
+      "rationale": "No tests exist, and the riskiest logic — API-response transformation, filtering, pagination, sorting — has zero coverage beyond the external acceptance suite."
+    },
+    "behaviour_not_implementation": {
+      "score": 1,
+      "evidence": [
+        "app/src — no *.test.* / *.spec.* files anywhere (find returned only routes, components, lib, styles)",
+        "app/src/components/MovesSection.tsx:33-55 — sort comparator and aria-sort state would be the prime candidates for behaviour tests; none exist"
+      ],
+      "rationale": "There are no tests to assess; the criterion's 1 bucket explicitly covers 'no tests'."
+    },
+    "regression_power": {
+      "score": 1,
+      "evidence": [
+        "app/src/lib/api.server.ts:226-235 — id > 10000 alternate-form exclusion would silently regress with no failing test",
+        "app/src/lib/api.server.ts:41-53 — memo TTL/in-flight cache could be broken (stale data) with no test to notice",
+        "app/src/routes/index.tsx:54-66 — page reset on filter change (page: undefined) has no regression guard"
+      ],
+      "rationale": "Nothing would fail. Any refactor of the data layer or sort comparator ships green as long as the acceptance suite's happy paths still hit."
+    },
+    "signal_to_noise": {
+      "score": 3,
+      "evidence": [
+        "app/package.json — no test dependencies (no vitest/playwright in app deps), so zero low-value tests either"
+      ],
+      "rationale": "No tests means no noise; per the scale, a no-tests app rates 3 here."
+    }
+  },
+  "overall": 1,
+  "findings": [
+    {
+      "severity": "high",
+      "location": "app/package.json:6-9",
+      "issue": "The app ships zero tests and no test tooling despite containing ~550 lines of data-transformation logic that only acceptance tests currently exercise.",
+      "suggestion": "Add a minimal vitest (or @tanstack/router + testing-library) setup and unit-test format.ts and the loaders' pure logic first; those tests cost minutes and cover the highest-risk code."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/lib/api.server.ts:276-345",
+      "issue": "Home filtering (type/generation/search intersection), the 48-per-page pagination math and the page clamp (totalPages 0 → page 1) are untested; a refactor could double-count or off-by-one the page slice silently.",
+      "suggestion": "Extract filtering/paging into a pure function over species data and unit-test edge cases: empty results, last partial page, page beyond range, combined filters."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/components/MovesSection.tsx:33-55",
+      "issue": "compareRows implements the subtle 'missing values sort last in both directions' rule plus the ascending/descending flip and aria-sort; none of it is tested.",
+      "suggestion": "Render MovesTable with rows including null power/accuracy and assert order and aria-sort after clicks — a direct behavioural test."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/lib/api.server.ts:403-436",
+      "issue": "Move-table dedupe key (method|move|level), level-up ordering (level then name) and the level-up/machine/egg/tutor-then-alphabetical method ordering are untested; changing the dedupe key to omit level would duplicate rows unnoticed.",
+      "suggestion": "Unit-test the grouping/ordering with a small fixture of version_group_details covering duplicate entries and unordered methods."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/lib/format.ts:15-27",
+      "issue": "latestEnglishFlavor's reverse-find (last English entry) and collapseWhitespace, plus englishEntry and idFromUrl regex, are untested pure functions where an off-by-one (first vs last entry) is easy to introduce.",
+      "suggestion": "Table-driven unit tests against fixture arrays with \\f/\\n and non-English entries; zero mocking needed."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/routes/index.tsx:19-27",
+      "issue": "URL search validation and the filter-change-resets-page-1 contract (page: undefined in updateSearch) are only covered by acceptance tests; a refactor of validateSearch could break deep links like /?type=fire&generation=generation-i.",
+      "suggestion": "Unit-test validateSearch directly and add one navigation test that changing a select resets page while preserving other filters."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/lib/api.server.ts:35-53",
+      "issue": "The memo cache (TTL expiry, in-flight dedupe, unbounded Map) is untested; a stale-cache or never-expiring bug would surface as confusing 'wrong data' reports, not test failures.",
+      "suggestion": "Unit-test memo with fake timers for expiry and concurrent-load dedupe."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/routes/pokemon.$name.tsx:36-42",
+      "issue": "The #moves hash-scroll effect and ?game= preselection (api.server.ts:372-375, at(-1) default) are untested; effects with requestAnimationFrame timing regress easily.",
+      "suggestion": "A single Playwright-style test rendering the page with ?game=... asserting the select value and hash jump would pin both behaviours."
+    }
+  ],
+  "summary": "The app contains no tests of its own — no runner, no script, no test files — leaving all filtering, pagination, sorting, URL-state and API-transformation logic guarded only by the external acceptance suite. The untested surface is large and exactly the kind (dedupe keys, missing-value sort order, form-exclusion filters, cache TTL) where refactoring bugs ship silently. A tiny vitest setup over the pure helpers and the sort comparator would have been cheap and high-yield; none was written.",
+  "wroteTests": false,
+  "testCount": 0,
+  "valuableTests": [],
+  "lowValueTests": [],
+  "untested": [
+    { "area": "Home filtering and pagination (app/src/lib/api.server.ts:276-345): type/generation/search intersection, 48-per-page slicing, page clamping", "risk": "high", "likelyBug": "Refactored filter drops the id > 10000 exclusion or off-by-ones the page slice, showing alternate forms or duplicated/missing cards on page boundaries" },
+    { "area": "Moves table grouping and ordering (app/src/lib/api.server.ts:403-436): dedupe key, level-up level-then-name sort, method order level-up/machine/egg/tutor then alphabetical", "risk": "high", "likelyBug": "Dedupe key change duplicates rows for moves learned at multiple levels; method rank change reorders or drops tables" },
+    { "area": "Client-side column sort (app/src/components/MovesSection.tsx:33-55): ascending-first toggle, missing-values-last in both directions, aria-sort", "risk": "high", "likelyBug": "Descending sort flips missing values to the front or aria-sort goes stale on column switch, failing accessibility and visual order" },
+    { "area": "Pure formatters (app/src/lib/format.ts): humanize, idFromUrl regex, latestEnglishFlavor last-English-entry + whitespace collapse", "risk": "medium", "likelyBug": "Reverse-find off-by-one returns the first instead of latest English entry, showing wrong flavor text names across all pages" },
+    { "area": "URL search state (app/src/routes/index.tsx:19-27,54-76): validateSearch defaults, filter change resetting to page 1, omission of default params", "risk": "medium", "likelyBug": "Deep links like /?type=fire&generation=generation-i stop working or pagination links lose filters after a validateSearch refactor" },
+    { "area": "In-memory cache (app/src/lib/api.server.ts:35-53): TTL expiry, in-flight request dedupe, unbounded growth", "risk": "medium", "likelyBug": "Cache never expires after a refactor, serving stale species/move data indefinitely once the API snapshot changes" },
+    { "area": "Not-found handling: null on 404 from apiGet propagating to NotFound rendering (api.server.ts:80-86, routes/$.tsx)", "risk": "low", "likelyBug": "A thrown error instead of null replaces the Not-found page with a crash for unknown Pokémon/move/ability/type names" },
+    { "area": "Version-group select default (app/src/lib/api.server.ts:372-375): highest-order game preselected, ?game= override", "risk": "low", "likelyBug": "Default game becomes lowest-order or an invalid ?game silently clears the moves tables" },
+    { "area": "#moves hash scroll effect (app/src/routes/pokemon.$name.tsx:36-42)", "risk": "low", "likelyBug": "Effect regression means /pokemon/pikachu#moves renders at the top of the page instead of the moves section" }
+  ]
+}
+```

@@ -1,0 +1,120 @@
+# Review: Pokédex (Qwik + Qwik City, v1.20.3 — current stable, per Oct 2026 releases)
+
+**What's good.** This is a recognisably idiomatic Qwik City app: `routeLoader$` per route with `status(404)` for missing resources (`app/src/routes/moves/[name]/index.tsx:6-12`), `DocumentHead` via `resolveValue` (`app/src/routes/pokemon/[name]/index.tsx:115-118`), `<html lang>` set the documented way via `containerAttributes` (`app/src/entry.ssr.tsx:15-17`), recursive `EvolutionNode` component (`app/src/routes/pokemon/[name]/index.tsx:19-30`), and per-table `useSignal` sort state computed inline in the JSX so Qwik's fine-grained reactivity drives re-render (`app/src/components/MoveTables.tsx:47-54`). Server/client boundaries are clean: `lib/api.ts` is only imported by loaders, components import types only (`app/src/components/MoveTables.tsx:2`), so the fetch/cache layer never ships to the browser. Route files are strikingly consistent with each other — a reviewer learns the pattern once.
+
+**The main problem.** The home page fights the router. Filter and pagination state is managed with hand-rolled `window.history.pushState/replaceState` (`app/src/routes/index.tsx:69,86,108,141,158`) plus a manual `popstate` listener in a `useVisibleTask$` (`app/src/routes/index.tsx:30-41`), instead of the documented pattern (`useNavigate`/`Link` + reactive `useLocation()`, cf. the official search-params tutorial). The pagination links even `preventDefault()` Qwik's own anchor handling and re-do the navigation by hand (`app/src/routes/index.tsx:138-148`). Worse, the popstate sync reads Qwik City's `location.url.href` (`app/src/routes/index.tsx:33`) rather than `window.location.href`; whether that value is already updated at listener time depends on internal ordering inside the qwik-city router — the acceptance tests never exercise back/forward (`tests/specs/home.spec.mjs` has no `goBack`), so this is exactly the kind of latent fragility a team inherits. Everything else is nits: dead `typeClassName` export (`app/src/components/ui.tsx:60`), duplicated `HomeCards`/`PokemonCards` (`app/src/components/ui.tsx:15,29`), a page-clamp that leaves the stale `?page=` in the URL (`app/src/routes/index.tsx:50-52`), heavy `any` typing in the data layer, and a hidden `globalThis` cache (`app/src/lib/api.ts:4-6`) that a plain module-level `Map` would express better.
+
+```json
+{
+  "dimension": "mergeability",
+  "criteria": {
+    "idiomatic": {
+      "score": 3,
+      "evidence": [
+        "app/src/routes/index.tsx:69-158 — raw window.history.pushState/replaceState instead of useNavigate/Link; fights the qwik-city router",
+        "app/src/routes/index.tsx:30-41 — hand-rolled popstate listener in useVisibleTask$ to work around un-reactive location",
+        "app/src/entry.ssr.tsx:15-17 — containerAttributes lang, exactly as current docs prescribe",
+        "app/src/routes/pokemon/[name]/index.tsx:115-118 — DocumentHead with resolveValue, the documented head pattern",
+        "app/src/routes/moves/[name]/index.tsx:6-12 — routeLoader$ + status(404), idiomatic data loading",
+        "app/src/components/MoveTables.tsx:47-54 — useSignal sort state read inline in JSX, idiomatic fine-grained reactivity"
+      ],
+      "rationale": "Data loading, routing, head handling and SSR config follow current docs; only the home page's URL/query management is a home-grown reimplementation of what the router provides."
+    },
+    "correctness_risks": {
+      "score": 3,
+      "evidence": [
+        "app/src/routes/index.tsx:33 — popstate sync reads qwik's location.url.href, which may be stale at popstate time; tests never exercise back/forward",
+        "app/src/lib/api.ts:391 — Promise.all fan-out fetching every move of the selected game on a cold cache (hundreds of parallel requests), though cached afterwards",
+        "app/src/routes/index.tsx:50-52 — currentPage is clamped to totalPages but the URL keeps the out-of-range ?page= value",
+        "app/src/lib/api.ts:57-59 — 404 responses cached as null for process lifetime; acceptable per spec but a documented trade-off",
+        "app/src/components/MoveTables.tsx:19-27 — nulls sort last in both directions, handled explicitly"
+      ],
+      "rationale": "No show-stopper bugs, but the signal↔URL sync depends on undocumented router internals and is untested for back/forward; the rest are minor or spec-sanctioned."
+    },
+    "global_abstractions": {
+      "score": 4,
+      "evidence": [
+        "app/src/lib/api.ts:1-2 — single server-only data module with in-memory cache, clearly documented",
+        "app/src/components/MoveTables.tsx:2 — components import types only from lib/api; client code never touches the fetch layer",
+        "app/src/components/ui.tsx:15,29 — HomeCards and PokemonCards are near-duplicate components",
+        "app/src/components/ui.tsx:60 — dead typeClassName export while type-class strings are inlined in 4 other files",
+        "app/src/lib/api.ts:4-6 — hidden global state via (globalThis as any).__pokedexApiCache"
+      ],
+      "rationale": "Boundaries are unusually clean for agent code (server data module, thin components, type-only imports); deductions are for one duplicated pair of card components and a needlessly hidden global cache."
+    },
+    "readability": {
+      "score": 4,
+      "evidence": [
+        "app/src/routes/moves/[name]/index.tsx — loader, 404 guard and head are laid out identically across all four resource routes",
+        "app/src/lib/format.ts:1-13 — tiny, well-named helpers with a clear contract",
+        "app/src/lib/api.ts:1-2 — comment explains the caching strategy up front",
+        "app/src/global.css:60 — single global stylesheet organised with section comments (starter-style scoped CSS not used, a minor inconsistency)",
+        "app/src/lib/api.ts:105-115 — pervasive any typing despite typed result shapes"
+      ],
+      "rationale": "A new teammate finds their way quickly: consistent route layout, small helpers, clear naming. The 460-line untyped-in-places data module is the only rough spot."
+    },
+    "review_cost": {
+      "score": 3,
+      "evidence": [
+        "app/src/routes/index.tsx:25-41,69-158 — the URL/History handling would need rework to qwik-native navigation before approving",
+        "app/src/components/ui.tsx:60 — delete dead export",
+        "app/src/components/ui.tsx:15,29 — merge the two card components",
+        "app/src/lib/api.ts:4-6 — module-level Map instead of globalThis indirection"
+      ],
+      "rationale": "One substantive round of changes (home-page navigation to useNavigate/reactive location, plus a couple of nits); everything else I'd approve as-is."
+    }
+  },
+  "overall": 3,
+  "findings": [
+    {
+      "severity": "medium",
+      "location": "app/src/routes/index.tsx:69-158",
+      "issue": "Filter/pagination state manages history by hand (window.history.pushState/replaceState, preventDefault on router-owned anchors) instead of using the qwik-city router (useNavigate/Link + reactive useLocation), duplicating and racing the framework's own SPA navigation.",
+      "suggestion": "Navigate via useNavigate()/Link and derive q/type/generation/page from useLocation(), letting the router own history; keep the loader query-independent so keystrokes stay cheap."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/routes/index.tsx:33",
+      "issue": "The popstate sync reads qwik's location.url.href inside a raw popstate listener; its freshness at that moment depends on qwik-city internal ordering, and stale values would leave the filters desynced since useSignal initialisers don't re-run.",
+      "suggestion": "Read window.location.href in the popstate handler (or drop the listener entirely by making state URL-derived)."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/lib/api.ts:391",
+      "issue": "Cold-cache Pokémon page fires one fetch per move of the selected game in a single Promise.all (hundreds of concurrent requests).",
+      "suggestion": "Chunk the fan-out (e.g. batches of 25-50) — results are cached, so only the first hit pays."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/routes/index.tsx:50-52",
+      "issue": "currentPage is clamped to totalPages but the URL retains an out-of-range ?page=, so URL and displayed page disagree on deep links.",
+      "suggestion": "Normalize by replacing the URL (or recompute the page param) when clamping."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/components/ui.tsx:15-44",
+      "issue": "HomeCards and PokemonCards are near-duplicates that will drift apart (they already differ in alt/hidden/type details).",
+      "suggestion": "One Card component with optional types/hidden props."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/components/ui.tsx:60",
+      "issue": "Dead typeClassName export, while type-badge class strings are hand-inlined in pokemon, moves, types routes and MoveTables.",
+      "suggestion": "Delete it, or actually use it everywhere to centralise the class construction."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/lib/api.ts:4-6",
+      "issue": "Cache hidden on globalThis via (globalThis as any).__pokedexApiCache — hidden global state without need.",
+      "suggestion": "A module-level Map is sufficient; if dev-mode HMR duplication was the worry, comment why."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/lib/api.ts:105-115",
+      "issue": "Pervasive any in the data layer despite well-typed output shapes; rename/refactors lose the safety net.",
+      "suggestion": "Introduce minimal response interfaces (Ref, NamedEntry) and type the fetch helpers on them."
+    }
+  ],
+  "summary": "A solid, mostly idiomatic Qwik City app: correct use of routeLoader$, status(404), resolveValue heads, containerAttributes and fine-grained signals, with a clean server/client boundary and consistent route structure. The one real mergeability concern is the home page's hand-rolled history/popstate management, which bypasses and subtly races the qwik-city router and would need rework before I'd approve. Everything else is nits — duplicated card components, dead code, and loose typing."
+}
+```

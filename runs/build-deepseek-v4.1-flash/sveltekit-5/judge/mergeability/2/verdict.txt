@@ -1,0 +1,119 @@
+I've reviewed the app thoroughly and verified the SvelteKit 3 APIs it uses against current docs (migration guide, shallow-routing docs, adapters docs). Summary of what I found:
+
+**Strengths:** The app is genuinely current-stack: config lives in `vite.config.js` via the `sveltekit()` plugin with the adapter (the SvelteKit 3 way, no `svelte.config.js`), imports use the new `#lib` package.json subpath mapping, page state uses `$app/state` (not the removed stores), runes throughout with no legacy `on:`/`export let`/`$:` patterns, recursive evolution list uses `{#snippet}`/`{@render}`, 404s use the v3 `error(404, 'message')` form, and the home page's filter-in-URL sync uses the brand-new `goto(..., { shallow: true, replace })` API exactly as the shallow-routing docs prescribe. The server data layer sits behind the enforced `lib/server` boundary with a promise-deduping cache that evicts on rejection.
+
+**Weaknesses:** One real current-API violation (`goto(url, { noScroll: true, keepFocus: true })` on the Pokémon page — those options were removed/merged into `reset: false` in v3), a popstate-only URL-sync on the home page that can desync when same-route links are clicked, and small duplication of `isMissing`/`format` helpers across three files.
+
+```json
+{
+  "dimension": "mergeability",
+  "criteria": {
+    "idiomatic": {
+      "score": 4,
+      "evidence": [
+        "app/vite.config.js:7-9 — adapter passed to sveltekit() plugin in vite.config.js, exactly the SvelteKit 3 layout (svelte.config.js is no longer supported)",
+        "app/package.json:13-16 — #lib subpath imports via package.json 'imports', the documented v3 replacement for $lib",
+        "app/src/routes/+page.svelte:45-51 — goto(url, { shallow: true, replace: !push, reset: false }) matches the current shallow-routing docs for same-page URL state",
+        "app/src/routes/+page.svelte:2-3 — $app/navigation + $app/state (page), the current replacements for removed $app/stores",
+        "app/src/lib/components/EvolutionList.svelte:5-16 — recursion via {#snippet}/{@render}, the recommended slot replacement",
+        "app/src/routes/types/[name]/+page.server.js:11-12 — error(404, 'Not found') message form per v3; called without throw as documented",
+        "app/src/routes/pokemon/[name]/+page.svelte:13 — goto(url, { noScroll: true, keepFocus: true, replace: true }) uses options REMOVED in SvelteKit 3 (merged into reset: false)",
+        "app/src/lib/components/MoveTable.svelte:28 — untrack() wrapping a $state initializer is unnecessary (initializers aren't tracked)",
+        "app/src/lib/components/PokemonCard.svelte:6 — class: directive where the official Svelte skill prefers array/object class syntax"
+      ],
+      "rationale": "Reads like the SvelteKit 3 docs — new config layout, #lib imports, $app/state, runes, snippets, shallow routing, v3 error() form. One genuine removed-API usage (noScroll/keepFocus) plus a few skill-discouraged micro-patterns keep it short of exemplary."
+    },
+    "correctness_risks": {
+      "score": 4,
+      "evidence": [
+        "app/src/routes/pokemon/[name]/+page.svelte:13 — removed goto options are silently dropped in v3, so changing the Game select now resets scroll/focus instead of preserving it; tests don't cover focus/scroll",
+        "app/src/routes/+page.svelte:90-92 — afterNavigate only syncs on popstate; a link navigation to '/' while filters are active (e.g. clicking the Pokémon nav link) keeps stale filter state while the URL clears",
+        "app/src/lib/server/pokeapi.js:13-14 — cache.get(key).catch(() => cache.delete(key)) correctly evicts failed promises, avoiding a poisoned cache",
+        "app/src/lib/server/pokeapi.js:30-32 — getJson throws on non-ok and returns null on 404; loads map null to error(404), so API failures surface as handled error pages",
+        "app/src/lib/server/pokeapi.js:6 — module-level Map cache grows without bound for the server's lifetime (spec-sanctioned, but unbounded memory on a long-lived process)",
+        "app/src/lib/server/pokeapi.js:33 — fetch has no timeout/AbortSignal; a hung API hangs requests",
+        "app/src/routes/pokemon/[name]/+page.server.js:81 — Promise.all over every move in a game (~100+ parallel fetches) with no concurrency cap on first view of each Pokémon"
+      ],
+      "rationale": "No serious bugs: 404s are handled everywhere, the cache self-heals on failure, and SSR/CSR state initialization is consistent. The removed goto options and the popstate-only sync are minor, test-invisible fragilities."
+    },
+    "global_abstractions": {
+      "score": 4,
+      "evidence": [
+        "app/src/lib/server/pokeapi.js — single cohesive server-only data layer (client + cache + derived indexes); routes stay thin; lib/server boundary prevents client leakage",
+        "app/src/app.css:151-428 — one shared stylesheet (~280 lines of global classes: .panel, .card-grid, .data-table, .type-*) that every page and component reaches into, with :global escapes in pokemon/[name]/+page.svelte:192-197",
+        "app/src/lib/components/PokemonCard.svelte:4 — component hardcodes <li>, only valid as a direct child of a <ul>, coupling it to list parents",
+        "app/src/lib/components/TypeBadge.svelte:1-9 — dynamic class type-{name} resolved by global CSS in app.css:161-218; unknown names silently fall back to Normal colour",
+        "app/src/lib/components/MoveTable.svelte:31 — isMissing/format duplicated near-identically in three files (MoveTable.svelte:31,92; moves/[name]/+page.svelte:6; moves/[name]/+page.server.js:10)"
+      ],
+      "rationale": "The one 'god' module (pokeapi.js) is server-scoped, cohesive and earns its keep; boundaries between server and client code are clean. The shared global CSS file and the duplicated tiny helpers are the only things that will need untangling as the app grows."
+    },
+    "readability": {
+      "score": 4,
+      "evidence": [
+        "app/src/routes/pokemon/[name]/+page.server.js — dense but linear: fetch, 404, derive view-models with clear names (STAT_LABELS:8, METHOD_ORDER:17), comment at :72 explains the one non-obvious ordering rule",
+        "app/src/lib/format.js:1-5 — tiny, well-named shared helper",
+        "app/src/lib/components/MoveTable.svelte:44-75 — sorting logic with missing-values-last and stable tiebreak is easy to follow",
+        "app/src/routes/+page.svelte:18-30 — filter state, pagination and URL building are small named functions",
+        "whole codebase has 2 comment lines for ~1700 LOC; the shallow-routing/popstate-sync design at app/src/routes/+page.svelte:45-92 deserves a why-comment"
+      ],
+      "rationale": "A new teammate would find their way in minutes: consistent route file layout, descriptive names, small components. Only rough spots are sparse comments on the trickiest logic and the odd dense load function."
+    },
+    "review_cost": {
+      "score": 4,
+      "evidence": [
+        "app/src/routes/pokemon/[name]/+page.svelte:13 — the one thing I'd block on: replace { noScroll: true, keepFocus: true } with { reset: false }",
+        "app/src/lib/components/MoveTable.svelte:31 and app/src/routes/moves/[name]/+page.svelte:6 — dedupe isMissing/format into #lib/format.js",
+        "app/src/routes/+page.svelte:50 — drop the no-op state: {} option",
+        "app/src/lib/components/PokemonCard.svelte:4 — nit: make the component render its own container or document the <ul>-child contract"
+      ],
+      "rationale": "I'd approve after one small round: one real API fix plus a handful of nits. Nothing structural needs to change."
+    }
+  },
+  "overall": 4,
+  "findings": [
+    {
+      "severity": "medium",
+      "location": "app/src/routes/pokemon/[name]/+page.svelte:13",
+      "issue": "goto is called with noScroll and keepFocus, options that SvelteKit 3 removed (merged into reset: false). They are silently ignored, so changing the Game select resets scroll and focus instead of preserving them.",
+      "suggestion": "Use goto(url, { replace: true, reset: false }) per the SvelteKit 3 migration guide."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/routes/+page.svelte:90-92",
+      "issue": "URL→state sync only runs for popstate; a same-route link navigation to '/' (e.g. the Pokémon nav link) leaves filters applied while the URL shows no filters, desyncing URL and view.",
+      "suggestion": "Sync from the URL on all navigations within the route (or derive filter state from page.shallow.url ?? page.url instead of one-shot local state)."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/lib/server/pokeapi.js:6",
+      "issue": "Module-level promise cache is unbounded for the life of the Node process and getJson has no timeout, so slow/hung API calls pile up and cached payloads accumulate without limit.",
+      "suggestion": "Add an AbortSignal.timeout to fetch and either an LRU cap or a documented assumption that the dataset bounds the cache."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/lib/components/MoveTable.svelte:31",
+      "issue": "isMissing and format are duplicated near-identically in MoveTable.svelte:31,92, moves/[name]/+page.svelte:6 and two +page.server.js files.",
+      "suggestion": "Move both helpers into #lib/format.js next to humanize and import them."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/lib/components/PokemonCard.svelte:4",
+      "issue": "The card component hardcodes its own <li>, so it's only valid as a direct child of a <ul> — a leaky contract that will surprise future reuse (e.g. in a grid of non-list markup).",
+      "suggestion": "Render only the link and let callers provide list markup, or document the constraint in the component."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/routes/pokemon/[name]/+page.svelte:66",
+      "issue": "{#key data.selectedGame} remounts every MoveTable (and resets their DOM) just to reset sort state when the game changes — the Svelte guidance warns #key is expensive.",
+      "suggestion": "Reset sort state inside MoveTable via a keyed prop change (e.g. reset sort when table.name/rows identity changes) instead of remounting whole subtrees."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/lib/components/TypeBadge.svelte:1-9",
+      "issue": "Type colour comes from a dynamic global class type-{name} defined in app.css; an unexpected type name silently renders as Normal with no signal.",
+      "suggestion": "Keep the fallback but log or assert unknown type names in dev so data/API drift is visible."
+    }
+  ],
+  "summary": "This is a well-crafted, genuinely current SvelteKit 3 codebase: v3 vite.config plugin setup, #lib imports, $app/state, runes, snippets, and the new shallow-routing goto API used exactly as documented, with a clean server-only data layer. The only real merge blocker is one removed goto option set (noScroll/keepFocus instead of reset: false) that silently degrades UX on the Pokémon page. I'd approve after one small round of fixes."
+}
+```

@@ -1,0 +1,112 @@
+## Review: Pokédex app (React Router v8, framework mode)
+
+**What's here.** A clean framework-mode app: route config in `app/routes.ts` with typed routes, server loaders that parse the URL for filter state, a `.server.ts` data module with an in-memory TTL cache, root `Layout`/`ErrorBoundary` with 404-aware `meta`, shared `Card`/`Section`/`TypeBadge` components, and a self-contained sortable move-table component. It reads like the framework's own examples almost everywhere.
+
+**Verified against current guidance.** React Router 8.5 is current stable; the app's shape matches the official skill (`./+types/<route>` type imports, `throw data(..., {status:404})` for missing records, `meta` receiving `error`, server-only code kept in a `.server` module, filter state in the loader URL). `vite.config.ts`'s `resolve.tsconfigPaths: true` is a real Vite 8 option. No deprecated APIs found.
+
+**The one real bug** is in the home filter logic: the debounced search timer closes over the render's `filters`, and the type/generation selects don't cancel it, so a filter chosen within the 150ms debounce window can be silently dropped from the URL when the timer fires (`home.tsx:115-124` vs `home.tsx:155`). Narrow window, recoverable, but it's the kind of hand-rolled sync code the framework's GET-form/search-params patterns exist to avoid. Secondary nits: any loader failure (500 included) gets a "Not found" title because route metas check `loaderData` presence instead of the `error` arg; the client-shared `Card` view type lives inside the server data module; `isbot` is an unused dependency; and `types.tsx` re-implements the type-badge color trick without `TypeBadge`'s fallback variable.
+
+```json
+{
+  "dimension": "mergeability",
+  "criteria": {
+    "idiomatic": {
+      "score": 4,
+      "evidence": [
+        "app/app/routes.ts:1-11 — typed manual route config with index/route, matching framework-mode docs",
+        "app/app/routes/pokemon.tsx:39 — loader uses Route.LoaderArgs generated types from ./+types",
+        "app/app/routes/not-found.tsx:4-6 — throw data(null, {status:404}) for unmatched URLs, the documented missing-record pattern",
+        "app/app/root.tsx:15-17 — root meta uses the `error` arg and Layout/ErrorBoundary exports, current v8 patterns",
+        "app/app/lib/api.server.ts:62 — notFound() via throw data(..., { status: 404 }), and 404 mapping at api.server.ts:79-85",
+        "app/vite.config.ts:6-8 — resolve.tsconfigPaths: true, a real Vite 8 option (not the old plugin)",
+        "app/app/routes/home.tsx:93-101 — hand-rolled queryFor + navigate for filter URLs instead of the documented GET-form/useSearchParams pattern"
+      ],
+      "rationale": "Reads like the framework's own examples: typed route modules, URL-driven loader state, proper 404s, server-only data module. Only home's manual query-string building deviates from the documented search-form pattern."
+    },
+    "correctness_risks": {
+      "score": 3,
+      "evidence": [
+        "app/app/routes/home.tsx:124 — debounced update() closes over the render's `filters`; home.tsx:155 select onChange doesn't clear the timer, so a type/generation picked within 150ms is dropped when the timer fires (stale-closure race)",
+        "app/app/routes/pokemon.tsx:37 — title falls back to \"Not found – Pokédex\" whenever loaderData is undefined, including 500s (root.tsx:17 distinguishes, routes don't; MetaArgs.error is available in v8)",
+        "app/app/routes/pokemon.tsx:64-75 — unbounded parallel fan-out (one fetch per version group + every move of a game) per cold request, only mitigated by the 60s cache",
+        "app/app/lib/api.server.ts:35-46 — failures evicted from the cache and in-flight promises deduped: no poisoned cache, no thundering herd",
+        "app/app/lib/format.ts:17-19 — idFromUrl returns NaN on malformed URLs, safely filtered downstream (api.server.ts:239)",
+        "app/app/routes/home.tsx:62-64 — out-of-range page clamped in the loader, no crash on ?page=99999"
+      ],
+      "rationale": "The cache and 404 handling are genuinely careful, but the search/filter sync has a real stale-closure race, error titles misreport 500s as 404s, and move loading fans out without a bound."
+    },
+    "global_abstractions": {
+      "score": 4,
+      "evidence": [
+        "app/app/lib/api.server.ts — single cohesive server-only data module: caching, API shapes and fetchers in one place, explicitly documented at lines 1-6",
+        "app/app/lib/api.server.ts:228-246 — cardsFromPokemon (a view-model builder) lives in the data module, and the Card type at api.server.ts:222 is imported by the client component ui.tsx:4 (type-only, so safe, but the boundary is leaky)",
+        "app/app/lib/format.ts — small, dependency-free helpers with no hidden state",
+        "app/app/components/ui.tsx:9-15 — TypeBadge is reused everywhere (move.tsx:35, type.tsx:45) except types.tsx:28-31 which re-implements its trick without the fallback",
+        "app/app/components/move-tables.tsx:102-106 — sorting is self-contained; no shared state leaks between tables"
+      ],
+      "rationale": "Abstractions are few and earn their keep: one data module, one format module, three small components with clear server/client boundaries. Only mild layering smells (view types in the server module, one duplicated color-var helper)."
+    },
+    "readability": {
+      "score": 4,
+      "evidence": [
+        "app/app/lib/api.server.ts:23-24 — module header comments explain the caching strategy and why",
+        "app/app/routes/home.tsx:99-103 — comment explains the local-state/URL sync tradeoff (though the code needs a few reads to verify it)",
+        "app/app/lib/api.server.ts:88-133 — API types declare only the fields used, clearly grouped with section dividers",
+        "app/app/routes/pokemon.tsx:24, 26 — STAT_LABELS/METHOD_ORDER constants named at module scope instead of inline magic strings",
+        "app/app/routes/move.tsx:15, type.tsx:17, ability.tsx:14, pokemon.tsx:37 — the same meta fallback string repeated in four routes instead of shared"
+      ],
+      "rationale": "Consistent naming, small functions, comments that explain intent, and predictable file organization; the repeated meta fallback and the lastPushed/ref dance in home.tsx are the only rough spots."
+    },
+    "review_cost": {
+      "score": 4,
+      "evidence": [
+        "app/app/routes/home.tsx:115-124 — one round of changes: cancel the pending debounce in the select handlers (or drive filters through a GET form/useSearchParams) so the race can't drop filters",
+        "app/app/routes/move.tsx:15 — use the meta `error` arg instead of inferring 404 from missing loaderData (4 routes)",
+        "app/package.json:14 — isbot is unused: no entry.server.tsx exists to consume it",
+        "app/app/routes/types.tsx:28-31 — reuse TypeBadge or add the same fallback variable it has (ui.tsx:10)"
+      ],
+      "rationale": "Approve after a small round: one real bug fix (the debounce race), a meta-fallback tweak, and three one-line cleanups. Nothing structural."
+    }
+  },
+  "overall": 4,
+  "findings": [
+    {
+      "severity": "medium",
+      "location": "app/app/routes/home.tsx:124",
+      "issue": "The debounced search timeout captures the render-time `filters` closure, and the type/generation selects (home.tsx:155,170) don't clear it, so a filter applied within the 150ms window is silently dropped from the URL when the timer fires.",
+      "suggestion": "Cancel the pending debounce in the select onChange handlers, or better, drive all filters through the documented pattern — a GET <Form> with submit-on-change / useSearchParams — so URL state has a single source of truth."
+    },
+    {
+      "severity": "low",
+      "location": "app/app/routes/pokemon.tsx:37",
+      "issue": "Meta titles report \"Not found – Pokédex\" for any loader failure, including 500s; root.tsx:17 gets this right by inspecting the error.",
+      "suggestion": "Use the `error` field of MetaArgs (available in v8) with isRouteErrorResponse to pick the heading, ideally via one shared helper instead of the copy repeated in move.tsx:15, type.tsx:17 and ability.tsx:14."
+    },
+    {
+      "severity": "low",
+      "location": "app/app/lib/api.server.ts:222",
+      "issue": "The Card type (and the cardsFromPokemon view-model builder) live in the server-only data module but are consumed by client components (ui.tsx:4).",
+      "suggestion": "Move Card and the card-building helper into a shared non-.server module (e.g. lib/cards.ts) to keep the server fetch/cache boundary clean."
+    },
+    {
+      "severity": "low",
+      "location": "app/app/routes/pokemon.tsx:64-75",
+      "issue": "The loader fans out one request per version group plus one per move in the selected game, unbounded.",
+      "suggestion": "Acceptable against the local cached API, but consider batching or a concurrency cap if the API ever becomes remote."
+    },
+    {
+      "severity": "low",
+      "location": "app/app/routes/types.tsx:28-31",
+      "issue": "Duplicates TypeBadge's --type-color variable trick but omits its fallback (ui.tsx:10 uses var(--color-text-muted) as default).",
+      "suggestion": "Reuse TypeBadge (or extract the color-var helper) so all type coloring behaves identically."
+    },
+    {
+      "severity": "low",
+      "location": "app/package.json:14",
+      "issue": "isbot is declared as a dependency but nothing imports it (no entry.server.tsx exists).",
+      "suggestion": "Remove it, or keep it only if a custom entry.server that uses it is added."
+    }
+  ],
+  "summary": "A small, disciplined framework-mode app that uses current React Router 8 idioms — typed route modules, URL-driven loaders, data() 404s, server-only data access, and careful request dedup/caching. The one substantive flaw is a stale-closure race in the home page's hand-rolled search/filter sync, which the documented GET-form/search-params pattern would have avoided. Mergeable after one small round of fixes."
+}
+```

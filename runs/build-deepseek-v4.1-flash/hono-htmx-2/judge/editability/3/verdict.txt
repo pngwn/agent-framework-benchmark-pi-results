@@ -1,0 +1,143 @@
+I've read the whole app (`server.mjs`, `src/api.mjs`, `src/render.mjs`, `src/views.mjs`, `scripts/build.mjs`, `package.json`), the spec, and the Hono skill reference. The app is a small, layered, plain-JS Hono + htmx service: `api.mjs` (fetch + cache + formatters), `render.mjs` (layout + shared fragments), `views.mjs` (page data assembly + views), `server.mjs` (routes + htmx partial negotiation). Here's my assessment.
+
+## Scenario walkthroughs
+
+1. **Remove Abilities** — delete route `server.mjs:88-93`, its imports (`server.mjs:7`, `server.mjs:9-19`), `renderAbilityPage` (`src/views.mjs:250-279`), and the Abilities section's links inside `renderPokemonPage` (`src/views.mjs:~560`); optionally `getAbility` (`src/api.mjs:160`). No nav links point at it. Two files, ~5 edits — self-contained, but not "delete a route and a link", and the unused `renderAbilityPageByName` (`src/views.mjs:602`) lingers as a decoy.
+2. **Sprite fix** — every card list renders through `cardGrid` → `pokemonCard` (`src/render.mjs:79`, `66-77`), which computes the sprite in exactly one place via `spriteUrl(id)` (`src/api.mjs:46`). One fix covers home, type, move and ability lists. (The card descriptors only carry `{id, name}`, so a fix needing the default Pokémon's actual sprite URL rather than the ID-pattern would require threading data through four list builders — the main latent risk.)
+3. **Sort every card list by name** — four separate builders each own their own ordering: `getHomeData` (`src/views.mjs:69-73`), type page (`152-166`), move page (`223-235`), ability page (`258-265`, which hand-rolls its own id map instead of `dedupeSortedPokemonEntries`). One file, four spots, three different idioms.
+4. **Items section** — reusable: `apiGet`/`fetchJson`/`memoize` (`src/api.mjs:49-102`), `section`/`cardGrid`/`layout`/`wrapPage` (`src/render.mjs`), `humanize`/`englishName`/`formatValue`. Copied: the catalog loader pattern (`loadTypeCatalog`, `src/api.mjs:104-135`), the list page (`renderTypesPage`, `src/views.mjs:131`), and the detail page shape (`renderMovePage`, `217-247`). Roughly half reused, half copy-adapted.
+5. **Data source/caching change** — `API_BASE_URL`/`API_ROOT` (`src/api.mjs:1-2`), the cache/pending dedupe (`src/api.mjs:49-77`), `memoize` (`84-102`), `versionGroupCache` (`167-174`) and `spriteUrl`'s use of the base URL (`46`) all live in one module. One file owns it; minor wart: three separate caching mechanisms inside it.
+
+## Criteria
+
+- **removability: 4** — features are route + view pairs with no cross-links beyond their own page; Abilities removal is 2 files / ~5 edits (`server.mjs:88`, `views.mjs:250`, `views.mjs:602`). Dead `*ByName` wrappers are the only leftover-trap.
+- **changeability: 4** — sprite, formatting (`formatDex`/`formatValue`/`statLabel`, `src/api.mjs:33-45`, `186-195`), and table sorting (`sortRows`, `src/views.mjs:283-305`) each live in one obvious place; deducted because card-list derivation is triplicated.
+- **coupling: 3** — layering is real (api → render/views → server) and htmx negotiation is cleanly isolated in `server.mjs:55`, `117-124` with views taking a `partial` flag (`views.mjs:87`). But data assembly lives inconsistently in two layers (`server.mjs:73-93` fetches inline while `getHomeData`/`getPokemonPageData` sit in `views.mjs:37`/`534`), and the presentation layer imports API-config-tied `spriteUrl` (`render.mjs:1`).
+- **abstraction_design: 3** — the primitives (`pokemonCard`, `section`, `typeBadge`, memoized catalogs) stretch well, but there is no abstraction for the app's most-repeated shape — "Pokémon cards from API references" — which is copy-pasted with per-view variations (`views.mjs:152-166`, `223-235`, `255-276`), and the half-built `*ByName` seam (`views.mjs:596-613`) was abandoned mid-design.
+
+```json
+{
+  "dimension": "editability",
+  "criteria": {
+    "removability": {
+      "score": 4,
+      "evidence": [
+        "app/server.mjs:88 — abilities route is one self-contained handler",
+        "app/src/views.mjs:250 — renderAbilityPage is one deletable function",
+        "app/src/views.mjs:602 — renderAbilityPageByName is dead code that would linger",
+        "app/src/views.mjs:560 — abilities links live only inside renderPokemonPage's own section"
+      ],
+      "rationale": "Features are route+view pairs with no cross-file entanglement; removal is a handful of scattered edits across two files rather than delete-and-done, partly because dead wrappers obscure what's actually used."
+    },
+    "changeability": {
+      "score": 4,
+      "evidence": [
+        "app/src/render.mjs:66-77 — every Pokémon card sprite rendered in one function",
+        "app/src/api.mjs:46 — spriteUrl is the single sprite-URL construction point",
+        "app/src/api.mjs:33-45 — formatters (formatDex, formatValue, humanize) centralized",
+        "app/src/views.mjs:283-305 — sortRows is the single sorting implementation for move tables"
+      ],
+      "rationale": "Most fixes land in one obvious, findable place and cover every list because all cards flow through pokemonCard/cardGrid. The exception is card-list derivation, which is reimplemented per view and would force N-place fixes for anything needing richer card data."
+    },
+    "coupling": {
+      "score": 3,
+      "evidence": [
+        "app/server.mjs:55 — htmx partial detection isolated in the server layer",
+        "app/src/views.mjs:87 — views take an explicit partial flag, keeping fragments reusable",
+        "app/server.mjs:73-93 — server assembles data for types/moves/abilities routes",
+        "app/src/views.mjs:37 — but home/pokemon data assembly lives in the views module instead",
+        "app/src/render.mjs:1 — presentation layer imports spriteUrl, which is tied to API_BASE_URL"
+      ],
+      "rationale": "Layering exists and the htmx seam is clean, but the fetch-then-render responsibility is split inconsistently between server.mjs and views.mjs, and views.mjs mixes data assembly with rendering."
+    },
+    "abstraction_design": {
+      "score": 3,
+      "evidence": [
+        "app/src/render.mjs:79-81 — cardGrid stretches across home/type/move/ability lists",
+        "app/src/views.mjs:139-150 — dedupeSortedPokemonEntries helps but only covers part of the card-list shape",
+        "app/src/views.mjs:255-263 — ability page hand-rolls its own id/hidden map instead of the shared helper",
+        "app/src/views.mjs:596-613 — three *ByName wrappers built then never wired up"
+      ],
+      "rationale": "The small primitives are well designed, but the app's most-repeated shape (cards from Pokémon references) is copy-pasted with per-view variations, and an intended page-level abstraction was abandoned half-built."
+    }
+  },
+  "overall": 4,
+  "findings": [
+    {
+      "severity": "medium",
+      "location": "app/src/views.mjs:152-166",
+      "issue": "Turning API Pokémon references into card descriptors is reimplemented in renderTypePage, renderMovePage (223-235) and renderAbilityPage (255-276) with three different idioms (one keeps a fallback-name branch, one hand-rolls its own id map).",
+      "suggestion": "Extract one helper, e.g. pokemonCardsFromReferences(entries, speciesCatalog), so ordering, dedupe and sprite/id resolution have a single home; new card lists and card-level fixes then land in one place."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/views.mjs:596-613",
+      "issue": "renderMovePageByName/renderAbilityPageByName/renderTypePageByName are dead code that duplicate the fetch-then-render logic server.mjs inlines at 73-93, misleading future editors about where to change behavior.",
+      "suggestion": "Either use the wrappers from the routes (making views own data assembly consistently) or delete them."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/render.mjs:3",
+      "issue": "All HTML is built by string concatenation with a hand-rolled escapeHtml that every interpolation must remember to call; one missed call is an injection bug, and this scales poorly as templates grow.",
+      "suggestion": "Use Hono's current html`` tagged template from 'hono/html' (auto-escapes by default, raw for trusted fragments) for the whole render layer."
+    },
+    {
+      "severity": "low",
+      "location": "app/server.mjs:73-93",
+      "issue": "Route handlers for types/moves/abilities fetch data inline while home and pokemon routes delegate to getHomeData/getPokemonPageData in views.mjs, so the same responsibility lives in two layers.",
+      "suggestion": "Pick one convention — e.g. every route calls a getXPageData in the views/data layer — and apply it uniformly."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/api.mjs:167-174",
+      "issue": "Three separate caching mechanisms (fetchJson cache/pending at 49-77, memoize at 84-102, versionGroupCache) implement overlapping behaviour in one module.",
+      "suggestion": "Route getVersionGroup through apiGet/fetchJson (it already caches by URL) or build it on memoize, leaving one caching rule to change."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/render.mjs:1",
+      "issue": "The presentation module imports spriteUrl, which embeds API_BASE_URL and the sprite URL pattern, coupling markup to API configuration.",
+      "suggestion": "Have callers pass the resolved sprite URL into pokemonCard, or accept it as a dependency parameter, so render.mjs stays free of API knowledge."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/render.mjs:83-92",
+      "issue": "section() takes both id and sectionId parameters whose roles are easy to confuse (heading anchor vs element id) — mild flag-parameter creep.",
+      "suggestion": "Rename to headingId/elementId or fold into one options object with clear names."
+    }
+  ],
+  "summary": "A clean, small, layered codebase where most changes land in one findable place: sprites, formatting, sorting and API/caching concerns are each centralized, and htmx partial/full rendering has a proper seam. The main editability tax is that the most-repeated shape — building Pokémon card lists from API references — is copy-pasted with per-view variations, and dead *ByName wrappers plus inconsistent placement of data assembly between server.mjs and views.mjs muddy the intended structure. Most scenarios are 2-file, one-sitting changes; adopting hono/html and one shared card-list helper would push it further.",
+  "scenarios": [
+    {
+      "change": "Remove the Abilities pages and every link to them",
+      "files": ["app/server.mjs", "app/src/views.mjs", "app/src/api.mjs"],
+      "difficulty": 4,
+      "notes": "Self-contained route+view pair (server.mjs:88, views.mjs:250); only cross-links are the Abilities section inside renderPokemonPage, which is built in the same file. Dead renderAbilityPageByName must be spotted or it lingers. No nav links involved."
+    },
+    {
+      "change": "Fix wrong sprite on cards for species whose default Pokémon has a different name (Deoxys)",
+      "files": ["app/src/render.mjs", "app/src/api.mjs"],
+      "difficulty": 4,
+      "notes": "All lists render through cardGrid→pokemonCard (render.mjs:79/66) with spriteUrl (api.mjs:46) as the single URL construction point, so one fix covers every list. Caveat: card descriptors carry only {id, name}; if the fix needs the default Pokémon's actual sprite URL from the API rather than the id-pattern, all four list builders would need threading."
+    },
+    {
+      "change": "Add sorting by name to every list of Pokémon cards",
+      "files": ["app/src/views.mjs"],
+      "difficulty": 3,
+      "notes": "One file but four separate builders each own their ordering (getHomeData:69, type:152, move:223, ability:258) with three different idioms; there is no shared card-list helper to change once."
+    },
+    {
+      "change": "Add an Items section (/items, /items/:name) shaped like Moves",
+      "files": ["app/src/api.mjs", "app/src/views.mjs", "app/server.mjs"],
+      "difficulty": 3,
+      "notes": "Data layer, catalog pattern, section/cardGrid/layout and fetch caching all reuse; the list page (renderTypesPage) and detail page (renderMovePage) shapes must be copy-adapted (~60 lines each). Roughly half reused, half copied."
+    },
+    {
+      "change": "Change the API base URL and caching rules",
+      "files": ["app/src/api.mjs"],
+      "difficulty": 5,
+      "notes": "API_BASE_URL/API_ROOT (api.mjs:1-2), the cache+pending dedupe (49-77), memoize (84-102) and spriteUrl's base-URL use (46) all live in one module. Minor wart: versionGroupCache (167-174) is a third, separate caching mechanism to remember."
+    }
+  ]
+}
+```

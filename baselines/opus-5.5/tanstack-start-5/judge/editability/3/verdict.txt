@@ -1,0 +1,163 @@
+I've reviewed the full app and verified the framework practices against current docs (`.validator()` is the canonical server-function validator in Start 1.169+; the srvx-based `dist/server/server.js` fetch-handler server is a documented current pattern; `vite build` + `tanstackStart()` plugin is correct for the Vite 8 era).
+
+## Review
+
+**Architecture in brief:** routes (`app/src/routes/`) → server functions (`app/src/lib/pokedex.functions.ts`) → server-only loaders (`app/src/lib/pokedex.server.ts`) → typed view models (`app/src/lib/types.ts`) → small shared UI (`app/src/components/ui.tsx`). The client never sees raw PokeAPI shapes; that's a strong seam for editability. Most data rules (`apiBase`, cache TTL, `cardsFor`, `spriteUrl`, `typeIndex`, `english`) live in one file.
+
+Scenario findings:
+
+1. **Remove Abilities** — delete `abilities.$name.tsx` and the section in `pokemon.$name.tsx:74-86`; but `getAbility` (`pokedex.functions.ts:20-22`), `loadAbility` (`pokedex.server.ts:303-312`) and `AbilityPage` (`types.ts:67`) survive as dead code unless you also clean three lib files.
+2. **Sprite fix** — `spriteUrl` (`pokedex.server.ts:75`) is a single shared function, but card objects are built twice: `cardsFor` (`:137-148`) and `loadList`'s inline mapping (`:169-174`), so a mapping-level card bug needs two edits.
+3. **Name sorting on card lists** — `CardList` (`ui.tsx:49`) is used by all five lists, so a sort there is one edit; sorting at the data layer is two (`cardsFor`, `loadList`).
+4. **Items section** — clear template to copy (route file + 5-line server fn + ~15-line loader + type); `Section`, `Count`, `CardList`, `english`, `latestFlavorText`, `cardsFor` all reuse. Note there is no `/moves` index route to mirror; `types.index.tsx` is the index template.
+5. **Data source change** — `apiBase()` (`:16`) reads the env per call and `CACHE_TTL_MS`/`cache`/`get()` (`:11-45`) are all in one file; one-place change.
+
+```json
+{
+  "dimension": "editability",
+  "criteria": {
+    "removability": {
+      "score": 3,
+      "evidence": [
+        "app/src/routes/abilities.$name.tsx:6 — self-contained route file; routeTree regenerates",
+        "app/src/routes/pokemon.$name.tsx:74-86 — Abilities section and /abilities/$name links live in the Pokémon page",
+        "app/src/lib/pokedex.functions.ts:20-22 — getAbility would survive route deletion as dead code",
+        "app/src/lib/pokedex.server.ts:303-312 — loadAbility likewise",
+        "app/src/lib/types.ts:67 — AbilityPage type likewise",
+        "app/src/routes/__root.tsx:38-46 — nav has no Abilities link, so nothing to unlink"
+      ],
+      "rationale": "The route itself is a clean delete, but each feature's code is spread across route, functions, server and types files, so removing it fully means touching five files and leaving no dead exports."
+    },
+    "changeability": {
+      "score": 4,
+      "evidence": [
+        "app/src/lib/pokedex.server.ts:75 — spriteUrl is the single place sprites are computed",
+        "app/src/lib/pokedex.server.ts:137-148 — cardsFor maps Pokémon refs to species/cards, shared by move, ability and type pages",
+        "app/src/lib/pokedex.server.ts:169-174 — loadList re-implements card construction instead of reusing cardsFor",
+        "app/src/lib/format.ts:14-24 — humanize/orDash/pageTitle centralized",
+        "app/src/components/ui.tsx:49-58 — CardList is the one component rendering every card list"
+      ],
+      "rationale": "Most fixes land in one obvious server helper or one shared component; the duplicated card construction between cardsFor and loadList is the one place a class of card bugs needs two edits."
+    },
+    "coupling": {
+      "score": 4,
+      "evidence": [
+        "app/src/lib/pokedex.functions.ts:1-23 — server functions are the only bridge between client routes and server loaders",
+        "app/src/lib/types.ts:5-11 — client components consume narrow view-model types (Card, NamedType), not raw API payloads",
+        "app/src/routes/moves.$name.tsx:12-23 — routes depend only on the typed loader result",
+        "app/src/routes/__root.tsx:16-18 — root head inspects internal match fields (m._notFound, m.status) to pick the title",
+        "app/src/router.tsx:11 and app/src/routes/__root.tsx:20 — NotFound registered in two places"
+      ],
+      "rationale": "Server/client separation is exemplary — loaders normalize PokeAPI shapes into view models behind typed server functions — with only minor tangles: a grab-bag ui.tsx, duplicated not-found wiring, and the root head reaching into match internals."
+    },
+    "abstraction_design": {
+      "score": 4,
+      "evidence": [
+        "app/src/components/ui.tsx:5-12 — Section (id + aria-labelledby pattern) reused across six sections",
+        "app/src/components/ui.tsx:14-29 — TypeBadge has a link boolean flag, a small but reasonable knob",
+        "app/src/routes/pokemon.$name.tsx:127-160 — SortableMoveTable uses column descriptors (COLUMNS) rather than N hand-written sorters",
+        "app/src/lib/pokedex.server.ts:226-236 — typeIndex/generationIndex are shared indexes reused by list and detail pages",
+        "app/src/lib/pokedex.server.ts:169-174 — loadList duplicates rather than delegating card building",
+        "app/src/lib/types.ts:1-2 — NamedType is a bare alias of Option adding no meaning"
+      ],
+      "rationale": "The shared pieces (Section, Count, CardList, cardsFor, per-resource loaders with a common notFound contract) stretch to new resources well; deductions are for the loadList/cardsFor duplication and per-domain code living in resource-agnostic catch-all lib files."
+    }
+  },
+  "overall": 4,
+  "findings": [
+    {
+      "severity": "medium",
+      "location": "app/src/lib/pokedex.server.ts:169-174",
+      "issue": "loadList builds Card objects inline, duplicating the id/name/label/sprite construction already in cardsFor (lines 137-148); a card-level fix (sprite, form filtering, hidden flag) has to be made twice.",
+      "suggestion": "Have loadList call cardsFor (then enrich with types), or extract a single makeCard(species) helper used by both."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/lib/pokedex.functions.ts:20-22",
+      "issue": "Each resource's code is spread across four shared files (route, pokedex.functions.ts, pokedex.server.ts, types.ts), so removing a feature leaves dead exports in three of them.",
+      "suggestion": "Split lib by resource (lib/moves.ts, lib/abilities.ts with loader + server fn + type together) so a feature deletes as a unit."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/routes/__root.tsx:16-18",
+      "issue": "The root head picks the Not found title by reading internal match fields (m._notFound, m.status), a fragile coupling to router internals, and the not-found component is registered both in router.tsx:11 and __root.tsx:20.",
+      "suggestion": "Register the not-found title in one place (e.g. a shared notFound route or a default head function) and drop the duplicate registration."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/components/ui.tsx:1-64",
+      "issue": "ui.tsx is a single grab-bag module for Section, TypeBadge, PokemonCard, CardList, Count and NotFound; unrelated edits collide in one file.",
+      "suggestion": "Split into components/section.tsx, components/card.tsx, components/not-found.tsx as the count grows."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/lib/pokedex.server.ts:1-348",
+      "issue": "All resource loaders live in one 350-line file; adding Items, Berries, etc. grows it monotonically and makes per-resource edits harder to scan.",
+      "suggestion": "Group loaders per resource in separate modules, keeping format.ts and a small shared api.ts (get, cache, cardsFor) as the common layer."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/lib/types.ts:1-2",
+      "issue": "NamedType is declared as a verbatim alias of Option with no added semantics, forcing readers to check both names.",
+      "suggestion": "Keep one name (Option) or document what NamedType adds."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/routes/types.index.tsx:10-17",
+      "issue": "The type index page inlines its list rendering rather than sharing a link-list pattern; a future Items index page has no reusable list component and would copy this.",
+      "suggestion": "Extract a simple LinkList({items}) component next to CardList."
+    }
+  ],
+  "summary": "This is a well-layered TanStack Start app: routes consume typed view models produced behind server functions, so the PokeAPI shape never leaks into components and most data-source or rendering changes are local. Current stable idioms are used correctly (canonical .validator() server functions, tanstackStart Vite plugin, an srvx handler for the production build). The main editability cost is mild duplication — card construction exists in both cardsFor and loadList — and per-resource code spread across four shared files, which makes feature removal slightly noisier than it should be.",
+  "scenarios": [
+    {
+      "change": "Remove the Abilities pages and every link to them",
+      "files": [
+        "app/src/routes/abilities.$name.tsx",
+        "app/src/routes/pokemon.$name.tsx",
+        "app/src/lib/pokedex.functions.ts",
+        "app/src/lib/pokedex.server.ts",
+        "app/src/lib/types.ts"
+      ],
+      "difficulty": 3,
+      "notes": "Deleting the route plus the Abilities section in pokemon.$name.tsx works, but a clean removal also means deleting getAbility, loadAbility and the AbilityPage type from three shared lib files, or leaving dead code behind. No nav link exists to unlink."
+    },
+    {
+      "change": "Fix the sprite shown for species whose default Pokémon has a different name (e.g. Deoxys)",
+      "files": [
+        "app/src/lib/pokedex.server.ts"
+      ],
+      "difficulty": 4,
+      "notes": "The pokemon→species mapping and sprite URL live in one file: cardsFor (pokedex.server.ts:137-148) for every cross-resource card list and spriteUrl (:75) as the shared URL helper. One fix covers the move/ability/type lists; the home list builds cards separately at :169-174, so a mapping-level fix must be mirrored there."
+    },
+    {
+      "change": "Add sorting by name to every list of Pokémon cards",
+      "files": [
+        "app/src/components/ui.tsx"
+      ],
+      "difficulty": 4,
+      "notes": "All five card lists render through CardList (ui.tsx:49-58), so one sort there covers everything; the catch is that home-page ordering and pagination are computed server-side (loadList, pokedex.server.ts:168-174), so a data-layer sort means editing cardsFor and loadList and re-verifying the spec'd dex order."
+    },
+    {
+      "change": "Add an Items section (/items, /items/:name) shaped like Moves",
+      "files": [
+        "app/src/routes/items.index.tsx",
+        "app/src/routes/items.$name.tsx",
+        "app/src/lib/pokedex.functions.ts",
+        "app/src/lib/pokedex.server.ts",
+        "app/src/lib/types.ts"
+      ],
+      "difficulty": 4,
+      "notes": "Section, Count, CardList, humanize/english/latestFlavorText and the loader-notFound contract all reuse, so the new code is a small route file, a five-line server fn, a short loadItem and one type. Five files are touched because each layer lives in a shared per-framework rather than per-resource file; there is also no /moves index route to mirror, so the index must be patterned on types.index.tsx."
+    },
+    {
+      "change": "Change the API base URL and caching rules",
+      "files": [
+        "app/src/lib/pokedex.server.ts"
+      ],
+      "difficulty": 5,
+      "notes": "apiBase() reads API_BASE_URL on every call (:16), and the cache, its TTL and the fetch wrapper are all in one place (:11-45); no route or component knows where data comes from. Only caveat: sprite URLs are baked as absolute API URLs into responses, so cached pages keep the old base for up to 60s after a change."
+    }
+  ]
+}
+```

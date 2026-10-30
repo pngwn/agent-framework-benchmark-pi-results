@@ -1,0 +1,169 @@
+## Review: Pokédex app (Hono + htmx)
+
+**Framework baseline (verified):** the app pins `hono@4.13.14` and `@hono/node-server@2.1.5` — both are the *current stable* releases (v5.0.0 is still an RC), so nothing here is judged against an outdated framework. Deps and runtime (`serve({ fetch: app.fetch, port, hostname })`) are idiomatic.
+
+### Structure
+
+The app is three flat modules plus a server file: `src/api.mjs` (data access + formatting helpers, ~190 lines), `src/render.mjs` (shared markup primitives, ~115 lines), `src/views.mjs` (all page data-fetching and rendering, ~623 lines), and `server.mjs` (routes). The layering is real and honest — routes never build markup, views never touch Hono's `Context` — but there is no per-feature boundary at all: home, types, moves, abilities and the Pokémon page all live in one 623-line grab bag.
+
+### What the scenarios actually require
+
+- **Remove Abilities:** touches `server.mjs:88` (route + imports), `views.mjs:250` and `views.mjs:591` (page render + the Abilities section on the Pokémon page), `views.mjs:602` and `api.mjs:169`, and `.hidden-label`/`.hidden-ability` CSS. Findable by grepping `abilit`, but scattered across 4 files and ~7 sites — exactly "a handful of scattered edits."
+- **Sprite bug:** `spriteUrl` (`api.mjs:46`) is the single URL builder and every list renders through `cardGrid` → `pokemonCard` (`render.mjs:66`), so one fix covers home, type, move and ability lists; only the artwork fallback (`views.mjs:572`) needs a glance. This is the app's best property.
+- **Sort cards by name:** four separate list-assembly sites each with its own sort — `views.mjs:69` (home), `views.mjs:153` (type, via `dedupeSortedPokemonEntries`), `views.mjs:226` (move), `views.mjs:261` (ability, which re-implements the dedupe/sort with a hidden flag). You must find all four by reading, not by grep.
+- **Items section:** copy `renderMovePage` + `getItem`; the reusable scaffolding (`layout`, `section`, `cardGrid`, `moveFact`) holds up. Additive and easy.
+- **API base URL / caching:** confined to `api.mjs` (`:1`, `:46`), but three distinct caching mechanisms live there (`cache`/`pending` at `:5-6`/`:40-72`, `memoize` at `:85-99`, `versionGroupCache` at `:180-185`), all unbounded and never invalidated.
+
+### Notable defects
+
+- **Dead parallel layer:** `renderMovePageByName` / `renderAbilityPageByName` / `renderTypePageByName` (`views.mjs:596-613`) duplicate the fetch-or-404 flow that `server.mjs:81-96` implements inline. Nothing imports them; a maintainer fixing 404 behavior can easily edit the wrong copy.
+- **Manual HTML strings:** all markup is raw template literals with a hand-rolled `escapeHtml` (`render.mjs:3-10`). With ~100 interpolation sites and zero type checking (plain `.mjs`, no JSDoc, 0 comment lines in 1,557 LOC), every new interpolation is an unescaped-XSS landmine. `hono/html`'s `html` tagged template (or hono/jsx) escapes automatically and is the framework-supported path for exactly this app.
+- **`section()` can't stretch:** the moves section needs `id="moves"` on the element, and rather than use the `sectionId` parameter (which exists at `render.mjs:87` but is never used by any caller), `renderMovesSection` (`views.mjs:459`) inlines the whole `<section class="panel" aria-labelledby=…>` chrome — the section contract is now defined twice.
+
+```json
+{
+  "dimension": "editability",
+  "criteria": {
+    "removability": {
+      "score": 3,
+      "evidence": [
+        "app/src/views.mjs:250 — renderAbilityPage is one self-contained block inside a 623-line shared file, not a feature module",
+        "app/server.mjs:88 — ability route plus its imports at app/server.mjs:6,14 must be removed separately from the view",
+        "app/src/views.mjs:591 — the Pokémon page's Abilities section links to /abilities, so dropping the pages means editing an unrelated page",
+        "app/src/views.mjs:602 — dead renderAbilityPageByName is a second copy a remover must also find",
+        "app/src/api.mjs:169 — getAbility becomes dead after route removal"
+      ],
+      "rationale": "Removing Abilities is a grep-able but scattered handful of edits across four files (~7 sites), including a dead duplicate and a section on the Pokémon page; no feature-module boundary exists to delete."
+    },
+    "changeability": {
+      "score": 3,
+      "evidence": [
+        "app/src/render.mjs:66 — pokemonCard is the single card component, so the Deoxys-style sprite fix in spriteUrl (app/src/api.mjs:46) covers every list",
+        "app/src/views.mjs:153 — type-page list assembly, sorting by id",
+        "app/src/views.mjs:226 — move-page list assembly, a near-copy with a different fallback",
+        "app/src/views.mjs:254 — ability-page list assembly re-implements the dedupe/sort with a hidden flag instead of reusing dedupeSortedPokemonEntries",
+        "app/src/views.mjs:596 — unused renderMovePageByName duplicates the 404 flow that app/server.mjs:81-96 implements inline"
+      ],
+      "rationale": "Rendering bugs in shared components land in one place, but list-assembly/ordering logic is duplicated across four sites and the fetch-or-404 flow exists twice (one copy dead), so several realistic fixes need N coordinated edits."
+    },
+    "coupling": {
+      "score": 3,
+      "evidence": [
+        "app/src/api.mjs — single data module; base URL and API_ROOT are private (lines 1-2), nothing outside knows them",
+        "app/server.mjs:58 — htmx target id 'pokemon-results' compared as a string literal, duplicating the id in app/src/render.mjs:103 markup",
+        "app/server.mjs:124 — same pattern for 'moves', duplicating app/src/views.mjs:460; renaming a target needs coordinated edits",
+        "app/src/views.mjs:1 — imports 21 symbols from api.mjs and reaches into raw API payload shapes (e.g. species.varieties at views.mjs:538)",
+        "app/src/views.mjs:37 and app/src/views.mjs:534 — page-data assembly lives in views.mjs for home/pokemon but inline in app/server.mjs:81-96 for move/ability/type, so the same concern has two homes"
+      ],
+      "rationale": "Server, views and data are honestly layered with no shared mutable state, but the htmx target-id contract is a string duplicated across files, views.mjs has a wide 21-symbol import surface into raw API shapes, and page-data assembly is inconsistently placed."
+    },
+    "abstraction_design": {
+      "score": 3,
+      "evidence": [
+        "app/src/render.mjs:66-83 — cardGrid/pokemonCard genuinely stretch across four pages and the hidden-ability variant via props",
+        "app/src/render.mjs:85-92 — section() helper used by five sections, but its sectionId flag parameter (line 87) is never used by any caller",
+        "app/src/views.mjs:459 — renderMovesSection bypasses section() and inlines the whole section chrome, so the section contract is defined twice",
+        "app/src/api.mjs:85-99 — memoize is a well-fitted abstraction for the three catalogs",
+        "app/src/views.mjs:261 — ability list re-implements type/move list assembly rather than parameterizing one helper"
+      ],
+      "rationale": "The shared primitives (cards, sections, badges, layout, memoized catalogs) stretch well, but the abstraction breaks exactly where the real variation is: one list pipeline is copy-pasted three ways and the moves section falls outside the section() abstraction, leaving a dead flag parameter behind."
+    }
+  },
+  "overall": 3,
+  "findings": [
+    {
+      "severity": "medium",
+      "location": "app/src/views.mjs:596",
+      "issue": "renderMovePageByName / renderAbilityPageByName / renderTypePageByName are exported but never imported; they duplicate the fetch-or-404 flow that server.mjs:81-96 implements inline, so a behavior fix has two homes and one is silently dead.",
+      "suggestion": "Delete all three, or move them into server.mjs as the single 'load or 404' path so there is exactly one copy."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/views.mjs:261",
+      "issue": "The 'API entries → Pokémon cards' pipeline (exclude forms >10000, dedupe by id, map id→species, sort by dex) is implemented three times: type page (:153), move page (:226) and ability page (:254-268), each slightly different, so ordering/limit changes must be made N times.",
+      "suggestion": "Extract one entriesToCards(entries, { speciesCatalog, decorate }) helper in render.mjs and have all three pages (plus any future Items page) call it."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/render.mjs:3",
+      "issue": "All HTML is raw template literals with a hand-rolled escapeHtml; with ~100 interpolation sites, zero type checking and zero comments across 1,557 lines, every new interpolation is an unescaped-output bug waiting to happen.",
+      "suggestion": "Use hono/html's html tagged template (or hono/jsx) for automatic escaping, and add JSDoc types to the public helpers at minimum."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/views.mjs:459",
+      "issue": "renderMovesSection inlines the <section class=\"panel\" aria-labelledby=…> chrome instead of using the section() helper, because section() can't express an element id — so the section contract is defined twice and the sectionId parameter that would fix it (render.mjs:87) is dead.",
+      "suggestion": "Use section({ id: 'moves', sectionId: 'moves', ... }) or restructure section() to take one id used for both the element and the heading, then route the moves section through it."
+    },
+    {
+      "severity": "low",
+      "location": "app/server.mjs:27",
+      "issue": "Static assets are served via three bespoke routes that read files into memory at startup, instead of serveStatic from @hono/node-server/serve-static; adding any new static file means editing server.mjs and a new route.",
+      "suggestion": "Replace the three routes with app.use('*', serveStatic({ root: fileURLToPath(new URL('./public', import.meta.url)) })) per the current Node.js adapter docs."
+    },
+    {
+      "severity": "low",
+      "location": "app/server.mjs:58",
+      "issue": "htmx target ids ('pokemon-results' at :58, 'moves' at :124) are string literals duplicated in the markup (render.mjs:103, views.mjs:460); renaming a target requires coordinated edits that nothing will catch if missed.",
+      "suggestion": "Export shared constants for target ids from render.mjs and use them in both the markup and the HX-Target checks."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/api.mjs:5",
+      "issue": "Three separate caching mechanisms (response cache/pending at :5-6 and :40-72, memoize at :85-99, versionGroupCache at :180-185) are all unbounded Maps with no invalidation; changing caching rules means reconciling three mechanisms in one file.",
+      "suggestion": "Route version-group fetches through the shared fetchJson/apiGet cache and drop versionGroupCache, so cache policy lives in exactly one place."
+    },
+    {
+      "severity": "low",
+      "location": "app/server.mjs:81",
+      "issue": "Page-data assembly is inconsistently placed: getHomeData/getPokemonPageData live in views.mjs (:37, :534) while the equivalent for move/ability/type pages is inlined in the route handlers, so the 'page data' pattern must be discovered twice.",
+      "suggestion": "Pick one convention — either a data function per page next to its render function, or all data assembly in server.mjs — and apply it uniformly."
+    },
+    {
+      "severity": "low",
+      "location": "app/server.mjs:95",
+      "issue": "The move-table htmx partial endpoint calls the full getPokemonPageData (species + default pokemon + evolution chain + species catalog + all move details for the game) just to render one table, coupling a lightweight partial to heavyweight page assembly.",
+      "suggestion": "Give the endpoint a narrow data path (species lookup + moves for the selected game) rather than reusing the whole page-data function."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/views.mjs:623",
+      "issue": "Minor dead exports and an unused flag: PAGE_SIZE is exported but never imported, and section()'s sectionId parameter (render.mjs:87) has no callers.",
+      "suggestion": "Remove the export and the unused parameter; dead knobs mislead future maintainers about intended usage."
+    }
+  ],
+  "summary": "The app is honestly layered — a single data module, a small shared-render kit, thin routes — and its shared components are good enough that the hardest real bug (the Deoxys sprite) would land in one place. But there is no per-feature boundary: everything lives in a 623-line views file where list assembly is copy-pasted three ways, the fetch-or-404 flow exists twice (one copy dead), and markup is hand-escaped template strings with no types or comments. It is comfortably acceptable and easy to grep, but every scenario requires finding duplicated sites by reading rather than by structure.",
+  "scenarios": [
+    {
+      "change": "Remove the Abilities pages and every link to them",
+      "files": ["app/server.mjs", "app/src/views.mjs", "app/src/api.mjs", "app/public/styles.css"],
+      "difficulty": 3,
+      "notes": "Four files, ~7 sites: the route (server.mjs:88) plus imports, the page render (views.mjs:250), the dead duplicate (views.mjs:602), getAbility (api.mjs:169), the Abilities section on the Pokémon page (views.mjs:591) and two CSS rules. All findable by grepping 'abilit', but nothing is a delete-a-directory operation."
+    },
+    {
+      "change": "Fix the wrong-sprite bug for species whose default Pokémon has a different name (e.g. Deoxys)",
+      "files": ["app/src/render.mjs", "app/src/api.mjs"],
+      "difficulty": 4,
+      "notes": "spriteUrl (api.mjs:46) is the only URL builder and every card list flows through pokemonCard (render.mjs:66), so one fix covers home, type, move and ability lists — the one place callers already normalize to species ids. Only the artwork fallback on the detail page (views.mjs:572) needs a confirming glance."
+    },
+    {
+      "change": "Add sorting by name to every list of Pokémon cards",
+      "files": ["app/src/views.mjs"],
+      "difficulty": 2,
+      "notes": "Four independent list-assembly sites each own their ordering: getHomeData (:69), type page (:153), move page (:226), ability page (:261). Nothing points you at all four; home also interacts with pagination. This is the scenario the duplicated pipeline hurts most."
+    },
+    {
+      "change": "Add an Items section (/items, /items/:name) shaped like Moves",
+      "files": ["app/src/api.mjs", "app/server.mjs", "app/src/views.mjs", "app/src/render.mjs"],
+      "difficulty": 4,
+      "notes": "Mostly additive: a getItem in api.mjs, one route in server.mjs, and a renderItemPage adapted from renderMovePage; layout, section, cardGrid, moveFact and the humanize/englishName helpers all reuse cleanly. The cost is copying ~50 lines of render code, since there is no generic 'resource page' abstraction to call."
+    },
+    {
+      "change": "Change the API base URL and caching rules",
+      "files": ["app/src/api.mjs"],
+      "difficulty": 4,
+      "notes": "API_BASE_URL/API_ROOT (api.mjs:1-2) and spriteUrl (:46) are private to one module that everything else goes through. Caching policy is also confined to this file, but it is spread over three mechanisms (response cache :40-72, memoize :85-99, versionGroupCache :180-185) that must be kept consistent, and none invalidate."
+    }
+  ]
+}
+```

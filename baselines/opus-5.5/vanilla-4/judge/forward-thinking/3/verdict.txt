@@ -1,0 +1,110 @@
+Analysis complete. I reviewed all of `app/` (12 source files, `server.mjs`, config) and verified the toolchain against current releases: **Vite 8.3.5** is the latest stable (Vite 8 GA'd 2026-03-12 with Rolldown as the single bundler; 8.3.5 shipped 2026-10-21), and **TypeScript 7.0.2** is the GA native (Go) compiler (GA 2026-07-08). Both are the current generation, not training-data-era picks.
+
+```json
+{
+  "dimension": "forward-thinking",
+  "criteria": {
+    "latest_apis": {
+      "score": 5,
+      "evidence": [
+        "app/package.json:9-10 — vite ^8.3.5 and typescript ^7.0.2, the exact current stable majors (Vite 8 GA 2026-03-12, TS 7 GA 2026-07-08)",
+        "app/tsconfig.json:2-8 — moduleResolution 'bundler', module ESNext, strict: true, types: ['vite/client'] — all current idioms, no legacy compilerOptions",
+        "app/src/main.ts:1-3 — pure ES-module imports, no CJS or legacy Vite config-era patterns; no vite.config.ts is needed and none is carried",
+        "app/src/api.ts:1-11 — declare-global window augmentation for the injected API base instead of legacy globals-in-a-script pattern"
+      ],
+      "rationale": "The toolchain is the current stable generation of both Vite (Rolldown-based 8.x) and TypeScript (native 7.x), and there is no legacy configuration or boilerplate a newer release would generate differently. Verified against the Vite 8 announcement and TS 7.0 announcement via web search."
+    },
+    "platform": {
+      "score": 4,
+      "evidence": [
+        "app/src/api.ts:79-85 — fetch() with status handling and a promise-level in-memory cache; no XHR, no hand-rolled HTTP",
+        "app/src/main.ts:33-36 — new URL(location.href) plus URLSearchParams via searchParams throughout (app/src/pages/home.ts:23-38) — query state is never string-concatenated",
+        "app/src/main.ts:99-100 — history.scrollRestoration = 'manual' and replaceChildren for rendering; app/src/dom.ts:33-41 uses the modern children-list DOM API",
+        "app/src/styles.css:265-271 — aspect-ratio, logical properties (margin-inline/padding-block, e.g. lines 27-29, 130-134), :focus-visible (lines 56-61), CSS custom properties and grid — all platform-first",
+        "app/src/api.ts:76-90 — no AbortController or timeout on fetches; stale navigation work is only guarded by render tokens (app/src/main.ts:18,94), requests keep running"
+      ],
+      "rationale": "The app reaches for the platform first everywhere that matters (fetch, URL/searchParams, replaceChildren, scrollRestoration, modern CSS), hand-rolling only what has no platform primitive (debounce, ~50-line router). The one real gap is no AbortController/timeout on API calls, so abandoned navigations keep consuming the network."
+    },
+    "dependencies": {
+      "score": 5,
+      "evidence": [
+        "app/package.json:5-11 — zero runtime dependencies; only devDependencies are typescript and vite, both at current stable versions",
+        "app/src/dom.ts:5-26 — a ~20-line h() helper instead of a virtual-DOM or hyperscript package",
+        "app/src/main.ts:17-24 — a regex-table router instead of a routing library",
+        "app/src/styles.css:1-560 — hand-written CSS with design tokens, no CSS framework (spec-compliant)"
+      ],
+      "rationale": "Minimal and modern: nothing is bundled at runtime, and the two devDependencies are the current stable major versions. Every hand-rolled piece (router, h(), debounce) is small enough that a library would be bloat."
+    },
+    "churn_resistance": {
+      "score": 4,
+      "evidence": [
+        "app/src/api.ts:29-115 — all API access and every response type live behind one module; pages never fetch directly (app/src/pages/move.ts:9, app/src/pages/ability.ts:3)",
+        "app/server.mjs:19 — ROUTES regex table duplicates app/src/main.ts:17-24; adding a route means editing two files in two languages",
+        "app/server.mjs:24 — config injection replaces a '<!--app-config-->' HTML comment marker, relying on Vite's build preserving comments in index.html (undocumented behavior, verified it currently does)",
+        "app/src/api.ts:163 — spriteUrl() hardcodes the /media/sprites/pokemon/<id>.png pattern rather than using sprites.front_default from the API data (app/src/components.ts:15)",
+        "app/src/pages/types.ts:46 — ['stellar','unknown','shadow'] exclusion list duplicated from app/src/api.ts:159",
+        "app/src/pages/pokemon.ts:265-268 — re-declares the VersionGroup shape inline instead of importing the interface from api.ts"
+      ],
+      "rationale": "Data access is properly centralized and typed at the boundary, so an API change touches one file. But route definitions are duplicated client/server, and a few constants (type exclusions, version-group shape, sprite URL pattern, the comment marker) live in more than one place, which is exactly what will ripple when requirements move."
+    }
+  },
+  "overall": 4,
+  "findings": [
+    {
+      "severity": "medium",
+      "location": "app/server.mjs:19",
+      "issue": "The server's ROUTES regexes duplicate the client route table in app/src/main.ts:17-24; a new or renamed route must be updated in both, and a mismatch produces a 404 status with a rendered page (or vice versa).",
+      "suggestion": "Derive both from one source of truth (e.g. a shared route module the server imports, or have the server serve index.html for any non-asset path and drop the 404-status optimization)."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/api.ts:76-90",
+      "issue": "get() has no AbortController and no timeout; abandoned navigations (e.g. rapidly switching the Game select on /pokemon/:name) keep fetching every move URL in the background.",
+      "suggestion": "Accept an AbortSignal plumbed from the render token, or at minimum a fetch timeout, while keeping the promise cache."
+    },
+    {
+      "severity": "low",
+      "location": "app/server.mjs:24",
+      "issue": "Runtime config injection depends on the '<!--app-config-->' comment surviving vite build — true today but not a documented Vite guarantee, and an HTML-minifying change would silently break API_BASE_URL (falling back to localhost:9000).",
+      "suggestion": "Serve a generated /config.js (or a JSON route) referenced by index.html instead of rewriting built HTML, or assert at server startup that the marker is present in dist/index.html."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/api.ts:163",
+      "issue": "spriteUrl() reconstructs sprite URLs from a hardcoded pattern, coupling the app to the media URL layout even though the API data carries sprites.front_default (typed at app/src/api.ts:41).",
+      "suggestion": "Where Pokemon data is already loaded use the data URL; keep the pattern only for species-list cards where Pokemon isn't fetched, and document that assumption."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/pages/types.ts:46",
+      "issue": "The non-standard type exclusion list ['stellar','unknown','shadow'] is duplicated from app/src/api.ts:159.",
+      "suggestion": "Export a single EXCLUDED_TYPES constant from api.ts and reuse it."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/pages/pokemon.ts:265-268",
+      "issue": "movesSection re-declares VersionGroup structurally ({ name; order }) instead of importing the existing interface from api.ts.",
+      "suggestion": "Use Map<string, VersionGroup> from '../api'."
+    },
+    {
+      "severity": "low",
+      "location": "app/tsconfig.json:2-4",
+      "issue": "target ES2022 with lib ES2023 is a minor mismatch; given Node 24 / latest Chromium and Vite 8's 'baseline-widely-available' build target, the tsconfig target can be ES2023+.",
+      "suggestion": "Align target and lib (both ES2023) — purely cosmetic, no functional impact today."
+    }
+  ],
+  "summary": "A lean, current-generation vanilla Vite app: zero runtime dependencies, Vite 8.3.5 and TypeScript 7.0.2 (both verified as today's stable majors), strict TS, and all data access typed and centralized in one api.ts module. Platform usage is modern throughout (fetch, URL/searchParams, replaceChildren, scrollRestoration, aspect-ratio, logical properties), with the main gap being no AbortController/timeout on fetches. Churn risk is low but non-zero: route definitions duplicated between client and server, a comment-marker config injection that relies on undocumented build output, and a few constants repeated across files.",
+  "apis": [
+    { "api": "fetch", "location": "app/src/api.ts:79", "status": "current", "replacement": "" },
+    { "api": "URL / URLSearchParams", "location": "app/src/main.ts:33", "status": "current", "replacement": "" },
+    { "api": "history.pushState/replaceState/scrollRestoration", "location": "app/src/main.ts:90-99", "status": "current", "replacement": "Navigation API is not yet the stable recommendation; History API remains correct" },
+    { "api": "ParentNode.replaceChildren", "location": "app/src/dom.ts:33-41", "status": "current", "replacement": "" },
+    { "api": "CSS custom properties / aspect-ratio / logical properties / :focus-visible", "location": "app/src/styles.css:56-61,265-271", "status": "current", "replacement": "" },
+    { "api": "AbortController", "location": "app/src/api.ts:76-90", "status": "absent", "replacement": "Should be used for cancellable navigation fetches" }
+  ],
+  "dependencies": [
+    { "name": "vite", "verdict": "modern", "note": "^8.3.5 — current stable major (Rolldown-based, GA 2026-03-12; 8.3.5 published 2026-10-21), no lockfile lag" },
+    { "name": "typescript", "verdict": "modern", "note": "^7.0.2 — current stable native (Go) compiler, GA 2026-07-08; used only for noEmit type-checking, which is the correct role alongside Vite's bundling" }
+  ]
+}
+```

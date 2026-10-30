@@ -1,0 +1,89 @@
+# Review — editability of `app/` (vanilla TS + Vite Pokédex)
+
+## Structure
+
+- `app/src/api.ts` (~385 lines): transport + cache + record types + domain aggregations (species index, generations, type catalog, "HomeData").
+- `app/src/components.ts`: tiny string-template component library (`escapeHtml`, href builders, `typeBadge`, `pokemonCard`/`pokemonCardList`).
+- `app/src/main.ts`: hand-rolled router + link interception; `app/src/pages/{home,pokemon,details}.ts` render pages; `app/src/style.css` grouped by feature with section comments.
+- `app/server.mjs`: static SPA server that injects `window.__API_BASE_URL__`; client does all rendering. Server/client separation is clean.
+
+## Scenario walkthroughs
+
+1. **Remove Abilities**: touches `main.ts:49` (route), `details.ts:70-107`, `pokemon.ts:293-340` (section), `components.ts:24-25,46` (`abilityHref`, `hidden` flag), `api.ts:73,84-92,251-270` (`AbilityRecord`, `speciesFromEntries`), `style.css:242`. Six files, no entanglement, but no single feature boundary either.
+2. **Sprite bug**: `spriteUrl` (api.ts:210) + `pokemonCard` (components.ts:49) is the only sprite source; every card list (home, move, ability, type) goes through `pokemonCardList`, so one fix covers all. If the fix needs real Pokémon data rather than the species-id derivation, the seam is `SpeciesRef` in the species index (api.ts:216) — still central.
+3. **Sort cards by name**: ordering lives in three sorters (`speciesFromPokemonList` api.ts:244, `speciesFromEntries` api.ts:251, `getHomeData` api.ts:373) plus `home.ts:99-105`, or one could centralize it in `pokemonCardList` — 3-4 edits, findable.
+4. **Items section**: mostly reuse — `apiFetch`/cache, `englishName`, `detailRow` (details.ts:17), `pokemonCardList`, the section/panel scaffold; but each page's HTML scaffold is a copy-paste string and the route + record type + href helper each need their own touch point.
+5. **Change API base/caching**: base URL is one constant (`api.ts:1-6`) plus the server-side injection (`server.mjs:9`) — good. Caching is one Map (`api.ts:168`) *plus four hand-rolled memoized-singleton-with-reset copies* (`api.ts:227,305,334,384`) that would each need editing for TTL/invalidation rules.
+
+## Scores
+
+```json
+{
+  "dimension": "editability",
+  "criteria": {
+    "removability": {
+      "score": 3,
+      "evidence": [
+        "app/src/main.ts:49 — abilities route is one line in a flat dispatch, easy to delete",
+        "app/src/pages/details.ts:70-107 — renderAbilityPage is one self-contained function",
+        "app/src/pages/pokemon.ts:293-340 — but the Pokémon page's Abilities section is separate and must be found by hand",
+        "app/src/components.ts:24-25,46 — abilityHref and the hidden flag in pokemonCard are ability-specific bits in shared code",
+        "app/src/api.ts:251-270 — speciesFromEntries and AbilityRecord exist only for this feature; style.css:242 too"
+      ],
+      "rationale": "Routes and render functions delete cleanly, but the feature also leaks into the Pokémon page, the shared card component, the data module and CSS — six files, all findable by grep, none tricky."
+    },
+    "changeability": {
+      "score": 4,
+      "evidence": [
+        "app/src/api.ts:210 — spriteUrl is the single sprite source",
+        "app/src/components.ts:49,66-72 — every card list renders through pokemonCardList, so one fix covers home, moves, abilities and types",
+        "app/src/pages/pokemon.ts:73-111 — move-table sorting is one sortRows function",
+        "app/src/pages/home.ts:99-135 — all home filtering/pagination lives in one update() closure",
+        "app/src/main.ts:60 vs app/src/pages/pokemon.ts:399 — hash-scroll logic is duplicated in router and page"
+      ],
+      "rationale": "The shared card component and centralised helpers mean the classic fixes land in one obvious place; the duplication that exists (hash scroll, memo-reset pattern) is small and localised."
+    },
+    "coupling": {
+      "score": 3,
+      "evidence": [
+        "app/src/api.ts:352-388 — getHomeData is a home-page view model (types-per-species, generation map) living in the transport module",
+        "app/src/pages/details.ts:36,78,134 — every detail page must itself fetch getSpeciesIndex and thread it into helpers; the Promise.all pattern repeats three times",
+        "app/src/api.ts:1-6 — API origin is a single constant consumed by both apiFetch and spriteUrl",
+        "app/server.mjs:9-40 — server only serves HTML and injects config; no rendering logic shared with the client"
+      ],
+      "rationale": "Pages depend on narrow, well-named exports and server/client are cleanly split, but the data module knows page-specific shapes and the species-index dependency is spread across every caller instead of hidden behind one helper."
+    },
+    "abstraction_design": {
+      "score": 3,
+      "evidence": [
+        "app/src/components.ts:39-72 — pokemonCard stretches across all four lists with only showTypes/hidden flags; no copy-paste",
+        "app/src/api.ts:168-204 — apiFetch + Promise cache is a clean, reusable seam",
+        "app/src/api.ts:216-232,298-306,326-336,352-384 — the memoize-promise-and-reset-on-error pattern is copy-pasted four times instead of one memoize() helper",
+        "app/src/pages/pokemon.ts:249-257 — column list duplicated for level-up vs the rest; header/body cells keyed by hand rather than a column descriptor",
+        "app/src/pages/pokemon.ts:146-150 — loadMoveTables bypasses MoveRecord with apiFetch<any>/record: any despite the type existing"
+      ],
+      "rationale": "Abstractions sit where the real variation is (cards, badges, fetch cache), but page scaffolds and the memoisation pattern are duplicated rather than factored, and the moves table would be awkward to reuse for an Items table."
+    }
+  },
+  "overall": 3,
+  "findings": [
+    { "severity": "medium", "location": "app/src/api.ts:352-388", "issue": "getHomeData builds a home-page-specific view model (types per species, generation lookup) inside the data-access module", "suggestion": "Move page view models into pages/home.ts or a view/ layer, keeping api.ts to transport, types and shared lookups" },
+    { "severity": "medium", "location": "app/src/api.ts:227,305,334,384", "issue": "Four hand-rolled copies of the memoized-promise-with-error-reset pattern", "suggestion": "Add a single memoize(fn) helper so caching/invalidation rules change in one place" },
+    { "severity": "medium", "location": "app/src/pages/details.ts:36,78,134", "issue": "Every card-listing page must know about and fetch the species index itself and thread it through helpers", "suggestion": "Wrap it: speciesFromPokemonListAsync(list) that awaits getSpeciesIndex internally" },
+    { "severity": "low", "location": "app/src/pages/pokemon.ts:146-150", "issue": "loadMoveTables uses apiFetch<any> and a record: any map even though MoveRecord is defined in api.ts", "suggestion": "Type the fetch as apiFetch<MoveRecord> so API shape changes are caught" },
+    { "severity": "low", "location": "app/src/main.ts:60 vs app/src/pages/pokemon.ts:397-401", "issue": "Hash-scroll-into-view logic duplicated in the router and the Pokémon page", "suggestion": "Keep it only in the router; drop the copy in the page" },
+    { "severity": "low", "location": "app/src/pages/pokemon.ts:249-257", "issue": "Move-table columns declared twice (level-up vs rest) and rendered with per-column switch logic in sortRows", "suggestion": "Describe columns once as data (key, label, sortable, included-for) and derive headers, cells and sort keys from it" },
+    { "severity": "low", "location": "app/src/components.ts:49", "issue": "Inline onerror handler embedded in the card template string", "suggestion": "Attach the fallback via a delegated listener in main.ts, keeping behaviour out of markup" },
+    { "severity": "low", "location": "app/src/pages/details.ts", "issue": "details.ts is a grab-bag of moves, abilities, types and not-found; each new resource type grows it", "suggestion": "Split per resource (moves.ts, abilities.ts, types.ts) so pages mirror routes" },
+    { "severity": "low", "location": "app/src/pages/details.ts:17", "issue": "detailRow's HTML is shared, but the surrounding page scaffold (<div class=\"page\">, panels, headings) is copy-pasted per page", "suggestion": "Extract a pageShell/panel helper to make new detail pages reuse the scaffold" }
+  ],
+  "summary": "A tidy, small vanilla-TS app whose real seams — shared card renderer, fetch cache, href/badge helpers — are in the right places, so bug fixes mostly land in one spot. The main editability costs are duplicated patterns (four memo singletons, page scaffolds, hash-scroll) and a data module that knows page-specific view models. Removing or adding a whole resource type is a handful of well-greppable edits across six-ish files, which is acceptable but not exemplary.",
+  "scenarios": [
+    { "change": "Remove the Abilities pages and every link", "files": ["app/src/main.ts", "app/src/pages/details.ts", "app/src/pages/pokemon.ts", "app/src/components.ts", "app/src/api.ts", "app/src/style.css"], "difficulty": 3, "notes": "Route and render function delete cleanly, but ability-specific bits also live in the Pokémon page's section, the shared card (hidden flag, abilityHref), api.ts helpers and one CSS rule — six files, all easy to grep" },
+    { "change": "Fix wrong sprite for species whose default Pokémon differs", "files": ["app/src/components.ts", "app/src/api.ts"], "difficulty": 5, "notes": "spriteUrl (api.ts:210) plus pokemonCard (components.ts:49) is the only sprite path; every card list on every page goes through pokemonCardList, so one fix covers all four lists" },
+    { "change": "Sort every Pokémon card list by name", "files": ["app/src/api.ts", "app/src/pages/home.ts"], "difficulty": 3, "notes": "Default ordering is baked into three separate sorters (speciesFromPokemonList, speciesFromEntries, getHomeData) plus home.ts's filter chain; alternatively centralise in pokemonCardList, but that hides intent" },
+    { "change": "Add an Items section (/items, /items/:name)", "files": ["app/src/main.ts", "app/src/pages/details.ts", "app/src/api.ts", "app/src/components.ts", "app/src/style.css"], "difficulty": 3, "notes": "apiFetch/cache, englishName, detailRow, pokemonCardList and the panel scaffold are all reusable; the page scaffold and route wiring are copy-paste, and details.ts grows further" },
+    { "change": "Change API base URL and caching rules", "files": ["app/src/api.ts", "app/server.mjs"], "difficulty": 3, "notes": "Base URL is one constant (plus server-side injection) and all media URLs derive from it; but caching rules span the apiFetch cache plus four hand-rolled memo singletons that each need the same edit" }
+  ]
+}
+```

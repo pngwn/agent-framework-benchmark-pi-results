@@ -1,0 +1,167 @@
+I've reviewed the app thoroughly. Here's my assessment for the **test quality** dimension.
+
+## What I found
+
+**The app contains zero tests of its own.** There is no test file anywhere in `app/` (confirmed by grep for vitest/jest/playwright/`describe(`/`.test.` patterns — the only hits are transitive entries inside `package-lock.json`), no `test` script in `app/package.json:6-10` (only `dev`, `build`, `start`), and no `devDependencies` at all, so no runner is even installed. `app/vite.config.ts:1-6` carries no test configuration.
+
+This is a clear miss against current framework practice: Solid's official testing guide (docs.solidjs.com/guides/testing) recommends vitest + jsdom + `@solidjs/testing-library` with a `test` script — a five-minute setup. Worse, the agent built its own safety net out from under itself: the architecture is *unusually* testable. `app/src/lib/format.ts:1-11` is a set of pure functions, and `app/src/lib/server/pokeapi.ts` is a dependency-free module whose only side effect is `global.fetch` (line 37) — it needs no mocks beyond a stubbed fetch, and no Solid primitives at all. Yet ~300 LOC of the riskiest logic in the app lives there with no pin.
+
+## What that lets through
+
+Reading the riskiest paths, several latent behaviours are guarded only by the harness's Playwright suite, and some not even by that:
+
+- **Filtering/pagination** (`pokeapi.ts:163-186`): the 48-per-page slice, three stacked filters, and the `Math.min(Math.max(...))` page clamp at line 180 that silently rewrites `?page=999` to the last page. Any refactor of this block has no fast feedback.
+- **Species↔Pokémon mapping** (`pokeapi.ts:118-131`): `cardsFor` dedupes by id and falls back to the *Pokémon* name when the species map lacks the id (line 122), then links to `/pokemon/<name>` — but routes resolve by *species* name (`pokeapi.ts:207-212`). Under exactly the data-drift scenario the overlay tests simulate, a mismatched fallback produces a dead link the acceptance suite wouldn't catch.
+- **Move-table sorting** (`MoveTable.tsx:28-45`): the direction flip, nulls-last-in-both-directions rule, and the tie-break at line 41 that is always ascending regardless of sort direction (a spec-adjacent wart). The suite exercises one column on one table only.
+- **URL-state sync** (`index.tsx:33-40, 66-79`): the debounce timer isn't cancelled on Back/Forward navigation, so a pending 150 ms timer can `replace` the URL right after a Back, defeating it; and the input-sync effect skips whenever a timer is pending. Nothing tests this interaction.
+- **Error paths** (`app.tsx:31`, `pokeapi.ts:40`): 404 → `null` → `NotFound` is handled (`routes/[...404].tsx`, `NotFound.tsx:8`), but a non-404 API failure throws from a server function with **no ErrorBoundary anywhere in `app/src`** — an API outage renders a hung Suspense. No test covers this because the suite never simulates errors.
+- **Language fallbacks** (`pokeapi.ts:72-78, 319-323, 342-345`): first-English vs. latest-English, short_effect → flavor → `—`. Subtle to get right, trivial to unit test, currently pinned only for a handful of fixture pages.
+
+```json
+{
+  "dimension": "tests",
+  "criteria": {
+    "coverage_of_risk": {
+      "score": 1,
+      "evidence": [
+        "app/package.json:6-10 — scripts are dev/build/start only; no test script, no devDependencies, no runner installed",
+        "app/src/lib/server/pokeapi.ts:163-186 — homeList filtering, 48/page slice and page clamp: the app's riskiest logic, entirely untested",
+        "app/src/components/MoveTable.tsx:28-45 — sort direction, nulls-last and tie-break comparator with no test"
+      ],
+      "rationale": "No tests exist at all, and the logic most likely to break on refactor (filtering, pagination, species mapping, sorting, language fallbacks) is precisely what's unguarded."
+    },
+    "behaviour_not_implementation": {
+      "score": 1,
+      "evidence": [
+        "app/src — zero *.test.* / *.spec.* files anywhere in the source tree (grep confirms only package-lock.json transitive matches)"
+      ],
+      "rationale": "There are no tests to classify; per the rubric, no tests scores 1."
+    },
+    "regression_power": {
+      "score": 1,
+      "evidence": [
+        "app/src/lib/server/pokeapi.ts:118-131 — cardsFor species-name fallback could emit dead /pokemon/ links under data drift with nothing failing",
+        "app/src/lib/server/pokeapi.ts:32-67 — TTL cache (404-caching, eviction-on-reject, sweep-every-500-writes) has no fake-timer coverage",
+        "app/src/routes/index.tsx:66-79 — pending debounce timer survives Back navigation and can replace the URL afterwards"
+      ],
+      "rationale": "Nothing in app/ would fail if any covered behaviour were broken; the only safety net is the harness's acceptance suite, which this dimension explicitly discounts."
+    },
+    "signal_to_noise": {
+      "score": 3,
+      "evidence": [
+        "app/package.json:6-10 — no test script or runner configured"
+      ],
+      "rationale": "No tests means no noise, but also no signal; the rubric assigns 3 when there are no tests."
+    }
+  },
+  "overall": 1,
+  "findings": [
+    {
+      "severity": "high",
+      "location": "app/package.json:6-10",
+      "issue": "No test infrastructure whatsoever: no test script, no devDependencies, no vitest config, and zero test files in the app.",
+      "suggestion": "Add the framework-recommended stack (vitest, jsdom, @solidjs/testing-library, @testing-library/jest-dom) with a `test` script and a vitest config using vite-plugin-solid."
+    },
+    {
+      "severity": "high",
+      "location": "app/src/lib/server/pokeapi.ts:163-186",
+      "issue": "homeList concentrates the app's riskiest logic — three stacked filters, humanized-name substring match, 48-per-page slicing, page clamping — with no unit tests; a refactor here is guarded only by slow e2e acceptance runs.",
+      "suggestion": "Unit-test homeList against a stubbed fetch: needle matching, type-in-either-slot, generation filter, page-1 reset, last-page partial slice, and empty results."
+    },
+    {
+      "severity": "high",
+      "location": "app/src/lib/server/pokeapi.ts:122-124",
+      "issue": "cardsFor falls back to the Pokémon name when the species map lacks the id, but cards link to /pokemon/<name> resolved by species name — under data drift this yields links to pages that 404.",
+      "suggestion": "Skip refs with no species entry (or resolve via the species endpoint), and add a unit test with a Pokémon reference absent from the species list."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/components/MoveTable.tsx:28-45",
+      "issue": "The sort comparator is subtle (direction flip, nulls last in both directions, numeric-vs-string compare) and the tie-break at line 41 is always ascending regardless of sort direction; only one column on one table is exercised by the acceptance suite.",
+      "suggestion": "Extract the comparator into a testable function and unit-test ascending/descending, nulls-last, and the tie-break on every column key."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/routes/index.tsx:33-40,66-79",
+      "issue": "URL-state sync is untested: a pending 150 ms debounce timer is not cancelled on Back/Forward, so it can replace the URL immediately after a Back navigation, and the input-sync effect deliberately skips while a timer is pending.",
+      "suggestion": "Add a component test driving the search box plus Back navigation, or cancel the timer whenever params change externally."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/app.tsx:31",
+      "issue": "No ErrorBoundary anywhere in app/src: a non-404 API failure throws from a server function and leaves Suspense hung with no user-facing error path (pokeapi.ts:40 throws on !res.ok).",
+      "suggestion": "Wrap route children in an ErrorBoundary with a retry link, and test it by stubbing fetch to reject."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/lib/server/pokeapi.ts:32-67",
+      "issue": "The TTL cache has untested semantics: 404s cached as null for 60 s, eviction of rejected promises, and a sweep that only runs every 500 writes.",
+      "suggestion": "Unit-test with fake timers that a 404 is cached, entries expire after TTL_MS, and rejections don't poison the cache."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/lib/server/pokeapi.ts:179-180",
+      "issue": "Out-of-range ?page values are silently clamped to the last page rather than surfaced; nothing pins this choice.",
+      "suggestion": "Add an assertion documenting the clamp behaviour (page=999 → last page) so a refactor doesn't accidentally change it to an error."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/lib/format.ts:1-11",
+      "issue": "Pure, high-leverage helpers (humanize, dexNumber, show, pageTitle) are untested; a change to capitalization or the em-dash rule would go unnoticed.",
+      "suggestion": "A handful of one-line vitest cases for humanize/dexNumber/show costs almost nothing and protects every page."
+    }
+  ],
+  "summary": "The app ships with zero tests of its own — no runner, no script, no files — despite Solid's officially documented vitest + @solidjs/testing-library stack and an architecture (pure helpers plus a fetch-only server module) that would make testing cheap. Consequently the riskiest ~300 LOC of filtering, pagination, species mapping, sorting and caching logic is guarded only by the harness's acceptance suite. Once that suite is no longer the sole safety net, refactors of the data layer have no fast, local feedback loop.",
+  "wroteTests": false,
+  "testCount": 0,
+  "valuableTests": [],
+  "lowValueTests": [],
+  "untested": [
+    {
+      "area": "Home filtering and pagination (app/src/lib/server/pokeapi.ts:163-186): search substring on humanized names, type-in-either-slot, generation filter, 48/page slicing, page clamping, empty-result count",
+      "risk": "high",
+      "likelyBug": "Off-by-one in the slice bounds, a filter applied after pagination instead of before, or a broken case-insensitive match would shift every list page; nothing in app/ would fail."
+    },
+    {
+      "area": "Species↔Pokémon mapping and alternate-form exclusion (app/src/lib/server/pokeapi.ts:114-131): dedupe by id, id < 10000 filter, species-name fallback for card links",
+      "risk": "high",
+      "likelyBug": "A fallback to the Pokémon name instead of the species name produces cards that link to 404 pages for exactly the data-drift cases the live overlay simulates; a swapped comparison operator would re-admit Mega forms into lists."
+    },
+    {
+      "area": "Non-404 error paths (app/src/app.tsx:31, app/src/lib/server/pokeapi.ts:40): thrown fetch errors from server functions",
+      "risk": "high",
+      "likelyBug": "An API outage or 500 leaves the page hung in Suspense with no error boundary or message; users see a blank main region and no way to recover."
+    },
+    {
+      "area": "Move-table sorting (app/src/components/MoveTable.tsx:28-45): ascending/descending flip, nulls last in both directions, numeric vs lexical compare, aria-sort management",
+      "risk": "medium",
+      "likelyBug": "A dropped direction factor or a nulls-first regression on descending sort would only be caught for the single column the acceptance suite clicks."
+    },
+    {
+      "area": "URL state synchronization (app/src/routes/index.tsx:33-79): search debounce vs. filter changes vs. Back/Forward, page reset on filter change, ?game round-trip on /pokemon/[name].tsx:57-62",
+      "risk": "medium",
+      "likelyBug": "A pending debounce timer can replace the URL right after a Back navigation, and the input can desync from the query string; nothing pins the 1-based page-omission rule or the ?game default fallback."
+    },
+    {
+      "area": "Language and text fallbacks (app/src/lib/server/pokeapi.ts:72-78,236-239,319-323,342-346): first-English name, latest-English flavor text, short_effect → flavor → '—' for moves/abilities",
+      "risk": "medium",
+      "likelyBug": "Swapping first-English for latest-English (or vice versa) or losing the whitespace-collapse would pass unnoticed except on the few pages the acceptance suite happens to check."
+    },
+    {
+      "area": "In-memory TTL cache (app/src/lib/server/pokeapi.ts:25-67): 60 s TTL, caching of 404 nulls, eviction of rejected promises, sweep cadence",
+      "risk": "medium",
+      "likelyBug": "A refactor could cache 404s indefinitely, serve stale data past the TTL, or leak a rejected promise that breaks all subsequent requests for the same URL; only a fake-timer test would catch it."
+    },
+    {
+      "area": "Not-found and malformed-input handling (app/src/routes/[...404].tsx, app/src/lib/server/pokeapi.ts:179-180): unknown names, out-of-range page numbers, names needing URL encoding via seg()",
+      "risk": "low",
+      "likelyBug": "The silent clamp of ?page=999 or a broken encodeURIComponent in seg() would let odd inputs render a wrong page or an unhandled fetch error."
+    },
+    {
+      "area": "Formatting helpers (app/src/lib/format.ts:1-11): humanize, dexNumber zero-padding, em-dash for missing values, page-title en dash",
+      "risk": "low",
+      "likelyBug": "A capitalization or padding regression (e.g. '#25' instead of '#0025') would render on every page with nothing failing in app/."
+    }
+  ]
+}
+```

@@ -1,0 +1,136 @@
+# Review: Pokédex (Hono + htmx)
+
+## Framework currency check
+
+Versions are the current stable releases as of today: `hono@4.13.14` (v5 is only at RC), `@hono/node-server@2.1.5`, `htmx.org@2.0.11` (`app/package.json:7-13`). None of the APIs in use — `jsxRenderer`, `ContextRenderer` module augmentation, `c.render`, `c.html`, `getCookie`/`setCookie`, `serveStatic`, `parseBody` — are deprecated in 4.x.
+
+## What's good
+
+This is a disciplined, docs-faithful implementation. The `ContextRenderer` augmentation (`app/src/views/layout.tsx:4-8`) is exactly the pattern the official hono-jsx skill documents for passing a title to the layout. The team builder uses plain form POSTs + 303 redirects (`app/src/views/team.tsx:13-33`, `app/src/index.tsx:91-117`) — the skill's stated default of "no client JavaScript required" — with the htmx budget spent only where interactivity is genuinely needed (search, sort, game select). `hx-sync="…:replace"` on the search input and the per-route `Vary: HX-Request, HX-History-Restore-Request` + `HX-Push-Url` handling (`app/src/index.tsx:19-33`) show real understanding of htmx's history/partial model, not cargo-culting. The `load*` + `Page` co-location pattern is applied uniformly across all four view modules. 404s return real 404 status via a shared `notFound` helper, `onError` exists, and there's no `dangerouslySetInnerHTML`/`raw()` anywhere — JSX escaping covers all the user-controlled interpolation.
+
+## What I'd ask about
+
+- The module-level SWR cache (`app/src/api.ts:9`) never evicts, and its keys are partly user-controlled (`/pokemon/:name`, `/moves/:name` feed arbitrary strings straight in at `app/src/index.tsx:39`, `app/src/index.tsx:78`). Behind the reverse proxy the spec assumes, that's an unbounded-memory vector from a crawler hitting random 404 names. A cap or a negative-result TTL is a ten-line fix, but I'd want it before merge.
+- The API boundary is `any` end-to-end (`api<T = any>`, `versionGroups(pokemon: any)`, `(a: any)` sorts in `app/src/views/pokemon.tsx:71-75,224-230`, `app/src/views/details.tsx:57,107`, `app/src/data.ts:49`). The types in `data.ts` are good, but nothing verifies the app's assumptions about API records; the first upstream data change fails silently rather than at a type check.
+- `serveStatic({ root: './dist' })` is cwd-dependent (`app/src/index.tsx:16`); fine under `npm start` from `app/`, brittle the first time someone runs the built file from elsewhere.
+- `POST /team/remove` writes `Set-Cookie` regardless of whether the request carried the cookie (`app/src/index.tsx:103-115`): `sameSite=Lax` protects the *request*, not the response, so a cross-site form can blank a visitor's team. Harmless data, but a `fetch`-gated mutation or hono's `csrf` middleware would close it.
+- No `Cache-Control` on dynamic responses; the fragment-only endpoints (`/pokemon/:name/moves`, `/moves-table`) are reachable by direct navigation and return a bare fragment a shared proxy could hand to a normal request.
+
+Nothing here is structural — every fix is local, and the loader/view seams make them easy to place. I'd merge after the cache bound and the `any` typing pass, and happily own this code.
+
+```json
+{
+  "dimension": "mergeability",
+  "criteria": {
+    "idiomatic": {
+      "score": 5,
+      "evidence": [
+        "app/src/views/layout.tsx:4-11 — ContextRenderer module augmentation with title prop, the exact pattern from the official hono-jsx docs",
+        "app/src/index.tsx:17,39-42 — c.render for pages, c.html for htmx fragments, split via the documented HX-Request header",
+        "app/src/views/team.tsx:13-33 — team mutations are plain form POSTs with 303 redirects, zero client JS",
+        "app/src/views/home.tsx:86-96 — hx-trigger 'input changed delay:200ms' + hx-sync 'closest form:replace' for the search; correct htmx 2 idioms",
+        "app/package.json:7-13 — pins current stable hono 4.13.14, @hono/node-server 2.1.5, htmx 2.0.11",
+        "app/src/views/pokemon.tsx:145-160 — sorting via per-table htmx fragment swaps with aria-sort, no hand-rolled client state"
+      ],
+      "rationale": "Reads like the framework's own examples: jsxRenderer layout, typed render props, form-POST-and-redirect mutations, and htmx used only where the UI is interactive, with proper partial/history-header handling."
+    },
+    "correctness_risks": {
+      "score": 3,
+      "evidence": [
+        "app/src/api.ts:9 — module-level cache Map never evicts; keys include user-supplied names",
+        "app/src/index.tsx:39,78 — /pokemon/:name and /moves/:name feed arbitrary strings into that cache, so 404 spam grows memory without bound behind the reverse proxy",
+        "app/src/index.tsx:60-68 — /pokemon/:name/moves returns a bare fragment on direct navigation, with no Cache-Control or Vary; a shared proxy could serve the fragment to a full-page request",
+        "app/src/api.ts:12-14 — fetch to the API has no timeout or AbortSignal; a hung API hangs every request touching that path",
+        "app/src/index.tsx:103-115 — POST /team/remove issues Set-Cookie even when sameSite=Lax meant the request carried no cookie, so a cross-site form can blank a team",
+        "app/src/api.ts:43 — stale-while-revalidate background failures are silently swallowed, leaving stale data with no log"
+      ],
+      "rationale": "No XSS (JSX escapes everything, no raw HTML), no race conditions (hx-sync dedupes search), real 404s everywhere; but the unbounded user-keyed cache plus the unguarded mutation endpoints are the kind of fragility tests don't catch."
+    },
+    "global_abstractions": {
+      "score": 4,
+      "evidence": [
+        "app/src/api.ts:4-9 — one thin API client with a single documented cache; the only hidden global, and its constants (FRESH_MS, API_BASE_URL) are buried in code",
+        "app/src/data.ts:63-76 — typesByPokemonId derives all Pokémon types from 18 type records instead of 1025 fetches; clever, cached, and contained",
+        "app/src/views/home.tsx:33 — loadHome co-locates query parsing (parseHomeQuery, homeUrl) with filtering, so filter state has one owner",
+        "app/src/team.ts:13-53 — team persistence (cookie), loading, and coverage math stay in one cohesive module rather than leaking across views",
+        "app/src/views/pokemon.tsx:78,71 — loadMoves/versionGroups are local to the moves view; no premature generic layer"
+      ],
+      "rationale": "Abstractions are few and earn their keep with clear boundaries (api / data domain / team feature / views). The only thing needing untangling later is the global cache's eviction policy and config buried as constants."
+    },
+    "readability": {
+      "score": 4,
+      "evidence": [
+        "app/src/index.tsx:15 — comment explains the htmx partial/history contract rather than restating code",
+        "app/src/api.ts:1-2, 32, 47 — doc comments on the SWR contract and each helper",
+        "app/src/views/home.tsx:19 — 'Canonical URL for a filter state' explains why homeUrl exists",
+        "app/src/views/pokemon.tsx:66-70 — sortRows and sortValue isolated and named for the missing-values-last rule",
+        "app/src/views/pokemon.tsx:71,224-230 and app/src/views/details.tsx:57,107 — pervasive `any` at the API boundary means a reader must consult raw data files to know record shapes"
+      ],
+      "rationale": "Uniform load*/Page pattern, good why-comments, small components; the `any`-typed API surface is the only real tax on navigating the data layer."
+    },
+    "review_cost": {
+      "score": 4,
+      "evidence": [
+        "app/src/api.ts:9 — one concrete change requested (cache bound/eviction) before approving",
+        "app/src/index.tsx:16 — serveStatic root './dist' should be resolved against the module, not cwd",
+        "app/src/api.ts:12 — add a fetch timeout",
+        "app/src/views/pokemon.tsx:71,224-230 — replace `any` with light API record types",
+        "app/src/team.ts:25-33 — add `secure: true` since production sits behind a TLS proxy"
+      ],
+      "rationale": "Approve after one round of small, local fixes; nothing requires moving seams or renaming across files."
+    }
+  },
+  "overall": 4,
+  "findings": [
+    {
+      "severity": "medium",
+      "location": "app/src/api.ts:9",
+      "issue": "Module-level SWR cache has no eviction and is keyed partly by user-controlled strings (every /pokemon/:name, /moves/:name request inserts an entry, including 404s), so memory grows without bound under a crawler or hostile traffic.",
+      "suggestion": "Cap the Map (LRU) or at least don't cache null results for unknown user-supplied names; add a small negative-TTL instead."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/index.tsx:60-68",
+      "issue": "Fragment-only endpoints (/pokemon/:name/moves, /moves-table) are reachable by direct navigation and return bare HTML with no Cache-Control, so a shared reverse proxy can cache a fragment and serve it to a full-page request; the Vary guard exists only on '/'.",
+      "suggestion": "Send Cache-Control: private (or no-store) on all dynamic responses, and consider a full-page fallback or redirect for non-HX-Request requests to the fragment routes."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/index.tsx:103-115",
+      "issue": "POST /team/remove (and /team/add) overwrite the team cookie even when sameSite=Lax meant the request carried no cookie, so a cross-site form can silently blank or alter a visitor's team.",
+      "suggestion": "Only save when the incoming request carried the cookie, or register hono's csrf middleware on the /team/* POST routes."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/api.ts:12",
+      "issue": "fetch() to the API has no timeout or AbortSignal; a hung upstream stalls every request touching that path with no recovery.",
+      "suggestion": "Wrap fetch in AbortSignal.timeout() (Node 24 supports it) and let the error surface to onError."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/index.tsx:16",
+      "issue": "serveStatic root './dist' is resolved against process.cwd(), so the production server breaks if started from any directory other than app/.",
+      "suggestion": "Derive an absolute path from import.meta.url (or process.cwd() fallback) so `node dist/index.js` works from anywhere."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/views/pokemon.tsx:71",
+      "issue": "The API boundary is `any` throughout (versionGroups(pokemon: any), (a: any) sorts, api<T = any>), so the app's assumptions about API records are untyped and upstream data changes fail silently.",
+      "suggestion": "Add minimal interfaces for the records actually consumed (species, pokemon, move, type) and type api<T> at each call site."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/team.ts:25-33",
+      "issue": "Team cookie is set without `secure: true`; production sits behind a TLS-terminating proxy per the spec.",
+      "suggestion": "Add `secure: true` to the setCookie options."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/index.tsx:31",
+      "issue": "HX-Push-Url fires on every debounced keystroke of the search box, pushing a history entry per intermediate query, making the back button walk through every partial search.",
+      "suggestion": "Return HX-Replace-Url while typing and only push on commit (select changes, pagination), or throttle pushes."
+    }
+  ],
+  "summary": "A clean, current-stable Hono/htmx implementation that follows the official jsxRenderer, form-POST, and htmx-partial patterns closely, with excellent loader/view organization and real 404/error handling. The main pre-merge asks are bounding the user-keyed SWR cache and adding Cache-Control to fragment responses, both small local fixes. Type the API boundary and this is code a team would be glad to inherit."
+}
+```

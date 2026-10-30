@@ -1,0 +1,129 @@
+I've reviewed the app thoroughly, checking the framework's current stable-release APIs (TanStack Start 1.169/1.170 stable: `.validator()` canonical, Vite 8 required, srvx prod-server pattern, `ToOptions.hash` function form) against the code.
+
+```json
+{
+  "dimension": "mergeability",
+  "criteria": {
+    "idiomatic": {
+      "score": 5,
+      "evidence": [
+        "app/src/routes/pokemon.$name.tsx:14-24 — validateSearch + loaderDeps for the `game` query param, then a createServerFn loader that throws notFound(); textbook current Start",
+        "app/src/server/functions.ts:75-78 — createServerFn({method:'GET'}).validator(...) uses the canonical `.validator()` API (inputValidator was removed in 1.169), matching the stable-release docs",
+        "app/src/routes/__root.tsx:5-25 — root route renders <html>/<head>/<HeadContent/>/<Scripts/> with a head() meta/links block, exactly the documented Start shell",
+        "app/server.mjs:8-19 — srvx fetch handler wrapping dist/server/server.js plus static middleware; mirrors the framework's own node-server/e2e examples for the Vite 8 build output",
+        "app/src/routes/index.tsx:20-30 — URL-as-state via validateSearch + Route.useNavigate, with route-level staleTime rather than hand-rolled fetching",
+        "app/src/router.tsx:7-10 — scrollRestoration and defaultPreload:'intent' set at the router, not per-route"
+      ],
+      "rationale": "Routing, data loading (server functions in loaders), head management and the production server all match the current stable framework's documented patterns, with no deprecated APIs (validator, Vite 8, HeadContent/Scripts). The only reach into internals is the `_notFound` peek in the root head."
+    },
+    "correctness_risks": {
+      "score": 4,
+      "evidence": [
+        "app/src/routes/team.tsx:44 — `void router.invalidate()` after `remove()`: the Type coverage table (app/src/server/functions.ts:130-165, computed server-side from the cookie) is briefly stale until the refetch lands; cards update instantly but coverage does not",
+        "app/src/lib/format.ts:23 + app/src/components/PokemonCard.tsx:19-23 — sprite URLs are constructed from a hard-coded pattern instead of the API's `sprites.front_default`, so species whose sprite set is null (spec says unshipped sets are null) render a broken image rather than a placeholder",
+        "app/src/routes/team.tsx:24 — `data.members.filter(m => team.includes(m.name))` merges a server snapshot with client state; a cookie name the API no longer has yields a count of `n of 6` with fewer cards",
+        "app/src/server/pokeapi.ts:20-37 — request-level memo cache shares in-flight promises, evicts failures, TTLs entries, and caps size; concurrent duplicate fetches are handled correctly",
+        "app/src/routes/index.tsx:32-48 — debounce/URL sync uses a lastPushed ref plus two effects; correct but a second writer of `q` would silently desync input and URL",
+        "app/src/routes/__root.tsx:14-19 — no errorComponent/onCatch anywhere, so an API outage surfaces the framework's generic error page instead of an app one"
+      ],
+      "rationale": "No serious bugs: 404 handling, race-free caching, hash preservation on navigation (hash as an updater function is valid ToOptions) and hydration-safe team state are all handled. The remaining issues are minor: a transient stale coverage table, constructed sprite URLs, and missing error boundaries."
+    },
+    "global_abstractions": {
+      "score": 4,
+      "evidence": [
+        "app/src/server/pokeapi.ts:1-37 — one server-only data module with a single documented TTL cache; clean server/client boundary (grep confirms only functions.ts imports it)",
+        "app/src/server/functions.ts:128-165 — getTeamPage reaches into the team cookie alongside app/src/server/functions.ts:41-44 (getConfig), so team truth lives in a cookie mirrored in React state (TeamProvider) and reconciled per-page; locally fine, globally a second source of truth to keep in sync",
+        "app/src/lib/team.ts:5-26 — cookie codec is pure, validated and shared by both server and client without leaking DOM access (document guards at :34, :41)",
+        "app/src/server/functions.ts:137-139 — typeList() called twice in one Promise.all, relying on memoisation to avoid a double fetch",
+        "app/src/lib/config.ts:3-5 — a lone hook useMediaBase() living in a file named config.ts blurs the lib/component boundary"
+      ],
+      "rationale": "Boundaries are unusually clean for a small app (server data layer isolated, tiny components, pure helpers), and the cache is documented rather than accidental. The team's dual cookie/context source of truth and a couple of small layering nits keep it from a 5."
+    },
+    "readability": {
+      "score": 4,
+      "evidence": [
+        "app/src/server/pokeapi.ts:23-25 — 'Memoizes an async computation for TTL_MS. Concurrent callers share one promise; failures are evicted immediately' — comments explain why, throughout the codebase",
+        "app/src/lib/team.ts:4-5 — the cookie-as-team-storage rationale is documented up front",
+        "app/src/components/Section.tsx:3-9 — small, single-purpose components (Section, TypeBadge, TeamButton) with consistent naming",
+        "app/src/routes/index.tsx:32-48 — the lastPushed-ref/effect dance is the one spot a new teammate must read carefully before touching search filters",
+        "app/src/lib/config.ts:1-5 — filename suggests configuration but contains one UI hook"
+      ],
+      "rationale": "Names, file layout (routes/components/lib/server) and function sizes are consistent and comment-on-why is the norm. The only rough edges are the subtle search-sync effect pair and a misleadingly named lib file."
+    },
+    "review_cost": {
+      "score": 4,
+      "evidence": [
+        "app/src/routes/team.tsx:44-46 — invalidate-then-hope refetch is the one place I'd ask for a change (compute coverage client-side or await the refetch)",
+        "app/src/components/PokemonCard.tsx:19-23 — second ask: use the API's sprite URL with a null fallback",
+        "app/src/routes/__root.tsx:15 — third ask: drop the private `_notFound` field access",
+        "app/src/server/functions.ts:137-139, app/src/lib/config.ts:3 — remaining items are nits (duplicate typeList call, file naming)"
+      ],
+      "rationale": "I'd approve after one small round: nothing structural, and three concrete asks plus nits. Every change is local and low-risk."
+    }
+  },
+  "overall": 4,
+  "findings": [
+    {
+      "severity": "medium",
+      "location": "app/src/routes/team.tsx:44",
+      "issue": "Removing a member updates cards and the count immediately (from TeamProvider state) but the Type coverage table stays stale until router.invalidate() refetches getTeamPage from the cookie; team truth is split between the cookie, the provider, and the server snapshot.",
+      "suggestion": "Compute the coverage table on the client from data.members' types plus the (already fetched) damage relations, or make the remove handler await the invalidation; single source of truth for the team."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/routes/__root.tsx:15",
+      "issue": "The root head() reads `m._notFound`, a private/internal router match field, to title not-found documents.",
+      "suggestion": "Rely on the public `m.status === 'notFound'` only, or let the notFound component set its own title via a route head."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/lib/format.ts:23",
+      "issue": "Card sprite URLs are constructed from a hard-coded pattern instead of the API-provided `sprites.front_default`, which the spec says is null for unshipped sprite sets.",
+      "suggestion": "Use the API's sprite URL with the pattern only as a fallback, and render a placeholder when it is null."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/server/functions.ts:137-139",
+      "issue": "typeList() is invoked twice inside the same Promise.all in getTeamPage, relying on the memo cache to avoid duplicate work.",
+      "suggestion": "Call it once and derive both the label list and the details list from the result."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/routes/__root.tsx:30",
+      "issue": "No errorComponent/onCatch anywhere; an upstream API failure surfaces the framework's default error page with no route back into the app.",
+      "suggestion": "Add a defaultErrorComponent on the router or root route with a retry link."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/routes/index.tsx:32-48",
+      "issue": "The search input is synced to the URL via a lastPushed ref plus two effects; correct but fragile if a second effect ever writes search.q.",
+      "suggestion": "Document the invariant next to the ref, or collapse to one effect keyed on the debounced value."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/server/pokeapi.ts:33-35",
+      "issue": "Cache eviction only prunes expired entries and only when size exceeds 5000, so a burst of unexpired keys can grow the map (bounded in practice by the API's fixed size).",
+      "suggestion": "Also cap by inserting order (e.g. FIFO beyond a hard limit) or evict the oldest entry regardless of expiry."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/lib/config.ts:3",
+      "issue": "A file named config.ts in lib/ contains a single React hook (useMediaBase), which misleads readers looking for configuration.",
+      "suggestion": "Rename to useMediaBase.ts (or fold it into an existing hooks/components location)."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/server/functions.ts:41-47",
+      "issue": "getHomeData ships the entire 1026-species index (plus types and generations) to the client in the dehydrated loader payload; a deliberate but undocumented trade-off.",
+      "suggestion": "Add a comment recording the payload/latency trade-off and revisit if the dataset grows."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/routeTree.gen.ts:1",
+      "issue": "Generated route tree is committed, so feature PRs carry ~60 lines of generated diff noise (visible in CHANGES.diff).",
+      "suggestion": "Add src/routeTree.gen.ts to .gitignore since the Vite plugin regenerates it on dev/build."
+    }
+  ],
+  "summary": "This is a genuinely idiomatic TanStack Start app on the current stable APIs: file-based routing with validateSearch/loaderDeps, server functions using the canonical `.validator()`, notFound() in loaders, a proper root shell, and an srvx production server that matches the framework's own examples. Server/client boundaries are clean and the TTL cache is well engineered, with no serious correctness bugs — only a stale coverage table on team edits, constructed sprite URLs, and a peek at a private router field. I'd merge after one small round of changes."
+}
+```

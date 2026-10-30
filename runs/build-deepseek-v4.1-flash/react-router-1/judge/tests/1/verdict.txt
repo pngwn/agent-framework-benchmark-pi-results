@@ -1,0 +1,135 @@
+## Review — Test quality
+
+**Ground truth:** `app/` contains **zero tests** and zero test infrastructure — no test script in `app/package.json:6-8` (only `build`/`start`), no runner in devDependencies (`app/package.json:15-22`), and the measured facts confirm `tests: {files: 0, cases: 0, runner: []}`. So `wroteTests` is false, and the value of this review is the map of what's unprotected.
+
+**Framework context (verified):** React Router 8 (the app pins `react-router@8.5.1`, `app/package.json:10`) has a first-class testing story: the official guide (reactrouter.com/start/framework/testing) documents `createRoutesStub` for rendering route components with loader data in isolation, and loaders are plain async functions that can be unit-tested directly. All the app's logic lives in exactly those two shapes — loaders (`app/app/routes/home.tsx:10-12`) and pure helpers (`app/app/lib/format.ts`) — so there was no tooling barrier at all.
+
+**Scoring against the rubric**
+
+- `coverage_of_risk` → 1: nothing is covered. The codebase is dense with exactly the logic the rubric flags as high-risk: filtering/pagination, URL state, data transformation, and error paths, all enumerated below with locations.
+- `behaviour_not_implementation` → 1: no tests to classify.
+- `regression_power` → 1: any refactor of the data layer or sort logic lands unguarded; the only safety net is the acceptance suite the agent doesn't own.
+- `signal_to_noise` → 3: the rubric's anchor for "no tests".
+
+What's particularly frustrating is how *cheap* the missing tests would have been: `format.ts` is 38 lines of pure, dependency-free functions with spec-defined edge cases, and `humanize`/`englishFlavor`/`dexNumber` encode named spec definitions. The most fragile non-pure logic (sprite fallback boundary, move-group dedup, alternate-form exclusion) would take one small fixture each.
+
+```json
+{
+  "dimension": "tests",
+  "criteria": {
+    "coverage_of_risk": {
+      "score": 1,
+      "evidence": [
+        "app/package.json:6-8 — no test script, no test runner anywhere in the app",
+        "app/app/lib/format.ts:1-37 — untested pure spec helpers (humanize, dexNumber padStart, englishFlavor, idFromUrl) covering display-name and flavor-text rules",
+        "app/app/routes/home.tsx:81-96 — untested search/type/generation filtering and pagination clamping/slicing",
+        "app/app/routes/pokemon.tsx:203-233 — untested multi-column sort with missing-last and aria-sort semantics"
+      ],
+      "rationale": "No tests exist, and the highest-risk logic (URL-driven filters, pagination math, sorting with missing values, alternate-form exclusion) is entirely unguarded."
+    },
+    "behaviour_not_implementation": {
+      "score": 1,
+      "evidence": [
+        "app/app — 0 test files across all 12 source files (measured facts: tests.files = 0)"
+      ],
+      "rationale": "There are no tests, so there is nothing to classify as behavioural or implementation-focused."
+    },
+    "regression_power": {
+      "score": 1,
+      "evidence": [
+        "app/app/lib/api.server.ts:109-118 — cardSprite's `id <= 1025` magic boundary against live-data overlays would regress silently",
+        "app/app/lib/api.server.ts:280-300 — move-group dedup key `${method}:${moveName}:${level}` and default-game selection have no safety net",
+        "app/app/routes/home.tsx:88-93 — page clamping logic (Math.min/Math.ceil) untested"
+      ],
+      "rationale": "Every behaviour change passes; nothing in app/ can fail because nothing in app/ asserts anything."
+    },
+    "signal_to_noise": {
+      "score": 3,
+      "evidence": [
+        "app/app — zero tests, zero low-value tests (vacuously lean)"
+      ],
+      "rationale": "Rubric anchors 'no tests' at 3: there is no noise, but also no signal."
+    }
+  },
+  "overall": 1,
+  "findings": [
+    {
+      "severity": "high",
+      "location": "app/package.json:6-8",
+      "issue": "The app ships with zero tests and no test infrastructure (no runner, no test script, no fixtures), despite React Router 8 providing an official testing path via createRoutesStub and loaders being plain async functions.",
+      "suggestion": "Add a minimal harness: vitest for pure units, @testing-library/react + createRoutesStub for route components with loaderData; wire an `npm test` script in app/package.json."
+    },
+    {
+      "severity": "high",
+      "location": "app/app/lib/format.ts:23-33",
+      "issue": "englishFlavor encodes the spec's 'latest English flavor text with whitespace collapsed' rule — a first-vs-last entry flip or dropping the \\f collapse would only be caught by the external acceptance suite.",
+      "suggestion": "Unit-test against a fixture with mixed-language and multi-whitespace entries, asserting the last en entry wins and runs of \\n/\\f collapse to one space."
+    },
+    {
+      "severity": "high",
+      "location": "app/app/routes/home.tsx:81-96",
+      "issue": "The entire filter pipeline is untested: case-insensitive substring match against humanized names, type/generation keep-predicates, 48-per-page slicing, and page clamping when filters shrink the result set.",
+      "suggestion": "Behavioural tests via createRoutesStub: seed 60 species, assert counts, 'Page n of m', page-clamp on ?page=99, and that filtered URLs like /?type=fire&generation=generation-i render the right cards."
+    },
+    {
+      "severity": "high",
+      "location": "app/app/routes/pokemon.tsx:203-233",
+      "issue": "MovesTable sorting is the most intricate UI logic in the app (missing-values-last in both directions, moveLabel tie-break, direction flip, aria-sort on exactly one header) and has no tests.",
+      "suggestion": "Component tests that click a header twice with rows containing null power/accuracy, asserting order, missing-last in both directions, and aria-sort values."
+    },
+    {
+      "severity": "high",
+      "location": "app/app/lib/api.server.ts:129-160",
+      "issue": "cardsFromRefs silently drops alternate forms (id > 10000), maps variety refs to species via byId (deoxys-normal → deoxys), dedups by id, and sorts by dex number — the exact 'type/move/ability data refers to Pokémon, not species' spec subtlety — all untested.",
+      "suggestion": "Unit-test getPokemonPage/getMovePage against a small API fixture including a >10000 form ref and a shared-species variety, asserting the rendered card links to /pokemon/deoxys."
+    },
+    {
+      "severity": "high",
+      "location": "app/app/lib/api.server.ts:109-118",
+      "issue": "cardSprite hardcodes `id <= 1025` as the 'API guarantees this pattern' boundary and falls back to fetching the pokemon record above it; this is precisely the code the live-data overlay (one extra Pokémon) stresses, and a regression here produces broken images with no test failing.",
+      "suggestion": "Test with ids 1025 (pattern URL) and 1026 (record-fetched sprite), including the null-sprite fallback to official artwork."
+    },
+    {
+      "severity": "medium",
+      "location": "app/app/routes/home.tsx:30-56",
+      "issue": "URL-state sync between local search state and the ?q param (including the activeElement guard for back/forward navigation, and deleting `page` on every filter change at home.tsx:41) is untested and is the classic source of stale-state and double-history-entry bugs.",
+      "suggestion": "Test that typing updates the URL without a page entry, that browser back restores the previous query in the input, and that changing a select resets page."
+    },
+    {
+      "severity": "medium",
+      "location": "app/app/routes/pokemon.tsx:12-16",
+      "issue": "Not-found handling returns a sentinel {notFound: true} (HTTP 200, no 404 status) and there is no ErrorBoundary anywhere, so a non-404 API failure (api.server.ts:37-39 throws) yields the framework's raw error page — all error and not-found paths are untested.",
+      "suggestion": "Add route-level ErrorBoundary export and tests for: unknown name → 'Not found' + link home; API 500 → friendly error, not a stack."
+    },
+    {
+      "severity": "medium",
+      "location": "app/app/lib/api.server.ts:30-48",
+      "issue": "The promise cache stores successful results forever, including null for 404s, and only evicts on rejection; caching semantics for a 'live service whose data can change' are untested.",
+      "suggestion": "A test around fetchJson asserting a 404 is cached as null and a thrown failure is evicted so a retry can succeed; document the invalidation policy."
+    },
+    {
+      "severity": "medium",
+      "location": "app/app/lib/api.server.ts:104-133",
+      "issue": "getPokemonPage's move-group construction (groupMap at api.server.ts:268-285, dedup key, latest-group default from a sort by order, ?game= validation) determines the whole Moves section and is untested.",
+      "suggestion": "Fixture-based tests asserting the default game is the highest-order group the Pokémon has moves in, that ?game=<unknown> falls back to the default, and that the Level Up table sorts by level then name."
+    }
+  ],
+  "summary": "The app contains no tests and no test infrastructure whatsoever, despite pinning React Router 8.5.1 which ships an official createRoutesStub-based testing guide and plain-function loaders that are trivially unit-testable. The unguarded surface is large and genuinely risky: URL-driven filtering/pagination, multi-column sortable tables with missing-value semantics, alternate-form/species mapping, a hardcoded sprite-ID boundary that the live-data overlay directly stresses, and entirely untested error and not-found paths. I'd require at least unit coverage of format.ts and behaviour-level route tests via createRoutesStub before merging.",
+  "wroteTests": false,
+  "testCount": 0,
+  "valuableTests": [],
+  "lowValueTests": [],
+  "untested": [
+    { "area": "Pure display helpers (humanize, dexNumber zero-padding, englishName/englishGenus/englishFlavor latest-entry + whitespace collapse, valueOrDash, idFromUrl) — app/app/lib/format.ts", "risk": "high", "likelyBug": "Flavor text picking the first instead of the last English entry, \\f/\\n runs not collapsed, dex number off-by-one in padding, humanize mishandling empty segments — all spec-defined details that would slip through any refactor" },
+    { "area": "Home filtering, pagination math and URL state (q/type/generation/page interplay, page clamping, page reset on filter change, back/forward input sync) — app/app/routes/home.tsx", "risk": "high", "likelyBug": "Off-by-one in slice bounds, clamping lost so ?page=99 shows an empty list, filters failing to reset page, stale search input after browser back" },
+    { "area": "Moves table sorting (missing-last in both directions, tie-break, direction flip, aria-sort on exactly one column) — app/app/routes/pokemon.tsx", "risk": "high", "likelyBug": "Descending sort putting nulls first, tie-break flipping with direction, aria-sort left stale on other headers — accessibility-visible and easily broken by a sort rewrite" },
+    { "area": "Alternate-form exclusion and variety→species mapping in card building (id > 10000 dropped, byId lookup, dedup, dex sort) — app/app/lib/api.server.ts", "risk": "high", "likelyBug": "Mega/alternate forms leaking into 'Learned by'/'Pokémon of type' lists, or deoxys-normal linking to /pokemon/deoxys-normal (404) instead of the species" },
+    { "area": "Sprite URL fallback boundary (hardcoded id <= 1025, null-sprite fallback chain) — app/app/lib/api.server.ts:109-118", "risk": "high", "likelyBug": "Broken images for species added by a live-data update if someone removes the fallback or moves the magic number; also wrong fallback order after refactor" },
+    { "area": "Move-section data pipeline (groupMap construction, dedup key, default version group by order, ?game= param validation, method ordering) — app/app/lib/api.server.ts", "risk": "high", "likelyBug": "Wrong default game selected (order ties, off-by-one on last element), unknown ?game= rendering empty tables, duplicate rows or dropped levels after dedup changes" },
+    { "area": "Error and not-found paths (sentinel {notFound:true} instead of 404 status, no ErrorBoundary for API failures) — app/app/routes/pokemon.tsx, app/app/routes/type-detail.tsx, app/app/routes/move.tsx, app/app/routes/ability.tsx", "risk": "medium", "likelyBug": "API 500 or malformed payload showing the framework's raw error dump to users; typo'd URL getting HTTP 200 instead of 404 and confusing crawlers/proxies" },
+    { "area": "Type/generation index construction (typesByPokemon from type records, slot sorting, generationBySpecies, 18-type filtering) — app/app/lib/api.server.ts:62-100", "risk": "medium", "likelyBug": "Types in wrong slot order on cards, a species missing its generation so the generation filter silently drops it, stellar/shadow/unknown leaking into the select" },
+    { "area": "Runtime promise cache semantics (null-404 cached forever, rejection eviction, no invalidation) — app/app/lib/api.server.ts:30-48", "risk": "medium", "likelyBug": "A transient API failure being cached, or the overlay test data being invisible until server restart, with no test to pin intended behaviour" },
+    { "area": "Damage-relations mapping (six relationTerms fields, None vs links) — app/app/lib/api.server.ts relationTerms/getTypePage", "risk": "low", "likelyBug": "A field name typo swapping 'Weak to' and 'Resists' relations rendering plausible-but-wrong data" }
+  ]
+}
+```

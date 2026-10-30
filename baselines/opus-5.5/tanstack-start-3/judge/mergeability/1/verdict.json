@@ -1,0 +1,115 @@
+{
+  "dimension": "mergeability",
+  "criteria": {
+    "idiomatic": {
+      "score": 5,
+      "evidence": [
+        "app/src/routes/pokemon.$name.tsx:13-25 — createFileRoute with validateSearch, loaderDeps, loader→server-fn, head, notFoundComponent: textbook stable-API layout",
+        "app/src/server/functions.ts:53-55 — createServerFn({ method: 'GET' }).validator(...).handler(...) uses the current post-RC validator API (not removed .inputValidator)",
+        "app/src/routes/__root.tsx:10-32 — HeadContent/Scripts + route head() meta/links, matching the document-head-management guide",
+        "app/src/router.tsx:7-13 — createRouter with scrollRestoration, defaultPreload: 'intent', defaultNotFoundComponent, Register type augmentation",
+        "app/server.mjs:9-23 — srvx + staticMiddleware over dist/client with fetch handler, same pattern as TanStack's own examples ('srvx --prod -s ../client dist/server/server.js')",
+        "app/vite.config.ts:1-6 — tanstackStart() plugin from @tanstack/react-start/plugin/vite on Vite 8, per the stable-release migration guide",
+        "app/src/routes/pokemon.$name.tsx:131 — navigate({ hash: (prev) => prev ?? '' }) uses the documented hash function-updater to keep #moves"
+      ],
+      "rationale": "This reads like the framework's own examples: file-based routes, server functions with validators called from loaders, head/meta management, notFound, and a srvx production server identical to the official pattern. Versions match the current stable release (react-start 1.169.4, react-router 1.170.46, Vite 8)."
+    },
+    "correctness_risks": {
+      "score": 4,
+      "evidence": [
+        "app/src/server/pokeapi.ts:14-36 — memo cache shares in-flight promises, evicts on rejection, TTL+size cleanup; failures retried, so no poisoned cache",
+        "app/src/server/pokeapi.ts:47-55 — 404s mapped to a distinct NotFoundError and converted to null via orNull, then loaders throw notFound() (functions.ts:96, 122, 141)",
+        "app/src/routes/index.tsx:56-66 — debounce timer cleared on re-render/unmount, and URL↔state sync handles back/forward without loops",
+        "app/src/components/MoveTable.tsx:58-70 — missing values sort last in both directions, with stable tiebreak on original index; sort state starts null so no SSR/hydration mismatch",
+        "app/src/server/functions.ts:60-66 — one fetch per learned move per Pokémon page (hundreds of parallel cold fetches for a big game); memoized for 60s but a cold-load latency cliff",
+        "app/package.json:7 — build is 'vite build' only, no tsc --noEmit step, so the strict tsconfig is never enforced anywhere",
+        "app/src/components/MoveTable.tsx:101 — row key `${row.move}-${row.level}` could collide if the API ever lists a move twice for one method/game at the same level"
+      ],
+      "rationale": "No serious bugs found after a careful read: error/404 paths are handled, the cache is failure-safe, and there are no listener leaks or hydration hazards. What remains is fragility risk — cold-cache fetch fan-out, an unenforced typecheck, and subtle-but-correct search/URL sync."
+    },
+    "global_abstractions": {
+      "score": 5,
+      "evidence": [
+        "app/src/server/pokeapi.ts — one cohesive data layer: raw API shapes, memoized fetch, and view-model builders; everything server-side flows through it with a single purpose",
+        "app/src/lib/types.ts:1-46 — shared view-model types define the server→client contract explicitly, no leaky raw-API types in components",
+        "app/src/server/functions.ts — server functions compose view models only; routes and components stay thin and free of API knowledge",
+        "app/src/lib/config.ts:4-7 — the one piece of server config that reaches the client (mediaBase) crosses the boundary through the root loader, not an import",
+        "app/src/lib/format.ts — small pure helpers (humanize, dexNumber, display) with no hidden state, used identically on both sides"
+      ],
+      "rationale": "Abstractions are few and each earns its keep: a data layer, a view-model contract, and pure formatters, with server/client boundaries enforced by server functions. The only shared mutable state is the deliberate, documented TTL cache. No utils grab-bag, no god component."
+    },
+    "readability": {
+      "score": 5,
+      "evidence": [
+        "app/src/routes/index.tsx:40-48 — comments explain *why* ('the URL catches up after a short debounce') rather than restating code",
+        "app/src/server/pokeapi.ts:1-20 — header comment states the caching contract; memo() documents promise sharing and failure eviction",
+        "app/src/server/functions.ts:47 — inline comment explains the version-group ordering strategy",
+        "app/src/server/pokeapi.ts:64-66 — toCards documents the alternate-forms (>10000) exclusion rule inline",
+        "file layout itself — routes/, components/, lib/, server/ with one concern per file; longest file (pokeapi.ts) is sectioned with clear banner comments"
+      ],
+      "rationale": "Consistent naming, small focused files, and why-comments at exactly the tricky spots (cache semantics, debounce, form exclusion). A new teammate can navigate this in minutes."
+    },
+    "review_cost": {
+      "score": 4,
+      "evidence": [
+        "app/src/routes/__root.tsx:18 — reads the underscore-prefixed internal match flag m._notFound; the public m.status === 'notFound' check alone suffices",
+        "app/src/routes/pokemon.$name.tsx:24, moves.$name.tsx:15, abilities.$name.tsx:13, types.$name.tsx:12 — per-route notFoundComponent: NotFound duplicates the router-level defaultNotFoundComponent already set in app/src/router.tsx:11",
+        "app/package.json:7 — I'd ask for a typecheck script wired into build or CI",
+        "app/src/routes/index.tsx:75 — the derived requestedPage (query vs search.q comparison) needs a comment or test before I'd trust future edits to it"
+      ],
+      "rationale": "I'd approve after one round of nits: drop the internal-flag read, de-duplicate the notFound components, and add a typecheck step. Nothing structural needs rework."
+    }
+  },
+  "overall": 4,
+  "findings": [
+    {
+      "severity": "medium",
+      "location": "app/package.json:7",
+      "issue": "npm run build runs only vite build; the strict tsconfig (app/tsconfig.json) is never type-checked by any script, so type drift in server functions and routes ships silently",
+      "suggestion": "Add \"typecheck\": \"tsc --noEmit\" and run it in build or CI"
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/server/functions.ts:60-66",
+      "issue": "Pokémon page fetches one full move document per learned move of the selected game (hundreds of parallel cold requests, e.g. scarlet-violet on a move-heavy species)",
+      "suggestion": "Acceptable against a local API with the 60s memo, but consider a per-(pokemon, game) memoized table or noting the cold-load latency budget in the module comment"
+    },
+    {
+      "severity": "low",
+      "location": "app/src/routes/__root.tsx:18",
+      "issue": "Head callback reads the internal, underscore-prefixed m._notFound flag in addition to the public m.status === 'notFound'",
+      "suggestion": "Rely on the public status check only; the status field covers notFound matches"
+    },
+    {
+      "severity": "low",
+      "location": "app/src/routes/index.tsx:56-75",
+      "issue": "Search/URL synchronization via lastPushed ref plus the derived requestedPage is a subtle three-way interplay that future edits could easily break (back/forward, debounce timing, page reset)",
+      "suggestion": "Add a comment explaining the invariant (query is the source of truth for rendering, URL lags ≤150ms) or a small unit test for the sync behavior"
+    },
+    {
+      "severity": "low",
+      "location": "app/src/router.tsx:11",
+      "issue": "notFoundComponent: NotFound is repeated on four routes even though defaultNotFoundComponent is already set on the router",
+      "suggestion": "Delete the per-route notFoundComponent props and rely on the router default"
+    },
+    {
+      "severity": "low",
+      "location": "app/src/lib/format.ts:26",
+      "issue": "Card sprite URLs are constructed from the /media pattern rather than taken from the API's sprites data, so a species whose front sprite is null would render a broken image",
+      "suggestion": "Acceptable given the spec documents the pattern, but consider falling back to hiding the img on load error or validating against the index"
+    },
+    {
+      "severity": "low",
+      "location": "app/src/components/MoveTable.tsx:101",
+      "issue": "Row key `${row.move}-${row.level}` is not guaranteed unique if a version-group detail repeats a move/method at the same level",
+      "suggestion": "Include the row's source index in the key, e.g. `${row.move}-${row.level}-${index}`"
+    },
+    {
+      "severity": "low",
+      "location": "app/src/server/pokeapi.ts:29-32",
+      "issue": "Cache cleanup only runs past 5000 entries and only evicts expired ones, so a burst of distinct live keys can grow past the nominal cap",
+      "suggestion": "Fine at this data size; optionally cap by evicting oldest entries regardless of expiry when over the limit"
+    }
+  ],
+  "summary": "This is a clean, current-stable TanStack Start app: thin file-based routes over server functions that compose view models, a single cohesive data layer with a well-designed TTL cache, and correct head/notFound/navigation idioms throughout. The only merge blockers are process nits — no typecheck step, an internal-flag read, and duplicated notFound components — plus a cold-cache fetch fan-out worth a comment. I'd approve after one round of minor changes."
+}

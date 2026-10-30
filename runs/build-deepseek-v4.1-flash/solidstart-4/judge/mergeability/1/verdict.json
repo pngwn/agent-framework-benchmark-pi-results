@@ -1,0 +1,117 @@
+{
+  "dimension": "mergeability",
+  "criteria": {
+    "idiomatic": {
+      "score": 4,
+      "evidence": [
+        "app/vite.config.ts:1-9 — exactly the current SolidStart v2 documented setup: solidStart() from @solidjs/start/config plus nitro() from nitro/vite",
+        "app/src/lib/queries.ts:290-295,407,512 — query() + \"use server\" + createAsync is the documented data-fetching pattern for v2, and the server directive correctly keeps caching/API access server-side",
+        "app/src/routes/index.tsx:22 — useSearchParams + setParams for filter state in the URL, the recommended primitive",
+        "app/src/app.tsx:17,20 — Router root layout with Suspense, FileRoutes, MetaProvider: matches the v2 entry-point examples",
+        "app/src/components/NotFound.tsx:2,7 — HttpStatusCode imported from @solidjs/start per current reference docs; [...404].tsx catch-all is the documented convention",
+        "app/src/routes/index.tsx:129 — attr:value plus a signal plus an imperative DOM write (index.tsx:60-71) where a single controlled value mechanism would do; also select value + per-option selected are redundant (index.tsx:111,121)",
+        "app/src/lib/queries.ts:132-136 — raw process.env.API_BASE_URL instead of the v2 env module (virtual:env/server/runtime)"
+      ],
+      "rationale": "This reads like the current docs: right config layout, right data primitives, right URL-state primitive, clean server boundary. Only small deviations (the triple input-value mechanism, process.env vs the env module) keep it from a 5."
+    },
+    "correctness_risks": {
+      "score": 3,
+      "evidence": [
+        "app/src/components/MoveTable.tsx:17-18 — sortRows indexes a[sort.key as keyof MoveRowData], but column keys are \"move\"/\"type\"/\"category\" while MoveRowData (app/src/lib/queries.ts:53-62) has moveName/typeName/categoryName; those three columns silently never sort, yet aria-sort (MoveTable.tsx:65) reports them as sorted. The TS cast hides the mismatch from the compiler.",
+        "app/src/lib/queries.ts:146-153 — fetchJson throws on any non-404 failure, but no route has an ErrorBoundary or catch (app/src/app.tsx:19-36); a rejected server function during client navigation is an unhandled rejection with no recovery UI",
+        "app/src/components/NotFound.tsx:7 — HttpStatusCode renders after createAsync resolution; known v2 issue (#2229) means the 404 status may be sent as 200 in this position — worth verifying given the app promises it via the shared component",
+        "app/src/lib/queries.ts:156-158 — rejected jsonCache entries are evicted on failure, so no poisoned-promise cache; module caches reset on error (queries.ts:212-214) — good",
+        "app/src/routes/index.tsx:58,84-87 — debounce timer is cleared on cleanup and navigation, no leaked timers; the URL-vs-input sync effect guards against pending debounces"
+      ],
+      "rationale": "The one real bug is user-visible and masked by a type cast, and error handling is absent across the board, but the core flows, caching and lifecycle handling are otherwise sound."
+    },
+    "global_abstractions": {
+      "score": 3,
+      "evidence": [
+        "app/src/lib/queries.ts (704 lines) — one module owns caching (jsonCache:130), the species directory (207), generations (232), types (272), version groups (486), and the shaping of all five pages; every route imports data and types from it",
+        "app/src/lib/format.ts:1-39 — small, honest, dependency-free helpers; earns its keep",
+        "app/src/lib/queries.ts:290-294 — \"use server\" on every query keeps the client bundle to serialized results, so the server/client boundary is not leaky",
+        "app/src/routes/index.tsx:15-22 — the HomeData shape is re-declared inline as a prop type instead of exporting the interface, so it can drift from queries.ts:70-76"
+      ],
+      "rationale": "No premature layers and a clean server boundary, but the single god data module will need splitting as soon as anyone adds a page, and one shape is already duplicated."
+    },
+    "readability": {
+      "score": 3,
+      "evidence": [
+        "app/src/lib/format.ts — naming is excellent: humanize, dexNumber, displayValue, statLabel; a new teammate reads this in seconds",
+        "app/src/lib/queries.ts:292,367,416,453 — magic number 10000 (alternate-form cutoff) repeated four times with zero comments explaining it; commentLines across the repo is 0",
+        "app/src/lib/queries.ts:512-704 — getPokemonPageData is ~190 lines mixing fetches, dedup, ordering and shaping in one function",
+        "app/src/components/PokemonCard.tsx, TypeBadge.tsx, MoveTable.tsx — small single-purpose components with clear prop names; consistent file organisation (routes/components/lib)"
+      ],
+      "rationale": "Well-organised and clearly named, but zero comments on non-obvious domain rules (form-ID cutoff, min-level dedup, sort-key mapping) and one ~190-line query function make the dense parts harder than they need to be."
+    },
+    "review_cost": {
+      "score": 3,
+      "evidence": [
+        "app/src/components/MoveTable.tsx:17 — must-fix before merge: mapping column keys to row fields (or storing sort accessor per column) is a small but required change",
+        "app/src/app.tsx:19-36 — an ErrorBoundary (or serverFunctions.onError in vite.config.ts) should be added; small, structural-free",
+        "app/src/routes/index.tsx:129 — collapse the three input-value mechanisms into one",
+        "app/src/lib/queries.ts — the module split and the HomeData export are asks, not blockers"
+      ],
+      "rationale": "Nothing structural needs rework, but the sort bug and missing error handling mean I would not approve on the first pass: one round of targeted changes."
+    }
+  },
+  "overall": 3,
+  "findings": [
+    {
+      "severity": "high",
+      "location": "app/src/components/MoveTable.tsx:17",
+      "issue": "sortRows indexes rows by column key (\"move\", \"type\", \"category\") but MoveRowData's fields are moveName/moveLabel, typeName/typeLabel, categoryName/categoryLabel, so those columns never actually reorder while aria-sort reports them as ascending/descending. The `as keyof MoveRowData` cast defeats TypeScript and hides the mismatch.",
+      "suggestion": "Give each column an accessor (e.g. { key: 'move', label: 'Move', value: (row) => row.moveLabel }) or rename column keys to match row fields, and drop the cast so the compiler catches this class of bug."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/lib/queries.ts:146",
+      "issue": "Any API failure other than 404 throws from the server function; no route has an ErrorBoundary, no catch on createAsync, and no serverFunctions.onError handler, so a transient backend error breaks the page with no recovery UI (and as an unhandled rejection during client navigation).",
+      "suggestion": "Add an ErrorBoundary around the route outlet in app.tsx (or use serverFunctions.onError in vite.config.ts) with a retry affordance."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/lib/queries.ts:130",
+      "issue": "The module is a 704-line god data layer: fetch cache, species/generation/type/version-group indexes, and the shaping logic for all five pages live together, and every route depends on it for both data and types.",
+      "suggestion": "Split into a server-side cache/api client, the shared indexes, and one module per page's data shaping; export the interfaces (HomeData) so routes stop re-declaring shapes (app/src/routes/index.tsx:15)."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/components/NotFound.tsx:7",
+      "issue": "HttpStatusCode renders after createAsync resolves in routes that render NotFound from null data; a known SolidStart v2 regression (#2229) can send 200 instead of 404 in that position, and the spec explicitly encourages the 404 status.",
+      "suggestion": "Verify the emitted status in the production build; if affected, hoist the status decision (e.g. set it before awaiting, or use deferStream appropriately) or accept and document it."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/routes/index.tsx:129",
+      "issue": "The search input's value is managed three ways at once: attr:value bound to params.q, a local signal, and an imperative searchInput.value write inside createEffect (lines 60-71). This is hard to reason about and is the likely source of future input-sync bugs.",
+      "suggestion": "Pick one mechanism — e.g. value={searchText()} with onInput updating the signal, plus a single reactive sync from params.q — and delete the rest."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/lib/queries.ts:292",
+      "issue": "The alternate-form cutoff appears as a bare `id > 10000` in four places with no named constant or comment; it encodes a spec rule someone will eventually change or break.",
+      "suggestion": "Extract `const ALTERNATE_FORM_ID = 10000` next to EXCLUDED_TYPES with a one-line comment referencing the spec."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/components/TypeBadge.tsx:9",
+      "issue": "The style object is computed from props once in the component body rather than in JSX or a memo, so if Solid reuses a badge instance with a different props.name (For reconciliation) the background colour goes stale.",
+      "suggestion": "Compute the style inline in the JSX (style={{ 'background-color': `var(--type-${props.name}, ...)` }}) so it stays reactive."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/lib/queries.ts:132",
+      "issue": "API_BASE_URL is read from raw process.env with a typeof guard instead of SolidStart v2's documented env module, which also fails-fast if the module is imported client-side.",
+      "suggestion": "Use `import { env } from \"virtual:env/server/runtime\"` (configured via solidStart's env option) or at least centralise the read without the typeof-process dance."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/routes/index.tsx:111",
+      "issue": "Selects set both a reactive value on the <select> and selected on every <option>, which is redundant and can disagree.",
+      "suggestion": "Keep value={currentType()} on the select and drop the per-option selected attributes."
+    }
+  ],
+  "summary": "A genuinely idiomatic SolidStart v2 app — correct config, query/\"use server\"/createAsync data flow, and URL-backed filters — with clean components and a well-typed, server-contained data layer. The blocker is a real, cast-masked bug: three of seven move-table columns silently don't sort while aria-sort claims they do. Beyond that I'd ask for an ErrorBoundary, one honest input-value mechanism, and a split of the 704-line data module before this becomes comfortable to own."
+}

@@ -1,0 +1,77 @@
+## Review: experimentalness
+
+**Ground truth on the stack:** `app/package.json` pins `next@16.4.3` / `react@19.3.1` — the current stable line (Next 16.4 shipped 2026-10-06; 16.5 is still canary). The measured `experimental` array is empty, and my own grep across `app/src` and `app/next.config.ts` finds **zero** `unstable_`/`experimental_` names, no `cacheComponents`/`use cache`/`dynamicIO`/PPR flags, and no canary-only APIs.
+
+What the app actually uses, and the status of each:
+
+| API | Location | Status (verified) |
+|---|---|---|
+| `connection()` from `next/server` | `app/src/lib/api.ts:40` | Stable since v15.0.0 — "connection stabilized" per https://nextjs.org/docs/app/api-reference/functions/connection |
+| `turbopack: { root }` config | `app/next.config.ts:5-8` | Top-level `turbopack` config stable since 15.3 (formerly `experimental.turbo`), Turbopack is the *default* bundler since 16.0 — per https://nextjs.org/docs/app/api-reference/config/next-config-js/turbopack and the Next 16 blog |
+| `fetch(url, { cache: 'no-store' })` + hand-rolled 30s in-memory cache | `app/src/lib/api.ts:26-56` | Long-stable fetch semantics |
+| Promise `params`/`searchParams`, `generateMetadata`, `Metadata`/`Viewport` exports, `notFound`, `useSearchParams`, `Link` | `page.tsx` files throughout | All stable since 14/15; async params are *required* in 16 |
+| React 19 hooks, `fetchPriority` on `<img>` | `app/src/app/pokemon/[name]/page.tsx:117` | React 19.3 stable |
+
+The only "new-ish" surface at all is `connection()`, and it's (a) two years stable, (b) isolated to the single `api()` wrapper that every data fetch goes through — one-line removal if it ever changed, and (c) genuinely justified: the spec demands live data at request time, and this makes every route request-dynamic without scattering `no-store` everywhere.
+
+The one *directional* observation cuts the other way: Next 16.4's headline is that **Cache Components (`use cache`) is now "the best choice for every Next.js app"** and becomes the default in Next 17 (https://nextjs.org/blog/next-16-4). This app stays on the older dynamic-rendering model with a hand-rolled TTL cache (`app/src/lib/api.ts:12-14, 26-56`) and disables prefetch on nearly every link (`app/src/components/PokemonCard.tsx:19`, `app/src/app/pokemon/[name]/page.tsx:48,168`, etc.). That's zero experimental risk today, but it's deliberately behind the framework's current recommendation, not ahead of it — a migration (or at least a prefetch re-think) will be on the roadmap for 17.
+
+```json
+{
+  "dimension": "experimentalness",
+  "criteria": {
+    "reach": {
+      "score": 1,
+      "evidence": [
+        "app/package.json:10 — next 16.4.3 / react 19.3.1, current stable line, no canary/beta/experimental packages",
+        "app/next.config.ts:1-9 — only long-stable options (poweredByHeader, compress) plus stable turbopack.root; no experimental block at all",
+        "app/src/lib/api.ts:40 — connection(), the newest API used, stable since Next 15.0 (verified against nextjs.org docs version history)",
+        "grep of app/src for unstable_/experimental_/use cache/dynamicIO/ppr — zero matches"
+      ],
+      "rationale": "Every API in the app has been stable for a year or more; nothing experimental, preview, RC or canary is reached for, and if anything the app is conservative relative to the 16.4-recommended Cache Components model."
+    },
+    "containment": {
+      "score": 5,
+      "evidence": [
+        "app/src/lib/api.ts:38-41 — connection() appears in exactly one place, inside the single api() wrapper every page fetches through",
+        "app/src/lib/api.ts:14-24 — the request-time/TTL behavior is confined to one module; pages only import api/apiList/getTypeRecords",
+        "app/src/lib/format.ts:1-4 — shared helpers are pure, keeping the newer server-side semantics from leaking into components"
+      ],
+      "rationale": "The one newer API sits behind a single data-access module, so a swap or removal is a one-line change; client components use only long-stable hooks."
+    },
+    "justification": {
+      "score": 5,
+      "evidence": [
+        "app/src/lib/api.ts:38-40 — connection() earns its keep: it guarantees request-time rendering required by the spec (live API data, no build-time embedding) without spreading no-store",
+        "app/next.config.ts:6 — compress:false is justified by the spec's explicit instruction to let the reverse proxy handle compression",
+        "app/src/app/HomeView.tsx:77-89,116-120 — filtering implemented with plain useState/useMemo/useSearchParams instead of any newer transition/prefetch machinery"
+      ],
+      "rationale": "No experimental APIs are used at all, and the stable-but-newer choices made (connection, turbopack root) each buy something the spec or deployment setup actually requires; nothing is novelty-driven."
+    }
+  },
+  "overall": 4,
+  "findings": [
+    {
+      "severity": "low",
+      "location": "app/src/lib/api.ts:12-56",
+      "issue": "App stays on the pre-Cache-Components dynamic model with a hand-rolled 30s TTL cache; Next 16.4 now recommends Cache Components ('use cache') for every app and it becomes the default in Next 17, so this codebase has a migration ahead of it.",
+      "suggestion": "Plan a migration to 'use cache' with cacheLife (and drop the bespoke Map-based cache) before upgrading to Next 17, or document the deliberate choice to stay on the classic model."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/components/PokemonCard.tsx:19",
+      "issue": "prefetch={false} is set on nearly every link (also pokemon/[name]/page.tsx:48,168, MovesSection.tsx:96, types pages), opting out of the enhanced/partial prefetching the current framework provides.",
+      "suggestion": "Revisit after adopting Cache Components or measuring bandwidth; leaving prefetch on (or scoping the opt-out to the heaviest pages only) gives faster client navigations at little cost."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/lib/api.ts:40",
+      "issue": "connection() and fetch cache:'no-store' (line 32) are both used, which is belt-and-suspenders; either alone makes routes dynamic in the classic model.",
+      "suggestion": "Harmless and arguably self-documenting, but if migrating to Cache Components, keep only the mechanism the new model prescribes (io()/connection for the dynamic shell, 'use cache' for the shared cache)."
+    }
+  ],
+  "summary": "This app contains zero experimental, preview, RC or canary APIs — its import surface (Metadata/Viewport, Link, notFound, useSearchParams, connection) is entirely stable, and the only even-slightly-new piece, connection(), is two releases old and isolated in one data-access module. The posture is deliberately conservative rather than forward-leaning: it skips the Cache Components model that Next 16.4 now recommends for every app, which means a Next 17 migration is on the horizon but today's breakage risk is effectively nil. Low reach, tight containment, every stable-but-new choice justified by the spec.",
+  "experimentalApis": [],
+  "count": 0
+}
+```

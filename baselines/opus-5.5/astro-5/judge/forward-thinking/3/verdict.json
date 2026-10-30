@@ -1,0 +1,87 @@
+{
+  "dimension": "forward-thinking",
+  "criteria": {
+    "latest_apis": {
+      "score": 5,
+      "evidence": [
+        "app/package.json:11-13 — astro ^7.4.2 with @astrojs/node ^11.1.9, the current stable line (7.4.4 released 28 Oct 2026; node adapter 11.1.9 is latest and peers on astro ^7.2.1)",
+        "app/astro.config.mjs:6 — `session: false`, the session opt-out added in Aug 2026 (merged PR #16871, shipped in Astro 7.2+) to tree-shake the AstroSession/unstorage runtime; no training-data-era code does this",
+        "app/src/pages/pokemon/[name].astro:175 — `' (hidden)'` written with an explicit leading space, i.e. the template was authored for Astro 7's new `compressHTML: 'jsx'` default rather than the v6 HTML-aware compression",
+        "app/astro.config.mjs:4-5 — `output: 'server'` + standalone Node adapter, the current (non-deprecated `hybrid`) rendering config; verified against the Astro 7 config reference",
+        "app/src/pages/pokemon/[name].astro:36,17 — `Astro.response.status`, `Astro.params`, `Astro.self` recursion: all current, documented public APIs; no use of removed `astro:transitions` internals or deprecated APIs"
+      ],
+      "rationale": "Pinned to the latest stable major with a config flag (`session: false`) that only exists in a 2026 release, and templates written against Astro 7's new JSX-whitespace default. Verified against docs.astro.build's v7 upgrade guide and configuration reference; nothing here is legacy."
+    },
+    "platform": {
+      "score": 4,
+      "evidence": [
+        "app/src/lib/api.ts:23-27 — native `fetch` on the server, and api.ts:31 `await res.body?.cancel()` to release the 404 response stream — uncommonly good stream hygiene",
+        "app/src/pages/index.astro:108-111 — client-side partial refresh built entirely on platform primitives (fetch → DOMParser → document.importNode), no hydration framework, no libraries",
+        "app/src/lib/pokedex.ts:26 — `.at(-1)`; app/src/pages/index.astro:34-40 — `URLSearchParams` for query-string construction; app/src/pages/pokemon/[name].astro:228 — `URL` + history API",
+        "app/src/components/TypeBadge.astro:12-17 — CSS custom properties as the theming primitive (`--type-color: var(--type-${name})`), with a fallback at global.css:.type-badge",
+        "app/src/pages/index.astro:97-106 — `latest`-counter races instead of `AbortController`; grep confirms no `AbortController` anywhere, so superseded full-page fetches are discarded, not cancelled"
+      ],
+      "rationale": "Reaches for the platform first on both server and client — native fetch, streams, DOMParser, URL/URLSearchParams, custom properties — with zero platform re-implementations. The only miss is using a monotonic counter rather than AbortController to cancel in-flight fetches during debounced typing."
+    },
+    "dependencies": {
+      "score": 5,
+      "evidence": [
+        "app/package.json:11-13 — exactly two runtime dependencies: `astro` and `@astrojs/node`, no devDependencies",
+        "app/src/pages/index.astro:25 — filtering, pagination and search implemented in ~100 lines of platform code rather than pulling a router/state/data library",
+        "app/src/scripts/sortable.ts:1-45 — table sorting written on DOM APIs instead of a table/sort utility"
+      ],
+      "rationale": "Minimal and modern: the framework plus the one adapter it requires, nothing else. Everything else is solved with the platform, which is the right call for an app this size."
+    },
+    "churn_resistance": {
+      "score": 4,
+      "evidence": [
+        "app/src/lib/api.ts:19-46 — all HTTP access, caching and concurrency live behind this single module; pages never fetch directly",
+        "app/src/lib/pokedex.ts — domain derivations (humanize, dexNumber, latestFlavorText, cardsForPokemon, compareMethods) centralized and pure, so API or spec changes localize here",
+        "app/src/lib/api.ts:19 — `Promise<any>` at the API boundary; app/src/lib/pokedex.ts:150 `moveInfo(record: any)`; app/src/pages/pokemon/[name].astro:37 `page: any` mega-object — the PokeAPI payload shapes are almost entirely untyped",
+        "app/src/pages/index.astro:96-122 vs app/src/pages/pokemon/[name].astro:223-237 — two hand-rolled copies of the same 'fetch HTML → parse → swap region with latest-counter' enhancement; a change to one risks drifting from the other",
+        "app/astro.config.mjs:1-8 — all framework configuration in one 8-line file, using only documented options (no internals, no experimental flags)"
+      ],
+      "rationale": "Data access, domain logic and config are each confined to one well-defined place and only documented APIs are used, so a framework upgrade would touch few files. The soft spots are the `any`-typed API boundary (no types where requirements are most likely to move) and the duplicated client-enhancement script."
+    }
+  },
+  "overall": 4,
+  "findings": [
+    {
+      "severity": "medium",
+      "location": "app/src/lib/api.ts:19",
+      "issue": "The API boundary is untyped: `api()` returns `Promise<any>` and every consumer (`moveInfo(record: any)` at pokedex.ts:150, the `page: any` object at pages/pokemon/[name].astro:37-100, `record.pokemon ?? []` at pages/abilities/[name].astro:23) reads PokeAPI payloads blind, so upstream shape changes surface as runtime failures instead of type errors.",
+      "suggestion": "Define minimal interfaces for the shapes actually consumed (Named, NamedAPIResource lists, flavor/effect entries, pokemon.stats/abilities/moves, type damage_relations) and have `api<T>` constrain against them; the cache stays generic."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/pages/pokemon/[name].astro:223-237",
+      "issue": "The 'fetch the page HTML, DOMParser it, swap `[data-*]` region, guard with a latest-counter' enhancement is copy-pasted from pages/index.astro:96-122 (same render/race/error-fallback logic, different selector), so a fix to one will not reach the other.",
+      "suggestion": "Extract a shared `enhanceRegion({ urlBuilder, swapSelector })` helper into src/scripts/ next to sortable.ts and reuse it for both the home filters and the game selector."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/pages/index.astro:97",
+      "issue": "Rapid typing (150 ms debounce) issues sequential full-page fetches that are only discarded by the `latest` counter, never cancelled — requests keep consuming the server and bandwidth (each render re-runs the full SSR pipeline and the species index build).",
+      "suggestion": "Use `AbortController` per request (`controller.abort()` before the next `update`) in the shared helper; it also makes the `latest` counter unnecessary."
+    },
+    {
+      "severity": "low",
+      "location": "app/astro.config.mjs:7",
+      "issue": "`security: { checkOrigin: false }` disables Astro's default CSRF origin check. It is inert today (the app only issues GET requests, and checkOrigin only fires on POST/PUT/PATCH/DELETE), but it silently removes the default protection the day someone adds an action or a POST form.",
+      "suggestion": "Delete the option and keep the framework default (`true`)."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/lib/api.ts:4",
+      "issue": "`process.env.API_BASE_URL` couples the data layer to the Node adapter; moving to any other adapter (or a non-Node runtime) breaks env resolution, and it bypasses Astro's env schema/typing entirely.",
+      "suggestion": "Define `API_BASE_URL` in `astro:env`'s schema (server variable, `getSecret`-style runtime read) or at minimum read it through `import.meta.env`, keeping a single accessor in api.ts. This is a small portability tax, not a correctness bug — reading it at runtime rather than build time is the right call given the spec."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/lib/pokedex.ts:12-70",
+      "issue": "The domain module has many high-value pure functions (humanize, latestFlavorText, cardsForPokemon, compareMethods, method sort order) with no unit tests anywhere in app/ (testLoc 0); the acceptance tests cover rendered pages, so a regression in sorting or localization logic would be hard to pin down later.",
+      "suggestion": "Add a tiny vitest file covering the pure helpers — they are already dependency-free and trivially testable, which is exactly what makes the current layering worth keeping."
+    }
+  ],
+  "summary": "This app is squarely on Astro's current release: 7.4.2 with the matching @astrojs/node 11, the new `session: false` opt-out added mid-2026, and templates written against Astro 7's JSX whitespace default — no legacy-era APIs anywhere I could verify against the v7 docs. The client layer is platform-first (native fetch, DOMParser, URL/URLSearchParams, custom properties) with only two runtime dependencies total, which is exactly the right weight for this problem. What keeps it from exemplary is the completely `any`-typed API boundary, a duplicated fetch-and-swap enhancement script, and the absence of AbortController where it would cancel superseded requests."
+}

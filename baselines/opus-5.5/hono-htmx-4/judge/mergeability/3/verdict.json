@@ -1,0 +1,120 @@
+{
+  "dimension": "mergeability",
+  "criteria": {
+    "idiomatic": {
+      "score": 5,
+      "evidence": [
+        "app/tsconfig.json:8-10 — jsx: react-jsx + jsxImportSource hono/jsx, exactly as current docs prescribe",
+        "app/src/index.tsx:16-23 — raw('<!DOCTYPE html>') from hono/html + c.html with an async JSX tree; the skill's own JSX section shows this Layout-FC pattern",
+        "app/src/pages/pokemon.tsx:35,73 — async server components awaited inside JSX (MovesBody, PokemonPage), the documented hono/jsx async-component pattern",
+        "app/src/index.tsx:27-36 — serveStatic from @hono/node-server/serve-static with rewriteRequestPath and onFound Cache-Control header, current adapter API",
+        "app/src/pages/home.tsx:95-102 — textbook htmx 2: hx-get/hx-trigger 'input changed delay:200ms from:#search', hx-sync this:replace, hx-target/hx-swap outerHTML",
+        "app/src/index.tsx:51,71 — HX-Push-Url response header (current htmx 2 spelling, not the old HX-Push) and HX-History-Restore-Request handling in isHtmx (index.tsx:12)",
+        "app/src/index.tsx:97-109 — app.notFound and app.onError both return full pages with correct status codes"
+      ],
+      "rationale": "Uses current stable hono 4.13.14 / node-server 2.1.5 / htmx 2.0.11 the way the docs and skill show: JSX SSR with async components, inline handlers, adapter serve-static, and idiomatic htmx-2 directives for partial swaps with URL sync."
+    },
+    "correctness_risks": {
+      "score": 4,
+      "evidence": [
+        "app/src/api.ts:15-18 — cache is bounded (MAX_ENTRIES 5000) with 60s fresh/stale-while-revalidate; 404s resolved to null and error paths delete pending markers (api.ts:54-59), so no unbounded growth or unhandled rejections",
+        "app/src/api.ts:26-39 — withSlot semaphore can overshoot MAX_CONCURRENT: the releaser decrements and shifts before the waiter increments, so a new request arriving in that gap takes a slot too",
+        "app/src/index.tsx:80-88 — /pokemon/:name/moves fragment route omits the 'Vary: HX-Request' header that the home route sets (index.tsx:50,58); responses differ per HX-Request so a shared cache could serve the wrong shape",
+        "app/src/index.tsx:70-71 — HX-Push-Url after a game change drops the '#moves' fragment, so the address bar loses the anchor the user is scrolled to",
+        "app/src/pages/home.tsx:89 — the aria-live region itself is replaced by hx-swap outerHTML (home.tsx:101), which some screen readers won't announce since the live node is swapped wholesale",
+        "app/src/index.tsx:56-60 — a PokemonPage render fans out to every version group and every move (pokemon.tsx:73-77,105-108); bounded by the cache and concurrency cap, but first paint of a move-heavy Pokémon costs ~100 API calls"
+      ],
+      "rationale": "Careful look found no escaping issues (all JSX text), no leaked listeners, complete 404/500 handling, and a well-bounded cache; only minor races and header/UX nits remain."
+    },
+    "global_abstractions": {
+      "score": 4,
+      "evidence": [
+        "app/src/api.ts — single 268-line data module everything imports, but clearly sectioned (cache, types, helpers, aggregate loaders) with why-comments (api.ts:1-4,31)",
+        "app/src/api.ts:174-176 — mapAll is a one-line Promise.all wrapper whose comment claims it applies the concurrency limit, which it does not (the limit lives in load); it adds indirection, not behavior",
+        "app/src/api.ts:165 — spriteUrl (a presentation URL) lives in the data module, blurring the server-data/UI boundary slightly",
+        "app/src/api.ts:139-141 — speciesForPokemon's `extra` generic earns its keep: it carries the hidden-ability flag (details.tsx:47-49) without a second near-identical helper",
+        "app/src/api.ts:14 — module-level cache is hidden global state, but the spec explicitly sanctions in-memory runtime caching and it's the only such global"
+      ],
+      "rationale": "Abstractions are few and mostly earn their keep; the central api.ts is cohesive but slightly overloaded, and mapAll is a wrapper that should just be Promise.all."
+    },
+    "readability": {
+      "score": 4,
+      "evidence": [
+        "app/src/ — clean layout: api.ts (data), components.tsx (shared UI), pages/ per route group, index.tsx (routing); a new teammate finds things fast",
+        "app/src/index.tsx:55,73,79,88 — the English-name lookup is re-implemented inline four times while api.ts exports englishName; the fallbacks even differ (raw name vs humanized), risking title/h1 drift",
+        "app/src/pages/home.tsx:101-107 — extra={(_, i) => data.items[i]...} closes over the index instead of using the item already passed, forcing the reader to verify CardList's callback contract (components.tsx:80-84)",
+        "app/src/pages/home.tsx:34-44 — homeUrl's canonical-URL builder with a defaulted page parameter is a small but real cleverness tax",
+        "app/src/api.ts:31,200 — comments explain why (semaphore rationale, mapping behavior), not what"
+      ],
+      "rationale": "Very navigable and consistent overall, with two recurring rough spots: duplicated English-name lookup and index-based rendering callbacks."
+    },
+    "review_cost": {
+      "score": 4,
+      "evidence": [
+        "app/src/index.tsx:55,73,79,88 — replace four inline names.find calls with the existing englishName helper",
+        "app/src/api.ts:174-176 — delete mapAll and use Promise.all directly",
+        "app/src/index.tsx:80-88 — add 'Vary: HX-Request' to the moves fragment response",
+        "app/src/index.tsx:70-71 — append '#moves' to the pushed URL after a game change"
+      ],
+      "rationale": "Everything else — types, structure, htmx wiring, no-JS fallbacks, cache design — I'd approve as-is; the remaining asks are small, local nits."
+    }
+  },
+  "overall": 4,
+  "findings": [
+    {
+      "severity": "medium",
+      "location": "app/src/index.tsx:55",
+      "issue": "English-name lookup duplicated inline four times (index.tsx:55,73,79,88) instead of the exported englishName helper; the fallbacks differ (raw slug vs humanized), so a resource missing an English name would get a title that disagrees with its h1.",
+      "suggestion": "Use englishName(species/move/ability/type) from api.ts for all four docTitle computations."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/api.ts:174",
+      "issue": "mapAll is a passthrough over Promise.all whose comment implies it enforces the concurrency limit; the limit actually lives inside load(), so the wrapper is misleading indirection.",
+      "suggestion": "Delete mapAll and call Promise.all(items.map(fn)) at the call sites, or move the semaphore into mapAll so the comment is true."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/api.ts:26",
+      "issue": "withSlot can overshoot MAX_CONCURRENT: the finally block decrements and releases a waiter (queue.shift()) before the waiter increments, so an intervening request also takes a slot.",
+      "suggestion": "Resolve the waiter and let it increment atomically, e.g. check the queue in the same tick, or increment active before awaiting."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/index.tsx:80",
+      "issue": "The moves fragment route returns different shapes for htmx vs plain requests (fragment vs 302) but doesn't set 'Vary: HX-Request' like the home route does.",
+      "suggestion": "c.header('Vary', 'HX-Request') on both branches."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/index.tsx:70",
+      "issue": "HX-Push-Url after changing the game drops the '#moves' anchor from the address bar even though the user is looking at that section.",
+      "suggestion": "Append '#moves' to the pushed URL."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/pages/home.tsx:89",
+      "issue": "The aria-live region is the element replaced by hx-swap outerHTML, so live announcements may not fire on some screen readers.",
+      "suggestion": "Keep a stable outer live region and swap only its contents (hx-swap innerHTML on a child container)."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/pages/home.tsx:101",
+      "issue": "extra={(_, i) => data.items[i]...} re-derives the item by index instead of using the item CardList already passes (components.tsx:80-84).",
+      "suggestion": "Use the passed item: extra={(p) => (<span class=\"card__types\">{p.types.map(...)}</span>)}."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/api.ts:53",
+      "issue": "Cache eviction is insertion-order FIFO, not LRU, so frequently accessed entries (e.g. the species list) can be evicted by a burst of one-off move fetches.",
+      "suggestion": "Re-insert on access (delete+set) to get LRU, or accept FIFO with a comment."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/api.ts:165",
+      "issue": "spriteUrl, a presentation concern, lives in the data-access module that all pages import.",
+      "suggestion": "Move spriteUrl (and dexNumber if desired) into components.tsx or a small display-helpers module."
+    }
+  ],
+  "summary": "A disciplined, current-idiom Hono + htmx app: hono/jsx async SSR with the documented tsconfig setup, adapter-correct serve-static, and careful htmx-2 partial swapping with URL sync, Vary headers and no-JS fallbacks. Correctness is solid — bounded stale-while-revalidate cache, complete 404/500 handling, JSX-escaped output — with only minor races and header nits. I'd merge after one small round: reuse englishName instead of four inline copies, drop the misleading mapAll wrapper, and fix the two htmx header/fragment nits."
+}

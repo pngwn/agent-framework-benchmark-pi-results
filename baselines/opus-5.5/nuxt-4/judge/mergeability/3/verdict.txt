@@ -1,0 +1,148 @@
+## Review
+
+I read the spec, all of `app/` (server routes, pages, components, composables, utils, config), and verified current Nuxt guidance: the app targets Nuxt **4.6.2** (latest stable is 4.6.3, released 2026-10-27), uses the Nuxt 4 `app/` directory layout, and its API choices (`useFetch`/`createError`/`clearError`/`useId`/`useHead`/`defineEventHandler`/`getRouterParam`, `shared/` availability, `scrollBehaviorType`) are all current, per the v4 docs and vue-router/Nuxt source.
+
+**What's strong**
+
+- Clean two-layer architecture: Nitro server routes shape data (`app/server/api/**`), pages stay thin and render, with a single `usePageData` composable (`app/app/composables/usePageData.ts:5`) centralising 404-as-error handling — exactly the full-stack split Nuxt is for.
+- Idiom density is high: `titleTemplate` in `app.vue:2`, `useId()` for section heading ids (`app/app/components/PageSection.vue:2`), `NuxtPage :page-key` chosen deliberately so query changes don't remount (`app/app/app.vue:7`), error.vue with `clearError({redirect:'/'})` (`app/app/error.vue:8`), catch-all 404 page (`app/app/pages/[...slug].vue:2`).
+- Server cache is honest: promise-deduped, failures evicted (`app/server/utils/pokeapi.ts:33`), TTL documented with a *why* comment (`:4`).
+- Filtering logic on the home page is correct and race-free: local `search` ref is source of truth while typing, URL follows via `router.replace`, `setFilter` drops `page` so filters reset pagination (`app/app/pages/index.vue:20`).
+- Accessibility work (aria-sort, row headers, `scope`, captions, decorative sprite `alt=""`) matches spec without hacks.
+
+**What I'd ask to change (all small)**
+
+1. The app↔server API contract is implicit: server handlers return untyped `any` shapes (`app/server/api/pokemon/[name].get.ts:73`) while each page hand-declares its own interface (`app/app/pages/types/[name].vue:6`, `:2` TypeRef duplicated at `app/app/pages/pokemon/[name].vue:5`). These can drift silently; Nuxt 4's `shared/types/` is the documented home.
+2. `humanize` is duplicated verbatim at `app/app/utils/format.ts:3` and `app/server/utils/pokeapi.ts:51` — `shared/utils/` exists precisely for this.
+3. `app/server/api/pokemon/[name].get.ts:46` correlates `gameRecords` with `[...gameNames][i]` across two independent Set spreads — correct (Set iteration is deterministic) but fragile; build an array once.
+4. `app/nuxt.config.ts:15` sets `scrollBehaviorType: 'auto'`, which is already the default — no-op config.
+5. `app/app/pages/index.vue:51` clamps `?page=` for display but never syncs the out-of-range URL back.
+
+No correctness bug of any consequence found: 404s flow to the error page with the right status, unhandled rejections are surfaced as 500s, HTML is never interpolated raw, hydration state is URL-derived on both sides, and caches are bounded-ish. The only structural watch-item is the cold-request fan-out of one fetch per learned move on a Pokémon page (`app/server/api/pokemon/[name].get.ts:40`), mitigated by the 60s cache.
+
+```json
+{
+  "dimension": "mergeability",
+  "criteria": {
+    "idiomatic": {
+      "score": 4,
+      "evidence": [
+        "app/app/composables/usePageData.ts:5 — thin useFetch wrapper with createError 404, current Nuxt 4 pattern",
+        "app/app/app.vue:7 — deliberate NuxtPage page-key so query changes don't remount (keeps search focus)",
+        "app/app/error.vue:8 — error.vue + clearError({redirect}) exactly as documented",
+        "app/server/api/types/[name].get.ts:2 — defineEventHandler/getRouterParam Nitro idiom, current stable Nuxt 4.6",
+        "app/app/utils/format.ts:3 — humanize duplicated server-side instead of Nuxt 4's shared/utils/",
+        "app/nuxt.config.ts:15 — scrollBehaviorType set to its default value ('auto'), no-op config"
+      ],
+      "rationale": "Reads like the framework's own examples for routing, data loading, error handling and meta; only misses are not using the shared/ directory the framework provides for cross-boundary helpers/types and one no-op config line."
+    },
+    "correctness_risks": {
+      "score": 4,
+      "evidence": [
+        "app/server/utils/pokeapi.ts:33 — failed fetches evicted from cache, no unhandled rejections cached",
+        "app/app/pages/index.vue:20 — setFilter rebuilds query and drops page, so filters reset pagination correctly",
+        "app/app/pages/index.vue:51 — out-of-range ?page= is clamped for display but left stale in the URL (minor)",
+        "app/server/utils/pokeapi.ts:27 — cache cap is soft: only expired entries pruned when size>5000",
+        "app/server/api/pokemon/[name].get.ts:40 — cold request fans out one fetch per learned move (~150 upstream calls), mitigated by 60s cache",
+        "app/app/pages/[...slug].vue:2 — catch-all throws fatal 404, so unknown URLs render the error page with a 404 status"
+      ],
+      "rationale": "No real bug found: 404 handling, cache hygiene, SSR/URL-derived state and escaping are all sound. Only minor fragility: a soft cache cap, heavy cold-request fan-out, and a clamped page that never syncs back to the URL."
+    },
+    "global_abstractions": {
+      "score": 4,
+      "evidence": [
+        "app/server/utils/pokeapi.ts — single upstream client (transport + cache + small domain shaping), ~120 lines with clear boundary",
+        "app/app/composables/usePageData.ts:5 — one fetch wrapper for all pages, no other global client state",
+        "app/app/pages/types/[name].vue:2 — TypeRef interface re-declared identically in pokemon/[name].vue and MoveTable.vue",
+        "app/server/api/pokemon/[name].get.ts:73 — server returns untyped any shape that pages must hand-mirror"
+      ],
+      "rationale": "Abstractions are few and have crisp server/client boundaries (only sprite URLs cross). The untangling candidates are the implicit, untyped API contract between server routes and page interfaces, plus the duplicated TypeRef/humanize helpers."
+    },
+    "readability": {
+      "score": 4,
+      "evidence": [
+        "app/server/utils/pokeapi.ts:68 — cardsFor docstring explains the alternate-form/ID-10000 rule",
+        "app/app/pages/index.vue:19 — comment explains search box is source of truth while typing",
+        "app/app/assets/main.css — plain, well-named BEM-ish CSS, no transitions/animations, tokens copied verbatim",
+        "app/server/api/abilities/[name].get.ts:5 — hidden plumbed by spreading into the ref then extracting via callback; convoluted",
+        "app/server/api/pokemon/[name].get.ts:46 — index-correlation with [...gameNames][i] requires a double-take"
+      ],
+      "rationale": "A new teammate finds their way in minutes: tiny files, consistent shape across the four resource pages, why-comments where they matter. Rough spots are the loose any typing in server handlers and two clever-but-opaque data-shaping lines."
+    },
+    "review_cost": {
+      "score": 4,
+      "evidence": [
+        "app/app/pages/types/[name].vue:6 — request: move API interfaces to shared/types (Nuxt 4 auto-imports in app and server)",
+        "app/app/utils/format.ts:3 — request: single humanize in shared/utils",
+        "app/app/pages/index.vue:51 — request: reconcile clamped page with URL",
+        "app/nuxt.config.ts:15 — request: drop the no-op scrollBehaviorType"
+      ],
+      "rationale": "Approve after one light round of nits — no blocking defects, no rework; the asks are consolidation (shared types/utils) and small clarity fixes."
+    }
+  },
+  "overall": 4,
+  "findings": [
+    {
+      "severity": "medium",
+      "location": "app/server/api/pokemon/[name].get.ts:73",
+      "issue": "Server routes return untyped any shapes while each page hand-declares a matching interface (app/app/pages/types/[name].vue:6, app/app/pages/pokemon/[name].vue:9); the API contract can drift silently between the two halves of the app.",
+      "suggestion": "Declare the response types once in shared/types/ (auto-imported in both app/ and server/ in Nuxt 4) and annotate the defineEventHandler returns with them."
+    },
+    {
+      "severity": "low",
+      "location": "app/app/utils/format.ts:3",
+      "issue": "humanize is duplicated verbatim in app/app/utils/format.ts:3 and app/server/utils/pokeapi.ts:51.",
+      "suggestion": "Move it (and orDash/queryString if useful server-side) to shared/utils/ so both bundles use one implementation."
+    },
+    {
+      "severity": "low",
+      "location": "app/server/api/pokemon/[name].get.ts:46",
+      "issue": "Game labels are built by correlating gameRecords with [...gameNames][i] across two independent Set spreads; correct but fragile under refactoring.",
+      "suggestion": "Create const gameNamesArr = [...gameNames] once and zip records with it, or map over the Set entries directly."
+    },
+    {
+      "severity": "low",
+      "location": "app/app/pages/index.vue:51",
+      "issue": "page is clamped to totalPages for display, but an out-of-range ?page= stays in the URL.",
+      "suggestion": "Either replace the URL with the clamped page or leave the raw page in the URL and let the visible slice follow it; pick one source of truth."
+    },
+    {
+      "severity": "low",
+      "location": "app/nuxt.config.ts:15",
+      "issue": "scrollBehaviorType: 'auto' is the framework default; the line is configuration noise.",
+      "suggestion": "Delete the router.options block (or set it only if 'smooth' hash scrolling is wanted)."
+    },
+    {
+      "severity": "low",
+      "location": "app/server/api/abilities/[name].get.ts:5",
+      "issue": "hidden is smuggled into the pokemon ref via object spread and then extracted by the extra callback — indirect and hard to read.",
+      "suggestion": "Have cardsFor accept a per-ref record (e.g. Map<id, boolean>) or pass {ref, hidden} pairs explicitly."
+    },
+    {
+      "severity": "low",
+      "location": "app/package.json:9",
+      "issue": "vue and vue-router are listed as direct dependencies; Nuxt resolves and manages these versions itself.",
+      "suggestion": "Drop them and let Nuxt's dependency graph provide them, avoiding version drift."
+    },
+    {
+      "severity": "low",
+      "location": "app/server/utils/pokeapi.ts:27",
+      "issue": "The 5000-entry cache cap only evicts expired entries on insert, so the bound is soft and eviction is O(n) inline.",
+      "suggestion": "Fine at this data volume; if kept, note it's a soft cap or evict oldest entries regardless of expiry."
+    },
+    {
+      "severity": "low",
+      "location": "app/server/api/pokemon/[name].get.ts:40",
+      "issue": "First request to a Pokémon page issues one upstream fetch per learned move (hundreds for Move-tutors), all in parallel.",
+      "suggestion": "Acceptable given the 60s cache and local API; if it ever matters, batch or lazily fetch move details per selected game."
+    },
+    {
+      "severity": "low",
+      "location": "app/app/pages/types/[name].vue:2",
+      "issue": "TypeRef is re-declared identically in types/[name].vue and pokemon/[name].vue, and similar near-duplicate row interfaces exist per page.",
+      "suggestion": "Hoist shared shape types to shared/types/ and reuse them across pages and the corresponding server routes."
+    }
+  ],
+  "summary": "A well-built Nuxt 4 app that uses the framework's current primitives almost everywhere and keeps a crisp server-routes/ thin-pages boundary. The main review asks are consolidation — shared types and utils instead of duplicated helpers and hand-mirrored interfaces — plus a few clarity and config nits. No correctness bug of consequence found; I'd approve after one light round."
+}
+```

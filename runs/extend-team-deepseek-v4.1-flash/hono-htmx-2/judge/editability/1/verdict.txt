@@ -1,0 +1,140 @@
+I've reviewed the app thoroughly against the spec, the feature file, and Hono's current guidance. Here's my assessment.
+
+## Review notes
+
+**Structure** (11 source files, ~770 significant LOC): thin router (`app/src/index.tsx`) orchestrating view modules that each colocate their loader + page (`views/details.tsx`, `views/pokemon.tsx`, `views/home.tsx`), a single API seam (`api.ts`), a shared data/helpers module (`data.ts`), shared JSX components (`views/components.tsx`), and a self-contained team feature (`team.ts` + `views/team.tsx`). This is a genuinely workable shape: every data fetch funnels through `api()`/`apiUrl()` (api.ts:38-51), and every Pokémon-card list in the app renders through the one `CardList` component (components.tsx:21) fed by the shared `Card` type (data.ts:86) and `cardsForPokemon` mapper (data.ts:88-102) — that's the right abstraction for this app's real variation (optional types, note via callback, action slot).
+
+**Scenario results:**
+
+1. *Remove Abilities* — touches `index.tsx:8,80-83` (import + route), `details.tsx:53-73` (loader + page), and `pokemon.tsx:286-294` (the spec-mandated Abilities section links). Three files, four edits; no nav link exists, nothing else references `/abilities/`. Acceptable but scattered, because `details.tsx` bundles Move/Ability/Type in one file and routes are all flat in `index.tsx`.
+2. *Sprite fix* — one render choke point: `spriteUrl` (data.ts:28) is consumed only by `CardList` (components.tsx:25), and all five card lists (home, move, ability, type, team) go through it. One fix covers everything. (Caveat: if the fix needed Pokémon-record data, the three card producers — `loadHome`, `cardsForPokemon`, `loadTeam` — would each populate a new `Card` field; still one render site.)
+3. *Sort by name* — `CardList` can't just sort internally, because the team page must keep insertion order (FEATURE.md), so you'd sort in `loadHome` (home.tsx:70) and `cardsForPokemon` (data.ts:96), or add a prop to `CardList`. Two or three findable edits, but not one obvious place.
+4. *Items section* — `loadMove`/`MovePage` (details.tsx:14-47) is a clean template; `api`, `apiList`, `englishEffect`, `latestFlavorText`, `Section`, `Count`, `TypeBadge`, `CardList`, `orDash` are all directly reusable. Mostly new code composed from existing helpers, plus a nav link in `layout.tsx:26-33`.
+5. *Data source / caching* — everything lives in `api.ts:3-5` (`API_BASE_URL`, `FRESH_MS`, `load`/`refresh`); `spriteUrl` imports `API_BASE_URL` from there so media URLs follow automatically. One module, period.
+
+**Weak spots:** `details.tsx` is a three-feature grab bag; API payload typing is pervasive `any` (pokemon.tsx:99, data.ts:46, details.tsx:54-59), so the compiler won't catch shape changes; htmx fragment contracts (`#results` home.tsx:80, `#move-tables` pokemon.tsx:319, `SORT_KEYS` index.tsx:68) are implicit cross-file agreements between router and view; `hx-get="/"` is repeated three times in home.tsx; `TypeBadge`'s `link` boolean is mild flag creep.
+
+```json
+{
+  "dimension": "editability",
+  "criteria": {
+    "removability": {
+      "score": 3,
+      "evidence": [
+        "app/src/index.tsx:8,80-83 — abilities route and import live among all other flat routes",
+        "app/src/views/details.tsx:53-73 — loadAbility/AbilityPage share a file with Move and Type pages",
+        "app/src/views/pokemon.tsx:286-294 — the Pokémon page's Abilities section links to /abilities/<name>"
+      ],
+      "rationale": "Removing Abilities means edits in three files (router, shared details module, Pokémon page) with no dead code left behind, but there's no per-feature module to delete, and the multi-feature details.tsx forces edits next to unrelated code."
+    },
+    "changeability": {
+      "score": 4,
+      "evidence": [
+        "app/src/data.ts:28 — spriteUrl is the only card-sprite builder, used once at app/src/views/components.tsx:25",
+        "app/src/api.ts:3-5 — API base URL, cache TTL and SWR logic are confined to one module",
+        "app/src/views/pokemon.tsx:139-145 — default level-up sort partially duplicates sortRows logic",
+        "app/src/views/pokemon.tsx:99 — loadPokemon types pokemon as any, so shape-related bugs get no compiler help"
+      ],
+      "rationale": "Most fixes land in one obvious place (sprite URL, API source, team cookie handling), but the sort default duplication and pervasive any-typing mean some behaviour changes need manual hunting rather than the type system pointing the way."
+    },
+    "coupling": {
+      "score": 3,
+      "evidence": [
+        "app/src/api.ts:38-51 — all API access funnels through api()/apiUrl(), a clean seam",
+        "app/src/views/home.tsx:80,92,99 — hx-target '#results' and three duplicated hx-get='/' URLs form implicit contracts with the router in app/src/index.tsx:20-29",
+        "app/src/views/pokemon.tsx:319 — hx-target '#move-tables' must match the fragment returned by app/src/index.tsx:43-50",
+        "app/src/views/pokemon.tsx:4 — Pokémon page imports TeamButton from the team feature's view module app/src/views/team.tsx:9"
+      ],
+      "rationale": "Server modules depend on narrow helper surfaces and the API is behind one module, but htmx wiring creates implicit cross-file contracts (fragment IDs, endpoint URLs, sort-param validation in index.tsx:68) that nothing ties together, and one view imports another feature's view."
+    },
+    "abstraction_design": {
+      "score": 4,
+      "evidence": [
+        "app/src/views/components.tsx:21-41 — CardList with optional types, note and action slot serves home, move, ability, type and team lists without duplication",
+        "app/src/data.ts:88-102 — cardsForPokemon absorbs the real variation in Pokémon references (hidden-ability wrappers, direct refs) via a note callback",
+        "app/src/views/details.tsx:14-47 — loadMove/MovePage is a reusable template for an Items resource",
+        "app/src/views/components.tsx:8 — TypeBadge's link boolean flag is minor flag-parameter creep"
+      ],
+      "rationale": "The Card/CardList/cardsForPokemon trio is designed around the app's genuine variation and would stretch to new resource pages easily; small flag props and loose any-typing keep it from being exemplary."
+    }
+  },
+  "overall": 4,
+  "findings": [
+    {
+      "severity": "medium",
+      "location": "app/src/views/details.tsx:14-163",
+      "issue": "Move, Ability and Type pages and their loaders are bundled in one file, so removing or adding a resource means editing a shared module next to unrelated features",
+      "suggestion": "Split per resource (views/move.tsx, views/ability.tsx, views/type.tsx) or group by resource; the shared Section/Count/CardList helpers already live in components.tsx"
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/views/pokemon.tsx:99",
+      "issue": "API payloads are typed as any throughout (also data.ts:46, details.tsx:54-59, loadMoves), so shape changes break silently",
+      "suggestion": "Declare minimal response types for the endpoints actually consumed (Pokemon, Species, Move, Type) so the compiler catches API-shape drift"
+    },
+    {
+      "severity": "low",
+      "location": "app/src/views/home.tsx:80,92,99",
+      "issue": "The htmx contract with the home route (target '#results', hx-get '/' repeated three times, HX-Push-Url in index.tsx:24) is spread across files with no single definition",
+      "suggestion": "Define the fragment id and home URL once (a constants module or shared helper) and reference it from both the route and the view"
+    },
+    {
+      "severity": "low",
+      "location": "app/src/index.tsx:68-83",
+      "issue": "Sort-key validation (SORT_KEYS) lives in the router while the sort semantics live in views/pokemon.tsx, splitting one contract across files",
+      "suggestion": "Export a parseSortParam helper from views/pokemon.tsx next to SortKey/SortDir and let the route call it"
+    },
+    {
+      "severity": "low",
+      "location": "app/src/views/pokemon.tsx:141-145",
+      "issue": "Default sorting for the level-up table is inlined, duplicating the byName/level ordering already expressed in sortRows",
+      "suggestion": "Route the level-up default through sortRows (e.g. a default key of 'level' with 'move' as tiebreaker) so ordering logic has one home"
+    },
+    {
+      "severity": "low",
+      "location": "app/src/views/components.tsx:8",
+      "issue": "TypeBadge's link boolean flag is mild flag-parameter creep; callers also hand-build TypeInfo literals everywhere (e.g. details.tsx:34, pokemon.tsx:224)",
+      "suggestion": "Consider a small typeBadge helper that resolves a type name to {name,label} using the labels map, reducing repeated inline object construction"
+    },
+    {
+      "severity": "low",
+      "location": "app/src/views/pokemon.tsx:4",
+      "issue": "The Pokémon page reaches into the team feature's view module for TeamButton, coupling two feature views",
+      "suggestion": "Move TeamButton (or the team add/remove forms) into components or the team module's public surface, so the dependency is explicit and one-directional"
+    }
+  ],
+  "summary": "This is a well-factored small app: a single API seam, one card abstraction covering every Pokémon list, colocated loader/view pairs and thin routes make most changes land in one obvious place. Editability is held back by a three-feature grab-bag module, pervasive any-typing that removes compiler support, and htmx fragment contracts spread implicitly between router and views. It reads like code a team could comfortably extend for years with modest refactoring.",
+  "scenarios": [
+    {
+      "change": "Remove the Abilities pages and every link to them",
+      "files": ["app/src/index.tsx", "app/src/views/details.tsx", "app/src/views/pokemon.tsx"],
+      "difficulty": 3,
+      "notes": "Four scattered edits (route + import, loader + page, Abilities section links); nothing else references /abilities/ so no dead code remains, but the multi-feature details.tsx forces edits next to unrelated code."
+    },
+    {
+      "change": "Fix the card sprite for species whose default Pokémon has a different name",
+      "files": ["app/src/data.ts", "app/src/views/components.tsx"],
+      "difficulty": 5,
+      "notes": "spriteUrl (data.ts:28) is consumed only by CardList (components.tsx:25) and every card list renders through CardList, so one fix covers home, moves, abilities, types and team. Caveat: if the fix required Pokémon-record data, the Card type would need a new field populated by the three producers (loadHome, cardsForPokemon, loadTeam), spreading it slightly."
+    },
+    {
+      "change": "Add sorting by name to every list of Pokémon cards",
+      "files": ["app/src/views/home.tsx", "app/src/data.ts", "app/src/views/components.tsx"],
+      "difficulty": 3,
+      "notes": "CardList can't unconditionally sort because the team page must keep insertion order (FEATURE.md); you either add a sort prop to CardList or sort in loadHome (home.tsx:70) and cardsForPokemon (data.ts:96). Findable, but not one place."
+    },
+    {
+      "change": "Add an Items section (/items, /items/:name) shaped like Moves",
+      "files": ["app/src/index.tsx", "app/src/views/details.tsx", "app/src/views/layout.tsx"],
+      "difficulty": 4,
+      "notes": "loadMove/MovePage is a clean template and api, apiList, englishEffect, Section, Count, TypeBadge, CardList, orDash are all directly reusable; the rest is a new loader/page in details.tsx plus three lines of routes and a nav link in layout.tsx."
+    },
+    {
+      "change": "Change the API base URL and caching rules",
+      "files": ["app/src/api.ts"],
+      "difficulty": 5,
+      "notes": "API_BASE_URL, FRESH_MS and the stale-while-revalidate cache live entirely in api.ts:3-33; spriteUrl imports the base URL from there (data.ts:28), so media URLs follow automatically. One module, no other file knows about the API."
+    }
+  ]
+}
+```

@@ -1,0 +1,113 @@
+I've reviewed the app against the current stable TanStack Start (1.169+) docs and APIs. Verification notes on the APIs being judged:
+
+- `.validator()` on server functions is the current canonical API (`inputValidator` was deprecated and removed in mid-2026) — `app/src/lib/pokedex.functions.ts` uses it correctly.
+- Start 1.169 stable requires Vite 8; `app/vite.config.ts` pins Vite ^8.3.5 with `tanstackStart()` before `viteReact()`, matching the docs exactly.
+- `router.tsx` with the `getRouter()` factory + `Register` module augmentation, and `__root.tsx` with `HeadContent`/`Scripts` imported from `@tanstack/react-router`, mirror the official "build from scratch" guide almost line-for-line.
+- The hand-rolled srvx production server (`dist/server/server.js` fetch handler + static client assets) matches the pattern TanStack's own examples use for `npm start` (`srvx --prod`).
+- `hashScrollIntoView` and `resetScroll` are documented `NavigateOptions` — the moves-page game selector uses them correctly to avoid scroll-jumping on `#moves`.
+- `RouteMatch.status` is a documented public field including `'notFound'`, but `m._notFound` (underscore-prefixed) at `__root.tsx:14` is a private field — the one genuine framework-facing wart.
+
+The architecture is clean: thin route files, loaders calling server functions, `notFound()` thrown in loaders, view models typed in `lib/types.ts`, server-only data access confined to `lib/pokedex.server.ts` behind the server-function boundary in `lib/pokedex.functions.ts`. Correctness looked solid overall — dedupe-cached fetches with TTL and rejection cleanup, no SSR/CSR mismatch paths found, sensible aria/sort handling — with only minor edge cases (unknown `generation` value silently empties the list; server-side page clamp desyncs from the URL; cold-request fan-out of ~100 move fetches per Pokémon page). The main maintainability gap is pervasive `any` in the API-shaping layer despite `"strict": true`.
+
+```json
+{
+  "dimension": "mergeability",
+  "criteria": {
+    "idiomatic": {
+      "score": 5,
+      "evidence": [
+        "app/src/lib/pokedex.functions.ts:5-32 — createServerFn({ method: 'GET' }).validator().handler() is exactly the current stable API (validator is the post-rename canonical name)",
+        "app/src/router.tsx:5-12 — getRouter() factory + Register module augmentation matches the official build-from-scratch guide",
+        "app/src/routes/__root.tsx:6-17 — HeadContent/Scripts from @tanstack/react-router, head() with meta/links, Outlet-wrapped RootDocument — docs-shaped",
+        "app/src/routes/pokemon.$name.tsx:31-37 — validateSearch + loaderDeps + loader calling a server fn, notFound() thrown from the loader; the framework-recommended data-loading pattern throughout",
+        "app/src/routes/pokemon.$name.tsx:126-136 — navigate uses documented hashScrollIntoView/resetScroll options to keep #moves stable across game switches",
+        "app/server.mjs:11-16 — srvx fetch-handler prod server with static client assets, matching TanStack's own example 'start' scripts",
+        "app/vite.config.ts:6-8 — tanstackStart() before viteReact(), Vite 8 as required by Start 1.169"
+      ],
+      "rationale": "This reads like the framework's own examples: routing, data loading, head management and the production server all use the current recommended primitives, including very recent options (hashScrollIntoView) and the freshly renamed validator(). The only private-API touch is the redundant m._notFound check at __root.tsx:14."
+    },
+    "correctness_risks": {
+      "score": 4,
+      "evidence": [
+        "app/src/lib/pokedex.server.ts:162 — an unknown generation query value (e.g. ?generation=garbage) makes generation undefined and the filter excludes every species, showing 'No Pokémon found' instead of ignoring the bad filter",
+        "app/src/lib/pokedex.server.ts:167 — page is clamped server-side, so ?page=999 renders the last page's content while the URL still says 999 (display/URL desync)",
+        "app/src/lib/pokedex.server.ts:232-234 — cold request fans out one fetch per learned move (~100 for popular Pokémon) with no concurrency bound; the 60s cache mitigates repeat loads",
+        "app/src/lib/pokedex.server.ts:38-46 — cache stores promises, deletes on rejection and has a TTL; no unhandled rejections or unbounded growth found",
+        "app/src/routes/index.tsx:49-61 — debounced search uses replace + refocus-guard, no race with URL state observed; no SSR/CSR mismatch paths found"
+      ],
+      "rationale": "Careful look turned up only minor edge cases: a bad generation filter silently empties results, page-clamp/URL desync, and unbounded-but-cached fan-out on cold Pokémon loads. Nothing serious — no races, leaks, or mismatch risks spotted."
+    },
+    "global_abstractions": {
+      "score": 4,
+      "evidence": [
+        "app/src/lib/pokedex.functions.ts — clean server/client boundary: everything server-only lives in pokedex.server.ts behind typed server functions",
+        "app/src/lib/pokedex.server.ts:12-46 — module-level cache is hidden global state, but confined, TTL-bounded, and documented; acceptable for the spec's runtime-caching allowance",
+        "app/src/lib/pokedex.server.ts:1-470 — single 470-line data module mixes fetch caching, API parsing and view-model shaping for all five page types; fine today, will need domain splitting as it grows",
+        "app/src/components/ui.tsx:1-70 — small, reusable presentational components (Section, TypeBadge, PokemonCard, CardList, NotFound) with no leaky coupling"
+      ],
+      "rationale": "Boundaries are unusually clear (thin routes, one server data layer, typed view models), but the data layer is one god module holding cache + parsing + shaping for every page, plus a module-scope cache. Locally reasonable; a modest untangling later."
+    },
+    "readability": {
+      "score": 4,
+      "evidence": [
+        "app/src/routes/__root.tsx:11-13 — comment explains the notFound/title edge case instead of the code",
+        "app/src/lib/pokedex.server.ts:1-4 — header comment explains cache TTL rationale (why, not what)",
+        "app/src/lib/pokedex.server.ts:27-46 — ~30 untyped `any` reads of API records across the file despite strict mode in app/tsconfig.json:11",
+        "app/src/lib/types.ts:1-59 — clean, complete view-model types make every route component easy to follow",
+        "app/src/lib/format.ts:1-19 — tiny, well-named helpers, consistent style across all files"
+      ],
+      "rationale": "A new teammate would find their way in minutes: consistent file layout, small functions, why-comments where they matter. The dock is the pervasive `any` in the API-shaping layer, which undermines the otherwise strict TypeScript story and hides API-shape drift."
+    },
+    "review_cost": {
+      "score": 4,
+      "evidence": [
+        "app/src/routes/__root.tsx:14 — drop the private m._notFound check (m.status === 'notFound' is the documented public signal)",
+        "app/src/lib/pokedex.server.ts:27-46 — type the API record shapes instead of `any`",
+        "app/src/lib/pokedex.server.ts:162 — decide intended behavior for an unknown generation filter value",
+        "app/src/routes/pokemon.$name.tsx:58-83, 146-181 — no rework needed; spec-critical sorting/aria/debounce logic is correct and self-contained"
+      ],
+      "rationale": "I'd approve after one small round: remove the private-API peek, type the API layer, and pick a behavior for invalid filter values. Everything else is nits at most — the core structure needs no rework."
+    }
+  },
+  "overall": 4,
+  "findings": [
+    {
+      "severity": "medium",
+      "location": "app/src/routes/__root.tsx:14",
+      "issue": "Root head() reads the private, underscore-prefixed `m._notFound` field on route matches to set the Not-found title; private internals can change in any patch release.",
+      "suggestion": "Rely only on the documented public `m.status === 'notFound'` (RouteMatch.status includes 'notFound'), or handle the 404 title via per-route notFoundComponent/head."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/lib/pokedex.server.ts:27-46",
+      "issue": "The entire API-shaping layer uses `any` for API records (~30 casts) in a project compiled with strict mode, so API shape drift is invisible to the type system.",
+      "suggestion": "Add minimal interfaces for the API responses actually consumed (species, pokemon, move, ability, type, generation) and narrow `get<T>()` at the call sites."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/lib/pokedex.server.ts:162",
+      "issue": "A syntactically valid but unknown `generation` query value (e.g. ?generation=garbage) yields 'No Pokémon found' rather than ignoring the unknown filter.",
+      "suggestion": "Treat an unresolvable generation name as no filter (and ideally canonicalize the URL), mirroring how unknown types already behave via the pokemonTypes lookup."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/lib/pokedex.server.ts:167",
+      "issue": "Page is clamped to pageCount server-side, so ?page=999 shows the last page's items while the URL (and pagination links derived from search) still carry page=999.",
+      "suggestion": "Clamp in the search validator (app/src/routes/index.tsx:18) so the URL and rendered page stay in sync, or normalize on match."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/lib/pokedex.server.ts:232-234",
+      "issue": "Cold load of a Pokémon page fans out one fetch per learned move (~100 concurrent requests for popular Pokémon) with no concurrency limit.",
+      "suggestion": "Acceptable given the 60s cache, but consider batching with a small concurrency pool or a chunked Promise.all to be polite to the upstream API."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/lib/pokedex.server.ts:41-44",
+      "issue": "Cache eviction only triggers when size exceeds 5000 and only removes expired entries; stale-but-unexpired entries are never proactively pruned.",
+      "suggestion": "Harmless at current key counts (bounded by API resource count within the 60s TTL), but an LRU or periodic sweep would make the bound explicit."
+    }
+  ],
+  "summary": "A faithful, current-stable TanStack Start implementation: server functions with the new validator() API, docs-shaped router/root wiring, and a proper srvx production server. The main issues are one private-API peek for the 404 title, an untyped `any` API layer, and a few minor filter/pagination edge cases. I'd approve after one small round of fixes."
+}
+```

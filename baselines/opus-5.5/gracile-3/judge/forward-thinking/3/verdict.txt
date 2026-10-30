@@ -1,0 +1,154 @@
+## Review: Gracile-with-Lit Pokédex — forward-thinking
+
+Framework check first: `@gracile/gracile` **0.11.0 is the current stable release** (published ~6 months before today; 0.11.1-next.* are the only newer tags). I verified the app's route API against the framework's own type surface (`@gracile/engine@0.12.0/dist/routes/route.d.ts` — `defineRoute({ handler, document, template, responseInit, handler: { GET } })` is exactly the current shape) and against the docs site's annotated `document.ts`/route examples and the official `minimal-server-express` starter. Nothing the app uses is deprecated.
+
+### `latest_apis` — 5
+
+The stack is pinned to the current generation and used the documented way:
+
+- `app/package.json:8` — `@gracile/gracile` **0.11.0**, exact pin (wise for a framework that still self-describes as alpha; avoids surprise breakage).
+- `app/src/routes/(home).ts:8-23` — `defineRoute` with `handler` returning props, `document`, `template` reading `props`: the current route contract, matching `route.d.ts` verbatim.
+- `app/src/routes/api/species-index.ts:6-13` — server endpoint via `handler: { GET: ... }` returning `Response.json`, the documented "Server Endpoints" feature used instead of bolting an API onto express.
+- `app/server.js:1-20` — structurally identical to the official `minimal-server-express` starter (`nodeAdapter`, `getClientBuildPath`, `printUrls`), with sensible hardening added (`disable('x-powered-by')`, immutable asset caching).
+- `app/src/document.ts:1` — `html` from `@gracile/gracile/server-html` for the document, `lit` `html` for route templates: the documented split.
+- `lit` 3.3.3 (registry latest as of 2026-05) and express ^5.1.0, `@types/express` ^5 — current.
+
+No legacy-era patterns anywhere; the client side is deliberately vanilla (`lit` `render` + native DOM) rather than hydration, which is a legitimate "progressive interactivity" choice in current Gracile, not a legacy one.
+
+### `platform` — 4
+
+Reaches for the platform almost everywhere:
+
+- `app/src/lib/api.ts:70-78` — global `fetch`, `response.body?.cancel()` on 404, `Response.json` status checks; no axios/node-fetch.
+- `app/src/lib/browse.ts:22-44` — `URLSearchParams` both ways; `app/src/routes/pokemon/[name].client.ts:22` — `Intl.Collator` for locale-aware sorting.
+- `app/src/routes/(home).ts:13` — native `<form method="get">` works without JS; the client script (`(home).client.ts:89-93`) merely enhances it and falls back with `location.assign` on error. Progressive enhancement done right.
+- `app/src/templates/components.ts:38-40` — `loading="lazy"`, `decoding="async"`, intrinsic `width`/`height` to prevent CLS.
+- Modern JS throughout: `.at(-1)` (`app/src/lib/data.ts:308`), `replaceAll` (`data.ts:140`), numeric separators (`api.ts:4`).
+
+Deduction: no `AbortController`/`AbortSignal` anywhere (grep confirms zero matches). Rapid filter typing in `app/src/routes/(home).client.ts:34-36` is raced via a hand-rolled `latest` ticket counter, and `pokemon/[name].client.ts:39-52` does fetch+`DOMParser`+node-adoption with the same pattern instead of aborting stale in-flight fetches. Works today, but the platform primitive would cancel the requests, not just ignore the results.
+
+### `dependencies` — 4
+
+Lean and current, with one redundancy:
+
+- `app/package.json:9` — `lit` 3.3.3 = registry latest. `express` 5.1 = latest. Dev deps: `vite` 8.3.5 (rolldown-based, current major), `typescript` 7.0.2 (native-port line, current), `@types/node` 24, `@types/express` 5.
+- Redundant: `app/package.json:12-13` — `@lit-labs/ssr` and `@lit-labs/ssr-client` are declared as direct deps but **never imported by any app source** (grep `@lit-labs` in `app/src` → 0 matches), and both are already transitive deps of `@gracile/gracile` 0.11.0 / `@gracile/client` 0.5.7 per the registry manifests. The app uses no custom elements or hydration, so `ssr-client` in particular is dead weight. The official starter declares neither.
+
+### `churn_resistance` — 4
+
+Genuinely good architecture for a framework that's still pre-1.0:
+
+- Data access is behind exactly two modules: `app/src/lib/api.ts` (fetch + cache, the only place that knows `API_BASE_URL`) and `app/src/lib/data.ts` (API records → typed view models). Routes only consume view models from `app/src/lib/types.ts`. An API change touches one file.
+- Server and client render the **same templates** (`app/src/templates/components.ts:49` `browseResults` is used by both SSR `(home).ts:24` and the client script `(home).client.ts:15`) and the same filtering logic (`lib/browse.ts`), so SSR and client output can't drift — the classic MPA failure mode is designed out.
+- The framework surface is confined to the 7 route files, `server.js`, and one line of `vite.config.ts:11` (`gracile({ output: 'server' })`). An upgrade touches few, thin call sites.
+
+Two real couplings:
+
+1. `app/src/lib/api.ts:33-35` + `app/vite.config.ts:5-8` — the `POKEDEX_BUILD_STEP` env-var flag works around Gracile's build-time handler invocation (rendering document shells). This behavior is not part of the documented `ModuleOptions` (`route.d.ts` shows `prerender`/`staticPaths` but no build-context flag), and the guard is repeated in all six handlers (`(home).ts:12`, `pokemon/[name].ts:111`, `moves/[name].ts:11`, `abilities/[name].ts:11`, `types/[name].ts:11`). If a future Gracile release exposes a first-class "is this a prerender pass" context flag — or stops calling handlers at build — six files need touching. At least it's centralized behind one function.
+2. `app/src/document.ts:16-17` — stylesheet hrefs computed as `new URL('./styles/tokens.css', import.meta.url).pathname`, instead of the documented `/src/styles/global.scss`-style href that Vite rewrites during build. This depends on how the server bundle resolves `import.meta.url` and on the static middleware layout — exactly the kind of bundler-implementation coupling that breaks silently on a Vite major bump.
+
+### Findings summary
+
+The two medium-ish items are the build-step env hack and the CSS href trick; everything else is nitpicks on an otherwise current, well-modularized codebase. I'd approve this PR with comments on findings 1–3.
+
+```json
+{
+  "dimension": "forward-thinking",
+  "criteria": {
+    "latest_apis": {
+      "score": 5,
+      "evidence": [
+        "app/package.json:8 — @gracile/gracile 0.11.0 exact-pinned, the current stable (only 0.11.1-next.* tags exist above it)",
+        "app/src/routes/(home).ts:8 — defineRoute({handler, document, template}) matches @gracile/engine@0.12.0 route.d.ts verbatim",
+        "app/src/routes/api/species-index.ts:6 — handler: { GET } server endpoint returning Response.json, the current documented feature",
+        "app/server.js:11 — nodeAdapter/getClientBuildPath/printUrls mirror the official minimal-server-express starter",
+        "app/src/document.ts:1 — html from @gracile/gracile/server-html for the document, lit html for route templates, the documented split"
+      ],
+      "rationale": "Verified against gracile.js.org's annotated examples, the engine's published route.d.ts, and the official Express starter: every framework API in use is the current 0.11 generation; no legacy or deprecated patterns found. Exact-pinning an alpha-stage framework is a forward-looking choice in itself."
+    },
+    "platform": {
+      "score": 4,
+      "evidence": [
+        "app/src/lib/api.ts:70 — global fetch with response.body.cancel() on 404; no HTTP library",
+        "app/src/routes/pokemon/[name].client.ts:22 — Intl.Collator for locale-aware table sorting",
+        "app/src/routes/(home).ts:13 — native form method=get works without JS; (home).client.ts:89 falls back via location.assign on failure",
+        "app/src/templates/components.ts:38 — loading=lazy, decoding=async, intrinsic width/height to prevent layout shift",
+        "app/src/lib/data.ts:140 — replaceAll; data.ts:308 uses .at(-1); api.ts:4 numeric separators"
+      ],
+      "rationale": "Platform-first throughout (fetch, URLSearchParams, Intl, DOMParser, history API, progressive-enhancement forms). The gap is the absence of AbortController: stale client fetches in (home).client.ts:34 and [name].client.ts:39 are discarded via hand-rolled ticket counters rather than aborted signals."
+    },
+    "dependencies": {
+      "score": 4,
+      "evidence": [
+        "app/package.json:12-13 — @lit-labs/ssr and @lit-labs/ssr-client declared but never imported (grep '@lit-labs' in app/src: 0 matches)",
+        "app/package.json:9 — lit 3.3.3 is the registry latest (2026-05); express ^5.1.0 is the current major",
+        "app/package.json:18-19 — vite 8.3.5 (rolldown-based) and typescript 7.0.2, both current-generation",
+        "app/src/routes/api/species-index.ts:6 — JSON endpoint served by Gracile's own server-endpoint feature, no extra routing/JSON dependency"
+      ],
+      "rationale": "Minimal, current set with excellent version hygiene, except that both @lit-labs packages are redundant direct deps: @gracile/gracile 0.11.0 and @gracile/client 0.5.7 already provide them transitively, the app uses no Lit custom elements/hydration, and the official starter declares neither."
+    },
+    "churn_resistance": {
+      "score": 4,
+      "evidence": [
+        "app/src/lib/api.ts:70 — all HTTP access behind one module (only place reading API_BASE_URL); app/src/lib/data.ts maps records to typed view models in app/src/lib/types.ts",
+        "app/src/templates/components.ts:49 — browseResults template shared by SSR route (home).ts:24 and client (home).client.ts:15, so server and client markup cannot drift",
+        "app/src/lib/browse.ts:46 — one filter/pagination implementation shared by server and browser",
+        "app/src/lib/api.ts:33 — isBuildStep() env-var guard, repeated in all six handlers ((home).ts:12, pokemon/[name].ts:111, moves/[name].ts:11, abilities/[name].ts:11, types/[name].ts:11), works around undocumented build-time handler invocation",
+        "app/src/document.ts:16 — CSS hrefs via new URL(..., import.meta.url).pathname instead of the documented /src/... href Vite rewrites"
+      ],
+      "rationale": "Data access, formatting, and rendering are each isolated behind one module, and the framework surface is confined to thin route definitions — an upgrade would touch few files. The deductions are the POKEDEX_BUILD_STEP workaround, which couples six handlers to an undocumented build behavior with no documented alternative in ModuleOptions, and the import.meta.url-derived stylesheet paths, which depend on bundler implementation details rather than the documented asset-href pattern."
+    }
+  },
+  "overall": 4,
+  "findings": [
+    {
+      "severity": "medium",
+      "location": "app/src/lib/api.ts:33",
+      "issue": "isBuildStep() relies on a custom POKEDEX_BUILD_STEP env var (set in vite.config.ts:6) to detect Gracile's undocumented build-time handler invocation, and the guard is duplicated in all six route handlers",
+      "suggestion": "Track Gracile's ModuleOptions (route.d.ts exposes prerender/staticPaths) for a first-class build/context flag and migrate when it appears; in the meantime at least keep the guard out of individual handlers by neutralizing it inside lib/api.ts's getJson/mustGetJson and having handlers tolerate empty data"
+    },
+    {
+      "severity": "low",
+      "location": "app/package.json:12",
+      "issue": "@lit-labs/ssr and @lit-labs/ssr-client are direct dependencies but never imported by app source; both ship transitively with @gracile/gracile 0.11.0",
+      "suggestion": "Remove both; re-declare only if the app later adopts Lit custom elements or hydration"
+    },
+    {
+      "severity": "low",
+      "location": "app/src/document.ts:16",
+      "issue": "Stylesheet hrefs computed as new URL('./styles/tokens.css', import.meta.url).pathname, deviating from the documented '/src/styles/...' href that Vite rewrites during build; couples the page to server-bundle path layout and the static middleware",
+      "suggestion": "Use the documented source-relative href (e.g. /src/styles/tokens.css) and let Vite emit the hashed asset, or import the CSS explicitly if a future Gracile supports it"
+    },
+    {
+      "severity": "low",
+      "location": "app/src/routes/(home).client.ts:35",
+      "issue": "In-flight species-index/page fetches are never aborted; staleness is handled by a hand-rolled ticket counter (same pattern in pokemon/[name].client.ts:40)",
+      "suggestion": "Pass an AbortController signal to fetch and abort the previous request on new input; keeps the ticket check as a belt-and-braces"
+    },
+    {
+      "severity": "low",
+      "location": "app/src/routes/pokemon/[name].client.ts:47",
+      "issue": "Game switching fetches the whole page and DOMParser-extracts [data-move-tables], coupling the client script to rendered markup structure rather than a data endpoint",
+      "suggestion": "Consider a JSON endpoint (like /api/species-index) for move tables, or accept the coupling knowingly since it degrades gracefully via location.assign"
+    }
+  ],
+  "summary": "This app is built squarely on the current Gracile 0.11 generation — its route contract, server endpoints, node adapter, and document html tag all match the framework's published types, docs, and official starter, with lit 3.3.3, express 5, vite 8, and TS 7 keeping the whole stack current. Architecture is churn-resistant where it counts: one fetch/cache module, typed view models, and templates shared between SSR and client so outputs can't drift. The main risks are the undocumented POKEDEX_BUILD_STEP build-detection workaround and import.meta.url-derived stylesheet paths, plus two unused @lit-labs deps and missing AbortController usage.",
+  "apis": [
+    { "api": "defineRoute ({ handler, document, template })", "location": "app/src/routes/(home).ts:8", "status": "current", "replacement": "" },
+    { "api": "responseInit.status mutation for 404", "location": "app/src/routes/pokemon/[name].ts:113", "status": "current", "replacement": "" },
+    { "api": "handler: { GET } server endpoint returning Response.json", "location": "app/src/routes/api/species-index.ts:6", "status": "current", "replacement": "" },
+    { "api": "@gracile/gracile/node (nodeAdapter, getClientBuildPath, printUrls)", "location": "app/server.js:4", "status": "current", "replacement": "" },
+    { "api": "html from @gracile/gracile/server-html", "location": "app/src/document.ts:1", "status": "current", "replacement": "" },
+    { "api": "lit html/nothing/TemplateResult/render (v3)", "location": "app/src/templates/components.ts:1", "status": "current", "replacement": "" }
+  ],
+  "dependencies": [
+    { "name": "@gracile/gracile", "verdict": "modern", "note": "0.11.0, the current stable release (only -next prereleases above it); exact pin is prudent for an alpha-stage framework" },
+    { "name": "lit", "verdict": "modern", "note": "3.3.3 is the registry latest; used for templates and client render only" },
+    { "name": "express", "verdict": "established", "note": "^5.1.0, current major, matching the official Gracile Express starter; used only for static serving and the node adapter" },
+    { "name": "@lit-labs/ssr", "verdict": "unnecessary", "note": "never imported by app code; already a dependency of @gracile/gracile 0.11.0" },
+    { "name": "@lit-labs/ssr-client", "verdict": "unnecessary", "note": "never imported; app has no custom elements or hydration, and @gracile/client provides it transitively" },
+    { "name": "vite", "verdict": "modern", "note": "8.3.5 with rolldown, current major; config stays pristine (single gracile plugin line)" },
+    { "name": "typescript", "verdict": "modern", "note": "7.0.2 (native-port line), current generation" }
+  ]
+}
+```

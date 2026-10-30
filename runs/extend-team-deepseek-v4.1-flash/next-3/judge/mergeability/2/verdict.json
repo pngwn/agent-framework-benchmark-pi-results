@@ -1,0 +1,114 @@
+{
+  "dimension": "mergeability",
+  "criteria": {
+    "idiomatic": {
+      "score": 4,
+      "evidence": [
+        "app/src/app/pokemon/[name]/page.tsx:21-24,46 — async `params`/`searchParams` Promises plus React `cache()` to dedupe generateMetadata from the page render, the documented Next 16 pattern",
+        "app/src/app/page.tsx:28 and every page — `await connection()` before data loading, matching the current docs for opting a page out of prerendering (spec forbids build-time data)",
+        "app/src/lib/team-server.ts:9-10 — `await cookies()` (async in current Next) behind a `server-only` module, with pure cookie helpers kept in shared lib/team.ts",
+        "app/src/app/layout.tsx:8-12 — Metadata title template '%s – Pokédex' with `absolute` override on the home page, exactly the spec's title rule",
+        "app/src/app/not-found.tsx:1-11 — route not-found.tsx convention, reached via notFound() on every data-miss path",
+        "app/src/lib/api.ts:26-41,59-74 — hand-rolled concurrency queue + TTL/LRU module cache instead of Next's data-cache primitives; defensible given the spec's 'no build-time data' rule, but it's the one home-grown layer a framework feature could own"
+      ],
+      "rationale": "Uses Next 16's current primitives correctly and consistently (Promise params, connection(), cache(), async cookies, not-found). The only non-framework machinery is the in-memory fetch cache/limiter, which the spec explicitly permits and the spec's request-time-data rule makes hard to replace with Next's data cache."
+    },
+    "correctness_risks": {
+      "score": 4,
+      "evidence": [
+        "app/src/app/filters.tsx:29-41 — debounced router.replace + 'follow URL changes' effect: if an earlier replace resolves after a later one (cha vs char), the stale props mismatch lastPushed and reset the input, clobbering what the user typed",
+        "app/src/app/pokemon/[name]/game-select.tsx:24-30 — same replace-without-sequence-guard pattern; rapid select changes can momentarily render the wrong game's tables",
+        "app/src/lib/api.ts:44-49 — 404 bodies drained rather than cancelled (with a why-comment about fetch tee); missing resources map to null → notFound(), so every route has 404 handling",
+        "app/src/lib/api.ts:59-74 — cache stores promises, evicts on rejection, bounded at 1500 entries with 60s TTL; no unbounded growth or unhandled rejections",
+        "app/src/app/team/page.tsx:27-43 — team cookie entries that the API no longer knows are dropped (null-checked), and getTeam() dedupes/clamps to 6",
+        "app/src/app/team/page.tsx:73 — empty team skips getAllTypes entirely, avoiding a pointless fan-out on the common empty state",
+        "app/src/app/error.tsx — missing: an API 5xx in lib/api.ts:48 throws and surfaces as Next's default error page instead of an app-styled boundary"
+      ],
+      "rationale": "Careful handling of 404s, cache eviction, listener cleanup and cookie robustness; the one real defect is an out-of-order-response race shared by the two URL-syncing client components, plus the absence of an error boundary."
+    },
+    "global_abstractions": {
+      "score": 4,
+      "evidence": [
+        "app/src/lib/api.ts:1,166-213 — single cohesive data module: typed API shapes, per-resource getters, index/card builders; every page depends on it but its boundary is clean ('server-only', no UI)",
+        "app/src/lib/team.ts + team-server.ts — cookie encoding/parsing split from server access, so client components never import server code; a deliberate, well-placed boundary",
+        "app/src/app/pokemon/[name]/page.tsx:44-50 vs app/src/app/team/page.tsx:33-38 — duplicated 'load species → find default variety → fetch pokemon' logic in two places; the second copy can drift",
+        "app/src/app/page.tsx:24-32 vs app/src/app/filters.tsx:11-17 — two near-identical query-string builders for the same three filter params (one adds page), sharing no code",
+        "app/src/app/team/page.tsx:82-87 — re-implements PokemonCardList's <ul className=\"card-grid\"> inline to inject remove buttons, a small near-duplicate of the shared list component"
+      ],
+      "rationale": "The two lib modules earn their keep with clean server/client boundaries; the cross-cutting problems are three small duplications (species loading, filter-URL building, team card list), each a one-file fix, not structural."
+    },
+    "readability": {
+      "score": 4,
+      "evidence": [
+        "app/src/lib/api.ts:44-46 — comment explains *why* the 404 body is drained (fetch tee never settles one cancelled branch), the kind of comment that pays off",
+        "app/src/lib/format.ts:4-16 — tiny pure helpers, each with a one-line example contract (`thunder-punch` → `Thunder Punch`)",
+        "app/src/app/pokemon/[name]/page.tsx:204-248 — movesFor is dense (dedupe, method ranking, two-level sort) but readable; heaviest function in the app at ~45 lines",
+        "app/src/app/filters.tsx:25,29-41 — lastPushed-ref + trim-comparison dance between props and debounced navigation needs a second read to trust",
+        "app/src/components/section.tsx:5-10 — Section component keeps the 'titled region' rule in one place instead of repeating aria-labelledby in 8 pages"
+      ],
+      "rationale": "Consistent naming, small files laid out in App Router convention, comments that explain intent rather than mechanics. Only the URL-sync effects in the client components and one dense data-shaping function cost extra reading."
+    },
+    "review_cost": {
+      "score": 4,
+      "evidence": [
+        "app/src/app/filters.tsx:29-41 — I'd ask for a stale-response guard before approving the search UX",
+        "app/src/app/pokemon/[name]/page.tsx:44-50 + app/src/app/team/page.tsx:27-43 — extract one loadSpeciesWithDefaultPokemon into lib/api",
+        "app/src/app/page.tsx:24-32 + app/src/app/filters.tsx:11-17 — share one filter-URL builder",
+        "app/src/app/error.tsx — add a route-segment error boundary so API failures match the app's look"
+      ],
+      "rationale": "Approve after one small round: guard the debounce race, add error.tsx, and collapse the three duplications. Nothing needs structural rework."
+    }
+  },
+  "overall": 4,
+  "findings": [
+    {
+      "severity": "medium",
+      "location": "app/src/app/filters.tsx:29",
+      "issue": "Debounced router.replace responses can resolve out of order; the 'sync from URL' effect then sees a mismatch against lastPushed and resets the input to the stale query, visibly clobbering what the user typed.",
+      "suggestion": "Track a monotonically increasing request id and ignore prop updates that correspond to an already-superseded navigation (or compare against the URL the router reports via useSearchParams)."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/app/pokemon/[name]/game-select.tsx:29",
+      "issue": "Same unguarded replace pattern: fast game switching can briefly render the wrong game's move tables.",
+      "suggestion": "Reuse the same stale-response guard as the filters fix."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/app/error.tsx",
+      "issue": "No error boundary anywhere in the tree; lib/api.ts:48 throws on any non-404 API failure, so users get Next's unstyled default error page.",
+      "suggestion": "Add an app/error.tsx (client component) with a 'Something went wrong' message and retry, matching the app's design."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/app/team/page.tsx:33",
+      "issue": "loadTeam duplicates the species → default variety → pokemon loading sequence already in pokemon/[name]/page.tsx loadSpecies; the two copies can drift (they already differ in null-handling).",
+      "suggestion": "Move a loadSpeciesWithDefault(name): Promise<{species, pokemon} | null> into lib/api.ts (wrap it in React cache() at the call sites) and use it from both pages."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/app/page.tsx:24",
+      "issue": "pageHref and filters.tsx href are two hand-maintained builders of the same q/type/generation query string.",
+      "suggestion": "Export one buildFilterQuery(values, page?) helper (e.g. from filters.tsx or lib) used by both the pagination links and the form navigation."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/lib/api.ts:26",
+      "issue": "Bespoke concurrency limiter (queue + shift + active counter) is ~15 lines of scheduling machinery unique to this app, sitting next to an also-custom TTL/LRU cache.",
+      "suggestion": "Keep it (it prevents socket blowout when movesFor fans out to 100+ move fetches), but add a one-line comment stating that purpose; alternatively chunk the Promise.all in movesFor and delete the queue."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/app/team/page.tsx:82",
+      "issue": "Team page re-creates PokemonCardList's <ul className=\"card-grid\"> inline to add the remove button, duplicating the shared list markup and class names.",
+      "suggestion": "Give PokemonCardList an optional per-item render slot (children after the card), or a variant that renders the button."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/app/team/page.tsx:73",
+      "issue": "members.length is shown as '<n> of 6' while the cookie may legitimately contain 6 entries of which some fail to load; the displayed count silently diverges from the stored team.",
+      "suggestion": "Either render the failed species names as inert placeholders, or fall back to team.length in the count text and note the discrepancy — either is fine, just make it deliberate."
+    }
+  ],
+  "summary": "A genuinely well-made Next 16 App Router app: correct use of the current async APIs, `connection()` for request-time data, React cache for metadata dedup, and a clean server/client boundary for the team feature. The merge-blocking items are minor: one out-of-order-navigation race in the two URL-syncing client components, a missing error boundary, and three small duplications that a maintainer would otherwise re-derive. I'd approve after one focused round of nits."
+}

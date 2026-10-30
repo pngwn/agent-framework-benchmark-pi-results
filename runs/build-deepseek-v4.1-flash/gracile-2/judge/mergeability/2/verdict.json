@@ -1,0 +1,126 @@
+{
+  "dimension": "mergeability",
+  "criteria": {
+    "idiomatic": {
+      "score": 3,
+      "evidence": [
+        "app/src/document.js:3 — imports html from '@gracile/gracile/server-html' exactly as the framework's document example prescribes",
+        "app/src/document.js:39 — uses the documented <route-template-outlet> injection point",
+        "app/src/routes/(home).js:34 — defineRoute({ handler: { GET }, document, template }) matches the annotated docs example; (home) naming matches Gracile's own route examples",
+        "app/src/routes/(home).client.js:1 — per-route client script convention; confirmed wired as pageAssets in app/dist/server/entrypoint.js:9",
+        "app/src/routes/(home).js:15 — home-grown, undocumented GRACILE_BUILD env guard (invented for this app), duplicated in 6 route files instead of any framework-supported mechanism",
+        "app/src/document.js:14 — asset referenced via new URL('./document.css', import.meta.url).pathname rather than the docs' root-relative source path; dist/server/chunk/document.js:12 shows it survives untransformed",
+        "app/src/routes/(home).client.js:33-50 — hand-rolled fetch-and-DOMParser partial refresh instead of the framework's client-side routing; defensible since that add-on is experimental, but still a workaround"
+      ],
+      "rationale": "The skeleton reads like Gracile's own examples (document/server-html, route outlet, defineRoute handler/document/template, .client.js companions, express + nodeAdapter), but several invent-their-own-convention workarounds (GRACILE_BUILD guard, import.meta.url asset URL, hand-rolled partial refresh) sit where framework features exist."
+    },
+    "correctness_risks": {
+      "score": 3,
+      "evidence": [
+        "app/src/routes/pokemon/[name].js:271-275 — catch-all turns every error (TypeError, API 500, network failure) into a 404 'Not found' page; same in moves/[name].js:45-48, abilities/[name].js:43-46, types/[name].js:69-73",
+        "app/src/document.js:14 — the stylesheet href evaluates to an absolute filesystem path at request time (dist/server/chunk/document.js:12), so every page ships a dead <link> that 404s; the page only renders styled because Gracile injects routeAssets (dist/server/entrypoint.js:61-67)",
+        "app/src/routes/(home).js:99-115 — on API failure responds 500 with a body that reads '0 Pokémon' / 'No Pokémon found', so an outage is indistinguishable from an empty result for a11y consumers",
+        "app/src/routes/pokemon/[name].js:134-137 and 136-145 — Promise.all fan-out of one request per version group and one per learned move (hundreds of concurrent fetches on first view of a popular Pokémon); bounded afterwards only by the in-memory cache",
+        "app/src/lib/api.js:12-27 — promise-level cache with rejection cleanup is correct and avoids unbounded retry storms; spec explicitly permits runtime caching",
+        "app/src/routes/(home).client.js:37-46 — request-number guard correctly discards stale partial refreshes; listeners are attached to controls outside the replaced node, so no leaks or lost handlers"
+      ],
+      "rationale": "No serious data-loss or XSS bug (all content flows through lit's html), and the client script handles its races, but the blanket error→404 mapping, the broken stylesheet href on every page, the misleading 500 body, and the un-throttled per-request fan-out are all things a reviewer would flag."
+    },
+    "global_abstractions": {
+      "score": 3,
+      "evidence": [
+        "app/src/lib/api.js:1-250 — single god data module every route imports: HTTP client, global cache, domain derivation (getSpeciesIndex, getPokemonTypeMap) and presentation helpers (typeClassName:103, dexNumber:100, displayValue:107) all in one file",
+        "app/src/routes/pokemon/[name].js:286-289 — 'Not found' template duplicated verbatim in routes/moves/[name].js:60-62, routes/abilities/[name].js:58-60, routes/types/[name].js:84-86 and routes/404.js:14-16",
+        "app/src/routes/(home).js:15 — the same one-line BUILDING guard is copy-pasted into six route files instead of a shared lib export",
+        "app/src/lib/components.js:1-60 — the other shared module is small, well-bounded and the right place for cards/badges",
+        "app/src/lib/api.js:53-55 — getRecordByUrl has an if/else whose two branches are identical (dead abstraction)"
+      ],
+      "rationale": "Boundaries are mostly sensible (api vs components vs routes) and the layer count is low, but api.js is the classic everything-module, and the not-found template and BUILDING guard are duplicated across five-plus files, which will need untangling at the first change to either."
+    },
+    "readability": {
+      "score": 4,
+      "evidence": [
+        "app/src/lib/api.js:66-76 — humanize/englishName/latestEnglishFlavorText are small, precisely named and map 1:1 to spec terms",
+        "app/src/routes/pokemon/[name].js:30-62 — move-table helpers (statLabel, moveTable, sortMoveRows) keep the template readable",
+        "app/src/routes/types/[name].js:8-16 — RELATIONS table makes the six damage-relation labels declarative",
+        "app/src/document.css:1-588 — one stylesheet organised by component with token-driven values, consistent with tokens.css",
+        "app/src/routes/(home).js:15 and app/src/routes/pokemon/[name].js:23 — no comment explains why GRACILE_BUILD exists or what breaks without it; a new teammate cannot infer the intent"
+      ],
+      "rationale": "Naming is consistent with the spec's vocabulary, functions are short, and the route/lib split makes navigation quick; the only real gaps are unexplained magic conventions (GRACILE_BUILD) and the near-zero comment density on non-obvious decisions."
+    },
+    "review_cost": {
+      "score": 3,
+      "evidence": [
+        "app/src/document.js:14 — must be changed (asset reference pattern)",
+        "app/src/routes/pokemon/[name].js:271-275 — error handling must distinguish 404 from 500 across four route files",
+        "app/src/routes/pokemon/[name].js:286-289 — dedupe the not-found template across five files",
+        "app/src/lib/api.js:53-55 and app/server.js:9-12 — delete dead code (identical branch; unused res.locals.requestId middleware)"
+      ],
+      "rationale": "Nothing requires architectural rework, but there is a concrete round of changes — asset href, error/status mapping, two deduplications, and dead code removal — before I would approve."
+    }
+  },
+  "overall": 3,
+  "findings": [
+    {
+      "severity": "medium",
+      "location": "app/src/document.js:14",
+      "issue": "Stylesheet href is computed as new URL('./document.css', import.meta.url).pathname, which at request time is an absolute filesystem path (verified unchanged in dist/server/chunk/document.js:12); every page emits a dead <link> that 404s, and pages are only styled thanks to Gracile's separately injected routeAssets.",
+      "suggestion": "Use the documented convention — a root-relative source path like href=\"/src/document.css\" — and let Vite/Gracile emit the hashed asset link."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/routes/pokemon/[name].js:271-275",
+      "issue": "A single catch block converts every failure — including programming errors and upstream 5xx — into a 404 'Not found' response; the same pattern is in routes/moves/[name].js:45-48, routes/abilities/[name].js:43-46 and routes/types/[name].js:69-73.",
+      "suggestion": "Re-throw or branch on the ApiError status: only a 404 ApiError should render the not-found page; everything else should be a logged 500 with an error state."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/routes/(home).js:15",
+      "issue": "An undocumented, app-invented GRACILE_BUILD env-var guard is copy-pasted into six route files (also pokemon/[name].js:23, types/index.js:7, types/[name].js:13, moves/[name].js:18, abilities/[name].js:15), burying build-mode configuration in route code with no explanation of what it protects.",
+      "suggestion": "Move it to a single shared helper in src/lib with a comment, or verify whether it is needed at all with output: 'server' (Gracile only prerenders in static mode)."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/routes/(home).js:99-115",
+      "issue": "When the API throws, the response is a 500 whose body renders '0 Pokémon' and 'No Pokémon found', so a service outage is indistinguishable from an empty result for screen-reader users and monitoring.",
+      "suggestion": "Render an explicit error message in the catch branch instead of the empty-state props."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/routes/pokemon/[name].js:134-145",
+      "issue": "Per-request fetch fan-out: one request per version group (~30) plus one per learned move for the selected game (100+ for popular Pokémon), all fired concurrently; only the in-memory cache keeps this bounded.",
+      "suggestion": "At minimum note the cost; better, derive the selected game's moves lazily (only fetch the version group actually selected) and cap concurrency or batch by a smaller fetch."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/routes/pokemon/[name].js:286-289",
+      "issue": "The 'Not found' template (h1 + back link) is duplicated verbatim in five files (moves/[name].js:60-62, abilities/[name].js:58-60, types/[name].js:84-86, 404.js:14-16).",
+      "suggestion": "Extract a shared notFoundTemplate() into src/lib/components.js."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/lib/api.js:1-250",
+      "issue": "God data module: HTTP client + global cache + domain indexes + presentation helpers (typeClassName, dexNumber, displayValue) all live in one file that every route imports.",
+      "suggestion": "Split into an api client module (fetch/cache/errors) and a small presentation/formatting module consumed by components.js."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/lib/api.js:53-55",
+      "issue": "getRecordByUrl's if/else branches are identical — dead code that suggests a distinction that does not exist.",
+      "suggestion": "Reduce to a single return getJson(url)."
+    },
+    {
+      "severity": "low",
+      "location": "app/server.js:9-12",
+      "issue": "Middleware sets res.locals.requestId on every request but the value is never read anywhere.",
+      "suggestion": "Delete the middleware, or actually use the id for request-scoped logging."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/routes/(home).client.js:33-50",
+      "issue": "Each debounced keystroke re-fetches and re-parses a full HTML document to swap one node; heavier than needed and it never updates <title> or announces the new result count to assistive tech.",
+      "suggestion": "Consider a small JSON endpoint (or the framework's client router) and a live region for the result count; at least document why the whole-document fetch is acceptable."
+    }
+  ],
+  "summary": "This is a competently structured Gracile 0.11 app whose routing, document, client-script and server conventions mirror the framework's own examples, and it has no serious data-integrity or escaping bugs. The merge blockers are a broken stylesheet href emitted on every page, a blanket error→404 mapping across four dynamic routes, and duplicated home-grown conventions (the GRACILE_BUILD guard and the not-found template) that would need a round of fixes before approval. I'd merge after one focused revision, not as-is."
+}

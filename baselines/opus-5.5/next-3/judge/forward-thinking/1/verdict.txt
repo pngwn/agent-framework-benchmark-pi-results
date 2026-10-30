@@ -1,0 +1,136 @@
+I've reviewed the app thoroughly and verified current framework guidance (Next.js 16.4, released Oct 6 2026, recommends Cache Components for every app and makes it the create-next-app default; Partial Prefetching landed in 16.3–16.4). Here's my review.
+
+## Assessment
+
+**Data layer (excellent).** `app/lib/api.ts` is a single typed boundary over the API with promise-dedup + TTL memory cache; `app/lib/data.ts` holds every derived view-model. `server-only` guards it. Any API change touches these two files.
+
+**Where it ages poorly.** The app is built entirely on the outgoing "previous model":
+- `app/app/layout.tsx:8` — `export const dynamic = "force-dynamic"`: still valid, but the docs ("Migrating to Cache Components") say route segment configs are *removed* under Cache Components, which 16.4 now recommends for every app and Next 17 makes default. The comment even says "nothing is prerendered" — the new model's answer is `use cache` + Suspense shells, not a blanket de-opt.
+- `app/lib/api.ts:9-49` — a hand-rolled 5000-entry Map cache reimplements what `use cache`/`cacheLife({ revalidate: 60 })` now provides declaratively.
+- 8 `prefetch={false}` sites (`PokemonCards.tsx:11`, `MoveTable.tsx:103`, `TypeBadge.tsx:17`, `page.tsx:69,77`, pokemon page `:121,168`, type page `:75`) — under 16.3+ Partial Prefetching the default prefetch is a cheap shared App Shell; blanket opt-out disables the framework's headline navigation improvement and will all need revisiting.
+- No `loading.tsx` or Suspense boundary anywhere — every page blocks on full API fetch, and Cache Components/PPR migration requires adding these per page.
+
+**Where it's current.** Async request APIs (`params`/`searchParams` as Promises — `app/app/page.tsx:9`, `pokemon/[name]/page.tsx:16`), `generateMetadata`, `notFound()`, `metadata` title template, `useRouter`/`usePathname` with `scroll: false`, plain `<select>`/`<input type="search">` controls driving URL state via `URLSearchParams` (`Filters.tsx:23`), `Array.prototype.findLast` (`format.ts:23`), `localeCompare` sorting, no polyfills. Runtime deps are exactly `next@16.4.3`, `react@19.3.1`, `server-only` — nothing removable.
+
+**Minor.** Raw `<img>` with suppressed lint instead of `next/image` (defensible for a runtime-config external host, but a framework-primitive bypass); `turbopack.root: __dirname` in `next.config.ts:8` is a documented-fragile pattern; hand-rolled route `Props` types instead of Next 16's generated `PageProps<'/pokemon/[name]'>`; `@types/node ^20` on a Node 24 environment.
+
+```json
+{
+  "dimension": "forward-thinking",
+  "criteria": {
+    "latest_apis": {
+      "score": 3,
+      "evidence": [
+        "app/app/layout.tsx:8 — `export const dynamic = \"force-dynamic\"` (previous-model route segment config; removed under Cache Components)",
+        "app/lib/api.ts:9-49 — hand-rolled Map TTL cache instead of `use cache`/`cacheLife`",
+        "app/components/PokemonCards.tsx:11 — blanket `prefetch={false}`, defeating 16.3+ Partial Prefetching App Shell prefetch",
+        "app/app/pokemon/[name]/page.tsx:16 — params/searchParams as Promises (current async request API)",
+        "app/app/pokemon/[name]/page.tsx:26-28 — generateMetadata + metadata title template (current)"
+      ],
+      "rationale": "Async request APIs, app-router conventions and navigation APIs are all current, but the caching/navigation model is the outgoing one: Next.js 16.4 (Oct 2026) recommends Cache Components for every app and it becomes the default in 17, under which `dynamic`, hand-rolled caches and prefetch opt-outs are all replaced (nextjs.org/blog/next-16-4; docs/app/guides/migrating-to-cache-components)."
+    },
+    "platform": {
+      "score": 4,
+      "evidence": [
+        "app/components/Filters.tsx:23 — URLSearchParams to build/normalize query state",
+        "app/app/page.tsx:63 — URLSearchParams for pagination hrefs",
+        "app/lib/format.ts:23 — Array.prototype.findLast (ES2023)",
+        "app/components/Filters.tsx:70-81 — native select/input type=search, no UI library",
+        "app/lib/format.ts:47 — idFromUrl hand-rolls URL parsing with a regex instead of new URL()"
+      ],
+      "rationale": "Reaches for the platform first — native fetch, URLSearchParams, native form controls, CSS custom properties, findLast, localeCompare, no polyfills; only the regex URL-id parser falls short of `new URL().pathname`."
+    },
+    "dependencies": {
+      "score": 5,
+      "evidence": [
+        "app/package.json:8-13 — only next, react, react-dom, server-only at runtime",
+        "app/package.json:14-19 — dev deps limited to typescript + @types",
+        "app/lib/api.ts:1 — server-only package guards the data layer (React-team recommended)"
+      ],
+      "rationale": "Minimal and current: next 16.4.3 (current stable), react 19.3.1 (the version Next 16.4 ships with), server-only is the standard small guard package; no CSS/UI library, nothing removable."
+    },
+    "churn_resistance": {
+      "score": 3,
+      "evidence": [
+        "app/lib/api.ts + app/lib/data.ts — all data access behind one typed boundary",
+        "app/lib/api.ts:74-151 — API record shapes typed at the boundary",
+        "app/app/layout.tsx:8 — force-dynamic must be removed/migrated per page when Cache Components lands",
+        "app/components/* — 8 scattered prefetch={false} sites all need revisiting under Partial Prefetching",
+        "app/app/ (absence) — no loading.tsx/Suspense boundaries, required for the recommended model",
+        "app/next.config.ts:8 — turbopack.root via bare __dirname (documented-fragile under ESM)"
+      ],
+      "rationale": "Data access and typing are genuinely well-isolated, but the framework's own active churn area (caching model, prefetching, Suspense shells) is exactly where this app will need edits across layout, every page and 8 link sites when Next 17 defaults Cache Components."
+    }
+  },
+  "overall": 3,
+  "findings": [
+    {
+      "severity": "medium",
+      "location": "app/app/layout.tsx:8",
+      "issue": "App-wide `dynamic = \"force-dynamic\"` keeps the whole app on the previous rendering model; Next 16.4 now recommends Cache Components for every app (default in create-next-app, default in Next 17), where route segment configs are removed and replaced by `use cache`/`cacheLife` + Suspense shells.",
+      "suggestion": "Enable cacheComponents and express \"live data\" with uncached fetches inside Suspense boundaries (or `use cache` + `cacheLife` where caching is wanted), removing the segment config."
+    },
+    {
+      "severity": "medium",
+      "location": "app/components/PokemonCards.tsx:11",
+      "issue": "Blanket `prefetch={false}` (8 sites: PokemonCards.tsx:11, MoveTable.tsx:103, TypeBadge.tsx:17, page.tsx:69/77, pokemon/[name]/page.tsx:121/168, types/[name]/page.tsx:75) disables the App-Shell prefetch that Partial Prefetching (16.3/16.4) makes cheap and default, so navigations will stay slow after the framework's intended upgrade.",
+      "suggestion": "Drop `prefetch={false}` and let default App Shell prefetching work; opt-in per-link `prefetch` only where URL-specific prefetch is wanted."
+    },
+    {
+      "severity": "medium",
+      "location": "app/app/pokemon/[name]/page.tsx:24-44",
+      "issue": "No loading.tsx or Suspense boundary on any route: every page blocks on the full API fetch chain before first paint, and the recommended Cache Components model requires Suspense boundaries around runtime data — meaning per-page edits at migration time.",
+      "suggestion": "Stream pages with loading.tsx or Suspense-wrapped data components so a static shell renders immediately."
+    },
+    {
+      "severity": "low",
+      "location": "app/lib/api.ts:9-49",
+      "issue": "Hand-rolled 5,000-entry Map cache with TTL re-implements framework caching; under the recommended model `use cache` + `cacheLife({ revalidate: 60 })`/`cacheTag` provides this declaratively (and `unstable_cache`, the previous-model option, is deprecated in 16).",
+      "suggestion": "Replace the Map cache with `use cache` functions or fetch-level caching so eviction/TTL semantics track the framework's."
+    },
+    {
+      "severity": "low",
+      "location": "app/app/pokemon/[name]/page.tsx:67",
+      "issue": "Raw `<img>` with `@next/next/no-img-element` suppressed instead of `next/image`, bypassing the framework's image optimization primitive (second site: PokemonCards.tsx:12).",
+      "suggestion": "Use next/image with `remotePatterns` derived from API_BASE_URL in next.config.ts, or keep raw <img> but document the deliberate tradeoff."
+    },
+    {
+      "severity": "low",
+      "location": "app/next.config.ts:8",
+      "issue": "`turbopack: { root: __dirname }` — bare `__dirname` is documented as fragile (undefined under ESM configs; see vercel/next.js issue #92540, vercel#16405).",
+      "suggestion": "Use `path.join(__dirname)` / `import.meta.dirname` with a fallback, or hard-code/derive the root from process.cwd()."
+    },
+    {
+      "severity": "low",
+      "location": "app/app/page.tsx:9",
+      "issue": "Hand-rolled `Params`/`SearchParams` prop types on every page instead of Next 15.5+/16 generated route types (`PageProps<'/pokemon/[name]'>`), which keep types in sync with the actual route tree.",
+      "suggestion": "Enable typed routes and use the generated PageProps/LayoutProps helpers."
+    },
+    {
+      "severity": "low",
+      "location": "app/package.json:16",
+      "issue": "@types/node ^20 while the environment is Node 24; minor drift.",
+      "suggestion": "Bump to ^24."
+    }
+  ],
+  "summary": "A lean, well-typed app with an exemplary single data-access boundary and zero wasteful dependencies, using current request/navigation APIs throughout. But it is built squarely on Next's outgoing caching model — force-dynamic, a hand-rolled cache, blanket prefetch={false} and no Suspense boundaries — precisely where the framework is heading next (16.4 recommends Cache Components for every app; Next 17 makes it the default), so the Next 17 upgrade touches many files. Acceptable and unremarkable today, with a known migration bill attached.",
+  "apis": [
+    { "api": "export const dynamic = 'force-dynamic'", "location": "app/app/layout.tsx:8", "status": "legacy", "replacement": "Cache Components: remove segment config; use `use cache`/`cacheLife` + Suspense boundaries (docs: migrating-to-cache-components; deprecated only under cacheComponents, removed when it becomes default in 17)" },
+    { "api": "params/searchParams as Promises", "location": "app/app/pokemon/[name]/page.tsx:16", "status": "current", "replacement": "" },
+    { "api": "next/navigation useRouter/usePathname", "location": "app/components/Filters.tsx:4", "status": "current", "replacement": "" },
+    { "api": "next/link prefetch={false}", "location": "app/components/PokemonCards.tsx:11", "status": "legacy", "replacement": "Default App-Shell prefetch under Partial Prefetching (16.3+); per-link prefetch for URL-specific content" },
+    { "api": "generateMetadata / Metadata", "location": "app/app/pokemon/[name]/page.tsx:26", "status": "current", "replacement": "" },
+    { "api": "notFound() from next/navigation", "location": "app/app/pokemon/[name]/page.tsx:31", "status": "current", "replacement": "" },
+    { "api": "fetch(url, { cache: 'no-store' })", "location": "app/lib/api.ts:23", "status": "current", "replacement": "" },
+    { "api": "turbopack.root config", "location": "app/next.config.ts:8", "status": "current", "replacement": "" },
+    { "api": "raw <img> instead of next/image", "location": "app/app/pokemon/[name]/page.tsx:67", "status": "legacy", "replacement": "next/image with remotePatterns from API_BASE_URL" }
+  ],
+  "dependencies": [
+    { "name": "next", "verdict": "modern", "note": "16.4.3 — current stable (23 Oct 2026 backport release)" },
+    { "name": "react / react-dom", "verdict": "modern", "note": "^19.3.1 — the React line Next 16.4 ships with" },
+    { "name": "server-only", "verdict": "modern", "note": "Small React-team package, recommended way to guard server-only modules" },
+    { "name": "@types/node", "verdict": "outdated", "note": "^20 while the environment runs Node 24; harmless drift" },
+    { "name": "typescript / @types/react / @types/react-dom", "verdict": "established", "note": "Current majors, nothing to change" }
+  ]
+}
+```

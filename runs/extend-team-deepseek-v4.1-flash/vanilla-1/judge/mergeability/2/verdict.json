@@ -1,0 +1,111 @@
+{
+  "dimension": "mergeability",
+  "criteria": {
+    "idiomatic": {
+      "score": 4,
+      "evidence": [
+        "app/index.html:10 — standard Vite vanilla-TS entry (<script type=\"module\" src=\"/src/main.ts\">), matching the framework's vanilla template",
+        "app/src/api.ts:4-7 — import.meta.env used as the build-time fallback, the documented way to read Vite env vars",
+        "app/vite.config.ts:1-4 — minimal defineConfig with a modern build target; no fighting the toolchain",
+        "app/src/dom.ts:12 — a 20-line h() helper instead of a framework; appropriate for the mandated vanilla setup",
+        "app/server.mjs:8-16 — API base injected via a meta tag at request time rather than baked at build time, honouring the 'no build-time API data' constraint"
+      ],
+      "rationale": "There's no framework to fight: plain ES modules, native DOM, hand-rolled SPA routing that's normal for vanilla Vite. Only mild non-idiom is the hand-rolled 40-line http server, but it exists for runtime meta injection, which static middleware can't do."
+    },
+    "correctness_risks": {
+      "score": 3,
+      "evidence": [
+        "app/src/pages/home.ts:128-133 — debounced applyFilters fires up to 150ms after the user navigates away; renderHome never checks ctx.isCurrent, so it history.replaceState()s '/?q=…' over the URL of the page just navigated to",
+        "app/src/main.ts:89 — `await result.ready?.catch(() => {})` silently swallows all errors in the moves section; a failed fetch there leaves an empty #moves section with no error and no console trace",
+        "app/server.mjs:64 — fs.createReadStream(file).pipe(res) has no 'error' handler; an EPIPE or file deleted between stat and open is an unhandled 'error' event that crashes the process",
+        "app/server.mjs:14 — meta injection escapes only '<'; a quote in API_BASE_URL would terminate the content attribute (should escape \" as &quot;)",
+        "app/src/api.ts:110-123 — moveTables fans out one fetch per distinct move (100+ parallel for a modern game) — cached and against a local API, so bounded in practice",
+        "app/src/main.ts:74 — decodeURIComponent on a malformed % sequence in a route param throws inside the try and shows the generic error page instead of Not found"
+      ],
+      "rationale": "The navigation token / isCurrent pattern exists and is used well on the pokemon page, but home.ts bypasses it, producing a genuine history-corruption race; plus a swallowed promise path and a couple of server nits. Several, none catastrophic."
+    },
+    "global_abstractions": {
+      "score": 3,
+      "evidence": [
+        "app/server.mjs:18 vs app/src/main.ts:27-35 — the route table is defined twice (regex list in the server, regex list in the client) with no shared source of truth; adding a page means editing both, and they can drift",
+        "app/src/pages/team.ts:40-42 — a local typeNames(types: Type[]) that shadows the differently-behaved api.typeNames(names: Iterable<string>) exported name; the same 'english label map' idea exists in three shapes (api.typeNames, team.typeNames, types.ts:28)",
+        "app/src/api.ts:92-95 — the in-memory promise cache is module-global and unbounded, fine today, but it's a hidden global every page depends on",
+        "app/src/components.ts:33 — EAGER_CARDS = 120 magic threshold buried in a shared component rather than page config"
+      ],
+      "rationale": "api.ts/dom.ts/format.ts/components.ts all earn their keep with clean boundaries — this is a well-layered vanilla app. But the duplicated route tables and the three flavours of type-label lookup are exactly the kind of thing that will need untangling when the next page is added."
+    },
+    "readability": {
+      "score": 5,
+      "evidence": [
+        "app/src/format.ts — every helper is a named, one-line-documented pure function (humanize, dexNumber, collapse, orDash) that matches the spec's vocabulary",
+        "app/src/pages/pokemon.ts:144-268 — the moves table logic (COLUMNS, METHOD_ORDER, compareValues with missing-values-last, aria-sort handling) reads as small named units in spec order",
+        "app/src/team.ts:10-37 — the storage layer normalizes untrusted localStorage data and comments why (storage can be unavailable)",
+        "app/src/main.ts:56-62 — the render/not-found/error split is 20 lines and obvious; comments explain the detached-container technique",
+        "app/src/style.css — consistent BEM naming (.card__sprite, .move-table-wrap, .team-button__note) mirroring the component structure"
+      ],
+      "rationale": "A new teammate can navigate this in minutes: pages map 1:1 to spec pages, helpers map 1:1 to spec definitions, and the comments that exist explain why rather than what."
+    },
+    "review_cost": {
+      "score": 3,
+      "evidence": [
+        "app/src/pages/home.ts:128-133 — reviewer must ask for an isCurrent guard (or clearing the timer) before approving",
+        "app/src/main.ts:89 — reviewer must ask that moves-section failures surface (console.error at minimum) rather than vanish",
+        "app/server.mjs:14,64 — two small hardening nits (attribute escaping, stream error handler)",
+        "app/src/pages/team.ts:40 — reviewer would likely ask for a rename to disambiguate from api.typeNames"
+      ],
+      "rationale": "One genuine round of changes: fix the search-debounce race and stop swallowing ready() rejections; the rest are nits I'd mention but not block on."
+    }
+  },
+  "overall": 4,
+  "findings": [
+    {
+      "severity": "medium",
+      "location": "app/src/pages/home.ts:128-133",
+      "issue": "The 150ms search debounce fires after the user has navigated to another page (renderHome ignores ctx.isCurrent), and applyFilters then calls history.replaceState('/?q=…'), overwriting the URL of the page the user is now on and breaking back/forward.",
+      "suggestion": "Capture ctx.isCurrent and bail in the timeout (or clearTimeout in a teardown the router calls); at minimum check isCurrent() before touching history."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/main.ts:89",
+      "issue": "`await result.ready?.catch(() => {})` silently discards every error from the moves section; a failed move fetch leaves #moves permanently empty with no user-visible or logged error.",
+      "suggestion": "catch, console.error, and render a small inline error in the moves section; the ctx.isCurrent pattern for updating it already exists."
+    },
+    {
+      "severity": "low",
+      "location": "app/server.mjs:64",
+      "issue": "fs.createReadStream(file).pipe(res) has no stream error handling; an error between stat and read (or a client abort) becomes an unhandled 'error' event that can take down the server.",
+      "suggestion": "stream.on('error', …) → send a 500, and destroy the stream on res 'close'."
+    },
+    {
+      "severity": "low",
+      "location": "app/server.mjs:14",
+      "issue": "The API_BASE_URL injection into the meta attribute escapes only '<'; a double quote in the env var would break out of the content attribute.",
+      "suggestion": "Also replace '\"' with '&quot;' (or escape with the full HTML-attribute set) before splicing into index.html."
+    },
+    {
+      "severity": "low",
+      "location": "app/server.mjs:18 / app/src/main.ts:27-35",
+      "issue": "Route patterns are duplicated between the production server (for 404 status) and the client router with no shared source of truth; they can silently drift when a page is added.",
+      "suggestion": "Export the route regex table from one shared module (server.mjs can import a plain .ts-compiled or .mjs route list) or generate the server list from a single routes constant."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/pages/team.ts:40-42",
+      "issue": "Local helper typeNames(Type[]) shares its name with api.typeNames(Iterable<string>) but has different semantics, inviting the wrong import; the type-label-map idea now exists in three shapes across the codebase.",
+      "suggestion": "Rename to typeLabelMap and consider consolidating on one helper in format.ts/api.ts."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/pages/pokemon.ts:188-196",
+      "issue": "moveTables fetches every distinct move of a version group in one unbounded Promise.all (100+ parallel requests on first view of a modern game's table).",
+      "suggestion": "Fine against the local cached API; if the API ever goes remote, chunk the fetches or build rows from a list endpoint."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/pages/home.ts:86-90",
+      "issue": "When ?page= exceeds the number of pages, the displayed page is clamped (Math.min) but the URL still says the out-of-range page, so a reload or shared link re-clamps differently after data changes.",
+      "suggestion": "replaceState the normalized URL (page clamped, page=1 omitted) as part of update()."
+    }
+  ],
+  "summary": "A genuinely well-crafted vanilla-Vite app: clean layering (api/dom/format/components/pages), naming and structure that mirror the spec, careful accessibility and race-awareness in the router. The main thing I'd ask for before merge is honoring the existing isCurrent pattern in the home page's search debounce, which currently can rewrite the history entry of a page the user has already navigated to, plus surfacing errors that the moves section currently swallows. Everything else is nits I'd approve quickly."
+}

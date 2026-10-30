@@ -1,0 +1,85 @@
+I've reviewed the whole app (`app/` — 16 source files), the spec, the tests' coverage surface, and confirmed the current framework expectations (Next.js 16: async `params`/`searchParams` as Promises, `notFound()`/`not-found.jsx` convention, `title.template`, React `cache`). Key evidence-backed observations:
+
+- **Architecture is right for Next 16**: Server Components do all data loading with `await`ed params/searchParams (`app/app/page.jsx:34-38`, `app/app/pokemon/[name]/page.jsx:86-87`), and interactivity is confined to two small client islands (`Filters.jsx`, `MovesSection.jsx`), neither of which imports the server-side `lib/api.js` — a clean server/client boundary.
+- **One real bug the tests miss**: `Filters` seeds `useState(q)` once (`app/components/Filters.jsx:22`) and the debounce effect only watches local state (`:26-33`), so after back/forward or the brand-link navigation from `/?q=char` to `/`, the input keeps showing stale text while the URL-driven results change — the filter UI and results desync.
+- **Home-grown 404 handling** replaces the framework's `notFound()` + `not-found.jsx` convention: a `[...slug]` catch-all that renders 200 (`app/app/[...slug]/page.jsx`), plus a `– Pokédex` "Not found" metadata fallback duplicated across four `generateMetadata` functions — also losing the HTTP 404 the spec encourages.
+- **Data layer is a coherent, spec-sanctioned in-memory promise cache** (`app/lib/api.js:39-56`) with error-invalidation, concurrency-limited fan-out (`mapLimit`), and shared card-building reused by three pages (`lib/cards.js`) — no god modules, though `mediaUrl` (`lib/api.js:11`) is dead code since sprite URLs are used raw (`app/app/page.jsx:83`, `app/app/pokemon/[name]/page.jsx:117`) and the API server absolutizes them.
+- Minor rough spots: duplicated `single()` helper in two pages, a pointless `EvolutionList`/`EvolutionNode` mutual wrapper, `.map((row) => row)` in `MovesSection.jsx:88`, inconsistent URL-state sources (`window.location.search` in Filters vs `useSearchParams()` in MovesSection), and an `eslint-disable` comment with no ESLint configured (empty devDependencies).
+
+```json
+{
+  "dimension": "mergeability",
+  "criteria": {
+    "idiomatic": {
+      "score": 4,
+      "evidence": [
+        "app/app/page.jsx:34-38 — awaits the Next 16 Promise-shaped searchParams/params, exactly current docs",
+        "app/app/pokemon/[name]/page.jsx:18-22 — generateMetadata with fetches deduped through the shared cache, current convention",
+        "app/components/Filters.jsx:1, app/components/MovesSection.jsx:1 — interactivity confined to two client islands; all data loading stays in Server Components",
+        "app/app/[...slug]/page.jsx:9-13 — hand-rolled catch-all 404 returning 200 instead of notFound() + not-found.jsx, the documented convention (spec explicitly encourages real 404s)",
+        "app/app/layout.jsx:4-7 — hand-rolled '– Pokédex' suffix in every page's generateMetadata instead of title.template in root metadata",
+        "app/app/pokemon/[name]/page.jsx:118 — plain <img> instead of next/image (defensible for runtime-origin sprites, but undocumented choice)"
+      ],
+      "rationale": "Recognisably written against Next 16 conventions (async params, RSC+islands, route segment config), but 404 handling and the title template bypass framework features that exist for exactly this."
+    },
+    "correctness_risks": {
+      "score": 3,
+      "evidence": [
+        "app/components/Filters.jsx:22 — useState(q) initialised once; effect deps are [search] only (:26-33), so back/forward or brand-link navigation to '/' leaves the input showing stale text while the URL-driven list changes",
+        "app/lib/api.js:29-37 — fetch has no timeout/AbortSignal; a hung API request hangs the whole page render",
+        "app/app/page.jsx:88-92 — 48 parallel fetches per home-page render with no error boundary; one failure 500s the page with the default error UI",
+        "app/components/MovesSection.jsx:110 — row key embeds array index, partially defeating reconciliation when sort reorders rows",
+        "app/lib/api.js:50-56 — promise cache deletes failed entries so they retry; success/null results cached forever, which the spec explicitly permits"
+      ],
+      "rationale": "One genuine user-visible desync bug (stale search input vs results) that the acceptance tests don't exercise, plus a few minor robustness gaps (no fetch timeout, no error boundary)."
+    },
+    "global_abstractions": {
+      "score": 4,
+      "evidence": [
+        "app/lib/api.js:39-56 — single coherent data layer with a spec-sanctioned in-memory promise cache and error invalidation; no god module",
+        "app/lib/cards.js:19-38 — shared card builder reused by move/ability/type pages; earns its keep, not premature",
+        "app/lib/format.js:8-40 — small pure helpers shared across server and client without leaking server code into the client bundle",
+        "app/lib/api.js:11-15 — mediaUrl is exported dead code, never imported anywhere",
+        "app/lib/api.js:115-127 — getSpeciesRefById mutates the cached byId map; benign but a hidden cross-request global"
+      ],
+      "rationale": "Abstractions are few, thin and clearly bounded (api/format/cards); the only complaints are a dead export and hidden module-level singletons, which the spec's caching allowance covers."
+    },
+    "readability": {
+      "score": 4,
+      "evidence": [
+        "app/lib/format.js:8-16 — humanize/englishName/latestEnglishFlavor are small, well-named and reused everywhere for spec terminology",
+        "app/app/types/[name]/page.jsx:20-28 — RELATIONS table makes the damage-relations spec trivial to audit",
+        "app/app/pokemon/[name]/page.jsx:38-46 — EvolutionList is a pointless wrapper that just calls EvolutionNode; mutual indirection confuses the recursion",
+        "app/app/page.jsx:22 and app/app/pokemon/[name]/page.jsx:23 — single() helper duplicated in two files",
+        "app/components/MovesSection.jsx:88 — '.map((row) => row)' is an obscure way to copy an array",
+        "app/app/globals.css — organised by component with section comments and tokens throughout; consistent with design/tokens.css"
+      ],
+      "rationale": "A new teammate would find their way quickly: names match spec vocabulary and files are small. A few rough edges (wrapper indirection, duplicated helper, obscure idioms) keep it from exemplary."
+    },
+    "review_cost": {
+      "score": 3,
+      "evidence": [
+        "app/components/Filters.jsx:22 — reviewer must request syncing the search input with the URL (derive from useSearchParams or key the component), a real behaviour change",
+        "app/app/[...slug]/page.jsx:9-13 — reviewer would ask for notFound() + not-found.jsx and to drop the four duplicated 'Not found – Pokédex' metadata fallbacks",
+        "app/lib/api.js:11 — delete the dead mediaUrl export or use it where raw sprite URLs are rendered (app/app/page.jsx:83)",
+        "app/app/pokemon/[name]/page.jsx:38-46, app/components/MovesSection.jsx:88, app/components/Filters.jsx:16 — nits: wrapper indirection, array copy, URL-state source inconsistent with MovesSection's useSearchParams"
+      ],
+      "rationale": "One substantive fix plus a 404-semantics change and a short list of nits — a normal review round, not rework."
+    }
+  },
+  "overall": 3,
+  "findings": [
+    { "severity": "medium", "location": "app/components/Filters.jsx:22", "issue": "Search input state is initialised from the q prop once and never resynced, so back/forward navigation or the brand link from /?q=… to / leaves stale text in the input while the URL-driven results change", "suggestion": "Derive the input value from useSearchParams() (or sync via an effect on the q prop) so the control always reflects the URL" },
+    { "severity": "medium", "location": "app/app/[...slug]/page.jsx:9-13", "issue": "404s are hand-rolled via a catch-all route plus a shared NotFound component and per-page 'Not found – Pokédex' metadata fallbacks, all served with HTTP 200", "suggestion": "Use next/navigation's notFound() with a root not-found.jsx; it gives the documented convention, real 404 status (spec encourages it), and removes the duplicated metadata fallbacks" },
+    { "severity": "low", "location": "app/lib/api.js:11-15", "issue": "mediaUrl() is exported but never used; sprite/artwork URLs are rendered raw (app/app/page.jsx:83, app/app/pokemon/[name]/page.jsx:117), relying on the API returning absolute URLs", "suggestion": "Either apply mediaUrl at the render sites for robustness or delete the dead export" },
+    { "severity": "low", "location": "app/lib/api.js:29-37", "issue": "fetch() has no timeout/AbortSignal and no error boundary exists, so a hung or failed API call produces an unstyled framework 500 page", "suggestion": "Add an AbortSignal timeout to requestJson and a root error.jsx that renders a friendly failure state" },
+    { "severity": "low", "location": "app/app/layout.jsx:4-7", "issue": "The '– Pokédex' title suffix is hand-assembled in every page's generateMetadata instead of using title.template in root metadata", "suggestion": "Set title: { default: 'Pokédex', template: '%s – Pokédex' } in the root layout and return bare page titles" },
+    { "severity": "low", "location": "app/app/pokemon/[name]/page.jsx:38-46", "issue": "EvolutionList is a one-line wrapper around EvolutionNode, adding mutual indirection to the recursion", "suggestion": "Make EvolutionNode self-recursive and delete EvolutionList" },
+    { "severity": "low", "location": "app/components/Filters.jsx:16", "issue": "URL state is read from window.location.search here but from useSearchParams() in MovesSection.jsx:23 — two different sources for the same job", "suggestion": "Standardise on useSearchParams() in both client components" },
+    { "severity": "low", "location": "app/components/MovesSection.jsx:88,110", "issue": "Rows are copied via .map((row) => row) and keyed with the array index, partially defeating React reconciliation when sorting reorders rows", "suggestion": "Use [...table.rows] and key rows by moveName + level (without index)" },
+    { "severity": "low", "location": "app/app/page.jsx:22", "issue": "The single() searchParams helper is duplicated in app/app/pokemon/[name]/page.jsx:23", "suggestion": "Move it to lib/format.js next to the other shared helpers" },
+    { "severity": "low", "location": "app/components/Filters.jsx:30", "issue": "An eslint-disable comment references react-hooks/exhaustive-deps, but the app configures no ESLint at all (devDependencies is empty)", "suggestion": "Add next lint/eslint config, or drop the comment; also justify the intentional dependency omission with a plain comment instead" }
+  ],
+  "summary": "A clean, well-bounded Next.js 16 App Router app: Server Components do all data loading with current async-params idioms, interactivity lives in two small client islands, and shared helpers are thin and genuinely reused. The main blockers are a real URL-state desync bug in the search filter that the tests miss, and hand-rolled 404 handling that bypasses the framework's notFound()/not-found.jsx convention (and its HTTP 404). I'd ask for one round of changes — sync the filter with the URL, adopt the 404 convention, and clean up dead code and a few nits — then merge."
+}
+```

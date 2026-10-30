@@ -1,0 +1,164 @@
+## Review: test quality
+
+**The agent wrote no tests.** Static facts confirm it (`tests: { files: 0, cases: 0 }`), a grep for `describe(`/`.spec.` in `app/` returns nothing, and the scaffolding is telling: `app/package.json` installs `vitest` and `jsdom` as devDependencies and defines `"test": "ng test"`, and `app/tsconfig.spec.json:12-14` includes `src/**/*.spec.ts` — but not a single spec file exists. The tooling was wired up and then never used; `ng test` runs against zero tests and passes vacuously.
+
+That means every judgement here is about *what the acceptance suite no longer guards*. The app has a lot of exactly the kind of logic that regresses silently under refactor:
+
+**Riskiest untested areas (read in full):**
+
+- **Home filtering/pagination/URL state** — `app/src/app/pages/home-page.ts:31-40` (`parseQuery`: NaN/negative `page` coercion), `:63-103` (humanized-name substring match, type/generation filters, 48-per-page slice, `currentPage` clamped to `totalPages`), `:101-111` (`pageLink` omitting default params) and `:122-138` (`navigateWithFilters` resetting `page` to 1 on every filter change). A refactor of the catalog map shapes or the clamp logic breaks pagination/filters with nothing failing.
+- **Move-table construction and sorting** — `app/src/app/pages/pokemon-page.ts:186-232` (`buildTables`: method priority `level-up → machine → egg → tutor → alphabetical`, Level column only in the level-up table, default sorts) and `:106-126` (`compareRows`: the deliberate "nulls sort last in *both* directions" rule, achieved by returning `1`/`-1` before applying the direction factor — a very easy thing to "simplify" into a bug). Also `:420-436` (`toggleSort` direction flipping feeding `aria-sort`).
+- **Catalog cross-indexing** — `app/src/app/core/catalog.service.ts:90-130`: `typeByPokemonId` with the `id <= 10000` alternate-form exclusion (`:101`) and slot ordering, `generationBySpeciesId`. Note the 10000 cutoff is duplicated in three places (`catalog.service.ts:101`, `type-page.ts:74`, `move-page.ts:63`) — changing one breaks the others silently.
+- **Error handling conflated with not-found** — `app/src/app/core/api.service.ts:38-41`: `optional()` maps *any* HTTP failure (500, network down) to `null`, so every page's "Not found" branch (`pokemon-page.html:163-167`) doubles as the error state. A transient API outage renders "Not found" pages; no test distinguishes absence from failure.
+- **Pure formatters** — `app/src/app/core/format.ts:14-64`: `latestEnglishFlavor` (last-English-entry + whitespace collapse — easy to regress to *first* entry), `displayValue` em-dash, `humanize`, `padDex`, `idFromUrl`'s regex. Trivially unit-testable, zero tests.
+- **Evolution tree recursion** — `app/src/app/pages/pokemon-page.html:154-167`: recursive `ngTemplateOutlet` for branching chains (Eevee), with `track child.species.name` — duplicate species names in a chain would collide keys.
+- **Caching** — `app/src/app/core/api.service.ts:24-35`: in-memory cache keyed by path with `shareReplay({ refCount: false })`; stale-cache or key-collision bugs would be invisible.
+
+**Scoring** — with no tests in `app/`, `coverage_of_risk`, `behaviour_not_implementation` and `regression_power` are 1 by the anchors (nothing would be caught). `signal_to_noise` is 3 per the rubric (no tests). The scaffolding-without-tests is worse than nothing in one sense — it signals intent without follow-through — but adds no maintenance noise. `overall: 1`: a data layer this dense (Rx streams, signal/rxjs-interop bridging, URL-synced filters, multi-table sorting) with zero regression net is a liability for a codebase owned for years.
+
+```json
+{
+  "dimension": "tests",
+  "criteria": {
+    "coverage_of_risk": {
+      "score": 1,
+      "evidence": [
+        "app/package.json:13 — \"test\": \"ng test\" but zero spec files exist anywhere in app/src",
+        "app/src/app/pages/home-page.ts:63-103 — filtering, 48-per-page pagination and page clamping: completely untested",
+        "app/src/app/pages/pokemon-page.ts:106-232 — compareRows nulls-last rule and buildTables method ordering: untested",
+        "app/src/app/core/format.ts:23-64 — latestEnglishFlavor/displayValue/humanize pure helpers: untested"
+      ],
+      "rationale": "No tests at all, and the most regression-prone logic (filtering, pagination, URL state, table sorting, catalog indexing, error paths) has zero coverage beyond the acceptance suite."
+    },
+    "behaviour_not_implementation": {
+      "score": 1,
+      "evidence": ["app/src — grep for .spec.ts/describe( across all 25 source files: no matches"],
+      "rationale": "No tests exist, so there is nothing to classify; nothing asserts observable behaviour of the app's own logic."
+    },
+    "regression_power": {
+      "score": 1,
+      "evidence": [
+        "app/src/app/core/api.service.ts:38-41 — optional() swallows 500s/network errors into null; nothing would catch this or distinguish it from 404",
+        "app/src/app/pages/home-page.ts:79-81 — currentPage clamped to totalPages; an off-by-one regression would pass silently",
+        "app/src/app/pages/pokemon-page.ts:110-118 — nulls-last-both-directions logic; simplifying the early returns to use the direction factor would break spec ordering unnoticed"
+      ],
+      "rationale": "There is no net: breaking any behaviour outside the acceptance scenarios (deep pagination, weird query params, error states, sorting edge cases) fails nothing."
+    },
+    "signal_to_noise": {
+      "score": 3,
+      "evidence": ["app/tsconfig.spec.json:12-14 — vitest scaffolding configured; app/package.json:35-36 — vitest/jsdom installed but unused"],
+      "rationale": "No tests means no noise (anchor: no tests → 3), though the installed-but-unused vitest/jsdom tooling is dead weight rather than neutral."
+    }
+  },
+  "overall": 1,
+  "findings": [
+    {
+      "severity": "high",
+      "location": "app/src",
+      "issue": "Zero test files despite a fully wired test setup (vitest + jsdom devDeps, tsconfig.spec.json, \"ng test\" script); `npm run test` in app/ runs nothing and passes vacuously.",
+      "suggestion": "Write unit specs for format.ts and catalog.service.ts first (pure, high-leverage), then component/routing tests for home-page and pokemon-page filter/sort/URL-state behaviour."
+    },
+    {
+      "severity": "high",
+      "location": "app/src/app/core/api.service.ts:38-41",
+      "issue": "optional() maps every error (including 500s and network failures) to null, so API outages render as \"Not found\" pages with no error state; no test would catch a regression here or the conflation itself.",
+      "suggestion": "Map only 404 to null and let other errors surface (retry or an error view), and add a test asserting a 500 is not treated as missing."
+    },
+    {
+      "severity": "high",
+      "location": "app/src/app/pages/home-page.ts:31-138",
+      "issue": "URL-state contract is untested: parseQuery's NaN/negative page handling, param omission at defaults, page reset on filter change, and clamping of out-of-range ?page= values.",
+      "suggestion": "Add routing tests driving the component through Router: load /?type=fire&generation=generation-i&page=99, change filters, assert URL and rendered slice."
+    },
+    {
+      "severity": "high",
+      "location": "app/src/app/pages/pokemon-page.ts:106-232",
+      "issue": "Move-table logic untested: method priority order, Level column only on level-up, nulls-last in both sort directions, default level-then-name sort, and the toggleSort/aria-sort wiring.",
+      "suggestion": "Unit-test buildTables/compareRows against fixture data including null power/accuracy and multiple methods; a render test asserting aria-sort after two clicks."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/app/core/catalog.service.ts:101",
+      "issue": "The alternate-form cutoff (id <= 10000) is duplicated in three files (also type-page.ts:74 and move-page.ts:63) with no shared constant and no test; changing one copy silently diverges the lists.",
+      "suggestion": "Extract one isAlternateForm()/SPECIES_ID_LIMIT helper and test it plus the resulting cross-indexes (typeByPokemonId, generationBySpeciesId)."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/app/pages/pokemon-page.html:154-167",
+      "issue": "Evolution tree is rendered via recursive ngTemplateOutlet with track child.species.name; branching chains (Eevee) and any duplicate-name collision are untested.",
+      "suggestion": "Add a component test with a branching chain fixture asserting nested list structure and per-species links."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/app/core/api.service.ts:24-35",
+      "issue": "In-memory response cache (path-keyed, shareReplay refCount:false) is untested; a refactor that keys by full URL or drops replay would duplicate or stale-serve requests unnoticed.",
+      "suggestion": "Add a test with an HttpTestingController/interceptor counting requests for the same path."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/app/core/format.ts:23-64",
+      "issue": "Pure helpers (latestEnglishFlavor's last-English-entry rule, whitespace collapse, em-dash displayValue, humanize) are the cheapest tests in the codebase and none exist; a regression to first-entry flavor text would ship silently.",
+      "suggestion": "Straightforward vitest specs against these five functions with PokeAPI-shaped fixtures."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/app/pages/home-page.ts:35-38",
+      "issue": "parseQuery casts ParamMap `as unknown as Map<string,string>` to duck-type get(); the type-system workaround is exactly the kind of thing a test would have pinned down and possibly forced a cleaner signature.",
+      "suggestion": "Type the helper against ParamMap (or plain Params) and cover it with unit tests for absent/NaN/page=0 params."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/app/pages/pokemon-page.ts:349-356",
+      "issue": "Document-title effects (en-dash format, \"Not found – Pokédex\" fallback, home reset) are untested; a title regression breaks an explicitly specified behaviour.",
+      "suggestion": "Add title assertions to page-level component tests (Title service is trivially assertable)."
+    }
+  ],
+  "summary": "The agent scaffolded a complete test setup (vitest, jsdom, tsconfig.spec.json, ng test script) but wrote zero tests, so all quality gates live in the acceptance suite. The code under it is dense in exactly the logic that regresses silently: URL-synced filtering and pagination, multi-table sorting with a subtle nulls-last rule, cross-indexed catalog maps, and error handling that conflates 404 with server failure. Once someone refactors the data layer, there is no net at all.",
+  "wroteTests": false,
+  "testCount": 0,
+  "valuableTests": [],
+  "lowValueTests": [],
+  "untested": [
+    {
+      "area": "Home page filtering, pagination and URL state (app/src/app/pages/home-page.ts:31-138)",
+      "risk": "high",
+      "likelyBug": "Off-by-one pagination slices, out-of-range ?page= not clamped, filter change not resetting to page 1, default params not omitted from the URL, NaN page crashing the view"
+    },
+    {
+      "area": "Move tables: buildTables ordering, compareRows nulls-last, toggleSort/aria-sort (app/src/app/pages/pokemon-page.ts:106-232, 420-436)",
+      "risk": "high",
+      "likelyBug": "Tables ordered alphabetically instead of level-up/machine/egg/tutor, null power/accuracy sorting first when descending, aria-sort left stale on other headers"
+    },
+    {
+      "area": "Catalog cross-index construction: typeByPokemonId slot order, generationBySpeciesId, alternate-form exclusion (app/src/app/core/catalog.service.ts:90-130)",
+      "risk": "high",
+      "likelyBug": "Mega/forms (id > 10000) leaking into lists after someone changes the duplicated cutoff in one of three files, types shown out of slot order, wrong generation filter results"
+    },
+    {
+      "area": "Error-vs-not-found distinction: optional() swallowing all errors (app/src/app/core/api.service.ts:38-41)",
+      "risk": "high",
+      "likelyBug": "API 500 or transient outage rendering \"Not found\" pages with HTTP 200, no retry, no error state — indistinguishable from a genuinely missing resource"
+    },
+    {
+      "area": "Response caching in ApiService (app/src/app/core/api.service.ts:24-35)",
+      "risk": "medium",
+      "likelyBug": "Duplicate fetches for the same resource (perf), or stale entries if the key/URL construction changes during refactor"
+    },
+    {
+      "area": "Evolution chain recursive template with branching chains (app/src/app/pages/pokemon-page.html:154-167)",
+      "risk": "medium",
+      "likelyBug": "Branching chains (Eevee) flattened or truncated, duplicate species names colliding via track expression, nested list roles lost"
+    },
+    {
+      "area": "Pure formatters: humanize, padDex, idFromUrl, latestEnglishFlavor, displayValue (app/src/app/core/format.ts)",
+      "risk": "medium",
+      "likelyBug": "Flavor text regressing to the first English entry or uncollapsed \\n/\\f, missing values rendering empty instead of —, dex numbers unpadded"
+    },
+    {
+      "area": "Document titles and not-found paths across pages (e.g. app/src/app/pages/pokemon-page.ts:349-356, type-page.ts:111-119)",
+      "risk": "low",
+      "likelyBug": "Wrong en-dash title format, title not resetting between routes, unknown names showing a broken page instead of the Not found component"
+    }
+  ]
+}
+```

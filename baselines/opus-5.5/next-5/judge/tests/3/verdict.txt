@@ -1,0 +1,153 @@
+I've read the spec, all of `app/src` (the three lib modules, both client components, all five route pages, layout), the acceptance specs, and grepped for any test artifact. The measured facts say `tests: 0` in `app/` and my own search confirms it: no `*.test.*`/`*.spec.*` files, no test runner in `app/package.json` devDependencies (only `@types/*` and `typescript`), and no test script (app/package.json:6–10 has only `dev`, `build`, `start`). So the acceptance suite in `tests/` is the only guard, and every line of the app's own logic is untested.
+
+The code has genuinely risky, easily-unit-testable logic that a refactor could silently break:
+
+- `app/src/lib/format.ts:9-45` — pure helpers (`humanize`, `dexNumber`, `latestEnglishFlavorText`, `orMissing`, `idFromUrl`) with zero dependencies; a change to the "latest English entry" or whitespace-collapse rule would go unnoticed.
+- `app/src/app/HomeView.tsx:66-80,96-115` — client-side filter/paginate/URL-sync with a debounce effect that has **no dependency array**, a `lastWritten` ref sync dance, page clamping (`Math.min(filters.page, pageCount)`), and a `toQuery` that must omit default params. Subtle timing/state bugs here are exactly what tests should pin down.
+- `app/src/app/pokemon/[name]/MovesSection.tsx:52-72,118-133` — sort comparators (missing-values-last in *both* directions, ascending-then-flip toggling), method ordering (`level-up, machine, egg, tutor`, then alphabetical), `aria-sort` placement, and per-game defaulting. A sign flip in the missing-values branch would put `—` rows first when descending, and nothing in `app/` would fail.
+- `app/src/lib/api.ts:18-58` — a hand-rolled in-memory promise cache with 30s TTL and 3000-entry pruning, including **negative caching of 404s** (`load` throws `NotFoundError`, whose rejected promise is cached at api.ts:47-52 until TTL). A newly-added resource requested too early stays "Not found" for up to 30s — the exact live-data scenario the spec cares about — and no test would catch a regression here.
+- `app/src/lib/cards.ts:14-29` — Pokémon→species mapping, alternate-form exclusion (`id > MAX_SPECIES_ID`), dedupe, and dex ordering; a boundary or dedupe bug silently drops cards from "Learned by"/ability/type lists.
+- No `error.tsx` anywhere in `app/src/app` (only `not-found.tsx`), so a non-404 API failure (`api.ts:35-36` throws a generic `Error`) crashes the whole route render with an unhandled 500 — completely untested error path.
+
+The acceptance specs themselves are strong (52 cases across home/pokemon/details/layout), but they belong to the harness; when someone refactors the data layer or the client filter code, nothing in `app/` will catch the breakage.
+
+```json
+{
+  "dimension": "tests",
+  "criteria": {
+    "coverage_of_risk": {
+      "score": 1,
+      "evidence": [
+        "app/package.json:6-10 — only dev/build/start scripts, no test runner or test script",
+        "app/src — zero *.test.* / *.spec.* files anywhere (grep for describe/it/test/expect: no matches)",
+        "app/src/app/HomeView.tsx:66-115 — risky filter/pagination/URL-sync logic with no coverage",
+        "app/src/app/pokemon/[name]/MovesSection.tsx:52-72 — sort comparators and method ordering untested",
+        "app/src/lib/api.ts:18-58 — hand-rolled TTL cache (incl. negative 404 caching) untested"
+      ],
+      "rationale": "No tests exist at all, so none of the app's risky logic — client filtering/pagination, table sorting, the in-memory API cache, or species mapping — is covered by anything the team owns."
+    },
+    "behaviour_not_implementation": {
+      "score": 1,
+      "evidence": [
+        "app/src — no test files, so no behavioural assertions either",
+        "app/src/lib/format.ts:9-45 — pure helpers that would be the natural target for behavioural (input/output) tests, untouched"
+      ],
+      "rationale": "With zero tests written there is nothing to classify; the criterion defaults to the floor."
+    },
+    "regression_power": {
+      "score": 1,
+      "evidence": [
+        "app/package.json:11-17 — devDependencies contain only types and typescript; no vitest/playwright installed",
+        "app/src/lib/cards.ts:14-29 — a MAX_SPECIES_ID or dedupe regression would silently drop cards with nothing failing",
+        "app/src/app/pokemon/[name]/MovesSection.tsx:61-63 — flipping the missing-values-last logic would pass unnoticed"
+      ],
+      "rationale": "Breaking any behaviour in app/ fails only the harness-owned acceptance suite; once that guard is gone, every refactor ships on faith."
+    },
+    "signal_to_noise": {
+      "score": 3,
+      "evidence": [
+        "app/src — no low-value tests because there are no tests"
+      ],
+      "rationale": "No tests means no noise, but also no signal; per the rubric this scores 3."
+    }
+  },
+  "overall": 1,
+  "findings": [
+    {
+      "severity": "high",
+      "location": "app/package.json:6-10",
+      "issue": "No test script, no test runner, and zero test files in app/; the acceptance suite in tests/ is the only safety net.",
+      "suggestion": "Add a lightweight runner (vitest or node:test) and start with unit tests for the pure helpers in src/lib/format.ts, the cards.ts mapping, and the MovesSection comparators — all trivially testable with no mocking."
+    },
+    {
+      "severity": "high",
+      "location": "app/src/lib/api.ts:29-58",
+      "issue": "Hand-rolled promise cache with 30s TTL negatively caches 404s (NotFoundError stored as the entry's value), so a resource requested before it exists stays 'Not found' for up to 30 seconds; also untested for eviction/dedup regressions.",
+      "suggestion": "Exclude 404 responses from the cache (or use a much shorter negative TTL), and add tests for hit/miss/expiry/404 behavior against a stubbed fetch."
+    },
+    {
+      "severity": "high",
+      "location": "app/src/app/HomeView.tsx:66-115",
+      "issue": "Client-side filtering, pagination clamping, and URL-state sync (debounce effect with no dependency array, lastWritten ref reconciliation, toQuery default-omission) are the app's most intricate logic and are completely untested.",
+      "suggestion": "Extract readFilters/toQuery and the match/page-computation into pure functions and unit-test the edge cases: empty q, page beyond pageCount, page=abc, combined filters, default-param omission."
+    },
+    {
+      "severity": "high",
+      "location": "app/src/app/pokemon/[name]/MovesSection.tsx:52-72",
+      "issue": "Sort comparators (missing-values-last in both directions, ascending-then-flip toggle, aria-sort placement) and the method-order rule (level-up, machine, egg, tutor, then alphabetical) have no regression protection.",
+      "suggestion": "Extract compareValues/compareMethods and the sort transform as pure functions and test them, including the descending-missing-last case the acceptance tests only sample lightly."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/lib/cards.ts:14-29",
+      "issue": "Pokémon→species mapping, alternate-form exclusion (id > MAX_SPECIES_ID), dedupe, and dex ordering are untested; a boundary or dedupe bug silently drops cards from Learned-by/ability/type lists.",
+      "suggestion": "Unit-test cardsFor with refs containing alternate-form IDs (>10000), duplicates, and unknown species ids, using a stubbed getSpeciesNames."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/app/pokemon/[name]/page.tsx:88-113",
+      "issue": "Data assembly for stats total, ability ordering/hidden markers, artwork fallback chain, and version-group ordering (default = highest order) is untested.",
+      "suggestion": "Add tests for getMoves and the stat/ability derivations with representative API fixtures (e.g. Mr. Mime, Eevee, a Pokémon with hidden ability and null artwork)."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/app (no error.tsx)",
+      "issue": "No error boundary anywhere in the route tree; api.ts:35-36 throws a generic Error on non-404 API failures, which crashes the whole page render as an unhandled 500.",
+      "suggestion": "Add app/error.tsx (and route-level ones if useful) with a retry affordance, and add one test that a 500 from the API renders a friendly error page instead of a framework crash."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/lib/format.ts:9-45",
+      "issue": "Pure, dependency-free helpers (humanize, dexNumber, latestEnglishFlavorText, cleanText, orMissing, idFromUrl) encode spec-critical rules but have no tests despite being the cheapest code in the repo to test.",
+      "suggestion": "A dozen table-driven unit cases here would pin the display rules (em dash, whitespace collapse, latest-English selection) permanently."
+    }
+  ],
+  "summary": "The agent wrote no tests of its own — no runner, no script, no spec files — leaving the harness-owned acceptance suite as the only guard over genuinely intricate logic: debounced URL-state filtering, multi-column sorting with missing-values-last semantics, and a hand-rolled API cache that negatively caches 404s for 30s. The pure helpers in lib/format.ts and lib/cards.ts would have been nearly free to test and would have caught most future regressions. As it stands, any refactor of the data or filter layer ships blind.",
+  "wroteTests": false,
+  "testCount": 0,
+  "valuableTests": [],
+  "lowValueTests": [],
+  "untested": [
+    {
+      "area": "Home filtering, pagination and URL-state sync (HomeView.tsx readFilters/toQuery/debounce/page clamping)",
+      "risk": "high",
+      "likelyBug": "A refactor breaks page clamping or default-param omission, e.g. '?page=1' persisted, page 0 or beyond-count accepted, or the debounce/lastWritten sync loses typed text on back/forward navigation."
+    },
+    {
+      "area": "Moves tables: sort comparators, missing-values-last in both directions, method ordering, aria-sort, game defaulting (MovesSection.tsx)",
+      "risk": "high",
+      "likelyBug": "A sign flip makes '—' rows sort first when descending, or method order regresses to alphabetical, and nothing the team owns fails."
+    },
+    {
+      "area": "In-memory API cache incl. negative caching of 404s, TTL expiry, eviction and dedup (lib/api.ts)",
+      "risk": "high",
+      "likelyBug": "A newly added resource requested before it exists is served 'Not found' for up to 30s, or a cache-key change causes duplicate in-flight fetches / stale data after upstream changes."
+    },
+    {
+      "area": "Pokémon→species card mapping: alternate-form exclusion, dedupe, dex ordering, hidden-ability note (lib/cards.ts)",
+      "risk": "medium",
+      "likelyBug": "An off-by-one in MAX_SPECIES_ID or the dedupe map drops legitimate cards (or admits Mega forms) from Learned-by/ability/type lists, changing the displayed counts."
+    },
+    {
+      "area": "Pokémon page data assembly: stats total, ability slot order and (hidden) marker, artwork fallback, version-group order/default game (pokemon/[name]/page.tsx, getMoves)",
+      "risk": "medium",
+      "likelyBug": "Default game selection stops being the highest-order version group, or ability/slot sorting regresses so hidden abilities appear out of order or unmarked."
+    },
+    {
+      "area": "Non-404 API failure handling (no error.tsx; api.ts throws generic Error)",
+      "risk": "medium",
+      "likelyBug": "An API hiccup renders a raw framework 500 instead of a friendly error page, and no test would notice until a user does."
+    },
+    {
+      "area": "Pure display helpers: humanize, dexNumber, latestEnglishFlavorText, orMissing, cleanText, idFromUrl (lib/format.ts)",
+      "risk": "low",
+      "likelyBug": "A tweak to whitespace collapsing or English-entry selection subtly corrupts every flavor text and name on the site."
+    },
+    {
+      "area": "Metadata title template and not-found routing for encoded/uppercase names (layout.tsx, not-found.tsx, decodeURIComponent+toLowerCase in each [name] route)",
+      "risk": "low",
+      "likelyBug": "A refactor of the title template breaks the '<h1> – Pokédex' convention or case/percent-encoded names start 500ing instead of 404ing."
+    }
+  ]
+}
+```

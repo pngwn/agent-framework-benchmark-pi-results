@@ -1,0 +1,157 @@
+I've now read every source file in `app/` (19 files), verified the framework idioms against the current SvelteKit 3 docs (config in `vite.config.ts`, `#lib` alias, `$app/state`, runes) and the Svelte 5 best-practices skill. Here's my review.
+
+## Scenario walkthrough
+
+**1. Remove Abilities.** Self-contained route dir (`app/src/routes/abilities/[name]/` — 2 files, deleted as a unit), and no nav links to it (`app/src/routes/+layout.svelte:23-26` only links Pokémon and Types, as the spec requires). The only inbound reference is the Abilities *section* on the Pokémon detail page (`app/src/routes/pokemon/[name]/+page.svelte:95-103`, data built at `+page.server.ts:92-95,167`) — inherent domain coupling, easy to find. Residue if you're sloppy: `Card.hidden` (`app/src/lib/util.ts:34`), the hidden-ability span in `CardList.svelte:33-35`, and the `extra` callback in `pokemonCards` become dead. **Difficulty 4.**
+
+**2. Sprite bug (Deoxys).** Every card list funnels through one function: `spriteUrl()` at `app/src/lib/server/api.ts:95-97`. The home page builds cards inline but still calls it (`app/src/routes/+page.server.ts:32`); moves/abilities/types all go through `pokemonCards` (`api.ts:195`). One fix covers all four lists. If the fix needs species→default-variety resolution, the species index (`getSpecies`, `byId`) is already in the same file. **Difficulty 5.**
+
+**3. Sort card lists by name.** All card lists render through one component (`CardList.svelte`), so a UI-side sort is a one-file change; a data-side sort touches two places (`pokemonCards`'s `sort` at `api.ts:197` and the home page's slice at `+page.server.ts:30`). **Difficulty 4.**
+
+**4. Add Items shaped like Moves.** Almost all heavy lifting is shared and reusable: `get`/`getOrThrow`/`englishName`/`latestFlavorText`/`pokemonCards` in `api.ts`, `CardList`, `TypeBadge`, global scaffolding classes (`.panel`, `.page-title`, `.facts`, `.count` in `app/src/app.css:48-98`), and the 404 pattern (`error(404)` in every load). You copy two thin route files (~60 LOC, e.g. `moves/[name]/+page.server.ts`) and adapt fields. **Difficulty 4.**
+
+**5. Change API base URL / caching.** Grep confirms exactly one file knows about either: `app/src/lib/server/api.ts` — `apiBase()` (:9-12), `resolveUrl` (:24-28), `CACHE_TTL_MS` (:6), the cache map and `get` (:33-61), `spriteUrl` (:95). Routes never see raw URLs. **Difficulty 5.**
+
+## Judgment
+
+This is a well-seamed codebase for its size: a single `lib/server/api.ts` owns the data source and domain indexes, `lib/util.ts` owns formatting, three small components own rendering, and route files are thin server-load + template pairs passing typed `$types` data down. What keeps it off 5s: card construction is duplicated between the home load and `pokemonCards`, `MoveTable` re-declares the `Row` shape its caller builds, and there's mild optional-field/boolean-flag creep (`Card.types/hidden`, `MoveTable.showLevel`, `TypeBadge.link`) that would leave dead code behind on feature removal.
+
+```json
+{
+  "dimension": "editability",
+  "criteria": {
+    "removability": {
+      "score": 4,
+      "evidence": [
+        "app/src/routes/abilities/[name]/+page.server.ts:1 — self-contained route dir, deleted whole",
+        "app/src/routes/+layout.svelte:23-26 — nav has no Abilities link, nothing to unlink",
+        "app/src/routes/pokemon/[name]/+page.svelte:95-103 — Abilities section is the only inbound reference; cohesive, easy to lift",
+        "app/src/lib/util.ts:34 and app/src/lib/components/CardList.svelte:33-35 — Card.hidden support would become dead code after removal",
+        "app/src/app.css:99 — comment names abilities in shared .bullets rule"
+      ],
+      "rationale": "Route directories are self-contained with no cross-links, so deletion is a directory plus one cohesive section on the Pokémon detail page; only minor dead code (the hidden-ability flag spanning util, CardList and pokemonCards) would be left behind by a lazy removal."
+    },
+    "changeability": {
+      "score": 4,
+      "evidence": [
+        "app/src/lib/server/api.ts:95-97 — spriteUrl is the single seam for card sprites",
+        "app/src/routes/+page.server.ts:32 and app/src/lib/server/api.ts:195 — both card-construction sites call spriteUrl, so one fix covers every list",
+        "app/src/lib/util.ts:5-20 — humanize/dexNumber/display formatting centralized",
+        "app/src/routes/pokemon/[name]/+page.server.ts:33-43 vs app/src/lib/components/MoveTable.svelte:4-14 — MoveRow shape declared twice; adding a column means editing both plus the value() switch"
+      ],
+      "rationale": "Sprite, formatting, localization and caching logic each live in one obvious module, and the Deoxys-type fix lands in one function; the duplicated Card literal (home vs pokemonCards) and the duplicated move-row type are the only two-places bugs."
+    },
+    "coupling": {
+      "score": 4,
+      "evidence": [
+        "app/src/lib/server/api.ts — server-only module; components never import it, routes pass serializable data via $types",
+        "app/src/lib/util.ts:29-35 — components depend on the narrow Card/TypeRef interfaces",
+        "app/src/lib/components/TypeBadge.svelte:10-13 and app/src/routes/types/+page.svelte:10 — both hardcode the var(--type-<name>) contract with tokens.css (two sites, no fallback in the list)",
+        "app/src/routes/+page.svelte:13-23 — afterNavigate/local q sync is subtle but commented and confined"
+      ],
+      "rationale": "Loose coupling with clean server/client separation and narrow shared types; the only tangles are a CSS custom-property contract duplicated across two components and the MoveTable/MoveRow duplication."
+    },
+    "abstraction_design": {
+      "score": 4,
+      "evidence": [
+        "app/src/lib/server/api.ts:177-198 — pokemonCards with the extra callback is a genuine open extension point (abilities adds 'hidden' with one argument)",
+        "app/src/lib/components/CardList.svelte:1-44 — one component renders all four card lists",
+        "app/src/lib/components/MoveTable.svelte:31 — columns config + showLevel flag: stretches without duplication, mild boolean-flag creep",
+        "app/src/routes/+page.server.ts:30-35 — home rebuilds Card objects inline instead of reusing a species-card builder",
+        "app/src/app.css:48-98 — .panel/.page-title/.facts scaffolding shared by all detail routes, so an Items section reuses styling for free"
+      ],
+      "rationale": "Abstractions track the real variation in the app and would absorb an Items section with almost no copying; small flag-props and the duplicated card literal are the only drift from a 5."
+    }
+  },
+  "overall": 4,
+  "findings": [
+    {
+      "severity": "medium",
+      "location": "app/src/routes/+page.server.ts:30-35",
+      "issue": "Card construction is duplicated: the home load builds {id,name,label,sprite,types} inline while pokemonCards (app/src/lib/server/api.ts:186-197) builds the same shape; a change to card semantics (e.g. sprite resolution) must be applied in two places",
+      "suggestion": "Add a speciesCard(species, extra) helper in api.ts (or reuse pokemonCards via the species index) so the Card literal exists in one place"
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/lib/components/MoveTable.svelte:4-14",
+      "issue": "MoveTable re-declares a Row interface that mirrors MoveRow from app/src/routes/pokemon/[name]/+page.server.ts:33-43; adding or renaming a column requires synchronized edits in both files plus the value() switch",
+      "suggestion": "Move the row type (and ideally a column descriptor) into lib/util.ts and have both the load and the component import it"
+    },
+    {
+      "severity": "low",
+      "location": "app/src/lib/components/CardList.svelte:33-35",
+      "issue": "The hidden-ability flag spans three files (Card.hidden in util.ts:34, this span, pokemonCards' extra callback) and only one consumer (the abilities route); removing Abilities would strand dead code in all three",
+      "suggestion": "Acceptable as-is, but when a feature using an optional card field is removed, sweep the field and its rendering branch together"
+    },
+    {
+      "severity": "low",
+      "location": "app/src/lib/components/TypeBadge.svelte:10-13",
+      "issue": "The var(--type-<name>) naming contract with tokens.css is duplicated here and in app/src/routes/types/+page.svelte:10, and the types list lacks the badge's fallback",
+      "suggestion": "Centralize the CSS-variable mapping in TypeBadge (or a helper) and give the type tiles the same var() fallback"
+    },
+    {
+      "severity": "low",
+      "location": "app/src/lib/components/MoveTable.svelte:31",
+      "issue": "showLevel boolean flag plus per-column value() switch; a future column with different formatting grows the switch and the flag set",
+      "suggestion": "Drive the table from a column descriptor (key, label, formatter, sortable) passed as props so new columns need no component edits"
+    },
+    {
+      "severity": "low",
+      "location": "app/src/routes/+page.svelte:13-23",
+      "issue": "Search-box state syncing via afterNavigate + a local $state with a navigation.type check is subtle; future editors must understand SvelteKit navigation types to avoid regressions",
+      "suggestion": "The comment helps; consider deriving the displayed value from data and keeping only the debounce buffer local, to reduce the implicit contract"
+    }
+  ],
+  "summary": "A genuinely well-factored SvelteKit 3 app: all data-source, caching, and domain-index knowledge is confined to lib/server/api.ts, all card rendering to one component, and route files are thin typed pairs, so most changes land in one obvious place. The main editability costs are two duplicated shapes — the Card literal in the home load vs pokemonCards, and MoveTable's re-declared Row type — plus mild optional-flag creep that would strand dead code on feature removal. Idiomatically current with the framework (vite.config-based Kit 3 config, #lib alias, $app/state, PageProps), so future maintainers will find it familiar.",
+  "scenarios": [
+    {
+      "change": "Remove the Abilities pages and every link to them",
+      "files": [
+        "app/src/routes/abilities/[name]/+page.server.ts",
+        "app/src/routes/abilities/[name]/+page.svelte",
+        "app/src/routes/pokemon/[name]/+page.svelte",
+        "app/src/routes/pokemon/[name]/+page.server.ts",
+        "app/src/lib/util.ts",
+        "app/src/lib/components/CardList.svelte"
+      ],
+      "difficulty": 4,
+      "notes": "Delete the route dir and lift the cohesive Abilities section from the Pokémon page; no nav links exist. Card.hidden support in util.ts/CardList/pokemonCards becomes dead code if not swept."
+    },
+    {
+      "change": "Fix wrong sprite for species whose default Pokémon has a different name (e.g. Deoxys)",
+      "files": [
+        "app/src/lib/server/api.ts"
+      ],
+      "difficulty": 5,
+      "notes": "Every card list's sprite flows through spriteUrl (api.ts:95); the home load and pokemonCards both call it, so one fix covers home, moves, abilities and types lists. Species lookup (getSpecies/byId) is in the same file if the fix needs variety resolution."
+    },
+    {
+      "change": "Add sorting by name to every list of Pokémon cards",
+      "files": [
+        "app/src/lib/components/CardList.svelte"
+      ],
+      "difficulty": 4,
+      "notes": "All lists render through CardList, so a UI-side sort with a prop is a one-file change; a data-side sort would instead touch two spots (pokemonCards' comparator and the home load's slice). Note the spec currently mandates dex order, so the sort would be additive."
+    },
+    {
+      "change": "Add an Items section (/items, /items/:name) shaped like Moves",
+      "files": [
+        "app/src/routes/items/+page.server.ts",
+        "app/src/routes/items/+page.svelte",
+        "app/src/routes/items/[name]/+page.server.ts",
+        "app/src/routes/items/[name]/+page.svelte"
+      ],
+      "difficulty": 4,
+      "notes": "Everything heavy is reused (api.ts helpers, pokemonCards, CardList, TypeBadge, 404 pattern, global .panel/.facts/.count styles, untouched layout); only two thin route files modeled on moves/ and types/ are written. No changes to shared code needed."
+    },
+    {
+      "change": "Change the API base URL and caching rules",
+      "files": [
+        "app/src/lib/server/api.ts"
+      ],
+      "difficulty": 5,
+      "notes": "apiBase(), resolveUrl(), CACHE_TTL_MS, the cache map and spriteUrl all live in one file; grep confirms no other file references API_BASE_URL or the base URL. Per-resource TTL rules would still be a single-file change inside get()."
+    }
+  ]
+}
+```

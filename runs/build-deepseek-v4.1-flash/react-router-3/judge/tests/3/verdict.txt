@@ -1,0 +1,173 @@
+I've read the full app. The verdict for this dimension is straightforward on the facts: `app/` contains **zero tests of its own** — no test script (`app/package.json:6-12` has only `build`/`dev`/`start`/`typecheck`), no test runner or testing library in devDependencies, and no test files anywhere under `app/` (confirmed by `find`/`ls` and the measured `tests: 0`). The only safety net is the acceptance suite in `tests/`, which the agent was handed and which doesn't live in `app/`.
+
+That's a real loss here, because this app is unusually testable and unusually risky to refactor:
+
+- **The pure helpers in `app/app/lib/format.ts`** (`humanize` at :4, `latestEnglishFlavorText` at :21, `dexNumber` :34, `inMetres`/`inKilograms` :37-44, `orDash` :47, `statLabel` :49) are exactly the spec-pinned edge cases ("Mr. Mime" vs `mr-mime`, `\f` collapse, em dash) and are one-line vitest targets.
+- **The home loader** (`app/app/routes/home.tsx:31-99`) does the riskiest logic in the app: three filters, alternate-form exclusion via `id <= 10000` (:54), pagination math with a `Math.min(requestedPage, totalPages)` clamp (:93) and slice (:94). An off-by-one in the slice or the clamp would silently shift every page and nothing in `app/` would fail.
+- **URL state + debouncing** (`home.tsx:66-86`): a 250 ms debounce that `replace`s the URL and deletes `page` (:75). Stale `searchParams` in the closure, race with the `qFromUrl` sync effect (:61-64), or dropping the `page` reset would all pass today and only be caught by hand-testing.
+- **Move table aggregation** (`app/app/routes/pokemon.tsx:169-262`) — the densest code in the repo: default game = highest `order` via `games[games.length-1]` (:202-204), method ordering `level-up/machine/egg/tutor` then alphabetical (:49-56, :244-252), level-up default sort (:254-263), and the `compareRows` missing-sorts-last-in-both-directions comparator (:60-77). That comparator plus the `aria-sort` toggle (:93-121) is precisely the kind of subtle spec behavior that breaks under refactor with no signal.
+- **Duplicated alternate-form logic** (`app/app/lib/data.server.ts:113` `id > 10000` skip in `cardsFromRefs` vs an inline reimplementation in `app/app/routes/ability.tsx:26-34` with its own dedupe/hidden-merge). No test pins either copy, so a "cleanup" of one can diverge from the other — e.g. breaking the hidden-ability merge `existing?.hidden || entry.is_hidden` (ability.tsx:32).
+- **The in-memory promise cache** (`data.server.ts:9-18`) deletes rejected promises — correct, but a refactor to cache the resolved value directly would make API outages sticky, and nothing would catch it.
+
+Also worth noting: the framework made testing cheap. React Router v8 (the app's `react-router@^8.5.1`, current stable) ships `createRoutesStub` for rendering routes/components in isolation (reactrouter.com/start/framework/testing), and every loader here is a plain async function that can be called directly against a stubbed `fetch` — no server needed. Not writing even a handful of pure-function tests around `format.ts` and the home loader was an easy, cheap opportunity missed.
+
+One incidental observation: `latestEnglishFlavorText` (format.ts:21-31) returns the last *non-empty* English entry, while the spec says the *last* English entry — a benign divergence, but exactly the sort of thing a pinned unit test would have forced a decision on. Similarly `type.tsx:52-54` sorts moves by humanized display name where the spec says "sorted alphabetically by name" (usually identical, occasionally not).
+
+```json
+{
+  "dimension": "tests",
+  "criteria": {
+    "coverage_of_risk": {
+      "score": 1,
+      "evidence": [
+        "app/package.json:6-12 — no test script, no test runner or testing library in devDependencies",
+        "app/app/routes/home.tsx:31-99 — filtering, alternate-form exclusion and pagination clamp/slice: zero coverage",
+        "app/app/routes/pokemon.tsx:169-262 — move aggregation, method ordering and default-game selection: zero coverage"
+      ],
+      "rationale": "The app wrote no tests at all, so none of its riskiest logic (URL filtering, pagination, sorting, cache) is covered by anything living in app/."
+    },
+    "behaviour_not_implementation": {
+      "score": 1,
+      "evidence": [
+        "app/ — no test files exist anywhere under app/ (measured tests.cases = 0)"
+      ],
+      "rationale": "Criterion scores 1 when there are no tests; nothing to assert behaviourally."
+    },
+    "regression_power": {
+      "score": 1,
+      "evidence": [
+        "app/app/lib/format.ts:4-51 — humanize/dexNumber/flavor-text helpers have no regression guard despite spec-pinned edge cases",
+        "app/app/routes/home.tsx:93-94 — Math.min page clamp and slice would silently break pagination with no failing test"
+      ],
+      "rationale": "With no tests in app/, any refactor of the data layer or sorting passes silently; only the external acceptance suite constrains behaviour."
+    },
+    "signal_to_noise": {
+      "score": 3,
+      "evidence": [
+        "app/ — no tests, hence no noise to evaluate"
+      ],
+      "rationale": "Per the scale, an empty test suite scores 3 on signal-to-noise: nothing wasteful, nothing earned either."
+    }
+  },
+  "overall": 1,
+  "findings": [
+    {
+      "severity": "high",
+      "location": "app/package.json:6-12",
+      "issue": "No test infrastructure at all: no test script, no vitest/playwright devDependency, no spec files in app/.",
+      "suggestion": "Add vitest and a small suite for lib/format.ts and the route loaders; loaders are plain async functions and React Router v8's createRoutesStub covers component-level tests without a server."
+    },
+    {
+      "severity": "high",
+      "location": "app/app/routes/home.tsx:31-99",
+      "issue": "The riskiest logic in the app — three filters, id<=10000 alternate-form exclusion, page clamp (Math.min) and slice — has no regression guard; an off-by-one would shift every page silently.",
+      "suggestion": "Extract filtering/pagination into a pure function and unit-test boundary cases: page beyond total, page=0, NaN, unknown type param, empty results, exactly 48 matches."
+    },
+    {
+      "severity": "high",
+      "location": "app/app/routes/home.tsx:66-86",
+      "issue": "Debounced URL-state sync (replace:true, page reset on filter change, stale searchParams closure) is untested and easy to break with a small refactor.",
+      "suggestion": "Test via createRoutesStub or Playwright component tests that typing updates q after the debounce, resets page to 1, and preserves other filters."
+    },
+    {
+      "severity": "high",
+      "location": "app/app/routes/pokemon.tsx:60-77,244-263",
+      "issue": "compareRows' missing-sorts-last-in-both-directions semantics and the level-up/machine/egg/tutor method ordering are subtle spec behaviors with no test pinning them.",
+      "suggestion": "Unit-test compareRows directly (ascending/descending with null values) and the method-ordering comparator against representative inputs."
+    },
+    {
+      "severity": "medium",
+      "location": "app/app/lib/format.ts:4-51",
+      "issue": "All pure helpers are trivially testable and encode spec edge cases (mr-mime→'Mr Mime', \\f collapse, '—' for null power, #0025 padding) yet are untested.",
+      "suggestion": "A 30-line vitest file over format.ts is the cheapest, highest-value addition to this codebase."
+    },
+    {
+      "severity": "medium",
+      "location": "app/app/routes/ability.tsx:26-34",
+      "issue": "Alternate-form exclusion and dedupe are reimplemented inline here while cardsFromRefs (data.server.ts:113) has its own copy; neither copy is pinned by a test, so they can silently diverge, including the hidden-ability merge.",
+      "suggestion": "Route ability card building through cardsFromRefs (extended to carry the hidden flag) and test it once, including a Pokémon listed both normally and as hidden."
+    },
+    {
+      "severity": "medium",
+      "location": "app/app/lib/data.server.ts:9-18",
+      "issue": "Promise cache deletes rejected entries so failures aren't sticky — correct but fragile under refactor, and untested.",
+      "suggestion": "Add a unit test asserting a failed fetch is retried on the next call and a succeeded one is cached."
+    },
+    {
+      "severity": "medium",
+      "location": "app/app/routes/pokemon.tsx:135, app/app/routes/move.tsx:34, app/app/routes/ability.tsx:19",
+      "issue": "Loaders return { notFound: true } flags instead of throwing 404 Responses, so HTTP status is never 404 and no test documents the not-found contract.",
+      "suggestion": "Throw a 404 Response via the framework's isRouteErrorResponse path (root.tsx already imports it) and add one loader test per route for the missing-resource case."
+    },
+    {
+      "severity": "low",
+      "location": "app/app/lib/format.ts:21-31",
+      "issue": "latestEnglishFlavorText skips empty English entries while the spec says take the last English entry — a quiet divergence a unit test would have surfaced.",
+      "suggestion": "Pin the spec behavior (or the intentional deviation) in a test with fixture entries."
+    },
+    {
+      "severity": "low",
+      "location": "app/app/routes/type.tsx:52-54",
+      "issue": "Type moves are sorted by humanized display name where the spec says 'sorted alphabetically by name'; usually identical, occasionally not, and untested.",
+      "suggestion": "Sort by API name (or test that display-name and API-name orders agree on the shipped data)."
+    }
+  ],
+  "summary": "The app shipped zero tests of its own: no test script, no runner, no spec files, leaving the provided acceptance suite as the only guard. That's costly here because the logic most likely to rot — home filtering/pagination, URL-state debouncing, move-table sorting with missing-values-last semantics, and duplicated alternate-form/hidden-ability handling — is dense, subtle, and spec-pinned. React Router v8 makes testing cheap (plain async loaders plus createRoutesStub), so a small vitest suite over format.ts and the extracted loader logic is the highest-leverage improvement this PR could still make.",
+  "wroteTests": false,
+  "testCount": 0,
+  "valuableTests": [],
+  "lowValueTests": [],
+  "untested": [
+    {
+      "area": "Home list filtering, generation/type membership sets, and pagination clamp/slice (app/app/routes/home.tsx:31-99)",
+      "risk": "high",
+      "likelyBug": "Off-by-one in PAGE_SIZE slicing or the Math.min page clamp shifting every page's contents; unknown type/generation param handling silently dropping all results"
+    },
+    {
+      "area": "URL query state: debounced search, filter changes resetting page, param omission at defaults (app/app/routes/home.tsx:66-117)",
+      "risk": "high",
+      "likelyBug": "Stale-closure searchParams clobbering concurrent filter changes, page param not reset on filter change, or q surviving a cleared filter"
+    },
+    {
+      "area": "Move table aggregation: default game selection (highest order), requested-game override, method grouping/ordering, level-up default sort (app/app/routes/pokemon.tsx:169-263)",
+      "risk": "high",
+      "likelyBug": "Wrong default game, a version-group's moves leaking into another table, or level ordering flipping to lexicographic ('10' before '2') after a refactor"
+    },
+    {
+      "area": "Sortable table comparator incl. missing-sorts-last in both directions and aria-sort toggling (app/app/routes/pokemon.tsx:60-77,93-121)",
+      "risk": "high",
+      "likelyBug": "Descending sort placing null Power/Accuracy first, or aria-sort sticking on the wrong header after a second click"
+    },
+    {
+      "area": "Pure formatting helpers: humanize, dexNumber, latest English flavor text, unit conversions, em dash (app/app/lib/format.ts)",
+      "risk": "medium",
+      "likelyBug": "Whitespace/\\f collapsing, '0.4 m' rounding, or #0025 zero-padding regressing; flavor text picking the first instead of last English entry"
+    },
+    {
+      "area": "Alternate-form (id > 10000) exclusion and dedupe, duplicated between cardsFromRefs and the ability route, incl. hidden-ability merge (app/app/lib/data.server.ts:104-121, app/app/routes/ability.tsx:26-34)",
+      "risk": "medium",
+      "likelyBug": "Mega Evolutions appearing in lists after one copy of the exclusion is refactored, or a Pokémon listed both normally and hidden losing its 'Hidden ability' label"
+    },
+    {
+      "area": "In-memory promise cache semantics: rejection eviction and cache keying (app/app/lib/data.server.ts:9-18,44-71)",
+      "risk": "medium",
+      "likelyBug": "A refactor caching resolved values (or the error) makes transient API failures sticky across requests"
+    },
+    {
+      "area": "Evolution chain recursion and branching rendering (app/app/routes/pokemon.tsx:24-45)",
+      "risk": "low",
+      "likelyBug": "Branching chains like Eevee rendering flat, or key collisions from `${node.name}-${children.length}` on duplicate names"
+    },
+    {
+      "area": "Not-found paths for unknown pokemon/move/ability/type and HTTP status behavior (app/app/routes/*.tsx loaders; app/app/root.tsx error boundary)",
+      "risk": "medium",
+      "likelyBug": "An unknown resource rendering the success layout with empty sections instead of the Not found page, or the 404 status never being sent"
+    },
+    {
+      "area": "Hash scrolling to /pokemon/:name#moves (app/app/root.tsx:24-45)",
+      "risk": "low",
+      "likelyBug": "The double-timer scroll racing route transitions and jumping to the wrong anchor or not at all"
+    }
+  ]
+}
+```

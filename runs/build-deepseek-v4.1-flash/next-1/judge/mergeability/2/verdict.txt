@@ -1,0 +1,141 @@
+## Review
+
+A well-organized App Router app that mostly follows current Next 16 conventions (Promise `params`/`searchParams`, `generateMetadata`, server components for data, `history.replaceState` for URL sync — which the current docs explicitly bless), but it hand-rolls two things the framework provides for free: unmatched-URL 404s and `notFound()`.
+
+**What's good**
+- `app/app/page.tsx:31-37`, `app/app/pokemon/[name]/page.tsx:83-88` — params/searchParams awaited as Promises, the Next 15+ convention; `generateMetadata` used on every dynamic page.
+- `app/lib/api.ts:14-21` — a small, single-purpose data layer: module-level promise cache with rejection-eviction (a failed fetch isn't poisoned into the cache), bounded concurrency via `mapLimit`. Clean server/client boundary — only plain serializable props cross into `HomeBrowser`/`MovesSection`.
+- `app/components/MovesSection.tsx:53-55` — the client `game` state is re-synced from server props via `useEffect`, the right pattern for state that also lives in the URL.
+
+**What I'd push back on**
+- `app/app/[...slug]/page.tsx:12` — a catch-all page that renders "Not found" with HTTP 200. Since Next 13.3 the root `not-found.tsx` already handles unmatched URLs **and returns a real 404 status**; this file exists only to downgrade the framework's built-in behavior.
+- `app/app/pokemon/[name]/page.tsx:91` (and moves/abilities/types) — inline `<NotFoundContent />` instead of `notFound()`. Same UI, but no 404 status, and `not-found.tsx` is dead code except for the catch-all.
+- `app/lib/api.ts:31` — any non-OK response, including 5xx and rate limits, is collapsed to `null` → rendered as "Not found". A transient API blip shows a page confidently telling the user the Pokémon doesn't exist. No `error.tsx` anywhere either, so a network-level fetch failure gives the default 500 page.
+- `app/components/HomeBrowser.tsx:33-36` — filter state is seeded from props once with `useState(initial.…)` and never re-synced (unlike `MovesSection`). Soft-navigating from a filtered home (`/?q=pika`) to `/` via the nav `Link` re-renders the server page with clean `initial` props but leaves the old client state mounted: URL says unfiltered, UI stays filtered. A `useEffect` sync (or `key` from the query) is needed.
+- `app/components/HomeBrowser.tsx:154,158` — raw `<a>` for pagination causes full document reloads and forfeits prefetch; these should be `Link`. Likewise raw `<img>` (`app/components/PokemonCard.tsx:28`) instead of `next/image` (defensible given the runtime-configured media origin, but worth a comment or an `unoptimized`/`remotePatterns` config decision).
+- Small duplication: `first()` defined twice (`app/app/page.tsx:12`, `app/app/pokemon/[name]/page.tsx:36`); `EvolutionTree`/`EvolutionBranch` are near-identical (`app/app/pokemon/[name]/page.tsx:37-60`); the type-badge link markup is re-implemented inline in the moves and types pages (`app/app/moves/[name]/page.tsx:63`, `app/app/types/[name]/page.tsx:77-81`) instead of reusing the `link` variant of `TypeBadge`.
+- `app/app/layout.tsx:5-8` plus `app/lib/api.ts:30` — no-store is asserted four ways (`dynamic`, `revalidate`, `fetchCache`, per-fetch `cache: 'no-store'`), then re-asserted on every page. Harmless but noisy; one mechanism suffices.
+
+```json
+{
+  "dimension": "mergeability",
+  "criteria": {
+    "idiomatic": {
+      "score": 3,
+      "evidence": [
+        "app/app/page.tsx:34-38 — Promise searchParams, current App Router convention, used consistently",
+        "app/components/HomeBrowser.tsx:67-69 — window.history.replaceState to sync URL without a re-render, exactly what current Next docs recommend",
+        "app/app/[...slug]/page.tsx:12 — catch-all page re-implements unmatched-URL 404s that root not-found.tsx already handles (with a real 404 status)",
+        "app/app/pokemon/[name]/page.tsx:91 — inline NotFoundContent instead of next/navigation notFound()",
+        "app/components/HomeBrowser.tsx:154 — raw <a> pagination links force full document reloads instead of next/link"
+      ],
+      "rationale": "Data loading, routing and metadata are recognisably current-doc idiomatic, but 404 handling is a home-grown workaround for two framework features (notFound() and the built-in unmatched-route 404) that exist precisely for this."
+    },
+    "correctness_risks": {
+      "score": 3,
+      "evidence": [
+        "app/lib/api.ts:31 — any non-OK response (including 5xx) becomes null and renders as 'Not found'; no error.tsx anywhere",
+        "app/components/HomeBrowser.tsx:33-36 — useState(initial.*) never re-synced: soft-navigating from /?q=x to / leaves URL and UI out of sync",
+        "app/components/MovesSection.tsx:53-55 — same pattern done correctly here, showing the home version is an oversight not a choice",
+        "app/lib/api.ts:15-21 — promise cache evicts on rejection, so failures aren't poisoned into the cache (good)",
+        "app/app/pokemon/[name]/page.tsx:105-135 — move fan-out bounded by mapLimit(12) and keyed by selected game (good)"
+      ],
+      "rationale": "No serious races or leaks, and the cache design is careful, but 5xx-as-not-found can show wrong content during API hiccups, and the stale HomeBrowser state is a real visible bug on soft navigation that the tests don't cover."
+    },
+    "global_abstractions": {
+      "score": 4,
+      "evidence": [
+        "app/lib/api.ts:14-21 — single data layer with clear server-side boundary; client components receive only serializable props",
+        "app/components/Section.tsx:1-20 — small focused components; no god component",
+        "app/app/page.tsx:12 and app/app/pokemon/[name]/page.tsx:36 — first() helper duplicated across two pages",
+        "app/app/types/[name]/page.tsx:77-81 — type-badge link markup re-implemented inline instead of reusing TypeBadge's link variant"
+      ],
+      "rationale": "The api/format module split earns its keep and boundaries between server and client code are clean; only a few local duplications need hoisting."
+    },
+    "readability": {
+      "score": 4,
+      "evidence": [
+        "app/lib/format.ts:1-90 — small, well-named pure helpers (humanize, dexNumber, latestEnglishFlavor)",
+        "app/app/pokemon/[name]/page.tsx:85-260 — long but linear page, each rendering block maps to a spec section",
+        "app/components/MovesSection.tsx:44-88 — sorting logic named and separated from rendering",
+        "app/app/layout.tsx:5-8 plus every page — no-store asserted redundantly, mild noise"
+      ],
+      "rationale": "Consistent naming, predictable file layout, zero comments needed because the code is self-documenting; only the segment-config redundancy and a couple of duplicated helpers roughen the edges."
+    },
+    "review_cost": {
+      "score": 3,
+      "evidence": [
+        "app/app/[...slug]/page.tsx:12 — delete and rely on not-found.tsx (returns 404)",
+        "app/app/pokemon/[name]/page.tsx:91 — switch to notFound() (mechanical, four pages)",
+        "app/components/HomeBrowser.tsx:33-36 — needs useEffect/key re-sync of initial props",
+        "app/lib/api.ts:31 — distinguish 404 from 5xx/network failure and add an error boundary"
+      ],
+      "rationale": "Nothing needs rework, but the 404 strategy, the stale-state bug and the error handling add up to one real round of changes before I'd approve."
+    }
+  },
+  "overall": 3,
+  "findings": [
+    {
+      "severity": "medium",
+      "location": "app/app/[...slug]/page.tsx:12",
+      "issue": "Catch-all page renders 'Not found' with HTTP 200, overriding the root not-found.tsx which already handles unmatched URLs and returns a real 404 status.",
+      "suggestion": "Delete the catch-all; keep app/not-found.tsx as the single 404 surface for unmatched routes."
+    },
+    {
+      "severity": "medium",
+      "location": "app/app/pokemon/[name]/page.tsx:91",
+      "issue": "Missing resources are rendered via an inline component, so not-found pages respond 200 and not-found.tsx is dead code (same in moves, abilities, types pages).",
+      "suggestion": "Call notFound() from next/navigation; the existing not-found.tsx then renders with a 404 status before streaming."
+    },
+    {
+      "severity": "medium",
+      "location": "app/lib/api.ts:31",
+      "issue": "Every non-OK response — including 5xx and rate limits — is returned as null and rendered as 'Not found'; there is no error.tsx for network failures either.",
+      "suggestion": "Return null only for 404, throw for other statuses, and add a root error.tsx so API failures surface as errors, not as confidently-wrong content."
+    },
+    {
+      "severity": "medium",
+      "location": "app/components/HomeBrowser.tsx:33-36",
+      "issue": "Filter state is seeded once from initial props; soft-navigating from /?q=pika to / via the nav Link leaves the URL clean but the UI still filtered.",
+      "suggestion": "Re-sync state from props in a useEffect (as MovesSection.tsx:53-55 already does) or key the component on the serialized query."
+    },
+    {
+      "severity": "low",
+      "location": "app/components/HomeBrowser.tsx:154",
+      "issue": "Pagination uses raw <a href>, causing full document reloads and forfeiting prefetch in an otherwise client-transition app.",
+      "suggestion": "Use next/link for Previous/Next page links."
+    },
+    {
+      "severity": "low",
+      "location": "app/components/PokemonCard.tsx:28",
+      "issue": "Raw <img> instead of next/image; no images config documents why (runtime-configured media origin).",
+      "suggestion": "Either configure images.remotePatterns/unoptimized and use next/image, or leave a comment recording the deliberate choice."
+    },
+    {
+      "severity": "low",
+      "location": "app/app/layout.tsx:5-8",
+      "issue": "No-store is asserted three ways in the root layout (dynamic, revalidate, fetchCache) plus per-fetch cache:'no-store' in api.ts:30, and re-declared on every page.",
+      "suggestion": "Pick one mechanism (per-fetch cache: 'no-store' + one segment config) and drop the rest."
+    },
+    {
+      "severity": "low",
+      "location": "app/app/pokemon/[name]/page.tsx:37-60",
+      "issue": "EvolutionTree and EvolutionBranch are near-identical recursive components, one just to add a wrapper class.",
+      "suggestion": "Keep one recursive component and pass a className prop."
+    },
+    {
+      "severity": "low",
+      "location": "app/app/page.tsx:12",
+      "issue": "The first() multi-value searchParam helper is duplicated in app/app/pokemon/[name]/page.tsx:36.",
+      "suggestion": "Move it to lib/format.ts next to the other param helpers."
+    },
+    {
+      "severity": "low",
+      "location": "app/app/types/[name]/page.tsx:77-81",
+      "issue": "The type-badge link markup (className type-badge type-x + href) is re-implemented inline here and in moves/[name]/page.tsx:63 instead of reusing TypeBadge's link variant.",
+      "suggestion": "Reuse <TypeBadge name=... label=... link /> everywhere badges are rendered."
+    }
+  ],
+  "summary": "A clean, well-structured App Router app whose data layer, component boundaries and URL-sync approach match current Next 16 guidance. The merge blockers are all in the same theme: 404/error handling hand-rolls over framework features (notFound(), built-in unmatched-route 404) and collapses API failures into 'Not found', plus one stale-client-state bug on the home page. One focused round of review fixes and this merges."
+}
+```

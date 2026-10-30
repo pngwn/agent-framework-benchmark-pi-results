@@ -1,0 +1,170 @@
+I've read the app thoroughly. Summary of what I found before scoring:
+
+- **No tests exist in `app/`**: `app/package.json:5-8` defines only `dev`, `build`, `start`; there's no `test` script, no test runner in `devDependencies` (it's empty), and no spec/test file anywhere under `app/` — confirmed by directory listings of `app/`, `app/src`, `app/src/lib`, `app/src/routes/*`. Measured facts agree (`tests: { files: 0, cases: 0 }`).
+- The app contains a substantial amount of *pure, trivially testable* logic that carries the spec's hardest rules: humanization/dex-number/flavor-text (`app/src/lib/format.ts`), URL-state building (`app/src/lib/home-url.ts`), pagination + filter math (`app/src/routes/(home).ts:33-37`), the API cache with LRU/TTL/404-caching/concurrency queue (`app/src/lib/api.ts`), species/index mapping (`app/src/lib/data.ts`), move-table grouping and game-default selection (`app/src/routes/pokemon/[name].ts`), and two hand-written client-side custom elements (`app/src/routes/(home).client.ts`, `app/src/routes/pokemon/[name].client.ts`). None of it is exercised by anything the app owns — only by the throwaway acceptance suite in `tests/`, which the app can't rely on after merge.
+- Gracile's own starter projects ship "minimal setup with various kinds of test suites", so a zero-test app is below the framework's own baseline. I verified `@gracile/gracile` 0.11.0 is the current stable release (npm/socket.dev), so the app is on current Gracile; the test-quality gap is a choice, not a version artifact.
+
+Since there are no tests, `coverage_of_risk`, `behaviour_not_implementation` and `regression_power` anchor at 1 per the rubric; `signal_to_noise` is 3 by the stated convention. My effort went into the `untested` list, backed by concrete latent-bug scenarios I traced in the code (e.g., a version-group resource that 404s gets `order = MAX_SAFE_INTEGER` in `data.ts:156`, sorts last, and is then picked as the *default* game by `games.at(-1)` in `[name].ts:112`).
+
+```json
+{
+  "dimension": "tests",
+  "criteria": {
+    "coverage_of_risk": {
+      "score": 1,
+      "evidence": [
+        "app/package.json:5-8 — only dev/build/start scripts; no test script, empty devDependencies, zero test files anywhere in app/",
+        "app/src/routes/(home).ts:33-37 — pagination/filter math (totalPages, parseInt page parsing, clamp, slice bounds) entirely unguarded",
+        "app/src/lib/api.ts:44-73 — TTL/LRU cache, promise dedupe, 404-caching, 24-slot concurrency queue: no test would catch a refactor regression",
+        "app/src/lib/format.ts:9-40 — humanize, dexNumber, latestEnglishFlavorText, orDash: pure functions, zero tests",
+        "app/src/routes/pokemon/[name].ts:101-135 — move-table grouping/dedup/default-game logic untested in-app"
+      ],
+      "rationale": "No tests at all, and the logic most likely to break (pagination, URL state, data mapping, caching, client-side sorting) is exactly the logic left unguarded."
+    },
+    "behaviour_not_implementation": {
+      "score": 1,
+      "evidence": [
+        "app/src/ — no *.test.* or *.spec.* files; nothing asserts rendered roles, text, or URL behaviour from within the app"
+      ],
+      "rationale": "No tests exist, so the criterion is vacuously at the bottom of the scale."
+    },
+    "regression_power": {
+      "score": 1,
+      "evidence": [
+        "app/src/lib/home-url.ts:5-14 — nothing would fail if default-omission or param encoding regressed (e.g. page=1 leaking into URLs)",
+        "app/src/lib/api.ts:64-67 — nothing would fail if cache dedup/eviction broke (double-fetching, unbounded growth)",
+        "app/src/lib/build.ts:6 — the guard that keeps API calls out of the build render depends on the undocumented 'gracile-static' hostname; nothing would catch it silently breaking on a Gracile upgrade",
+        "tests/ — the only safety net is the acceptance suite, which is not owned by the app and will not run in normal development"
+      ],
+      "rationale": "Every refactoring risk in the data layer is unguarded; breaking pagination, mapping, or caching behaviour would ship silently."
+    },
+    "signal_to_noise": {
+      "score": 3,
+      "evidence": [
+        "app/ — no tests, so also no trivial or duplicated tests adding maintenance cost"
+      ],
+      "rationale": "Per the rubric, an empty suite scores neutral; the problem is absence, not noise."
+    }
+  },
+  "overall": 1,
+  "findings": [
+    {
+      "severity": "high",
+      "location": "app/package.json:5-8",
+      "issue": "The app ships no test script, no test runner, and no test files, despite owning ~800 lines of script logic (pagination, URL state, API caching, data mapping, client-side sorting).",
+      "suggestion": "Add a runner (vitest or Playwright, both idiomatic alongside Vite/Gracile — Gracile's own starters include test-suite templates) plus a `test` script, and start with unit tests for the pure modules in src/lib/."
+    },
+    {
+      "severity": "high",
+      "location": "app/src/routes/(home).ts:33-37",
+      "issue": "Pagination and filtering math (PAGE_SIZE slice bounds, totalPages = max(1, ceil), parseInt page parsing and clamping, three-way filter) has no tests; an off-by-one or a filter-precedence change would pass review unnoticed.",
+      "suggestion": "Unit-test the handler's data step (or extract a pure filterPaginate(entries, filters) helper and test it) over fixtures: 0/47/48/49 matches, page=0, page=999, page=abc, filter combinations."
+    },
+    {
+      "severity": "high",
+      "location": "app/src/lib/api.ts:44-73",
+      "issue": "The runtime cache's invariants (single-flight dedupe, LRU eviction at MAX_ENTRIES, 60s TTL, 404s cached as null, failure eviction, concurrency queue) are enforced only by convention; a refactor could reintroduce double-fetching, cache stale 404s indefinitely, or leak memory.",
+      "suggestion": "Test with a stubbed fetch: concurrent identical requests hit the wire once, expired entries refetch, rejected requests are evicted and retried, 404 resolves to null, and MAX_CONCURRENT is respected."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/lib/data.ts:156",
+      "issue": "A version group whose resource is missing gets order = Number.MAX_SAFE_INTEGER, so it sorts last and is then selected as the default game via games.at(-1) (app/src/routes/pokemon/[name].ts:112), silently showing an empty Moves section.",
+      "suggestion": "Exclude unknown version groups from the default selection (only fall back to the highest known order) and add a test with a partial version-group fixture."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/lib/build.ts:6",
+      "issue": "isBuildRender keys on the undocumented 'gracile-static' stub hostname to keep API fetches out of the build render — a spec-level invariant guarded by an internal Gracile detail, with no test pinning it.",
+      "suggestion": "Add a test that the handlers return stub data for a URL with that hostname (and consider a more robust signal, e.g. checking for a Gracile-provided build flag)."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/lib/data.ts:96-128",
+      "issue": "getPokemonIndex composes species, types and generations from separately-cached responses; with different cache ages the index can be inconsistent (a new species with no type slots or no generation), and nothing tests that aggregation or the alternate-form exclusion.",
+      "suggestion": "Test getPokemonIndex against fixture responses covering forms with id > 10000, multi-slot types, and species missing from every generation."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/routes/(home).client.ts:20-100",
+      "issue": "The progressive-enhancement layer (150ms debounce, push/replace history choice, abortable fetch-and-swap of #results, popstate re-sync) is only covered by the external acceptance suite; regressions here would break filtering for JS users with nothing in-repo failing.",
+      "suggestion": "Add Playwright component/route tests in-repo: typing updates URL and results without Enter, select changes push history, back/forward restores state, and a failed fetch falls back to a full navigation."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/routes/pokemon/[name].client.ts:20-44",
+      "issue": "Client sorting (missing-values-last in both directions, aria-sort toggling, numeric vs lexical columns, order stability) is untested in-app; the acceptance suite only clicks Power and Move on one table.",
+      "suggestion": "Add tests covering ascending→descending flips, missing values staying last when descending, aria-sort cleared on other headers, and numeric vs string comparison."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/lib/api.ts:77-80",
+      "issue": "apiRequired throws on missing resources and route handlers have no error handling, so a single failed upstream request during a home-page load (18 type + 9 generation fetches) 500s the whole page; the path is untested.",
+      "suggestion": "Add a test for the 500 path and consider degrading gracefully (render the page with the sections that could load) or retrying transient failures."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/lib/home-url.ts:8",
+      "issue": "homeUrl keeps an untrimmed q (whitespace-only q stays in the URL) while the handler trims the needle at app/src/routes/(home).ts:31, so ?q=%20 shows all results with a bogus filter in the URL; no test pins the omit-empty/default contract.",
+      "suggestion": "Trim q before building the URL and unit-test homeUrl's default-omission contract (empty q/type/generation and page=1 produce '/')."
+    }
+  ],
+  "summary": "The app contains zero tests: no test script, no runner, no spec files, while owning a disproportionate amount of high-risk pure logic (pagination, URL state, humanization, runtime caching, data mapping) that Gracile's own starter templates show how to test. The acceptance suite in tests/ is external and cannot protect this code after merge, so any refactor of the data layer would ship unverified. Priority is a runner plus unit tests for src/lib/format.ts, home-url.ts, api.ts and the (home).ts pagination math, which would catch the majority of the latent bugs identified above.",
+  "wroteTests": false,
+  "testCount": 0,
+  "valuableTests": [],
+  "lowValueTests": [],
+  "untested": [
+    {
+      "area": "Pagination and filtering on the home route (totalPages, page parsing/clamping, 48-per-page slice, q/type/generation combination)",
+      "risk": "high",
+      "likelyBug": "An off-by-one in the slice bounds or the Math.max(1, ceil) total would show duplicate/missing cards on interior pages or 'Page 1 of 0' for empty results; parseInt edge cases (page=abc, 0, negative, 999) could render an empty list or crash."
+    },
+    {
+      "area": "Runtime API cache in src/lib/api.ts (dedupe, TTL, LRU eviction, 404-as-null caching, concurrency queue, failure eviction)",
+      "risk": "high",
+      "likelyBug": "Breaking single-flight dedupe would double- or triple-fetch during a home-page load; caching a rejection instead of evicting it would permanently 500 a route; losing the null-404 distinction would turn not-found pages into 500s."
+    },
+    {
+      "area": "Move-section data assembly (game list ordering, default game selection, per-method table grouping, dedup key, level-up ordering)",
+      "risk": "high",
+      "likelyBug": "A missing version-group resource silently becomes the default game (order = MAX_SAFE_INTEGER at data.ts:156, picked by games.at(-1) at [name].ts:112) and yields an empty 'This Pokémon learns no moves' section; a dedup-key change could drop rows learned at the same level."
+    },
+    {
+      "area": "URL state building in src/lib/home-url.ts (omitting empty/default params, encoding)",
+      "risk": "medium",
+      "likelyBug": "Default params (page=1, empty type) leaking into URLs, or double-encoding of q, would break deep links and back/forward behaviour on the Pokémon list."
+    },
+    {
+      "area": "Client-side progressive enhancement (filter debounce, push vs replace history, fetch-and-swap of #results, abort handling, popstate re-sync; sortable-table aria-sort and missing-values-last rule)",
+      "risk": "medium",
+      "likelyBug": "A lost abort check could let a slow earlier response overwrite a newer one (stale results for the typed query); breaking aria-sort bookkeeping would leave multiple columns marked sorted for screen-reader users."
+    },
+    {
+      "area": "Species/Pokémon mapping and index aggregation in src/lib/data.ts (alternate-form exclusion, dedup, dex-number sort, type-slot ordering, generation assignment)",
+      "risk": "medium",
+      "likelyBug": "Dropping the id < 10000 filter would list Mega Evolutions; a slot-sort regression would show dual types in the wrong order; a species absent from all generations would get generation: null and vanish from every generation filter."
+    },
+    {
+      "area": "Formatting rules in src/lib/format.ts (humanize, dexNumber, latestEnglishFlavorText whitespace collapsing, orDash, English-name lookup)",
+      "risk": "medium",
+      "likelyBug": "padStart(4) regressing to 3 would break #1026 and the test helpers' /#\\d{4}/ pattern; losing the trim in collapseWhitespace or the 'last English entry' rule would silently change every Pokémon description."
+    },
+    {
+      "area": "The build-render guard (isBuildRender keyed on the 'gracile-static' stub hostname) that enforces 'no API fetches at build time'",
+      "risk": "medium",
+      "likelyBug": "A Gracile upgrade changing the stub origin would make vite build fetch and embed live API data, violating the spec and breaking the live-data overlay tests, with no in-repo test failing to flag it."
+    },
+    {
+      "area": "Error and not-found paths (apiRequired throwing, upstream 5xx, 404 route rendering, graceful degradation on partial data)",
+      "risk": "medium",
+      "likelyBug": "One failed type fetch during a home-page load would 500 the entire page instead of degrading; a broken null-check would turn a missing Pokémon into an exception rather than the Not found page."
+    },
+    {
+      "area": "Sprite/artwork URL construction and null-sprite handling (spriteUrl, official-artwork fallback in [name].ts)",
+      "risk": "low",
+      "likelyBug": "A missing official artwork would fall back to front_default, and a null there renders no image; a path-format regression would 404 every sprite on the card grid."
+    }
+  ]
+}
+```

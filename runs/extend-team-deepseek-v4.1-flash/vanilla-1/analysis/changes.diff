@@ -1,0 +1,388 @@
+diff --git a/app/index.html b/app/index.html
+index ae2b346..6030c07 100644
+--- a/app/index.html
++++ b/app/index.html
+@@ -16,6 +16,7 @@
+           <ul>
+             <li><a href="/" data-nav="pokemon">Pokémon</a></li>
+             <li><a href="/types" data-nav="types">Types</a></li>
++            <li><a href="/team" data-nav="team">Team</a></li>
+           </ul>
+         </nav>
+       </div>
+diff --git a/app/server.mjs b/app/server.mjs
+index 5069e84..fcdec2d 100644
+--- a/app/server.mjs
++++ b/app/server.mjs
+@@ -28,7 +28,7 @@ const indexHtml = fs
+   .replace('__API_BASE_URL__', JSON.stringify(API_BASE_URL).slice(1, -1).replace(/</g, '\\u003c'));
+ 
+ // Paths the client router knows about; anything else gets a 404 status (same app shell).
+-const ROUTES = [/^\/$/, /^\/types\/?$/, /^\/types\/[^/]+\/?$/, /^\/pokemon\/[^/]+\/?$/, /^\/moves\/[^/]+\/?$/, /^\/abilities\/[^/]+\/?$/];
++const ROUTES = [/^\/$/, /^\/team\/?$/, /^\/types\/?$/, /^\/types\/[^/]+\/?$/, /^\/pokemon\/[^/]+\/?$/, /^\/moves\/[^/]+\/?$/, /^\/abilities\/[^/]+\/?$/];
+ 
+ function sendIndex(res, status) {
+   res.writeHead(status, { 'Content-Type': MIME['.html'], 'Cache-Control': 'no-cache' });
+diff --git a/app/src/main.ts b/app/src/main.ts
+index b8a5ea9..a5f0864 100644
+--- a/app/src/main.ts
++++ b/app/src/main.ts
+@@ -7,6 +7,7 @@ import { renderPokemon } from './pages/pokemon';
+ import { renderMove } from './pages/move';
+ import { renderAbility } from './pages/ability';
+ import { renderTypes, renderType } from './pages/types';
++import { renderTeam } from './pages/team';
+ 
+ export interface PageContext {
+   main: HTMLElement;
+@@ -15,11 +16,12 @@ export interface PageContext {
+   isCurrent: () => boolean;
+ }
+ 
+-export type PageResult = { title: string; nav?: 'pokemon' | 'types'; ready?: Promise<void> };
++export type PageResult = { title: string; nav?: 'pokemon' | 'types' | 'team'; ready?: Promise<void> };
+ type Page = (ctx: PageContext, ...params: string[]) => Promise<PageResult>;
+ 
+ const routes: [RegExp, Page][] = [
+   [/^\/$/, renderHome],
++  [/^\/team\/?$/, renderTeam],
+   [/^\/types\/?$/, renderTypes],
+   [/^\/types\/([^/]+)\/?$/, renderType],
+   [/^\/pokemon\/([^/]+)\/?$/, renderPokemon],
+diff --git a/app/src/pages/pokemon.ts b/app/src/pages/pokemon.ts
+index 1b3f753..f782373 100644
+--- a/app/src/pages/pokemon.ts
++++ b/app/src/pages/pokemon.ts
+@@ -3,6 +3,7 @@ import { section, typeBadge } from '../components';
+ import { fragment, h, type Child } from '../dom';
+ import { EM_DASH, dexNumber, englishName, humanize, latestEnglishFlavorText, orDash } from '../format';
+ import type { PageContext, PageResult } from '../main';
++import { teamControl } from '../team';
+ 
+ const STAT_LABELS: Record<string, string> = {
+   hp: 'HP',
+@@ -46,6 +47,7 @@ export async function renderPokemon(ctx: PageContext, name: string): Promise<Pag
+         { class: 'pokemon-hero__info' },
+         h('p', { class: 'pokemon-hero__dex' }, dexNumber(species.id)),
+         h('h1', null, title),
++        teamControl(species.name),
+         genus ? h('p', { class: 'pokemon-hero__genus' }, genus) : null,
+         h(
+           'ul',
+diff --git a/app/src/pages/team.ts b/app/src/pages/team.ts
+new file mode 100644
+index 0000000..a3f3498
+--- /dev/null
++++ b/app/src/pages/team.ts
+@@ -0,0 +1,125 @@
++import { allTypes, get, getByName, type Pokemon, type Species, type Type } from '../api';
++import { pokemonCard, section } from '../components';
++import { h } from '../dom';
++import { englishName, humanize } from '../format';
++import type { PageContext, PageResult } from '../main';
++import { MAX_TEAM_SIZE, readTeam, removeFromTeam } from '../team';
++
++interface MemberType {
++  name: string;
++  label: string;
++}
++
++interface Member {
++  name: string;
++  id: number;
++  types: MemberType[];
++}
++
++async function loadMember(name: string, typeLabels: Map<string, string>): Promise<Member | null> {
++  try {
++    const species = await getByName<Species>('pokemon-species', name);
++    const variety = species.varieties.find((v) => v.is_default) ?? species.varieties[0];
++    const pokemon = await get<Pokemon>(variety ? variety.pokemon.url : `pokemon/${species.id}`);
++    const types = [...pokemon.types]
++      .sort((a, b) => a.slot - b.slot)
++      .map((t) => ({ name: t.type.name, label: typeLabels.get(t.type.name) ?? humanize(t.type.name) }));
++    return { name: species.name, id: species.id, types };
++  } catch {
++    // A stored species may no longer exist in the live API; leave it out of the view.
++    return null;
++  }
++}
++
++function typeNames(types: Type[]): Map<string, string> {
++  return new Map(types.map((t) => [t.name, englishName(t)]));
++}
++
++function coverageTable(types: Type[], members: Member[]): HTMLElement {
++  const rows = types.map((type) => {
++    const double = new Set(type.damage_relations.double_damage_to.map((r) => r.name));
++    const half = new Set(type.damage_relations.half_damage_to.map((r) => r.name));
++    const none = new Set(type.damage_relations.no_damage_to.map((r) => r.name));
++    let weak = 0;
++    let resistant = 0;
++    for (const member of members) {
++      let multiplier = 1;
++      for (const defender of member.types) {
++        if (double.has(defender.name)) multiplier *= 2;
++        else if (half.has(defender.name)) multiplier *= 0.5;
++        else if (none.has(defender.name)) multiplier *= 0;
++      }
++      if (multiplier > 1) weak++;
++      else if (multiplier < 1) resistant++;
++    }
++    return h(
++      'tr',
++      null,
++      h('th', { scope: 'row' }, englishName(type)),
++      h('td', { class: 'num' }, String(weak)),
++      h('td', { class: 'num' }, String(resistant)),
++    );
++  });
++
++  return h(
++    'table',
++    { class: 'coverage' },
++    h('thead', null, h('tr', null, h('th', { scope: 'col' }, 'Type'), h('th', { scope: 'col' }, 'Weak'), h('th', { scope: 'col' }, 'Resistant'))),
++    h('tbody', null, rows),
++  );
++}
++
++export async function renderTeam({ main }: PageContext): Promise<PageResult> {
++  const types = await allTypes();
++  const labels = typeNames(types);
++  const names = readTeam();
++  const loaded = await Promise.all(names.map((name) => loadMember(name, labels)));
++  const members = loaded.filter((m): m is Member => m !== null);
++
++  const body = h('div', { class: 'team-body' });
++
++  const render = () => {
++    const current = readTeam()
++      .map((name) => members.find((m) => m.name === name))
++      .filter((m): m is Member => m !== undefined);
++
++    if (!current.length) {
++      body.replaceChildren(
++        h('p', { class: 'team-count' }, `${readTeam().length} of ${MAX_TEAM_SIZE}`),
++        h('p', { class: 'team-empty' }, 'Your team is empty'),
++        h('p', { class: 'not-found__back' }, h('a', { href: '/' }, 'Browse Pokémon')),
++      );
++      return;
++    }
++
++    const cards = current.map((member, index) => {
++      const card = pokemonCard({ id: member.id, name: member.name, types: member.types }, index);
++      card.classList.add('card-item--team');
++      card.append(
++        h(
++          'button',
++          {
++            type: 'button',
++            class: 'card__remove',
++            onclick: () => {
++              removeFromTeam(member.name);
++              render();
++            },
++          },
++          `Remove ${humanize(member.name)}`,
++        ),
++      );
++      return card;
++    });
++
++    body.replaceChildren(
++      h('p', { class: 'team-count' }, `${current.length} of ${MAX_TEAM_SIZE}`),
++      h('ul', { class: 'card-grid' }, cards),
++      section('Type coverage', [coverageTable(types, current)]),
++    );
++  };
++
++  render();
++  main.append(h('h1', null, 'Team'), body);
++  return { title: 'Team', nav: 'team' };
++}
+diff --git a/app/src/style.css b/app/src/style.css
+index 98f2a84..10b5407 100644
+--- a/app/src/style.css
++++ b/app/src/style.css
+@@ -576,6 +576,101 @@ input[type='search'] {
+   padding: 0.125rem 0;
+ }
+ 
++/* ---- Team ---- */
++
++.team-control {
++  display: flex;
++  flex-wrap: wrap;
++  align-items: center;
++  gap: var(--space-2) var(--space-3);
++  margin: var(--space-3) 0;
++}
++
++.team-button,
++.card__remove {
++  font: inherit;
++  cursor: pointer;
++  border: 1px solid var(--color-accent);
++  border-radius: var(--radius-sm);
++  background: var(--color-accent);
++  color: var(--color-on-accent);
++  padding: var(--space-2) var(--space-3);
++  line-height: var(--leading-tight);
++}
++
++.team-button:hover:not(:disabled),
++.card__remove:hover {
++  filter: brightness(0.92);
++}
++
++.team-button:disabled {
++  cursor: not-allowed;
++  opacity: 0.55;
++}
++
++.team-button__note {
++  color: var(--color-text-muted);
++  font-size: var(--text-sm);
++}
++
++.team-count {
++  color: var(--color-text-muted);
++  font-size: var(--text-sm);
++  margin-bottom: var(--space-3);
++}
++
++.team-empty {
++  margin-bottom: var(--space-3);
++}
++
++.card-item--team {
++  flex-direction: column;
++  gap: var(--space-2);
++}
++
++.card-item--team .card {
++  width: 100%;
++}
++
++.card__remove {
++  background: var(--color-surface);
++  border-color: var(--color-border);
++  color: var(--color-link);
++  font-size: var(--text-sm);
++  padding: var(--space-1) var(--space-2);
++}
++
++.card__remove:hover {
++  border-color: var(--color-link);
++}
++
++.coverage {
++  width: 100%;
++  border-collapse: collapse;
++  font-size: var(--text-sm);
++}
++
++.coverage th,
++.coverage td {
++  text-align: left;
++  padding: var(--space-2) var(--space-3);
++  border-bottom: 1px solid var(--color-border);
++}
++
++.coverage thead th {
++  color: var(--color-text-muted);
++  font-weight: var(--weight-normal);
++}
++
++.coverage tbody th {
++  font-weight: var(--weight-normal);
++}
++
++.coverage th:last-child,
++.coverage td:last-child {
++  text-align: right;
++}
++
+ /* ---- Not found ---- */
+ 
+ .not-found__back {
+diff --git a/app/src/team.ts b/app/src/team.ts
+new file mode 100644
+index 0000000..f8ce75d
+--- /dev/null
++++ b/app/src/team.ts
+@@ -0,0 +1,74 @@
++import { h } from './dom';
++
++export const MAX_TEAM_SIZE = 6;
++
++// A team is stored in the browser: up to six species API names, in the order they were added.
++const STORAGE_KEY = 'pokedex.team';
++
++function normalize(names: unknown): string[] {
++  if (!Array.isArray(names)) return [];
++  const team: string[] = [];
++  for (const name of names) {
++    if (typeof name !== 'string' || !name || team.includes(name)) continue;
++    team.push(name);
++    if (team.length === MAX_TEAM_SIZE) break;
++  }
++  return team;
++}
++
++export function readTeam(): string[] {
++  try {
++    return normalize(JSON.parse(localStorage.getItem(STORAGE_KEY) ?? '[]'));
++  } catch {
++    return [];
++  }
++}
++
++function saveTeam(names: string[]): void {
++  try {
++    localStorage.setItem(STORAGE_KEY, JSON.stringify(names));
++  } catch {
++    // Storage can be unavailable (for example in private mode). The app still works for this page.
++  }
++}
++
++export const teamHas = (name: string): boolean => readTeam().includes(name);
++
++export function addToTeam(name: string): string[] {
++  const team = readTeam();
++  if (team.includes(name) || team.length >= MAX_TEAM_SIZE) return team;
++  team.push(name);
++  saveTeam(team);
++  return team;
++}
++
++export function removeFromTeam(name: string): string[] {
++  const team = readTeam().filter((n) => n !== name);
++  saveTeam(team);
++  return team;
++}
++
++/** Add/remove button for a Pokémon page, kept in sync with the stored team. */
++export function teamControl(name: string): HTMLElement {
++  const button = h('button', { type: 'button', class: 'team-button' });
++  const note = h('span', { class: 'team-button__note' });
++  const control = h('div', { class: 'team-control' }, button, note);
++
++  const update = () => {
++    const team = readTeam();
++    const onTeam = team.includes(name);
++    const full = team.length >= MAX_TEAM_SIZE;
++    button.textContent = onTeam ? 'Remove from team' : 'Add to team';
++    button.disabled = !onTeam && full;
++    note.textContent = !onTeam && full ? 'Team is full' : '';
++  };
++
++  button.addEventListener('click', () => {
++    if (teamHas(name)) removeFromTeam(name);
++    else addToTeam(name);
++    update();
++  });
++
++  update();
++  return control;
++}

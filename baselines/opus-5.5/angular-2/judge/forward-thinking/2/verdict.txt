@@ -1,0 +1,105 @@
+I've reviewed the app against Angular's current stable release (v22.2.x, Oct 2026 — confirmed via angular.dev and the v22 release notes) and the official Angular skill guidance. Here is my assessment.
+
+## Review notes
+
+**Data-loading architecture.** The app deliberately does not use `HttpClient`/`httpResource`. Instead, `app/src/server/loaders.ts` builds compact view models server-side from raw PokeAPI documents, route resolvers hand them to components via `withComponentInputBinding` (`app/src/app/app.routes.ts:10-47`, `app/src/app/data/page-data.ts:48-77`), and client-side navigations fetch the same VMs from a custom `/_data/{*path}` Express endpoint (`app/src/server.ts:22-29`). Resolvers + input binding is the pattern the current Angular docs label "modern"; `resource()` would be the alternative, but is a poorer fit for SSR view-model rendering. The seams are clean: raw API shapes, VM types (`app/src/app/shared/models.ts`), loader token (`PAGE_DATA_LOADER`), and the endpoint all live behind one module.
+
+**Current-generation APIs throughout**, several of them post-dating most training data: `@Service()` decorator (`app/src/app/data/page-data.ts:48` — new in v21/v22), `linkedSignal` with the `source`/`computation` object API (`app/src/app/pages/home/home.ts:32`, `app/src/app/pages/pokemon/move-table.ts:49`), `provideAppInitializer`/`mergeApplicationConfig` (`app/src/app/app.config.server.ts:5,12,18`), `BootstrapContext` server bootstrap (`app/src/main.server.ts:5`), `provideServerRendering(withRoutes())` + `ServerRoute`/`RenderMode` from `@angular/ssr` (`app/src/app/app.config.server.ts:7`, `app/src/app/app.routes.server.ts:3-9`), `RESPONSE_INIT` 404 (`app/src/app/pages/not-found/not-found.ts:8-11`), no `standalone: true`, no explicit `changeDetection` (OnPush is the v22 default). One redundancy: `withEventReplay()` (`app/src/app/app.config.ts:21`) is enabled by default since v22; the v22 schematics removed it (angular-cli PR #32996).
+
+**Two things I'd flag in review.** First, `app/tsconfig.json` has the v22 strict-mode flags but omits `"strict": true`, so `strictNullChecks` is off — the code writes `| null` unions everywhere (`models.ts`, `input.required<PokemonVM | null>()`) that the compiler doesn't enforce. Second, `new AngularNodeAppEngine({ allowedHosts: ['*'] })` (`app/src/server.ts:17`) disables SSRF host validation; current docs put `allowedHosts` in `angular.json` `build.options.security.allowedHosts` (present but empty, `app/angular.json:25-27`) or `NG_ALLOWED_HOSTS`.
+
+```json
+{
+  "dimension": "forward-thinking",
+  "criteria": {
+    "latest_apis": {
+      "score": 5,
+      "evidence": [
+        "app/package.json:8-20 — Angular ^22.2.x, matching the current stable (v22.2.3, Oct 2026)",
+        "app/src/app/data/page-data.ts:48 — @Service() decorator (new in v21/v22, per angular.dev creating-services guidance)",
+        "app/src/app/pages/home/home.ts:32-36 — linkedSignal with the current source/computation object API",
+        "app/src/app/app.config.server.ts:5,12,18 — provideAppInitializer + mergeApplicationConfig (current bootstrapping APIs)",
+        "app/src/main.server.ts:5 — bootstrapApplication(App, config, context) with BootstrapContext (v21+ server bootstrap)",
+        "app/src/app/app.routes.server.ts:3-9 — provideServerRendering(withRoutes) + RenderMode/ServerRoute from @angular/ssr (modern location, not legacy @angular/platform-server)",
+        "app/src/app/pages/not-found/not-found.ts:8-11 — RESPONSE_INIT status 404, the documented SSR pattern (angular.dev hybrid-rendering guide)",
+        "app/src/app/app.config.ts:14,21 — provideBrowserGlobalErrorListeners; withEventReplay() is the one redundancy (default since v22, angular-cli PR #32996)"
+      ],
+      "rationale": "Built on the current stable release with a generation-latest API surface (signal inputs, @Service, linkedSignal, v21+ SSR bootstrap, @angular/ssr render modes); the only nit is the now-redundant withEventReplay flag."
+    },
+    "platform": {
+      "score": 4,
+      "evidence": [
+        "app/src/server/api-client.ts:26 — native fetch on the server, no HttpClient/XHR",
+        "app/src/app/data/page-data.ts:25 — native fetch on the client with response.status handling",
+        "app/src/server.ts:9,22 — import.meta.dirname and Express 5 path-to-regexp v8 wildcard syntax ({*path})",
+        "app/src/app/app.ts:43, app/src/server/loaders.ts:398 — URL/searchParams parsing instead of hand-rolled query strings",
+        "app/src/styles.css:247,292,336 — CSS custom properties, logical properties (padding-inline/padding-block), grid and aspect-ratio; native form controls in templates",
+        "app/src/app/shared/format.ts:12,19 — localeCompare/padStart/replaceAll rather than hand-rolled compare/format"
+      ],
+      "rationale": "Reaches for the platform first (fetch, URL, logical CSS, native forms) and uses modern Express 5 syntax; docked one point because no fetch passes an AbortSignal or timeout (a hung API stalls SSR), and tokens.css is pulled in via a plain CSS @import rather than the build's styles entry."
+    },
+    "dependencies": {
+      "score": 4,
+      "evidence": [
+        "app/package.json:8-20 — Angular 22.2 (current stable) + Express 5.1 (current major); no CSS/UI/framework extras",
+        "app/package.json:13 — @angular/forms declared but never imported anywhere in src (grep: zero hits)",
+        "app/package.json:12 — @angular/platform-server not directly imported; kept as the transitive engine behind @angular/ssr",
+        "app/package.json:24,27 — vitest 5 + jsdom 30, required by the @angular/build:unit-test builder (app/angular.json:69)",
+        "app/package.json:26 — @types/node ^22 while the spec targets Node.js 24"
+      ],
+      "rationale": "Lean and modern: no state-management, CSS or icon packages, and even Angular's own HTTP/forms packages go unused. Only deductions are the never-imported @angular/forms and the @types/node major lagging the runtime."
+    },
+    "churn_resistance": {
+      "score": 4,
+      "evidence": [
+        "app/src/app/shared/models.ts:1-104 — typed view models at the server/client boundary; raw API shapes isolated in app/src/server/loaders.ts:14-79",
+        "app/src/app/data/page-data.ts:34-38,48 — one PAGE_DATA_LOADER token swaps server loader for client fetcher; no framework internals (no ɵ imports anywhere)",
+        "app/tsconfig.json:5-18 — v22 strict flags present but \"strict\": true is missing, so the pervasive `| null` unions (e.g. app/src/app/pages/pokemon/pokemon-page.ts:18) are not compiler-enforced",
+        "app/src/app/page-title-strategy.ts:15-19 — title strategy reaches into resolver data keys ('vm' in data), a mild coupling to the resolver naming",
+        "app/src/app/data/page-data.ts:15-16,55-62 — bespoke TransferState key scheme (page:<path>, remove-on-read); the app's own hydration plumbing a future router/SSR change would touch",
+        "app/src/app/data/page-data.ts:14-15 — client cache is TTL-bounded but has no size cap, unlike the server cache (app/src/server/api-client.ts:9)"
+      ],
+      "rationale": "Data access, API shapes, config and deviating decisions are centralized and documented, so a framework upgrade touches few files; the deductions are the unenforced strict null-safety, the redundant withEventReplay boilerplate, and two small hand-rolled layers (transfer-state keys, unbounded client cache) that need maintenance as Angular evolves."
+    }
+  },
+  "overall": 4,
+  "findings": [
+    { "severity": "medium", "location": "app/tsconfig.json:5", "issue": "No \"strict\": true, so strictNullChecks/noImplicitAny are off; the codebase's extensive `| null` view-model types are unenforced documentation rather than guarantees, and the config diverges from what ng new currently generates.", "suggestion": "Add \"strict\": true (and rely on the v22 strictTemplates default); fix any resulting nullability errors so the boundary types actually bite." },
+    { "severity": "medium", "location": "app/src/server.ts:17", "issue": "AngularNodeAppEngine({ allowedHosts: ['*'] }) disables SSRF host validation, while angular.json's security.allowedHosts is left empty; current docs recommend the angular.json entry or NG_ALLOWED_HOSTS.", "suggestion": "Drop the wildcard; configure the deployment host via angular.json build.options.security.allowedHosts (or the env var) so validation stays on behind the proxy." },
+    { "severity": "low", "location": "app/src/app/app.config.ts:21", "issue": "withEventReplay() is redundant in Angular v22 — provideClientHydration() enables event replay and incremental hydration by default, and the v22 schematics no longer generate it.", "suggestion": "Call provideClientHydration() bare (or with explicit no-op opt-outs) to match what current scaffolding produces." },
+    { "severity": "low", "location": "app/package.json:13", "issue": "@angular/forms is a declared dependency but is never imported by any source file.", "suggestion": "Remove it; the pages use native form elements directly, which is the right call here." },
+    { "severity": "low", "location": "app/src/server/api-client.ts:26", "issue": "No fetch timeout/AbortSignal on server-side API calls (or in the client fetchPageData), so a hung upstream can stall a render indefinitely.", "suggestion": "Wrap fetches with AbortSignal.timeout(...) and treat 504s as ApiNotFoundError/errors so the server degrades gracefully." },
+    { "severity": "low", "location": "app/src/app/data/page-data.ts:15", "issue": "The client-side page-data cache has a TTL but no size cap, so a long session across many Pokémon pages accumulates view models indefinitely; the server cache (app/src/server/api-client.ts:9) does have MAX_ENTRIES.", "suggestion": "Mirror the server cache's MAX_ENTRIES eviction (or cap on insertion) for symmetry." },
+    { "severity": "low", "location": "app/package.json:26", "issue": "@types/node is pinned to ^22 while the app runs on Node.js 24.", "suggestion": "Bump to ^24 to match the documented runtime." },
+    { "severity": "low", "location": "app/src/styles.css:1", "issue": "tokens.css is loaded via a plain CSS @import, which serializes a second request and diverges from the builder-native way of composing global styles.", "suggestion": "Add src/tokens.css to the angular.json styles array (or use a @layer import) so the bundler inlines it." }
+  ],
+  "summary": "This is a forward-looking Angular 22 codebase: it targets the current stable release and consistently uses the newest generation of APIs (@Service, linkedSignal, signal inputs, @angular/ssr render modes, BootstrapContext, RESPONSE_INIT), with a clean, centralized data layer and platform-first fetch/URL/CSS usage. The notable review items are missing TypeScript strict mode (which defangs the otherwise excellent null-typed view models), a wildcard allowedHosts that disables SSRF validation, and a few small nits (redundant withEventReplay, unused @angular/forms, unbounded client cache, no fetch timeouts). It would age well; enabling strict and tightening the host config would make it exemplary.",
+  "apis": [
+    { "api": "Service decorator (@Service())", "location": "app/src/app/data/page-data.ts:48", "status": "current", "replacement": "" },
+    { "api": "linkedSignal (source/computation)", "location": "app/src/app/pages/home/home.ts:32", "status": "current", "replacement": "" },
+    { "api": "provideClientHydration(withEventReplay())", "location": "app/src/app/app.config.ts:21", "status": "current", "replacement": "provideClientHydration() — event replay and incremental hydration are on by default since v22 (angular-cli PR #32996)" },
+    { "api": "provideAppInitializer / mergeApplicationConfig", "location": "app/src/app/app.config.server.ts:12,18", "status": "current", "replacement": "" },
+    { "api": "bootstrapApplication with BootstrapContext", "location": "app/src/main.server.ts:5", "status": "current", "replacement": "" },
+    { "api": "provideServerRendering(withRoutes) / RenderMode / ServerRoute", "location": "app/src/app/app.config.server.ts:7", "status": "current", "replacement": "" },
+    { "api": "ResolveFn + withComponentInputBinding", "location": "app/src/app/app.routes.ts:10-13", "status": "current", "replacement": "" },
+    { "api": "RESPONSE_INIT (status 404)", "location": "app/src/app/pages/not-found/not-found.ts:8", "status": "current", "replacement": "" },
+    { "api": "NgOptimizedImage (ngSrc)", "location": "app/src/app/shared/pokemon-card.ts:5", "status": "current", "replacement": "" },
+    { "api": "Injectable (TitleStrategy useClass provider)", "location": "app/src/app/page-title-strategy.ts:8", "status": "current", "replacement": "" },
+    { "api": "AngularNodeAppEngine allowedHosts option", "location": "app/src/server.ts:17", "status": "current", "replacement": "Prefer angular.json build.options.security.allowedHosts or NG_ALLOWED_HOSTS rather than a wildcard" },
+    { "api": "toSignal(route.queryParamMap, {requireSync: true})", "location": "app/src/app/pages/home/home.ts:22", "status": "current", "replacement": "" }
+  ],
+  "dependencies": [
+    { "name": "@angular/* (core, common, compiler, router, platform-browser, ssr, cli, build, compiler-cli)", "verdict": "modern", "note": "^22.2.x matches the current stable release (v22.2.3, Oct 2026)" },
+    { "name": "@angular/platform-server", "verdict": "established", "note": "Not directly imported; it is the rendering engine @angular/ssr depends on, so keeping it pinned is correct" },
+    { "name": "@angular/forms", "verdict": "unnecessary", "note": "Declared but never imported; pages use native form elements" },
+    { "name": "express", "verdict": "modern", "note": "5.x — current major, with correct path-to-regexp v8 wildcard syntax" },
+    { "name": "rxjs", "verdict": "established", "note": "~7.8 required by @angular; used only for router.events and toSignal" },
+    { "name": "tslib", "verdict": "established", "note": "Required by importHelpers in tsconfig" },
+    { "name": "typescript", "verdict": "modern", "note": "~6.0 current" },
+    { "name": "vitest / jsdom", "verdict": "modern", "note": "Required by the @angular/build:unit-test builder (Karma is gone in v22)" },
+    { "name": "@types/express", "verdict": "modern", "note": "5.x matches Express 5" },
+    { "name": "@types/node", "verdict": "outdated", "note": "^22 while the environment is Node.js 24 — minor lag" },
+    { "name": "prettier", "verdict": "established", "note": "Formatting only; reasonable dev dependency" }
+  ]
+}
+```

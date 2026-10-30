@@ -1,0 +1,125 @@
+I've reviewed the app against the installed React Router v8 skill guidance and current release behavior (Vite 8, `MetaArgs` with `loaderData`/`error`, the `Layout` root export, `throw data(..., { status: 404 })` for missing records, loader-based URL filtering — all verified against current docs).
+
+## Review
+
+**How the app uses the framework.** This is textbook framework mode: manual route config in `app/routes.ts`, generated `Route.*` types from `./+types/...` used for loaders/components/meta everywhere, 404s thrown as `data(null, { status: 404 })` from loaders and rendered via the root `Layout`/`ErrorBoundary` split (`app/app/root.tsx:27,63-70`, `app/app/lib/api.server.ts:39-41`), URL query filtering parsed in the loader (`app/app/routes/home.tsx:21-27`) — exactly the pattern the framework-mode skill prescribes. Vite 8's native `resolve.tsconfigPaths` (`app/vite.config.ts:6-7`) is the current way, and the v8 `meta` args (`loaderData`, `error`, no deprecated `data`) are used correctly (`app/app/root.tsx:17`).
+
+**Where it will bite.** Two minor correctness issues the tests won't catch: (1) the search debounce in `home.tsx:124` fires `update` from a stale render closure — typing then flipping a Type/Generation select within 150 ms can clobber the URL in both directions; (2) the API cache at `api.server.ts:16-33` never evicts expired entries, so the Map grows to the full API surface per server process. Structurally, `lib/api.server.ts` is a god data module (transport + cache + API types + localization + card view-models), and the shared `Card` view-model type crosses the server boundary via a type-only import in client components (`app/app/components/ui.tsx:3`) — guarded today by the `.server.ts` convention, but it will trip someone later. These are a round of nits, not a rejection.
+
+```json
+{
+  "dimension": "mergeability",
+  "criteria": {
+    "idiomatic": {
+      "score": 5,
+      "evidence": [
+        "app/app/routes.ts:1-10 — manual RouteConfig with index/route(), the framework-mode convention",
+        "app/app/routes/home.tsx:3,17,21 — generated Route.MetaFunction/LoaderArgs types from ./+types; search params parsed in the loader for shareable URLs, exactly the skill's recommended pattern",
+        "app/app/lib/api.server.ts:39-49 — notFound() throws data(null, {status:404}) from loaders, the documented missing-record pattern",
+        "app/app/root.tsx:17-18,27,63-70 — v8 meta args (error/loaderData, no deprecated data); root Layout export so ErrorBoundary renders inside the document shell",
+        "app/vite.config.ts:6-7 — Vite 8 native resolve.tsconfigPaths instead of a plugin",
+        "app/app/lib/api.server.ts:1-4 — .server.ts module naming keeps fetching server-only"
+      ],
+      "rationale": "Reads like the framework's own examples: typed route modules, documented 404 and error-boundary patterns, URL-driven filtering in loaders, no deprecated APIs."
+    },
+    "correctness_risks": {
+      "score": 3,
+      "evidence": [
+        "app/app/routes/home.tsx:115-125 — debounced update() closes over stale filters: a select change within the 150ms window can be overwritten by the pending search (and the select uses lastPushed q, losing pending text)",
+        "app/app/lib/api.server.ts:16-33 — cache entries are never evicted on expiry; Map grows to the entire API surface per process (TTL gates reuse, not retention)",
+        "app/app/routes/home.tsx:100,116 — q/page ordering handled correctly; page clamped at home.tsx:75-77; aria-sort only on active header (move-tables.tsx:95-101)",
+        "app/app/root.tsx:63-70 — non-404 API failures bubble to a generic root ErrorBoundary (500 path exists)"
+      ],
+      "rationale": "Two real but minor issues (debounce race, unbounded cache) and no serious bug; 404s, pagination clamping, sort/dedup and error paths are all handled deliberately."
+    },
+    "global_abstractions": {
+      "score": 3,
+      "evidence": [
+        "app/app/lib/api.server.ts:1-260 — one module holds transport, cache, API type defs, localization helpers and card view-model construction; all four routes depend on it",
+        "app/app/components/ui.tsx:3 — Card view-model type imported (type-only) from the server-only api.server module, crossing the server/client boundary",
+        "app/app/routes/pokemon.tsx:47, move.tsx:19, type.tsx:21 — near-identical typeNames[name] ?? humanize(name) closures duplicated across three routes",
+        "app/app/lib/api.server.ts:180-182 — getTypeNames() fetches all 18 full type records (with their pokemon lists) just for name labels on every detail page"
+      ],
+      "rationale": "The api.server god module and its Card type leak will need untangling as the app grows; individually each choice is defensible, globally it concentrates too much."
+    },
+    "readability": {
+      "score": 4,
+      "evidence": [
+        "app/app/lib/api.server.ts:1-4, app/app/routes/home.tsx:101-102 — why-comments where they belong (cache rationale, debounce/local-state sync)",
+        "app/app/components/ui.tsx:19-50 — small, well-named Section/TypeBadge/PokemonCard components, consistent across routes",
+        "app/app/root.tsx:68 — heading !== \"Not found\" string comparison drives a branch instead of checking error status",
+        "app/app/routes/pokemon.tsx:36-38 (also move.tsx:14, type.tsx:16, ability.tsx:13) — \"Not found – Pokédex\" meta fallback is dead code: meta doesn't run when the loader throws"
+      ],
+      "rationale": "Consistent, small files, clear naming and useful comments; rough spots are the stringly-typed error branch and dead meta fallbacks."
+    },
+    "review_cost": {
+      "score": 4,
+      "evidence": [
+        "app/app/routes/home.tsx:124 — fix the debounce stale-closure race (flush or read current params at fire time)",
+        "app/app/lib/api.server.ts:16-33 — evict expired cache entries or cap the Map",
+        "app/app/components/ui.tsx:3, app/app/lib/api.server.ts:224-236 — move shared Card/NamedRef types out of api.server.ts into a shared types module",
+        "app/app/routes/pokemon.tsx:47 — dedupe the three label-closure copies"
+      ],
+      "rationale": "All requested changes are nits; the architecture and framework usage are sound and I'd approve after one pass of small fixes."
+    }
+  },
+  "overall": 4,
+  "findings": [
+    {
+      "severity": "medium",
+      "location": "app/app/routes/home.tsx:124",
+      "issue": "The 150ms search debounce calls update() from a stale render closure: if a Type/Generation select changes inside the window, the pending search pushes the old filter values to the URL (and the select's update uses lastPushed q, dropping pending typed text).",
+      "suggestion": "Read the current params from searchParams at debounce-fire time (or keep filters in a ref), and clear the pending debounce in update() when another filter fires first."
+    },
+    {
+      "severity": "medium",
+      "location": "app/app/lib/api.server.ts:16-33",
+      "issue": "In-memory cache never evicts expired entries — the TTL only gates reuse, so the Map grows to the full API surface (species ids, ~900 moves, version groups, evolution chains) for the life of the server process.",
+      "suggestion": "Delete entries on expiry (e.g. lazy sweep on access) or cap the cache with an LRU."
+    },
+    {
+      "severity": "medium",
+      "location": "app/app/components/ui.tsx:3",
+      "issue": "The shared Card view-model type lives in the server-only ~/lib/api.server module and is type-imported into client components; a future value import (e.g. spriteUrl) would break the server/client boundary the .server.ts convention is meant to enforce.",
+      "suggestion": "Move shared shapes (Card, NamedRef, MoveRow-style view models) to ~/lib/types.ts and keep api.server.ts for transport only."
+    },
+    {
+      "severity": "low",
+      "location": "app/app/lib/api.server.ts:224-260",
+      "issue": "God data module: transport + caching + API type definitions + localization helpers + card view-model construction in one file that all four routes import.",
+      "suggestion": "Split into api.server.ts (fetch/cache), types.ts (API + view-model shapes) and a small localization module."
+    },
+    {
+      "severity": "low",
+      "location": "app/app/routes/pokemon.tsx:47",
+      "issue": "The label fallback closure typeNames[name] ?? humanize(name) is duplicated in pokemon.tsx, move.tsx:19 and type.tsx:21.",
+      "suggestion": "Have getTypeNames() (or a shared helper) return a labelFor() function and reuse it."
+    },
+    {
+      "severity": "low",
+      "location": "app/app/root.tsx:68",
+      "issue": "The ErrorBoundary branches on the string 'Not found' produced by errorHeading rather than the error's status.",
+      "suggestion": "Check isRouteErrorResponse(error) and compare status === 404 inside ErrorBoundary, or return a boolean alongside the heading."
+    },
+    {
+      "severity": "low",
+      "location": "app/app/routes/pokemon.tsx:36-38",
+      "issue": "The loaderData ? pageTitle(...) : \"Not found – Pokédex\" fallbacks here and in move.tsx/type.tsx/ability.tsx are dead code — meta doesn't run for a route whose loader threw; root meta already covers the 404 title (root.tsx:17-18).",
+      "suggestion": "Drop the null branches; keep the 404 title logic solely in root meta."
+    },
+    {
+      "severity": "low",
+      "location": "app/app/lib/api.server.ts:180-182",
+      "issue": "getTypeNames() fetches all 18 full type records (each embedding its complete pokemon list) just to build a name→English-name map used on every detail page.",
+      "suggestion": "Build the label map from the type list + names without pulling each full record, or cache the derived map once."
+    },
+    {
+      "severity": "low",
+      "location": "app/app/routes/not-found.tsx:6-8",
+      "issue": "The catch-all route's component returns null and all UI comes from the root ErrorBoundary — functional but non-obvious to a reader expecting a Not Found page here.",
+      "suggestion": "Add a one-line comment stating the 404 page renders via the root ErrorBoundary, or render the heading/link here directly."
+    }
+  ],
+  "summary": "Clean, current-idiom React Router v8 framework-mode code: typed route modules, documented 404/error-boundary patterns and URL-driven loaders, with only minor hand-rolled pieces. The main asks before merge are fixing the search-debounce stale-closure race, bounding the API cache, and splitting the god data module so the shared Card type stops crossing the server/client boundary. Everything else is nits — I'd merge after one small pass."
+}
+```

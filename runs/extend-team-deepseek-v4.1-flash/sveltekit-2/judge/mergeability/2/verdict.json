@@ -1,0 +1,108 @@
+{
+  "dimension": "mergeability",
+  "criteria": {
+    "idiomatic": {
+      "score": 4,
+      "evidence": [
+        "app/vite.config.ts:7-13 — Kit 3 style: config passed to the sveltekit() Vite plugin (adapter, compilerOptions), no svelte.config.js, exactly what SvelteKit 3 requires",
+        "app/package.json:28-30 — #lib subpath imports in package.json 'imports', Kit 3 replacement for $lib",
+        "app/src/routes/+page.svelte:3-4 — page from $app/state and goto with Kit 3 option names (replace, reset: false)",
+        "app/src/lib/components/Section.svelte:1-10 — Snippet children with {@render}, runes-mode props, Section/aria-labelledby pattern",
+        "app/src/routes/team/+page.svelte:2,15 — invalidateAll(), deprecated in SvelteKit 3 in favour of refreshAll()",
+        "app/src/lib/team.svelte.ts:1,45-49 — setContext/getContext with a Symbol key; current Svelte (≥5.40) docs and official skill recommend createContext for type safety"
+      ],
+      "rationale": "Reads like the framework's own Kit 3 examples — data loading entirely in server load functions, runes everywhere, correct new-style config and option names — but two small spots use APIs current docs warn against (invalidateAll, manual context keys)."
+    },
+    "correctness_risks": {
+      "score": 4,
+      "evidence": [
+        "app/src/routes/+page.svelte:38-40 — debounce timer is never cleared on unmount; a click on a card within 200ms of typing lets the pending setTimeout fire goto('/?q=…') and yank the user back to the home page",
+        "app/src/lib/server/pokedex.ts:251 — getOrThrow per move reference in getPokemonPage: one 404/500 move record fails the entire Pokémon page with a 500 instead of degrading that row",
+        "app/src/lib/server/api.ts:31-52 — cache stores promises (dedupes concurrent fetches), evicts failures, bounded at 5000 entries: no unbounded fan-out",
+        "app/src/routes/+page.svelte:12-14,24-27 — local q state plus afterNavigate guard prevents stale results from earlier keystrokes overwriting the input; race was clearly considered",
+        "app/src/lib/server/pokedex.ts:402-404 — team members that 404 are filtered to null instead of crashing the team page",
+        "app/src/routes/+page.server.ts:6-12 — page param parsed and clamped in getPokemonList (pokedex.ts:170-171), so out-of-range pages can't slice out of bounds"
+      ],
+      "rationale": "No serious bugs: caching is bounded, 404s are handled per resource, SSR/client state is seeded from a cookie to avoid hydration mismatches. What remains are two narrow failure modes: the search debounce timer outliving its component and getOrThrow turning a single bad move record into a page-level 500."
+    },
+    "global_abstractions": {
+      "score": 4,
+      "evidence": [
+        "app/src/lib/server/pokedex.ts:1-437 — one ~430-line module holds every page's data logic (Home/Pokémon/Move/Ability/Type/Team sections); cohesive and well-sectioned but every new page grows this file",
+        "grep '#lib/server' — server data layer is only imported from +page.server.ts files; no leak of server code into client bundle",
+        "app/src/lib/server/api.ts:1-99 — thin, single-purpose HTTP client with cache; clear boundary under pokedex.ts",
+        "app/src/lib/team.svelte.ts:8-43 — team state is one class scoped via context, not module-global state; safe under SSR",
+        "app/src/lib/types.ts:1-22 — small shared view-model types shared across the boundary, no kitchen-sink utils module"
+      ],
+      "rationale": "Boundaries are genuinely clean (server/ isolated from components, no god component, team state scoped via context rather than a module global). The only structural concern is pokedex.ts accreting the entire domain in one file — fine today, worth splitting when it grows."
+    },
+    "readability": {
+      "score": 5,
+      "evidence": [
+        "app/src/lib/server/team.ts:1-4 — comment explains *why* the team lives in a cookie (no flash of wrong label on first render)",
+        "app/src/lib/server/api.ts:1-3 — comment states the caching/TTL intent up front",
+        "app/src/routes/+page.svelte:12-13 — comment explains the debounce/typing-race rationale",
+        "app/src/routes/+layout.svelte:11-13 — comment explains the seed-then-own lifecycle of the team store",
+        "app/src/lib/server/pokedex.ts:93-146 — consistent get<Thing>Page naming per page, sectioned with clear banners matching route structure",
+        "app/src/lib/components/*.svelte — six small single-purpose components, each under 150 lines"
+      ],
+      "rationale": "A new teammate can navigate this in minutes: file layout mirrors routes, naming is uniform (getXPage, Card/TypeBadge/Section), and comments consistently explain intent rather than mechanics."
+    },
+    "review_cost": {
+      "score": 4,
+      "evidence": [
+        "app/src/routes/team/+page.svelte:15 — one-line fix: invalidateAll → refreshAll",
+        "app/src/lib/team.svelte.ts:45-49 — mechanical swap to createContext",
+        "app/src/routes/+page.svelte:40 — needs a cleanup effect ($effect teardown or clear in afterNavigate) for the debounce timer",
+        "app/src/lib/components/MoveTable.svelte:106 — each-block key mixes row name/level with the loop index; stable identity without the index suffix would be preferable"
+      ],
+      "rationale": "Nothing structural to rework; a single round of small, well-localized changes (deprecation swap, context helper, timer cleanup, key nit) before approval."
+    }
+  },
+  "overall": 4,
+  "findings": [
+    {
+      "severity": "medium",
+      "location": "app/src/routes/+page.svelte:40",
+      "issue": "The 200ms search debounce timer is never cancelled when the component unmounts; if the user types and clicks a result within the window, the pending setTimeout calls goto() and navigates them away from the page they just opened.",
+      "suggestion": "Clear the timer in an $effect teardown (or in afterNavigate/onDestroy) so navigation away cancels the pending update."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/routes/team/+page.svelte:15",
+      "issue": "invalidateAll() is deprecated in SvelteKit 3 in favour of refreshAll().",
+      "suggestion": "Import and call refreshAll() from $app/navigation instead."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/lib/server/pokedex.ts:251",
+      "issue": "getOrThrow on every move reference in getPokemonPage: a single missing or erroring move record fails the whole Pokémon page with a 500.",
+      "suggestion": "Use get() and skip/null-out rows for moves that 404 (or fall back to the reference name), so one bad record degrades one row rather than the page."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/lib/team.svelte.ts:45-49",
+      "issue": "Hand-rolled setContext/getContext with a Symbol key and an unsafe cast; Svelte ≥5.40 provides createContext for exactly this, which is type-safe and throws a clear error if the context is missing.",
+      "suggestion": "Replace with `export const [getTeam, setTeam] = createContext<TeamState>()`."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/lib/components/MoveTable.svelte:106",
+      "issue": "The each-block key `${row.name}-${row.level}-${i}` includes the loop index, so keys are not stable across sorting and rows remount needlessly; the official guidance says not to key by index.",
+      "suggestion": "Key by a stable identity (e.g. a unique row id composed of method+move name built server-side)."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/lib/server/pokedex.ts:1-437",
+      "issue": "A single ~430-line module contains the data logic for all six page types; every new page edits this file.",
+      "suggestion": "Fine for now given the clear section banners, but split per page (home.ts, pokemon.ts, team.ts, …) when it next grows."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/lib/team.svelte.ts:15",
+      "issue": "TeamState constructor round-trips an array through a comma-joined string just to reuse parseTeam.",
+      "suggestion": "Have parseTeam accept (and dedupe/limit) the array directly, keeping the string parsing only for the cookie path."
+    }
+  ],
+  "summary": "A well-crafted SvelteKit 3 app that is current with the framework's own practices — plugin-based config, #lib imports, $app/state, Snippets and runes — with a clean server/client boundary and thoughtful race handling around search, caching and SSR state seeding. The team-builder feature fits the existing conventions nicely (cookie-seeded SSR avoids label flash, data via getTeamPage). Remaining work is one real UX race (the unmounted debounce timer), a Kit 3 deprecation swap, and a handful of style nits — approve after one small round."
+}

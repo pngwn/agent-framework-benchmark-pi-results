@@ -1,0 +1,137 @@
+I have everything I need. Let me compile the review.
+
+**Verification notes:** The app runs Astro `^7.4.2` with `@astrojs/node ^11` — matching the current stable line (7.4.x, Oct 2026). `session: false` (astro.config.mjs:5) is a real, current Astro 7 option (opt-out merged Aug 2026), not a made-up flag. `output: 'server'` + Node adapter in standalone mode is the current idiomatic SSR setup. The sprite scenario is hypothetical for this app (it derives sprites from ID, which is correct since a species' default Pokémon shares its ID), so I assessed where such a fix *would* land.
+
+```json
+{
+  "dimension": "editability",
+  "criteria": {
+    "removability": {
+      "score": 5,
+      "evidence": [
+        "app/src/pages/abilities/[name].astro:1 — the entire Abilities feature is one route file",
+        "app/src/pages/pokemon/[name].astro:170-176 — the only other Abilities code is one self-contained Section in the Pokémon page",
+        "app/src/layouts/Layout.astro:23-27 — nav contains only Pokémon and Types, so no link cleanup is needed",
+        "app/src/lib/pokedex.ts:123-141 — cardsForPokemon is shared with moves/types pages, so removing Abilities leaves no dead helpers"
+      ],
+      "rationale": "Deleting the abilities route plus one Section block removes the feature completely; nothing else links to it and no ability-only code exists in shared modules."
+    },
+    "changeability": {
+      "score": 4,
+      "evidence": [
+        "app/src/components/PokemonCard.astro:13 — every card sprite is computed in exactly one render point via spriteUrl(card.id)",
+        "app/src/lib/api.ts:75 — spriteUrl is the single sprite-URL rule",
+        "app/src/lib/pokedex.ts:137 — cardsForPokemon sorts/derives cards for move, ability and type pages, but the home list is built separately at app/src/pages/index.astro:66 from SpeciesEntry, so a Card-model change touches two construction paths",
+        "app/src/pages/index.astro:105-111 and app/src/pages/pokemon/[name].astro:229-234 — the fetch→DOMParser→replaceWith client-swap pattern is duplicated verbatim"
+      ],
+      "rationale": "Render-level fixes are one-place and obvious, but the Card data model is constructed in two paths and the client-side swap logic is copy-pasted, so data-level fixes land in 2–3 findable places rather than one."
+    },
+    "coupling": {
+      "score": 4,
+      "evidence": [
+        "app/src/lib/api.ts:8-88 — one narrow data client (api, resourcePath, listPath, idFromUrl, spriteUrl, mapAll); base URL and cache constants live only here",
+        "app/src/components/CardGrid.astro:1-14 — components take explicit Props and know nothing about pages",
+        "app/src/pages/index.astro:78-131 — server work is frontmatter, client enhancement is a separate <script> with a <noscript> fallback at line 49",
+        "app/src/lib/api.ts:10,21 — api() returns Promise<any> and every page casts inline (e.g. app/src/pages/pokemon/[name].astro:36-41,50), so consumers depend on untyped record internals",
+        "app/src/pages/types/[name].astro:26 and app/src/pages/index.astro:26 — pages rebuild their own type-label Map instead of the existing helper app/src/lib/pokedex.ts:53"
+      ],
+      "rationale": "Clean seams between pages, components and the data client, with clear server/client separation; the main tangle is the pervasive `any` at the API boundary, which makes refactor-safety depend on grep rather than the compiler."
+    },
+    "abstraction_design": {
+      "score": 4,
+      "evidence": [
+        "app/src/lib/pokedex.ts:117-141 — the Card model plus cardsForPokemon's optional `extra` callback handles per-source variation (hidden flags, alternate forms, dedup) without flag parameters",
+        "app/src/lib/pokedex.ts:44-115 — getSpeciesIndex centralizes the cross-referencing of species/types/generations once for all pages",
+        "app/src/components/Section.astro:1-14 and TypeBadge.astro:1-18 — small, focused primitives reused across all pages",
+        "app/src/components/MovesTable.astro:15,21-28 — showLevel is a mild boolean flag, though it reflects a real column difference",
+        "app/src/pages/moves/[name].astro:39-64 — the facts <dl> block would need copying for an Items page; there is no reusable 'key-value facts' component"
+      ],
+      "rationale": "Abstractions are designed around the app's real variation (card sources, localized labels, learn methods) and stretch well; only the moves page's facts list and a couple of small components would be copied for a similar new resource."
+    }
+  },
+  "overall": 4,
+  "findings": [
+    {
+      "severity": "medium",
+      "location": "app/src/lib/api.ts:10,21",
+      "issue": "The API client is untyped (Promise<any>), so every consumer reaches into raw record internals with inline casts (app/src/pages/pokemon/[name].astro:36-41,50,104,172; app/src/lib/pokedex.ts:40,155) — renames and shape changes are invisible to the compiler.",
+      "suggestion": "Define per-resource interfaces (Species, Pokemon, Move, Ability, Type) in lib/pokedex.ts and have api() accept them, e.g. api<Species>(resourcePath('pokemon-species', name))."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/lib/pokedex.ts:123-141",
+      "issue": "Card construction is split: reference-based lists build cards via cardsForPokemon, while the home list derives them from SpeciesEntry (app/src/lib/pokedex.ts:95, app/src/pages/index.astro:66). Adding a Card field (e.g. a real sprite URL or sort key) requires touching both paths.",
+      "suggestion": "Add a single toCard(species: SpeciesEntry, extra?: Partial<Card>) builder used by both cardsForPokemon and the home page."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/pages/index.astro:105-111",
+      "issue": "The fetch→DOMParser→replaceWith progressive-enhancement pattern is duplicated verbatim in the Pokémon page's game selector (app/src/pages/pokemon/[name].astro:229-234); a change to error handling or stale-response guarding must be made twice.",
+      "suggestion": "Extract a shared swapRegion(url, selector) helper into app/src/scripts/ next to sortable.ts, which already shows the right pattern."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/pages/index.astro:26",
+      "issue": "Pages rebuild the type-label Map by hand (also app/src/pages/types/[name].astro:26) instead of the existing typeLabels() helper (app/src/lib/pokedex.ts:53), and the `?? humanize(t)` fallback is repeated in four files (PokemonCard.astro:24, pokemon/[name].astro:126, MovesTable.astro:47, moves/[name].astro:27).",
+      "suggestion": "Reuse typeLabels() and add a small labelFor(map, name) fallback helper so the localization rule has one home."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/pages/pokemon/[name].astro:41,80",
+      "issue": "The whole Pokémon page payload is accumulated into an untyped `page: any` object, so the template at lines 92-208 is unchecked; renaming a field is a grep exercise.",
+      "suggestion": "Declare a PokemonPage interface for the page object so the frontmatter and template agree."
+    },
+    {
+      "severity": "low",
+      "location": "app/astro.config.mjs:6",
+      "issue": "security.checkOrigin: false disables Astro's CSRF origin check although the app only issues GET requests (the filter form uses method=\"get\" at app/src/pages/index.astro:22 and the client scripts only fetch GET).",
+      "suggestion": "Drop the checkOrigin override; the default origin check is compatible with this app's traffic."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/components/MovesTable.astro:15",
+      "issue": "showLevel is a boolean flag selecting a column; a future learn-method with different columns would grow the flag set.",
+      "suggestion": "Acceptable as-is given only Level Up differs; if another variant appears, pass the column list as a prop instead of a flag."
+    },
+    {
+      "severity": "low",
+      "location": "app/package.json:6-9",
+      "issue": "No test script or unit tests in the app itself; edits like the sorting change have no local safety net beyond the external acceptance suite.",
+      "suggestion": "Add a lightweight `test` script covering lib/pokedex.ts pure helpers (humanize, cardsForPokemon, compareMethods), which are trivially testable."
+    }
+  ],
+  "summary": "A small, well-factored Astro 7 app: features map to routes, shared logic lives in two focused lib modules, and components take narrow explicit props, so removing a feature or changing the API/data layer is nearly trivial. The main editability costs are the untyped `any` API boundary, a Card model constructed in two separate paths, and a duplicated client-side swap helper. Everything is findable and low-risk to change; nothing needs rearchitecting.",
+  "scenarios": [
+    {
+      "change": "Remove the Abilities pages and every link to them",
+      "files": ["app/src/pages/abilities/[name].astro", "app/src/pages/pokemon/[name].astro"],
+      "difficulty": 5,
+      "notes": "Delete the route file and the one Abilities Section (lines 170-176) plus its data (lines 50, 104). No nav links exist, and cardsForPokemon is still needed by moves/types, so no dead code remains."
+    },
+    {
+      "change": "Fix the card sprite for species whose default Pokémon has a different name (e.g. Deoxys)",
+      "files": ["app/src/components/PokemonCard.astro", "app/src/lib/api.ts", "app/src/lib/pokedex.ts", "app/src/pages/index.astro"],
+      "difficulty": 3,
+      "notes": "Rendering is single-point (PokemonCard.astro:13 via spriteUrl, api.ts:75), so a render-level fix covers every list. But if the fix needs real per-Pokémon sprite data, the Card model must grow a field, and cards are built in two places: cardsForPokemon (pokedex.ts:123-141) for move/ability/type lists and the SpeciesEntry path (index.astro:66) for the home list. `any` typing offers no compiler help."
+    },
+    {
+      "change": "Add sorting by name to every list of Pokémon cards",
+      "files": ["app/src/lib/pokedex.ts", "app/src/pages/index.astro"],
+      "difficulty": 3,
+      "notes": "Two orderings to change: cardsForPokemon's final sort (pokedex.ts:137) covers move/ability/type pages, while the home list's order comes from getSpeciesIndex's sort (pokedex.ts:95) and must be sorted before the pagination slice in index.astro:66. Doing it inside CardGrid would not work because home pagination slices first."
+    },
+    {
+      "change": "Add an Items section (/items, /items/:name) shaped like Moves",
+      "files": ["app/src/pages/items/index.astro", "app/src/pages/items/[name].astro", "app/src/lib/pokedex.ts"],
+      "difficulty": 4,
+      "notes": "Layout, Section, NotFound, api helpers and the localization helpers (englishName/englishShortEffect/latestFlavorText/MISSING) all drop in unchanged. The move page's facts <dl> and section markup (~40 lines, moves/[name].astro:39-73) would be adapted rather than reused — there is no generic facts-list component — but no Moves code needs modification."
+    },
+    {
+      "change": "Change the API base URL and caching rules",
+      "files": ["app/src/lib/api.ts"],
+      "difficulty": 5,
+      "notes": "API_BASE_URL and all cache knobs (FRESH_MS, MAX_ENTRIES, MAX_CONCURRENT) live at api.ts:4-7; every fetch and the sprite URL builder go through the same module, so nothing else knows these details."
+    }
+  ]
+}
+```

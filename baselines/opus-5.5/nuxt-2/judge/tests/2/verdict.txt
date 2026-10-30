@@ -1,0 +1,86 @@
+I've reviewed the full app. `app/` contains no test files, no test runner, and no test script — every score below reflects "no tests," with my effort spent on what the missing coverage lets through.
+
+## Review
+
+### What exists
+The app is a competent Nuxt 4 SSR app: server routes under `app/server/api/` do the heavy lifting (index building, card mapping, move-table grouping), pages own URL state, and `app/server/utils/pokeapi.ts` is a caching fetch client. **There is not a single test in `app/`**: no `test` script in `app/package.json:6-11`, no vitest/`@nuxt/test-utils`/Playwright anywhere in the tree (grep confirmed), and the measured facts agree (`tests: { files: 0, cases: 0, runner: [] }`). The only safety net is the acceptance suite in `tests/`, which the agent didn't write and which covers a sample of pages, not the logic.
+
+### Where the risk actually is
+The riskiest code is exactly the code with zero coverage:
+
+- **`speciesCards`** (`app/server/utils/data.ts:69-79`) — dedup-by-ID, alternate-form exclusion (`id > MAX_SPECIES_ID`), Pokémon-ID→species-name mapping, hidden-ability flag. A refactor that changes the dedup key or drops the `cards.has(id)` guard would silently produce duplicate cards or lost `Hidden ability` labels; nothing would fail.
+- **Moves endpoint** (`app/server/api/pokemon/[name]/moves.get.ts:17-72`) — version-group ordering by `order`, default = highest `order` (`games[games.length-1]`), method ordering (`METHOD_ORDER` then alphabetical), per-method dedup key `${move}:${level}`. Any of these inverted (e.g. defaulting to *lowest* order) only breaks for games the acceptance suite happens to sample.
+- **Client sorting** (`app/app/components/MovesTable.vue:42-68`) — missing-values-last in *both* directions, direction flip, `aria-sort`. The null-handling branch is easy to break and no test pins it.
+- **URL state machine** (`app/app/pages/index.vue:40-52`) — `buildQuery` omitting defaults, page clamping (`Math.min(Math.max(n,1), totalPages)`), filter-change resetting to page 1, debounced search with timer cleanup (`onBeforeUnmount`). Off-by-one in the `slice` at line 37 would show 47/49 per page; `Number.parseInt('12abc')` → 12 is unpinned behaviour.
+- **Cache layer** (`app/server/utils/pokeapi.ts:11-19`) — 60s TTL, promise coalescing, negative caching of 404s, unbounded `Map`. TTL expiry, error eviction and memory growth under a long-running server are all untested behaviours someone will eventually "simplify" incorrectly.
+- **Cheap pure helpers** (`app/shared/utils/format.ts`, `englishName`/`latestFlavorText`/`collapse` in `data.ts`) — trivially unit-testable, untested.
+
+### Verdict
+The data layer is the part a future refactor will touch first, and it's completely unguarded. Adding vitest + `@nuxt/test-utils` with unit tests on `shared/utils`, `server/utils`, and a component test each for `index.vue` and `MovesTable.vue` would be the highest-value follow-up.
+
+```json
+{
+  "dimension": "tests",
+  "criteria": {
+    "coverage_of_risk": {
+      "score": 1,
+      "evidence": [
+        "app/package.json:6-11 — no test script, no test runner dependency at all",
+        "app/server/utils/data.ts:69-79 — speciesCards dedup/alt-form/hidden logic, the riskiest transform, has zero tests",
+        "app/server/api/pokemon/[name]/moves.get.ts:17-72 — game ordering, default game, method ordering and dedup all untested",
+        "app/app/pages/index.vue:37-52 — pagination slice, page clamping and buildQuery URL-default omission untested",
+        "app/app/components/MovesTable.vue:42-68 — sortable-header logic incl. missing-values-last untested"
+      ],
+      "rationale": "No tests exist, and the untested code is precisely the data transformation, pagination, URL-state and error logic most likely to break."
+    },
+    "behaviour_not_implementation": {
+      "score": 1,
+      "evidence": ["app/package.json:1-13 — whole package: no test files, runner or script"],
+      "rationale": "There are no tests to judge; the anchor scores 'no tests' as 1."
+    },
+    "regression_power": {
+      "score": 1,
+      "evidence": [
+        "app/server/utils/pokeapi.ts:11-19 — cache TTL, coalescing and 404-negative caching have nothing that could fail",
+        "app/server/api/species.get.ts:10-22 — types-by-id and generation-by-species map construction unguarded",
+        "app/app/pages/[...slug].vue:1-3 — catch-all 404 path has one hand-checked case, no regression test"
+      ],
+      "rationale": "No test in app/ can fail, so any regression in the data layer slips through the moment the acceptance suite isn't run or is extended past its sample."
+    },
+    "signal_to_noise": {
+      "score": 3,
+      "evidence": ["app/ — no test files at all (grep for vitest/playwright/describe finds nothing)"],
+      "rationale": "Per the anchor, no tests scores 3: nothing padding the suite, but nothing earning its keep either."
+    }
+  },
+  "overall": 1,
+  "findings": [
+    { "severity": "high", "location": "app/package.json:6-11", "issue": "No test infrastructure: no test script, no vitest/@nuxt/test-utils/playwright dependency anywhere in app/", "suggestion": "Add vitest with @nuxt/test-utils; start with unit tests for shared/utils and server/utils, which are pure and easy to cover." },
+    { "severity": "high", "location": "app/server/utils/data.ts:69-79", "issue": "speciesCards dedup, alternate-form exclusion and hidden-ability flagging are untested; a changed dedup key or dropped cards.has(id) guard would silently duplicate cards or lose 'Hidden ability'", "suggestion": "Unit-test with fixtures containing alternate forms (id > 10000), duplicates, and a Pokémon listed both regular and hidden." },
+    { "severity": "high", "location": "app/server/api/pokemon/[name]/moves.get.ts:17-72", "issue": "Version-group ordering, default-game selection (highest order), METHOD_ORDER ranking and the `${move}:${level}` dedup key are untested", "suggestion": "Test with a fixture covering multiple version groups and methods, asserting game list order, default game, table order and row dedup." },
+    { "severity": "medium", "location": "app/app/pages/index.vue:33-46", "issue": "URL filter/pagination state machine untested: page clamping, default-omission in buildQuery, filter change resetting to page 1, off-by-one risk in the 48-per-page slice", "suggestion": "A component or e2e test that loads ?type=fire&generation=generation-i&page=2, changes a filter, and asserts the resulting URL and visible slice." },
+    { "severity": "medium", "location": "app/app/components/MovesTable.vue:42-68", "issue": "Sorting logic untested, especially the null-last-in-both-directions branch and aria-sort values", "suggestion": "Component test driving clicks on each header with rows containing null power/accuracy, asserting order and aria-sort." },
+    { "severity": "medium", "location": "app/server/utils/pokeapi.ts:11-19", "issue": "Cache layer untested: 60s TTL, request coalescing, 404 negative caching, and an unbounded Map whose memory growth under a long-running server nobody observes", "suggestion": "Unit-test with a fake fetch: TTL expiry, coalescing of concurrent calls, 404→null, and error eviction; consider an LRU bound." },
+    { "severity": "medium", "location": "app/shared/utils/format.ts:1-15", "issue": "Pure helpers (humanize, dexNumber, display) untested — the cheapest tests in the codebase, and humanize drives search matching and every list label", "suggestion": "A handful of table-driven unit tests, including 'mr-mime', empty string, and null/'' display cases." },
+    { "severity": "low", "location": "app/server/api/species.get.ts:10-30", "issue": "Index construction (types-by-ID with slot sort, generation-by-species, species sort) untested; idFromUrl returning NaN on a malformed URL would flow into sorting unchecked", "suggestion": "Fixture-driven test of the index handler asserting slot order, generation mapping and ID sort; guard idFromUrl's NaN." },
+    { "severity": "low", "location": "app/app/pages/pokemon/[name].vue:22-28", "issue": "selectGame's router.replace preserves route.hash so the #moves anchor survives a game change — untested and easy to lose in a refactor", "suggestion": "A test that selects a game while on #moves and asserts the URL keeps both query and hash." },
+    { "severity": "low", "location": "app/app/error.vue:4-8", "issue": "Non-404 error path ('Something went wrong') and NotFound's SSR-only setResponseStatus are untested", "suggestion": "One test for an API-down scenario asserting the error page copy, and one asserting a 404 status on SSR for an unknown name." }
+  ],
+  "summary": "The app contains no tests of its own — no runner, no script, no test files — so the dimension's floor applies. The uncovered code is exactly the risky part: card dedup/alt-form logic, moves-table grouping, URL filter/pagination state, client sorting and the caching layer. Once the acceptance suite is no longer the only guard, a routine data-layer refactor could break ordering, dedup and URL state with nothing failing.",
+  "wroteTests": false,
+  "testCount": 0,
+  "valuableTests": [],
+  "lowValueTests": [],
+  "untested": [
+    { "area": "speciesCards mapping in server/utils/data.ts: alternate-form exclusion (>10000), per-ID dedup, Pokémon-ID→species-name resolution, hidden-ability flag", "risk": "high", "likelyBug": "A changed dedup key or removed cards.has(id) guard duplicates cards or drops the 'Hidden ability' label on ability pages; wrong MAX_SPECIES_ID comparison silently reintroduces Mega forms into every list." },
+    { "area": "Moves endpoint grouping in server/api/pokemon/[name]/moves.get.ts: version-group order, default game = highest order, METHOD_ORDER ranking, row dedup by move:level", "risk": "high", "likelyBug": "Defaulting to the lowest-order version group, or ranking 'machine' before 'level-up', yields wrong tables for every Pokémon; only the few games sampled by acceptance tests would reveal it." },
+    { "area": "Client-side sortable headers in MovesTable.vue: direction flip, missing-values-last in both directions, aria-sort on the active header only", "risk": "high", "likelyBug": "Flipping the null branch to 'first in descending' or leaking aria-sort onto inactive headers — invisible without explicit assertions on rows with null power/accuracy." },
+    { "area": "Home page URL state in pages/index.vue: buildQuery default omission, page clamping, filter-change→page 1 reset, debounced search and timer cleanup", "risk": "high", "likelyBug": "Off-by-one in the 48-per-page slice (47 or 49 visible), page=1 leaking into URLs and breaking deep links, or debounce lost so every keystroke pushes history." },
+    { "area": "Index construction in server/api/species.get.ts: types-by-ID slot ordering, generation-by-species map, species sort", "risk": "medium", "likelyBug": "Types rendered in API order rather than slot order, or a generation filter matching nothing after a map-key change — both look fine in casual browsing." },
+    { "area": "Cache layer in server/utils/pokeapi.ts: 60s TTL, concurrent-request coalescing, 404 negative caching, unbounded Map growth", "risk": "medium", "likelyBug": "TTL removal or a broken eviction path makes the app serve stale data (or never cache at all, hammering the API); unbounded growth leaks memory over a long-running server." },
+    { "area": "Error and not-found paths: error.vue non-404 copy, NotFound setResponseStatus (SSR only), catch-all [...slug].vue", "risk": "medium", "likelyBug": "An API outage rendering an empty shell with status 200, or a client-side navigation to an unknown name skipping the 404 render entirely." },
+    { "area": "Pure helpers: humanize, dexNumber, display, englishName, latestFlavorText, collapse", "risk": "low", "likelyBug": "Search matching breaking for hyphenated names, or the wrong flavor_text entry (first instead of last English) shown after a 'simplification'." },
+    { "area": "Pokemon page extras: stats total, stat bar scaling, height/weight formatting, selectGame preserving the #moves hash", "risk": "low", "likelyBug": "A wrong Total row or a game change that scrolls the user off #moves; cosmetic but user-visible." }
+  ]
+}
+```

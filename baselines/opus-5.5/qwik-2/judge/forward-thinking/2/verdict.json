@@ -1,0 +1,189 @@
+{
+  "dimension": "forward-thinking",
+  "criteria": {
+    "latest_apis": {
+      "score": 5,
+      "evidence": [
+        "app/package.json:11-12 — pins @builder.io/qwik and @builder.io/qwik-city 1.20.3, the latest stable release (2026-10-25, per QwikDev/qwik releases)",
+        "app/src/entry.node-server.tsx:16-44 — byte-for-byte the current 1.20.3 node-server starter, including the recently added uncaughtExceptionMonitor diagnostics",
+        "app/adapters/node-server/vite.config.ts:12-13 — nodeServerAdapter({name, ssg:null}); ssg:null is the documented ServerAdapterOptions way to disable build-time prerendering (lib/adapters/shared/vite/index.d.ts)",
+        "app/src/routes/index.tsx:33-58 — routeLoader$ + query-derived state, URLSearchParams for filter URLs: the current data-loading and URL-as-state model, not client-side fetching",
+        "app/src/routes/index.tsx:78-85 — useTask$ (post-1.2 name) keeps the search signal in sync with the URL",
+        "app/src/routes/pokemon/[name]/index.tsx:207-210 — DocumentHead with resolveValue(loader), the current head API rather than the old useDocumentHead-in-route pattern",
+        "app/src/routes/layout.tsx:4-6 — RequestHandler cacheControl({noCache:true, private:true}) for live-data pages; app/src/components/router-head/router-head.tsx:5 — useDocumentHead in RouterHead, current"
+      ],
+      "rationale": "Every framework API used is the current generation, on the newest stable release (published five days before this review). The only newer thing is the 2.0 RC line, which is pre-release and renames packages (@qwik.dev/core); building on it would be wrong."
+    },
+    "platform": {
+      "score": 4,
+      "evidence": [
+        "app/src/lib/server-api.ts:27-31 — native fetch + res.json(), no HTTP client library; 404 mapped to null, other failures thrown",
+        "app/src/routes/index.tsx:24-32 — URLSearchParams builds filter URLs; app/src/routes/index.tsx:139-141 — new URL(window.location.href).searchParams to read live state",
+        "app/src/routes/index.tsx:92-120 — native form primitives: <input type=search> with real <label>, <select>, preventdefault:submit instead of a JS-only filter UI",
+        "app/src/components/moves-table.tsx:41-70 — sorting done client-side with useSignal and aria-sort, no server round-trip or hand-rolled state library",
+        "app/src/global.css:52-59 — CSS custom properties and logical properties (margin-inline/padding-inline); no floats or hacks; images use loading=\"lazy\" (app/src/components/cards.tsx:12)",
+        "app/src/lib/server-api.ts:33 — fetch has no AbortSignal/timeout, so a hung API server stalls the SSR response indefinitely",
+        "app/src/lib/server-api.ts:18-19 — hand-rolled in-memory TTL Map instead of something like a shared LRU; acceptable per spec, but entries are only evicted on failure, never on staleness"
+      ],
+      "rationale": "Reaches for the platform first: native fetch, URL/URLSearchParams, real form elements, semantic tables/dl, and modern CSS with zero client libraries. The only gap is no AbortController/timeout on upstream fetches, which is the kind of omission that surfaces years later under a slow or dying API."
+    },
+    "dependencies": {
+      "score": 5,
+      "evidence": [
+        "app/package.json:15-22 — zero runtime dependencies; six devDependencies, all framework toolchain",
+        "app/package.json:12 — vite 7.3.1, exactly qwik-city 1.20.3's own dev pin and the max major in qwik's peer range (vite >=5 <8)",
+        "app/package.json:13 — typescript 5.4.5 matches Qwik's own repo override (pnpm-lock.yaml: typescript: 5.4.5)",
+        "app/package.json:14 — @types/node ^24, current Node LTS line; app/package.json:6-8 — engines node >=20",
+        "app/vite.config.ts:2-10 — vite-tsconfig-paths is the plugin the official Qwik docs example uses; no CSS framework, no state library, no fetch wrapper"
+      ],
+      "rationale": "Minimal and precisely aligned with the framework: zero runtime deps, and each toolchain dep sits at the version the framework itself pins. Nothing heavy, nothing the platform already covers."
+    },
+    "churn_resistance": {
+      "score": 4,
+      "evidence": [
+        "app/src/lib/server-api.ts:1-143 — all PokeAPI access behind one module; every route consumes it via routeLoader$, so swapping endpoints or adding caching touches one file",
+        "app/src/lib/types.ts:1-39 — view-model types (Card, MoveRow, TypeRef, EvolutionNode) at the loader→component boundary, so components never see raw API shapes",
+        "app/src/routes/layout.tsx:1-29 — banner/nav/footer in one layout, no copy-pasted per-page boilerplate",
+        "app/adapters/node-server/vite.config.ts:5-15 — adapter config extends the base vite config rather than duplicating it; app/src/entry.*.tsx — generated framework boilerplate kept intact so future starter diffs are trivial",
+        "app/src/lib/server-api.ts:21,78,94 — api<T = any> and Promise<any[]> returns; the API record boundary is untyped, so API shape drift won't be caught by tsc (types only exist for the derived view models)",
+        "app/src/routes/pokemon/[name]/index.tsx:92-105 — inline `(v: any)` and `as` casts inside the loader further erode that boundary",
+        "app/package.json:9-10 — build hand-rolls 'vite build && vite build -c adapters/...' instead of the starter's 'qwik build' / 'qwik check-client' pipeline, so future build-pipeline improvements won't be picked up automatically"
+      ],
+      "rationale": "Structure strongly resists churn: one data module, typed view models, config in one place, and pristine generated boilerplate. The two real gaps are the any-typed API boundary and the hand-rolled build scripts; the coming 2.0 package rename will touch every import line but is mechanical and unavoidable on stable 1.x."
+    }
+  },
+  "overall": 5,
+  "findings": [
+    {
+      "severity": "medium",
+      "location": "app/src/lib/server-api.ts:21",
+      "issue": "The API layer is untyped at the boundary: api<T = any> defaults to any, allTypes()/allGenerations() return Promise<any[]>, and loaders add (v: any) casts and `as` assertions (app/src/routes/pokemon/[name]/index.tsx:92-105). If the upstream API's shape shifts, the compiler stays silent and it surfaces at runtime on pages.",
+      "suggestion": "Define minimal interfaces for the ~8 endpoints actually consumed (species, pokemon, type, generation, version-group, move, ability, evolution-chain) in lib/types.ts and have api<T> require them; keep the view-model layer as is."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/lib/server-api.ts:33",
+      "issue": "Server-side fetch has no AbortSignal or timeout, and the in-flight promise is cached, so one hung upstream request can stall that page's SSR indefinitely.",
+      "suggestion": "Pass AbortSignal.timeout(N) (Node 18+/20+) to fetch and drop the cache entry on abort, mirroring the existing value.catch(() => cache.delete(path)) cleanup."
+    },
+    {
+      "severity": "low",
+      "location": "app/package.json:9",
+      "issue": "The build scripts bypass the starter's pipeline: 'qwik build' and 'qwik check-client src dist' are replaced by raw vite invocations, so Qwik build-pipeline changes (e.g. the 1.20.3 adapter starter's build.server) won't be picked up on upgrade.",
+      "suggestion": "Use 'qwik build' for `build` and 'qwik check-client src dist && vite build -c adapters/node-server/vite.config.ts' for build.server, as the current node-server starter does."
+    },
+    {
+      "severity": "low",
+      "location": "app/package.json:15",
+      "issue": "No lint tooling: eslint-plugin-qwik (current release 1.20.3) is absent, so Qwik-specific rules (serializable props, correct `$` usage, no-async-prevent-default) never run; those are exactly the mistakes that break across upgrades.",
+      "suggestion": "Add eslint + eslint-plugin-qwik pinned to the Qwik version and a `lint` script."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/lib/server-api.ts:68",
+      "issue": "spriteUrl() derives sprite URLs from a hard-coded /media/sprites/pokemon/<id>.png pattern instead of the URLs the API already supplies in pokemon.sprites, creating a second coupling point to the media layout.",
+      "suggestion": "Use the API-provided sprites.front_default where available (the spec's pattern can remain the fallback for list-only contexts that don't fetch the full record)."
+    },
+    {
+      "severity": "low",
+      "location": "app/vite.config.ts:9",
+      "issue": "qwikCity({ trailingSlash: false }) passes the plugin's default value explicitly, so a reader must verify whether it's load-bearing.",
+      "suggestion": "Drop the option (the docs example uses bare qwikCity()) or add a comment saying it's the default."
+    }
+  ],
+  "summary": "This is a current-generation Qwik City app on the framework's newest stable release (1.20.3, published days before this review), with generated boilerplate left intact, a documented ssg:null to honour the no-build-time-data rule, and zero runtime dependencies whose toolchain versions match the framework's own pins. Data access is isolated in one module behind typed view models, so most API or requirement changes are local. The only real ageing risks are the any-typed API boundary, the missing fetch timeout, and hand-rolled build scripts that bypass the qwik CLI pipeline.",
+  "apis": [
+    {
+      "api": "routeLoader$",
+      "location": "app/src/routes/index.tsx:33",
+      "status": "current",
+      "replacement": ""
+    },
+    {
+      "api": "useTask$ / useSignal",
+      "location": "app/src/routes/index.tsx:74-78",
+      "status": "current",
+      "replacement": ""
+    },
+    {
+      "api": "useNavigate / useLocation",
+      "location": "app/src/routes/index.tsx:72-73",
+      "status": "current",
+      "replacement": ""
+    },
+    {
+      "api": "DocumentHead (resolveValue)",
+      "location": "app/src/routes/pokemon/[name]/index.tsx:207",
+      "status": "current",
+      "replacement": ""
+    },
+    {
+      "api": "RequestHandler cacheControl",
+      "location": "app/src/routes/layout.tsx:4-6",
+      "status": "current",
+      "replacement": ""
+    },
+    {
+      "api": "createQwikCity (@builder.io/qwik-city/middleware/node)",
+      "location": "app/src/entry.node-server.tsx:16",
+      "status": "current",
+      "replacement": "renamed to @qwik.dev/router/middleware/node createQwikRouter in the 2.0 RC line; no change needed on stable 1.x"
+    },
+    {
+      "api": "nodeServerAdapter({ ssg: null })",
+      "location": "app/adapters/node-server/vite.config.ts:13",
+      "status": "current",
+      "replacement": ""
+    },
+    {
+      "api": "@qwik-city-plan import",
+      "location": "app/src/entry.node-server.tsx:18",
+      "status": "current",
+      "replacement": "dropped by the 2.0 starter; still required by 1.20.x"
+    },
+    {
+      "api": "preventdefault:submit JSX prefix",
+      "location": "app/src/routes/index.tsx:93",
+      "status": "current",
+      "replacement": ""
+    },
+    {
+      "api": "useDocumentHead / QwikCityProvider / RouterOutlet",
+      "location": "app/src/components/router-head/router-head.tsx:5",
+      "status": "current",
+      "replacement": ""
+    }
+  ],
+  "dependencies": [
+    {
+      "name": "@builder.io/qwik@1.20.3",
+      "verdict": "modern",
+      "note": "Latest stable (2026-10-25); the 2.0 line is RC-only"
+    },
+    {
+      "name": "@builder.io/qwik-city@1.20.3",
+      "verdict": "modern",
+      "note": "Latest stable, exact-matched to core"
+    },
+    {
+      "name": "vite@7.3.1",
+      "verdict": "modern",
+      "note": "Max major in Qwik 1.20.3's peer range (>=5 <8) and qwik-city's own dev pin; vite 8 is unsupported by stable Qwik"
+    },
+    {
+      "name": "typescript@5.4.5",
+      "verdict": "established",
+      "note": "Older than ecosystem TS, but exactly what the Qwik monorepo pins; aligned with the framework"
+    },
+    {
+      "name": "@types/node@^24",
+      "verdict": "modern",
+      "note": "Current Node LTS types, consistent with engines node >=20"
+    },
+    {
+      "name": "vite-tsconfig-paths@^4",
+      "verdict": "established",
+      "note": "Small dev-only plugin, used in the official Qwik docs vite config example"
+    }
+  ]
+}

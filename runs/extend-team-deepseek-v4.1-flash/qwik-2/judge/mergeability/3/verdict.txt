@@ -1,0 +1,140 @@
+I've now read the whole app, verified the framework version against current releases, and inspected the built client/server bundles to check the server/client boundary claims. Key verifications:
+
+- `@builder.io/qwik`/`qwik-city` `^1.20.3` **is** the current stable (1.20.3 released 2026-10-25; Qwik 2 is still RC/beta), so all `routeLoader$`, `useSignal/useTask$`, `Link`, `DocumentHead({resolveValue})`, `cacheControl`, `status(404)`, node-adapter usage is current-idiomatic.
+- I confirmed in `app/dist/build` (client chunks) that no `/api/v2/` or `localhost:9000` strings exist, and in the client router chunk that SPA navigation fetches loader data via `q-data.json` from the server — so the "server-only" `data.ts`/`api.ts` layering genuinely holds in the build, and `process.env.API_BASE_URL` only ever runs on the server.
+- I also verified `navigate(href, { scroll: false })` is a real option in this version (the compiled link handler passes `scroll` through), so the search UX code isn't using a phantom API.
+
+```json
+{
+  "dimension": "mergeability",
+  "criteria": {
+    "idiomatic": {
+      "score": 5,
+      "evidence": [
+        "app/package.json:15 — pins @builder.io/qwik/qwik-city ^1.20.3, which is the current stable (1.20.3, 2026-10-25; v2 is still RC)",
+        "app/src/routes/index.tsx:14 — routeLoader$(({url}) => homePage(url.searchParams)): URL is the single source of truth for filters",
+        "app/src/routes/pokemon/[name]/index.tsx:15-21 — routeLoader$ + status(404) + cookie read; textbook Qwik City loader",
+        "app/src/routes/[...catchall]/index.tsx:4-7 — catchall route sets 404 and renders the Not-found page",
+        "app/src/routes/layout.tsx:4-7 — layout RequestHandler with cacheControl({noCache:true}) for live data",
+        "app/src/routes/pokemon/[name]/index.tsx:150-153 — DocumentHead via resolveValue(loader), the documented way to title from a loader",
+        "app/src/entry.node-server.tsx:18-28 — official node-server middleware wiring (staticFile → router → notFound)",
+        "app/src/routes/team/index.tsx:16-18 — cookie read in the loader so SSR paints the correct team button with no flash (FEATURE requirement)"
+      ],
+      "rationale": "Uses exactly the primitives the current docs prescribe: routeLoader$ for all data, Link/useNavigate for routing, useSignal/useTask$ for state, the official node adapter, eslint-plugin-qwik. Nothing is hand-rolled where a framework feature exists (the debounce/SWR cache have no framework equivalent)."
+    },
+    "correctness_risks": {
+      "score": 3,
+      "evidence": [
+        "app/src/routes/index.tsx:40 — applyFilters reads type/generation from home.value.filters (the async loader), not loc.url; changing a second filter before the loader resolves builds the URL from stale filters and silently drops the first one (same for typing during that window)",
+        "app/src/routes/index.tsx:61 — debounce timer is never cleared on unmount; navigating away within 200 ms fires applyFilters from a dead component and navigates back to /?q=…",
+        "app/src/lib/api.ts:16 — module-level cache Map with no size cap or eviction policy",
+        "app/src/lib/api.ts:23-24 — fetchJson has no timeout/AbortSignal; a hung upstream request stalls SSR with no user-facing error path",
+        "app/src/lib/data.ts:212-256 — uncached Pokémon page fans out to ~20 version-group + ~1 fetch per move (~100+ upstream requests); bounded only by the 30 s SWR cache",
+        "app/src/lib/api.ts:26-30 — 404 and non-OK both cancel the response body and NotFoundError maps cleanly to null → 404 pages (good)",
+        "app/src/lib/team.ts:78-91 — coverage math shared by server and client, immunities counted as resistant per spec (good)"
+      ],
+      "rationale": "Two genuine but small client-side races (stale-loader filter state, uncleaned debounce timer) plus a few robustness gaps (unbounded cache, no fetch timeout). Nothing severe: 404 handling, XSS (all text is text nodes), and the SSR/client cookie consistency are all correct."
+    },
+    "global_abstractions": {
+      "score": 4,
+      "evidence": [
+        "app/src/lib/format.ts:1 — 'Pure helpers shared by server and client code', zero imports; humanize/dexNumber/orDash used everywhere without duplication",
+        "app/src/lib/team.ts:1-2 — cookie + coverage logic shared by both runtimes with no server imports, so it safely lands in the client bundle",
+        "app/src/lib/data.ts:1-3 — server-only data assembly, only referenced from routeLoader$; verified: app/dist/build contains no /api/v2/ or apiBase strings in client chunks",
+        "app/src/components/ui.tsx:5-29 — PokemonCard/CardList deduplicate the card markup that 4 different pages need (good)",
+        "app/src/lib/data.ts:98,212,343,378 — one 400+ line module holds homePage/pokemonPage/movePage/abilityPage/typesPage/teamPage; every route depends on it, so it's a merge-conflict hotspot and the natural split point",
+        "app/src/components/ui.tsx:5-70 — six unrelated components (badges, cards, Section, Evolution, NotFound) in one grab-bag file"
+      ],
+      "rationale": "The layering is unusually clean and proven in the build output (pure format/team vs server data/api), and the one shared cache is documented. The costs are organisational: a single data module every route imports and a components grab-bag — locally fine, globally the two places future edits will collide."
+    },
+    "readability": {
+      "score": 4,
+      "evidence": [
+        "app/src/lib/api.ts:1-2 — header comment states the caching strategy and why (short-lived cache + background refresh)",
+        "app/src/lib/data.ts:79-81,161-163,343-345 — clear section dividers per page/domain inside the data module",
+        "app/src/components/ui.tsx:36 — JSDoc explains the Section = region-landmark contract",
+        "app/src/routes/index.tsx:30-36 — comments explain the two history behaviours (typing replaces, picking pushes) and the back/forward sync guard",
+        "app/src/global.css:99+ — CSS grouped by section comments, driven entirely by design tokens",
+        "app/src/lib/data.ts:124-131 — dense chained .filter().sort().filter() with an inline 3-condition predicate; the only place that needs a second read",
+        "app/src/routes/team/index.tsx:22-28 — members/coverage/relations triple-signal sync with a useTask$ is slightly redundant but well-named"
+      ],
+      "rationale": "Predictable structure (routes/, components/, lib/{api,data,format,team}), consistent naming, and comments that explain intent rather than mechanics. The rough spots are the length of data.ts, the ui.tsx grab-bag, and one dense filter chain."
+    },
+    "review_cost": {
+      "score": 3,
+      "evidence": [
+        "app/src/routes/index.tsx:40 — requires a real change: build filter URLs from loc.url/URLSearchParams instead of the async loader value",
+        "app/src/routes/index.tsx:60-61 — requires a real change: clear the debounce timer via useTask$ cleanup / unmount hook",
+        "app/package.json:29 — unused, unpinned 'undici: *' devDependency should be removed",
+        "app/src/lib/data.ts:98 — homePage's per-request map rebuilding is acceptable but worth a reviewer question about caching the derived maps",
+        "app/src/routes/layout.tsx:1-27 — untouched by FEATURE.md and correct; third nav link added cleanly in the existing list"
+      ],
+      "rationale": "Not approve-as-is: the two client-side races need a fix and re-review, and there are a few hygiene nits. But every change is small and localized in an otherwise idiomatic, well-layered codebase — one round, not rework."
+    }
+  },
+  "overall": 4,
+  "findings": [
+    {
+      "severity": "medium",
+      "location": "app/src/routes/index.tsx:40",
+      "issue": "applyFilters builds the next URL from home.value.filters (the async routeLoader signal), so changing a second filter — or typing during the debounce — while the first navigation's q-data.json is still in flight silently drops the earlier filter (type/generation vanish from the URL).",
+      "suggestion": "Derive the current q/type/generation from loc.url (useLocation().url.searchParams) or from dedicated signals, not from the loader value; the loader stays a pure projection of the URL."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/routes/index.tsx:61",
+      "issue": "The 200 ms search debounce timer is never cancelled when the home route unmounts; navigating away within the window fires applyFilters from the dead component and navigates the user back to '/?q=…'.",
+      "suggestion": "Clear the timer in a cleanup: useTask$(({ cleanup }) => { cleanup(() => clearTimeout(timer.value)) }) or an equivalent unmount hook."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/lib/api.ts:16",
+      "issue": "The in-memory cache Map has no size cap or eviction policy; keys are only bounded by the API's URL space, and a permanently-hung refresh leaves refreshing=true forever (no retry).",
+      "suggestion": "Add a simple size cap/LRU and a refresh timeout, or reset hit.time when a refresh fails to start/complete."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/lib/api.ts:23-24",
+      "issue": "fetchJson has no timeout or AbortSignal, so a hung upstream request stalls SSR (streaming never completes) with no error surfaced; a thrown loader currently yields a bare 500.",
+      "suggestion": "Pass AbortSignal.timeout(...) to fetch and add a graceful error state (or at least a log) for upstream failures."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/lib/data.ts:212-256",
+      "issue": "An uncached Pokémon page fans out to one fetch per move plus one per version group (~100+ upstream requests); the 30 s SWR cache bounds it, but a cache stampede after expiry on a popular page is worth thinking about.",
+      "suggestion": "Consider caching the per-(game,method) resolved move rows, or deduplicating in-flight requests more aggressively (e.g. share the moveRow promise per name across requests)."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/lib/data.ts:98",
+      "issue": "One 400+ line module assembles data for all five page types; every route loader depends on it, making it the app's merge-conflict hotspot and the one file that must change for any new page.",
+      "suggestion": "Split per page (lib/pages/home.ts, pokemon.ts, …) keeping shared pieces (speciesById, mainTypes, cardsForPokemon) in a small lib/api-derived core."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/components/ui.tsx:1-70",
+      "issue": "Six unrelated components (TypeBadge, PokemonCard, CardList, Section, Evolution, NotFound) live in one grab-bag file.",
+      "suggestion": "One file per component (or small themed groups) so imports and ownership are obvious."
+    },
+    {
+      "severity": "low",
+      "location": "app/package.json:29",
+      "issue": "devDependency 'undici: *' is unused by any source file (Node's global fetch is used) and the '*' range makes installs non-deterministic.",
+      "suggestion": "Remove it; if it was needed for a specific fetch issue, pin it and leave a comment."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/lib/data.ts:47-56",
+      "issue": "typesPage() calls mainTypes(), which fetches all 18 full type records (each large) when the page only needs names.",
+      "suggestion": "Have typesPage use the lighter list endpoint, or accept the cost explicitly given the 30 s cache."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/routes/team/index.tsx:22-32",
+      "issue": "Three mirrored signals plus a useTask$ re-sync duplicate the loader state so remove() can patch locally; workable but a second place where member/coverage state can drift from the loader.",
+      "suggestion": "Keep the loader result as the base and store only the client-side mutation (e.g. a 'removed' set) applied on top, or invalidate the loader after the cookie write."
+    }
+  ],
+  "summary": "This is a genuinely idiomatic Qwik City 1.20 app — routeLoader$ for all data, URL-driven filters, official node adapter, 404 via status(), and a server/pure-client lib split that I verified actually holds in the built client bundle. What blocks approve-as-is is a pair of small client-side races on the home page (filter state read from the async loader value, and an uncleaned debounce timer), plus hygiene nits (unbounded cache, unused 'undici: *', monolithic data.ts). One round of localized fixes and I'd merge it."
+}
+```

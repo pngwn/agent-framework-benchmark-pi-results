@@ -1,0 +1,178 @@
+I have a complete picture. The app is a SolidStart 2.1 / Vite 8 app (current stable stack, with the v2-style `vite.config.ts` using the `solidStart()` + `nitro()` plugins) built on a clean layered architecture: routes → thin `query`-wrapped server functions (`lib/queries.ts`) → a single server-only data module (`lib/server/pokeapi.ts`), with typed DTOs in `lib/types.ts` and a small set of reusable presentational components.
+
+**Scenario walk-through**
+
+1. **Remove Abilities**: delete `app/src/routes/abilities/[name].tsx`, the Abilities `<Section>` in `app/src/routes/pokemon/[name].tsx:151-163`, `abilityDetail` (`app/src/lib/server/pokeapi.ts:342`), `getAbility` (`app/src/lib/queries.ts:24`), and the `AbilityDetail` type (`app/src/lib/types.ts:37`). Five files, but every hit is enumerable with one grep for "abilit", there's no nav link, and no ability-specific CSS. No dead code left behind if you finish the sweep.
+2. **Deoxys-style sprite fix**: sprite URLs are built from the id in two template literals — `app/src/lib/server/pokeapi.ts:116` (`card()`, which covers moves/abilities/types/team) and `:187` (`homeList`). Both are in one file and every card list renders through the single `PokemonCards` component via `Card.sprite`, so one fix does cover every list — but it's two call sites today, and centralizing them into a `spriteUrl(id)` helper is the obvious first move.
+3. **Sort cards by name**: all five card lists (home, move, ability, type, team) render through `app/src/components/PokemonCards.tsx`, which receives fully-materialized `Card[]`, so a comparator prop there is the natural seam — but each route would need to pass it, and current ordering is imposed in three server helpers (`pokeapi.ts:109`, `:168`, cookie order in `teamDetail`).
+4. **Items section**: you'd copy the ~55 lines of route scaffolding (`Switch`/`Match`/`NotFound`/`preload`, e.g. `app/src/routes/moves/[name].tsx:17-40`) a fifth time, but reuse everything that's actually hard: `api()`/`listAll`/`englishName` helpers, `Section`, `PokemonCards`, `CountText`, `TypeLink`, `format.ts`.
+5. **API base / cache change**: entirely confined to `app/src/lib/server/pokeapi.ts:21-29` (`TTL_MS`, `apiBase`, the cache map) and the single `fetch` at `:43`. No other file knows the base URL exists.
+
+**Notable findings**: the app shell (`app/src/app.tsx:13`) gates the entire layout render on the team-names query, weaving the team feature into the shell; the server data module reads the team cookie (`pokeapi.ts:391-392`); the generic `PokemonCards` component carries a team-specific `onRemove` prop (`PokemonCards.tsx:14`); and the `Card` DTO encodes per-list variants as optional `types?`/`hidden?` flags. All are mild but real seams where the team feature reaches into shared code.
+
+```json
+{
+  "dimension": "editability",
+  "criteria": {
+    "removability": {
+      "score": 4,
+      "evidence": [
+        "app/src/routes/abilities/[name].tsx:17-36 — the whole Abilities feature is one route file; no nav link to remove",
+        "app/src/routes/pokemon/[name].tsx:151-163 — one self-contained 'Abilities' Section block is the only inbound link",
+        "app/src/lib/server/pokeapi.ts:342 — abilityDetail is a single named export under a clear banner comment",
+        "app/src/lib/queries.ts:24 — getAbility is one 3-line query wrapper",
+        "app/src/lib/types.ts:37 — AbilityDetail is a standalone type; grep for 'abilit' enumerates every removal site"
+      ],
+      "rationale": "Abilities spans five files, so it's more than delete-and-go, but every edit is a mechanical, fully-enumerable deletion with no cross-wiring and no orphaned CSS or dead helpers."
+    },
+    "changeability": {
+      "score": 4,
+      "evidence": [
+        "app/src/lib/server/pokeapi.ts:116 — sprite URL template in card()",
+        "app/src/lib/server/pokeapi.ts:187 — the same template duplicated in homeList; a sprite fix must land in both",
+        "app/src/components/PokemonCards.tsx:11-42 — every card list renders via one component, so a Deoxys-style fix at the Card.sprite seam covers all lists",
+        "app/src/routes/index.tsx:7 and app/src/routes/pokemon/[name].tsx:62 — search-param array normalization implemented twice",
+        "app/src/routes/pokemon/[name].tsx:166, moves/[name].tsx:17, abilities/[name].tsx:17, types/[name].tsx:15 — the Switch/Match NotFound scaffolding repeated in four routes"
+      ],
+      "rationale": "Business logic is centralized in the data layer and all rendering variation flows through single components, so most fixes are one obvious place; the dings are a duplicated sprite template, duplicated param normalization, and four copies of the route-scaffolding idiom."
+    },
+    "coupling": {
+      "score": 4,
+      "evidence": [
+        "app/src/lib/server/pokeapi.ts:26,43 — API base URL, cache and fetch live only here; routes never touch the network",
+        "app/src/lib/queries.ts:5-60 — routes depend on a thin, uniform query-wrapper layer, not on server internals",
+        "app/src/lib/types.ts:1-58 — routes consume typed DTOs (Card, PokemonDetail, TypeDetail), not raw API payloads",
+        "app/src/app.tsx:13-15 — the app shell gates all rendering on the team-names query and wraps TeamProvider around every page",
+        "app/src/lib/server/pokeapi.ts:391-392 — the data module reads the team cookie via getCookie, importing client team-store",
+        "app/src/components/PokemonCards.tsx:14-17 — the generic card list carries a team-specific onRemove prop and remove button"
+      ],
+      "rationale": "Server/client separation and the data seam are genuinely excellent — one server module behind query wrappers and typed DTOs. The tangles are all team-feature related: it's woven into the app shell, the server data module, and the shared card component."
+    },
+    "abstraction_design": {
+      "score": 4,
+      "evidence": [
+        "app/src/lib/server/pokeapi.ts:105-110 — cardsFor with an optional extra() mapper stretches to move/ability/type card lists, including the 'hidden' variant, without copying",
+        "app/src/components/PokemonCards.tsx:11-42 — one card component absorbs all five list variants (types, hidden note, remove button)",
+        "app/src/components/Section.tsx:8-14 — one section abstraction with optional id covers every region/heading need",
+        "app/src/components/MoveTable.tsx:13-20 — column model + valueOf makes sorting generic over keys rather than flag-per-column",
+        "app/src/lib/types.ts:5-9 — Card carries optional types?/hidden? flags encoding per-list variants; mild flag creep",
+        "app/src/components/MoveTable.tsx:70-78 — thead is generic over COLUMNS but tbody enumerates cells by hand; adding a column touches three spots in one file"
+      ],
+      "rationale": "Abstractions track the app's real variation points well: card lists, sections, sortable tables and language/label shaping all stretch to new cases. Minor flag creep on Card and a hand-enumerated table body keep it from being exemplary."
+    }
+  },
+  "overall": 4,
+  "findings": [
+    {
+      "severity": "medium",
+      "location": "app/src/app.tsx:13",
+      "issue": "The entire layout (banner, nav, main, footer) is gated on <Show when={names()}> from the team-names query, so the team feature is woven into the app shell; a failing team fetch renders no page at all, and removing the team feature means unwinding the shell.",
+      "suggestion": "Render the shell unconditionally and keep TeamProvider optional (e.g. default the initial names to [] with a non-blocking createAsync, or resolve the cookie before the shell without gating it)."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/lib/server/pokeapi.ts:391",
+      "issue": "The shared PokéAPI data module reads the team cookie (getCookie) and imports the client-side team-store, mixing browser-persistence policy into the API client layer.",
+      "suggestion": "Move teamNames()/cookie handling into a dedicated server module (or accept names as a parameter like teamDetail already does) so pokeapi.ts stays purely a PokeAPI client."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/lib/server/pokeapi.ts:116,187",
+      "issue": "The sprite URL template is duplicated between card() and homeList, so a sprite-scheme change (the Deoxys-style fix) must be applied in two places.",
+      "suggestion": "Extract a spriteUrl(id) helper (or have homeList items go through card()) so the pattern lives in one place."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/components/PokemonCards.tsx:14",
+      "issue": "The generic card list component carries a team-specific onRemove prop and renders the 'Remove <name>' button, baking team UI policy into a shared component.",
+      "suggestion": "Accept a generic per-item action render prop, or compose the remove button in the team route (e.g. wrap the card list) so PokemonCards stays domain-neutral."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/routes/moves/[name].tsx:17",
+      "issue": "The Switch/Match null-check + NotFound + preload scaffolding is repeated verbatim in four detail routes (also pokemon/[name].tsx:166, abilities/[name].tsx:17, types/[name].tsx:15); an Items section would copy it a fifth time.",
+      "suggestion": "A tiny shared helper (e.g. a <ResourcePage data={...}> wrapper that renders NotFound on null) would centralize the not-found handling while keeping each route's body unchanged."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/lib/types.ts:5",
+      "issue": "Card encodes per-list variants as optional fields (types?, hidden?), so every consumer must know which optional flags the current list populates.",
+      "suggestion": "Acceptable as-is given the spec's three card variants; if more variants appear, consider a variant map or a discriminated per-list props model."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/routes/index.tsx:7",
+      "issue": "Search-param array normalization ('first') is reimplemented inline at app/src/routes/pokemon/[name].tsx:62 for the game param.",
+      "suggestion": "Export the first() helper from a shared module (e.g. ~/lib/format or a small router-helpers file) and use it in both routes."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/components/PokemonCards.tsx:8",
+      "issue": "CountText, an unrelated count-text helper, is exported from the card-list component file, weakening file cohesion.",
+      "suggestion": "Move CountText to its own small component (or a text components module)."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/components/MoveTable.tsx:70",
+      "issue": "The header row is generic over COLUMNS but the body enumerates cells by hand, so adding a column requires edits in the column model, valueOf and the tbody.",
+      "suggestion": "Render body cells from the same COLUMNS model (row[key]) so a new column is a one-line addition."
+    }
+  ],
+  "summary": "This is a well-seamed SolidStart 2 app: all network access, caching and data shaping live in one server module behind typed DTOs and query wrappers, and all repeated UI flows through a handful of genuinely reusable components, so most changes land in one obvious place. The main editability debt is the team feature's reach into shared code — the app shell gates all rendering on the team query, the server data module reads the team cookie, and the generic card list carries a team-specific action. Remaining nits are duplicated sprite/param helpers and four copies of the detail-route scaffolding idiom.",
+  "scenarios": [
+    {
+      "change": "Remove the Abilities pages and every link to them",
+      "files": [
+        "app/src/routes/abilities/[name].tsx",
+        "app/src/routes/pokemon/[name].tsx",
+        "app/src/lib/server/pokeapi.ts",
+        "app/src/lib/queries.ts",
+        "app/src/lib/types.ts"
+      ],
+      "difficulty": 4,
+      "notes": "Five files, but each edit is a mechanical deletion and one grep for 'abilit' enumerates every site: the route directory, one self-contained Section block on the Pokémon page, one data helper, one query wrapper, one type. No nav link, no ability-specific CSS, no leftover dead code if the sweep is finished."
+    },
+    {
+      "change": "Fix the wrong-sprite bug for species whose default Pokémon has a different name (e.g. Deoxys)",
+      "files": [
+        "app/src/lib/server/pokeapi.ts"
+      ],
+      "difficulty": 4,
+      "notes": "Sprite URLs are built from ids in two template literals in one file (card() at line 116 covering moves/abilities/types/team, homeList at line 187). Every list renders through the single PokemonCards component via Card.sprite, so a fix at this seam covers every list of cards — but today you must edit both call sites, so extract a spriteUrl(id) helper first."
+    },
+    {
+      "change": "Add sorting by name to every list of Pokémon cards",
+      "files": [
+        "app/src/components/PokemonCards.tsx",
+        "app/src/routes/index.tsx",
+        "app/src/routes/moves/[name].tsx",
+        "app/src/routes/abilities/[name].tsx",
+        "app/src/routes/types/[name].tsx",
+        "app/src/routes/team.tsx"
+      ],
+      "difficulty": 3,
+      "notes": "One component renders all five lists and receives fully-materialized Card arrays, so the sort itself is a single comparator in PokemonCards — but the control/URL plumbing must be threaded through five routes, and the default dex ordering is imposed in three separate server helpers (cardsFor, homeList, teamDetail), so making the sort server-side would be three edits plus the query plumbing."
+    },
+    {
+      "change": "Add an Items section (/items, /items/:name) shaped like Moves",
+      "files": [
+        "app/src/routes/items/index.tsx",
+        "app/src/routes/items/[name].tsx",
+        "app/src/lib/server/pokeapi.ts",
+        "app/src/lib/queries.ts",
+        "app/src/lib/types.ts"
+      ],
+      "difficulty": 3,
+      "notes": "Everything hard is reusable: api()/listAll()/englishName/collapse helpers, Section, PokemonCards, CountText, TypeLink, NotFound and the format module. What you copy is ~55 lines of route scaffolding (Switch/Match/preload) from moves/[name].tsx plus a list page like types/index.tsx, and a query wrapper + DTO following the existing uniform pattern."
+    },
+    {
+      "change": "Change the API base URL and caching rules",
+      "files": [
+        "app/src/lib/server/pokeapi.ts"
+      ],
+      "difficulty": 5,
+      "notes": "apiBase(), TTL_MS, the cache Map, in-flight de-duplication and the single fetch call all live in one file (lines 21-53); no other file references API_BASE_URL, fetch or the cache. Trivially confined — the strongest seam in the app."
+    }
+  ]
+}
+```

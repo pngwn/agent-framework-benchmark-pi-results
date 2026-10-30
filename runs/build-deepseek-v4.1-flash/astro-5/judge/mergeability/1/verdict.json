@@ -1,0 +1,128 @@
+{
+  "dimension": "mergeability",
+  "criteria": {
+    "idiomatic": {
+      "score": 4,
+      "evidence": [
+        "app/package.json:12-13 — astro@7.4.4 + @astrojs/node@11.1.9, the current stable pair (verified against Astro 7.4.4 release notes, 28 Oct 2026)",
+        "app/astro.config.mjs:1-5 — output: 'server' with standalone node adapter, per current docs",
+        "app/src/components/EvolutionNode.astro:16-18 — Astro.self recursion, the documented pattern for recursive templates",
+        "app/src/pages/pokemon/[name].astro:23-28 — Astro.response.status = 404 + params/searchParams, recommended primitives",
+        "app/src/pages/pokemon/[name].astro:7 — export const prerender = false is redundant under output: 'server' (harmless noise on every route)",
+        "app/src/pages/[...path].astro:1-11 — byte-for-byte duplicate of 404.astro; the docs pattern for SSR not-found is 404.astro alone, so one of these is dead code"
+      ],
+      "rationale": "Uses current Astro 7 on the documented primitives (file routing, params, response status, Astro.self, frontmatter data loading, small bundled scripts for interactivity). Only deductions are the redundant prerender exports and the duplicated 404 route."
+    },
+    "correctness_risks": {
+      "score": 3,
+      "evidence": [
+        "app/src/pages/index.astro:124 — set:html={JSON.stringify(payload)} with no escaping of '<'; a species name containing </script> breaks out of the JSON island",
+        "app/src/lib/pokeapi.ts:317 — Promise.all over every move in the selected version group; several hundred simultaneous fetches on a cold cache for a wide learner, no concurrency cap",
+        "app/src/pages/pokemon/[name].astro:95-96 — pokemon.height / 10 with no null guard renders 'NaN m' if the API omits height",
+        "app/src/pages/index.astro:265-268 — client re-render of pagination drops the id=\"page-status\" the server set (index.astro:119); SSR/CSR DOM drift",
+        "app/src/lib/pokeapi.ts:23-29 — cache deletes the entry on failure so no stale-rejection is retained; non-404 errors correctly propagate to a 500",
+        "app/src/pages/index.astro:305-309 — single popstate listener, no leaked listeners; pagination nodes are rebuilt rather than accumulating"
+      ],
+      "rationale": "Solid error handling and no leaks, but the unescaped JSON-in-script is a real (if low-likelihood) injection vector, the cold-cache move fetch is an unbounded fan-out, and a few unguarded arithmetic/ID bits could render NaN if the API shape shifts."
+    },
+    "global_abstractions": {
+      "score": 3,
+      "evidence": [
+        "app/src/pages/index.astro:53-58 — entire 1,025-species dataset embedded in the HTML payload on every home request (~140 KB of inline JSON)",
+        "app/src/pages/index.astro:146-150 vs app/src/lib/pokeapi.ts:82-86 — humanize re-implemented in the client script instead of shared",
+        "app/src/pages/index.astro:188-224 vs app/src/components/PokemonCard.astro:11-36 — card markup implemented twice (createCard vs the component)",
+        "app/src/pages/index.astro:172-180 vs app/src/pages/index.astro:43-51 — pagination URL builder implemented twice",
+        "app/src/pages/moves/[name].astro:22-28, abilities:22-28, types:22-28, pokemon:22-28 — identical try/catch isNotFound + status=404 boilerplate in four pages",
+        "app/src/pages/abilities/[name].astro:36 — inline /\\/(\\d+)\\/?$/ regex duplicating lib's idFromUrl",
+        "app/src/lib/pokeapi.ts:1-330 — single lib module mixes URL/caching, pure formatting helpers and page-shaped data loaders; every route depends on it, but boundaries are at least consistent"
+      ],
+      "rationale": "The lib module is a mild god module but with a clear theme; the real untangling cost is the home page's two parallel implementations of the same filter/card/pagination logic plus the full-dataset-in-HTML trade-off, and the four-times-duplicated not-found block."
+    },
+    "readability": {
+      "score": 4,
+      "evidence": [
+        "app/src/layouts/Layout.astro — small, obvious layout with a single title/isHome contract",
+        "app/src/lib/pokeapi.ts:80-86 — humanize/englishName/collapseWhitespace are small, well-named, with a usage example comment",
+        "app/src/components/Section.astro:1-12 — tiny purpose-built component, easy to reason about",
+        "app/src/lib/pokeapi.ts — pervasive any (lines 96, 147, 220, 290) and app/tsconfig.json:6 strict: false undercut the type hints that exist",
+        "app/src/pages/index.astro:91-94 — dual 'No Pokémon found' branches where one element with hidden={...} would do"
+      ],
+      "rationale": "Organization and naming are consistent and a new teammate would find their way in minutes; the dings are the pervasive any, sparse comments, and the doubled-up branches that make the home page harder to follow than it needs to be."
+    },
+    "review_cost": {
+      "score": 3,
+      "evidence": [
+        "app/src/pages/index.astro:124 — must change: escape '<' in the JSON island",
+        "app/src/pages/index.astro:53-58 — must discuss: dataset-in-HTML vs a JSON endpoint",
+        "app/src/pages/moves/[name].astro:22-28 (+3 siblings) — must change: extract the shared not-found loader",
+        "app/src/pages/[...path].astro:1-11 — must change: delete one of the two 404 routes",
+        "app/src/lib/pokeapi.ts:82-86, app/src/components/PokemonCard.astro — must change: share humanize/card markup between SSR and client"
+      ],
+      "rationale": "Approvable in one round: none of it is broken enough to reject, but I would ask for the JSON escaping, the de-duplicated 404 handling, and a decision on the home-page data strategy before signing off."
+    }
+  },
+  "overall": 3,
+  "findings": [
+    {
+      "severity": "medium",
+      "location": "app/src/pages/index.astro:124",
+      "issue": "JSON serialized straight into a <script> via set:html with no '<' escaping; any API-supplied string containing '</script>' breaks out into HTML.",
+      "suggestion": "Use JSON.stringify(payload).replace(/</g, '\\\\u003c') (and ideally also escape U+2028/U+2029) before set:html."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/pages/index.astro:53-58",
+      "issue": "The full species list (~140 KB inline JSON) is shipped in every home-page response solely to enable client-side filtering.",
+      "suggestion": "Serve the index from a JSON endpoint (e.g. src/pages/api/pokedex.json.ts) fetched once on load, or trim the payload to what the client needs."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/pages/index.astro:146-244",
+      "issue": "humanize, the filter predicate, the pagination-URL builder and the Pokémon-card markup are all implemented twice (server frontmatter vs client script), so the two copies can drift.",
+      "suggestion": "Extract a shared client-importable module for humanize/filter/urlForState, and render cards from one definition (either a framework island or a client template matching PokemonCard.astro)."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/pages/moves/[name].astro:22-28",
+      "issue": "The try/catch + isNotFound + Astro.response.status = 404 block is copy-pasted verbatim into four dynamic routes.",
+      "suggestion": "Add a loadOrNotFound(fn, Astro) helper in src/lib/pokeapi.ts and call it from each page."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/pages/[...path].astro:1-11",
+      "issue": "This catch-all is a byte-for-byte duplicate of src/pages/404.astro, making one of them dead code and adding a route-shadowing footgun next to index.astro.",
+      "suggestion": "Delete [...path].astro and keep 404.astro, which Astro already uses for unmatched routes in server output."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/lib/pokeapi.ts:317",
+      "issue": "Promise.all fans out one fetch per move in the selected version group with no concurrency limit; a wide learner means hundreds of simultaneous requests on a cold cache.",
+      "suggestion": "Batch the fetches (chunks of ~25) or precompute the needed move fields on first request; the cache already makes subsequent loads cheap."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/pages/abilities/[name].astro:36",
+      "issue": "Inline regex re-implements the id extraction that already exists as idFromUrl in lib/pokeapi.ts.",
+      "suggestion": "Import and use idFromUrl."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/pages/pokemon/[name].astro:95-96",
+      "issue": "pokemon.height / 10 and pokemon.weight / 10 assume the fields exist; a missing value renders as 'NaN m' / 'NaN kg'.",
+      "suggestion": "Guard with Number.isFinite and fall back to the em dash, consistent with dash()."
+    },
+    {
+      "severity": "low",
+      "location": "app/tsconfig.json:6",
+      "issue": "strict: false plus pervasive any in src/lib/pokeapi.ts means the hand-written interfaces in that module are barely checked.",
+      "suggestion": "Extend astro/tsconfigs/strict and type the API resources instead of any; it is a contained module, so the migration is cheap."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/pages/index.astro:91-94",
+      "issue": "The 'No Pokémon found' paragraph is written twice (shown/hidden branches), and the client re-render of pagination drops the id=\"page-status\" the server rendered.",
+      "suggestion": "Use a single element with hidden={filtered.length !== 0} and keep the ids stable between the server and client markup."
+    }
+  ],
+  "summary": "A faithful, current-Astro-7 implementation: correct output mode and adapter, idiomatic file routing, and clean small components, with only mild framework noise (redundant prerender exports, a duplicated 404 route). The home page is the one place I would insist on rework before merge: the full species dataset is inlined into every response and the filter/card/pagination logic exists twice, once on each side of the server/client boundary. Fix the JSON escaping, extract the not-found helper, and settle the home-page data strategy, and this merges."
+}

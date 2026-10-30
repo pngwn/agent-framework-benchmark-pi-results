@@ -1,0 +1,115 @@
+{
+  "dimension": "mergeability",
+  "criteria": {
+    "idiomatic": {
+      "score": 5,
+      "evidence": [
+        "app/src/lib/queries.ts:1-42 — query() + \"use server\" facade, exactly the current docs' data-fetching pattern",
+        "app/src/routes/index.tsx:14-21 — route-level `preload` export calling the same queries, per the routing docs",
+        "app/src/app.tsx:10-12 — Router root + FileRoutes, the documented v2 app root",
+        "app/src/routes/index.tsx:24-25,61-63 — filter state in URL via useSearchParams, pushing params on change",
+        "app/src/entry-server.tsx:13-15 — createHandler(..., { mode: \"async\" }), current API and a justified choice for #moves fragment links",
+        "app/src/components/NotFound.tsx:10 — HttpStatusCode 404 on detail misses and the catch-all",
+        "app/src/lib/team-store.tsx:16-20 — createContext/useContext store with a clean SSR-safe source (cookie via getRequestEvent, app/src/lib/team.ts:41-45)",
+        "app/src/routes/pokemon/[name].tsx:139-145 — Switch/Match on `=== null` so loading never flashes NotFound"
+      ],
+      "rationale": "Reads like the framework's own examples: no hand-rolled routing, fetching or reactivity; server-only code stays behind \"use server\" with a real client/server boundary, and the team feature uses context + cookie exactly the way SSR/hydration demands (no wrong-label flash)."
+    },
+    "correctness_risks": {
+      "score": 4,
+      "evidence": [
+        "app/src/routes (all pages) — no ErrorBoundary anywhere (grep: only pokeapi.ts:50 and team.ts:31/34 have catch); a non-404 API failure throws out of createAsync with nothing to catch it",
+        "app/src/routes/index.tsx:51-54 — a pending 150 ms debounce timer can `setParams({q, page: undefined}, {replace:true})` after the user clicked Previous/Next within the window, silently yanking them back to page 1",
+        "app/src/routes/index.tsx:36-42 — the URL→text sync effect is skipped while `timer` is defined, so back-navigation during a pending debounce leaves the input showing stale text",
+        "app/src/lib/server/pokeapi.ts:51 — sweep only every 500 writes; expired-but-unoverwritten entries linger, though the URL space is bounded by the dataset so the cache cannot grow without limit",
+        "app/src/lib/server/pokeapi.ts:40-43 — 404s are turned into `null` and surfaced as NotFound, and failed fetches evict their cache entry (line 50), which is careful",
+        "app/src/components/MoveTable.tsx:28-31 — missing values sort last in both directions, matching the spec's trickiest rule"
+      ],
+      "rationale": "Careful handling of the hard cases (404→null, dedup, in-flight cache eviction, stale-free sort), but there is no error boundary for a failing upstream API and one small debounce-vs-pagination race; both are minor for this deployment."
+    },
+    "global_abstractions": {
+      "score": 4,
+      "evidence": [
+        "app/src/lib/server/pokeapi.ts:152-170 vs 321-336 — the typesById (slot-ordered Pokémon types) block is built twice, ~20 near-identical lines that will drift",
+        "app/src/lib/server/pokeapi.ts:114,185,341 — sprite URL template duplicated three times",
+        "app/src/lib/server/pokeapi.ts (whole file, ~440 lines) — one server data module owns the cache, the API client and all domain shaping for every page; cohesive but the obvious split point (cache client vs shaping) is unexploited",
+        "app/src/lib/queries.ts:1-42 — the client/server boundary is a thin, honest facade; routes never import server code directly",
+        "app/src/routes/index.tsx:6 vs app/src/routes/pokemon/[name].tsx:59 — two different inline implementations of \"first value of a search param\""
+      ],
+      "rationale": "Boundaries are genuinely clean (routes → queries → server-only module, components reused everywhere), so nothing structural will fight a future change; the cost is three small DRY violations inside the one large data module."
+    },
+    "readability": {
+      "score": 5,
+      "evidence": [
+        "app/src/lib/types.ts:1-58 — one central, well-named type vocabulary shared by server and UI",
+        "app/src/lib/server/pokeapi.ts:60-100 — helpers (english, latestEnglish, humanize wrappers, mapLimit) are named for what they do and reused",
+        "app/src/lib/team-store.tsx:14-15, app/src/entry-server.tsx:3-4, app/src/lib/server/pokeapi.ts:1-2 — comments explain *why* (cookie-for-SSR, async mode for fragment links), not what",
+        "app/src/routes/[detail].tsx files (pokemon/[name].tsx, moves/[name].tsx, abilities/[name].tsx, types/[name].tsx) — identical shape: preload export, createAsync, Switch/Match with NotFound, so pattern-matching across pages is trivial",
+        "app/src/app.css:52-556 — CSS organised with section comments matching the component structure"
+      ],
+      "rationale": "A new teammate can navigate this in minutes: predictable file layout, one shared vocabulary, small components, and the few comments present are exactly the non-obvious decisions."
+    },
+    "review_cost": {
+      "score": 4,
+      "evidence": [
+        "app/src/lib/server/pokeapi.ts:152-170,321-336 — I'd ask for the typesById helper to be extracted",
+        "app/src/app.tsx — I'd ask for an ErrorBoundary around the Suspense",
+        "app/package.json:6-10 — no typecheck/lint script and empty devDependencies; a team repo needs at least `tsc --noEmit` wired into CI",
+        "Everything else — idiom, naming, spec compliance, a11y structure — I'd approve without comment"
+      ],
+      "rationale": "Nits only: one extraction, one error boundary, one CI script. Nothing needs rework, and the diff is small enough to verify in a single sitting."
+    }
+  },
+  "overall": 4,
+  "findings": [
+    {
+      "severity": "medium",
+      "location": "app/src/app.tsx:39",
+      "issue": "No ErrorBoundary anywhere; a non-404 failure of the upstream API throws out of createAsync during SSR or client navigation and takes down the whole page with no recovery UI.",
+      "suggestion": "Wrap the route outlet in solid-js's ErrorBoundary inside the Router root (with a fallback and a link home)."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/routes/index.tsx:51-54",
+      "issue": "A pending search-debounce timer fires after a pagination link was clicked and does setParams({q, page: undefined}, {replace:true}), stripping the page the user just navigated to.",
+      "suggestion": "Cancel the debounce on any navigation (e.g. in the pagination onClick or via an on cleanup tied to page()), or only set `q` in the deferred setParams."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/lib/server/pokeapi.ts:321-336",
+      "issue": "The typesById construction is a near-duplicate of the one in homeList (lines 152-170); a change to how card types are derived must be made twice.",
+      "suggestion": "Extract a shared `typesByPokemonId()` helper (built from allTypes()) used by both homeList and teamDetails."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/lib/server/pokeapi.ts:114",
+      "issue": "The sprite URL template is built inline in three places (114, 185, 341).",
+      "suggestion": "Extract a `spriteUrl(id)` helper next to `card()`."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/lib/server/pokeapi.ts:1",
+      "issue": "A single ~440-line module owns the fetch cache, the API client and all domain shaping for every page; it will become the merge hotspot as pages grow.",
+      "suggestion": "Split the cache/fetch client (api, mapLimit, listAll) from the per-resource shaping functions; the queries.ts facade already gives the right seam."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/routes/pokemon/[name].tsx:59",
+      "issue": "First-value-of-search-param logic is re-implemented inline here while index.tsx:6 has a `first()` helper.",
+      "suggestion": "Move `first()` into lib/format (or a small router-utils module) and reuse it."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/routes/team.tsx:14",
+      "issue": "getTeamDetails([]) is called (a server round-trip plus a full types fetch) even when the team is empty and the result is never shown.",
+      "suggestion": "Guard the createAsync fetcher: `team.team().length ? getTeamDetails(team.team()) : null`."
+    },
+    {
+      "severity": "low",
+      "location": "app/package.json:6-10",
+      "issue": "No typecheck/lint script and no devDependencies section; CI has nothing to run and types are only checked incidentally.",
+      "suggestion": "Add `\"typecheck\": \"tsc --noEmit\"` (and a lint script) and wire them into the harness's test command."
+    }
+  ],
+  "summary": "This is a genuinely idiomatic SolidStart v2 codebase — query/\"use server\" data loading, route preloads, URL-held filter state, a cookie-backed context store for the team feature, and 404s surfaced as both UI and status — that I'd merge after one review round. The weaknesses are all local and cheap to fix: a missing ErrorBoundary, a 150 ms debounce/pagination race, and three small DRY violations inside the one large server data module."
+}

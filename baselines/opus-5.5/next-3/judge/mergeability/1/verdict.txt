@@ -1,0 +1,136 @@
+## Review
+
+This is a Next.js 16 (App Router, Turbopack, React 19) Pokédex with server components for pages and small, well-scoped client components for interactive controls. Structure follows the framework's conventions closely; the main non-native piece is a hand-rolled in-memory fetch cache, which is a deliberate and documented choice given the spec's "live API" requirement.
+
+**Idiom.** Async `params`/`searchParams` (`app/app/pokemon/[name]/page.tsx:14`), `notFound()` + `not-found.tsx`, `generateMetadata` with the title template (`app/app/layout.tsx:11`), `server-only` guards on data modules (`app/lib/api.ts:1`), and a clean server/client split (`format.ts` shared both sides) all read like current docs. Route segment config `dynamic = "force-dynamic"` (`app/app/layout.tsx:6`) is still valid on Next 16 stable (only conflicts with opt-in `cacheComponents`). The custom 60s TTL promise cache (`app/lib/api.ts:29-47`) reimplements what `use cache`/`cacheLife` would do — acceptable since Cache Components is opt-in, but a reviewer could ask. Blanket `prefetch={false}` on every Link (e.g. `app/components/PokemonCards.tsx:15`) deviates from the framework default without a comment. `error.tsx` renders a `<title>` in the tree (`app/app/error.tsx:6`) — works via React 19 hoisting and is a known workaround for client boundaries, fine.
+
+**Correctness.** Genuinely careful: the `sentQuery` guard against a slow navigation clobbering the user's typing (`app/components/Filters.tsx:26-35`), failed-request cache eviction (`app/lib/api.ts:43-45`), missing-values-sorted-last (`app/components/MoveTable.tsx:46-50`), bounded cache with FIFO sweep (`app/lib/api.ts:36-41`), and name validation before fetching (`app/lib/format.ts:44`). Remaining risks are minor: `get<Pokemon>` for the default variety turns a hypothetical 404 into an error-boundary 500 instead of `notFound()` (`app/app/pokemon/[name]/page.tsx:38`); `GameSelect` lacks the same stale-navigation guard `Filters` has (`app/components/GameSelect.tsx:14-18`); `error.tsx` never logs the error. No SSR/CSR mismatches found — client components all derive initial state from props.
+
+**Abstractions.** `lib/api.ts` (transport + types), `lib/data.ts` (domain assembly), `lib/format.ts` (pure helpers) is a clean layering with the server/client boundary drawn explicitly. Duplication exists: two query-string builders for filter state (`app/app/page.tsx:44-51` vs `app/components/Filters.tsx:12-18`) that can drift, `MISSING` redefined (`app/components/MoveTable.tsx:14` vs `app/lib/format.ts:5`), and `/types` re-implements the `--type-color` inline style rather than reusing `TypeBadge` (`app/app/types/page.tsx:14`). All small.
+
+**Readability.** Strong. Comments explain *why* (cache eviction rationale at `app/lib/api.ts:2-3`, sentQuery guard at `app/components/Filters.tsx:24-25`), naming is consistent, files are modest. The Pokémon page is the longest at ~230 lines but stays coherent; `getMoves` could live in `lib/`. `Section.tsx`'s diacritic-stripping slug (`app/components/Section.tsx:4-11`) is over-engineered for a fixed set of ASCII titles.
+
+**Review cost.** I'd approve after one round of nits: dedupe the query builders, reuse the `MISSING` constant, add the missing-value/404 guards, and drop or justify blanket `prefetch={false}`.
+
+```json
+{
+  "dimension": "mergeability",
+  "criteria": {
+    "idiomatic": {
+      "score": 4,
+      "evidence": [
+        "app/app/pokemon/[name]/page.tsx:14-15 — async params/searchParams, the Next 15/16 convention",
+        "app/app/layout.tsx:11 — metadata title template exactly as docs recommend",
+        "app/lib/api.ts:1 — server-only guard on the data layer",
+        "app/lib/api.ts:29-47 — hand-rolled TTL promise cache where use cache/cacheLife would be the framework-native answer",
+        "app/components/PokemonCards.tsx:15 — blanket prefetch={false} deviates from framework default, no comment explaining why",
+        "app/app/error.tsx:6 — <title> rendered from a client error boundary; legitimate React-19-hoisting workaround for a client component"
+      ],
+      "rationale": "Reads like current App Router examples throughout; the only non-native pieces are the in-memory cache (defensible given the spec's live-API rule and that Cache Components is opt-in) and a blanket prefetch opt-out."
+    },
+    "correctness_risks": {
+      "score": 4,
+      "evidence": [
+        "app/components/Filters.tsx:26-35 — sentQuery guard correctly prevents a slow navigation from clobbering the user's typing",
+        "app/lib/api.ts:43-45 — failed fetches evicted from cache by identity, no unhandled rejections",
+        "app/lib/api.ts:36-41 — cache is bounded (5000) with FIFO sweep",
+        "app/app/pokemon/[name]/page.tsx:38 — get() (not find) for the default variety, so a 404 surfaces as an error-boundary 500 rather than notFound()",
+        "app/components/GameSelect.tsx:14-18 — lacks the stale-navigation guard Filters has; rapid selects can transiently desync",
+        "app/app/error.tsx:2 — error is never logged or inspected (no console.error/digest)"
+      ],
+      "rationale": "The code anticipates real races (debounce vs navigation, failed fetches, dedup of learn entries, missing-value sorting); the residual issues are minor and unlikely in practice."
+    },
+    "global_abstractions": {
+      "score": 4,
+      "evidence": [
+        "app/lib/api.ts, app/lib/data.ts, app/lib/format.ts — clean transport/domain/pure-helper layering with an explicit server/client boundary",
+        "app/lib/api.ts:30 — cache is hidden global state, but single-purpose, bounded, and server-only",
+        "app/app/page.tsx:44-51 — pageHref duplicates app/components/Filters.tsx:12-18 href: two builders of the same query string that can drift",
+        "app/components/MoveTable.tsx:14 — redefines MISSING already exported from app/lib/format.ts:5",
+        "app/app/types/page.tsx:14 — inline --type-color style re-implements TypeBadge's trick instead of reusing it"
+      ],
+      "rationale": "Abstractions earn their keep and have clear boundaries; the problems are small duplications between server and client filter handling, not structural."
+    },
+    "readability": {
+      "score": 5,
+      "evidence": [
+        "app/lib/api.ts:2-3 — header comment explains the caching contract, not the mechanics",
+        "app/components/Filters.tsx:24-25 — comment explains the why of the sentQuery ref",
+        "app/lib/format.ts — small, well-named pure helpers with a comment on the API-name invariant",
+        "app/app/pokemon/[name]/page.tsx — cohesive; getMoves helper keeps the page readable",
+        "app/components/Section.tsx:4-11 — minor blemish: diacritic-stripping slug is over-engineered for fixed ASCII titles"
+      ],
+      "rationale": "A new teammate can navigate this in minutes: naming, file layout and comment discipline are consistent across all 18 files."
+    },
+    "review_cost": {
+      "score": 4,
+      "evidence": [
+        "app/app/page.tsx:44 — extract a shared filter-query builder used with Filters.tsx",
+        "app/components/MoveTable.tsx:14 — import MISSING from lib/format",
+        "app/app/pokemon/[name]/page.tsx:38 — use find() + notFound() for the default variety",
+        "app/app/error.tsx:2 — log the error per Next's error-boundary example",
+        "app/components/PokemonCards.tsx:15 — justify or remove blanket prefetch={false}"
+      ],
+      "rationale": "All findings are nits addressable in one small round; nothing blocks approval."
+    }
+  },
+  "overall": 4,
+  "findings": [
+    {
+      "severity": "low",
+      "location": "app/app/pokemon/[name]/page.tsx:38",
+      "issue": "Default variety fetched with get(), so a 404 record throws NotFoundError into the error boundary (500-style page) instead of the not-found route",
+      "suggestion": "Use find() and call notFound() when the default variety is missing"
+    },
+    {
+      "severity": "low",
+      "location": "app/app/page.tsx:44",
+      "issue": "pageHref and Filters.href (app/components/Filters.tsx:12) are two near-identical builders of the filter query string; they can drift (e.g. page handling)",
+      "suggestion": "Extract one shared query-serializing helper for {q, type, generation, page} into lib"
+    },
+    {
+      "severity": "low",
+      "location": "app/components/GameSelect.tsx:14",
+      "issue": "No stale-navigation guard: a slow router.replace can momentarily overwrite a newer local selection, unlike the guarded Filters component",
+      "suggestion": "Apply the same sentQuery-style ref guard used in Filters.tsx"
+    },
+    {
+      "severity": "low",
+      "location": "app/app/error.tsx:2",
+      "issue": "The error boundary ignores the error object (no logging, no digest check) despite the accessibility/production implications",
+      "suggestion": "console.error the error (and respect NEXT_PUBLIC debug gating) as in Next's own error.tsx example"
+    },
+    {
+      "severity": "low",
+      "location": "app/lib/api.ts:29",
+      "issue": "Hand-rolled TTL/FIFO promise cache duplicates responsibility the framework owns (use cache/cacheLife, or fetch caching), adding ~40 lines of custom infrastructure to maintain",
+      "suggestion": "Either migrate to use cache once cacheComponents is adopted, or keep it but add a note comparing to the framework alternatives and why they don't apply here"
+    },
+    {
+      "severity": "low",
+      "location": "app/components/PokemonCards.tsx:15",
+      "issue": "prefetch={false} is repeated on every Link in the app with no comment; it's a deliberate deviation from the framework's default prefetching behavior",
+      "suggestion": "Document the rationale once (dynamic app, avoid prefetch stampede against the API) or drop the blanket opt-out"
+    },
+    {
+      "severity": "low",
+      "location": "app/components/MoveTable.tsx:14",
+      "issue": "MISSING constant re-declared instead of importing from app/lib/format.ts:5",
+      "suggestion": "Import the shared constant"
+    },
+    {
+      "severity": "low",
+      "location": "app/app/types/page.tsx:14",
+      "issue": "Inline --type-color CSS variable duplicates TypeBadge's styling mechanism without its fallback token",
+      "suggestion": "Reuse TypeBadge (with a size variant) or share the style construction"
+    },
+    {
+      "severity": "low",
+      "location": "app/components/Section.tsx:4",
+      "issue": "Slug helper strips combining diacritics via a raw code-unit range regex, over-engineered for a fixed set of ASCII section titles",
+      "suggestion": "Simplify to a lowercase/dash slug, or derive ids from the title at each call site"
+    }
+  ],
+  "summary": "A clean, idiomatic Next.js 16 App Router implementation with a well-drawn server/client boundary, careful race handling, and consistently readable code. The only notable non-native piece is a hand-rolled in-memory cache, a defensible choice given the spec's live-API requirement and the opt-in status of Cache Components. I'd merge after one round of small nits around duplicated query/constant helpers and a couple of missing guards."
+}
+```

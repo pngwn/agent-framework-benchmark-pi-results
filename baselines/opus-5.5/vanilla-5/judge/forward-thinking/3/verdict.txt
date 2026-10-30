@@ -1,0 +1,103 @@
+I've reviewed the app thoroughly. This is a framework-free vanilla TS app on Vite 8.3.5 + TypeScript 7.0.2 — both of which I verified are the current stable releases (Vite 8.0 shipped 2026-03-12 with Rolldown as the unified bundler; TypeScript 7.0 GA'd 2026-07-08 with the native Go compiler).
+
+Key observations:
+
+- **Zero runtime dependencies** — the router, the `h()` element builder (`app/src/dom.ts:8`), the sortable-table component (`app/src/table.ts`), and the static file server (`app/server.mjs`) are all hand-rolled but each is small, typed, and uses the platform directly.
+- **Platform-first throughout**: `fetch` with a promise cache (`app/src/api.ts:130`), `URL`/`URLSearchParams` (`app/src/pages/home.ts:14`), `Element.replaceChildren` (`app/src/dom.ts:33`), `findLast` (`app/src/format.ts:29`), `AbortSignal.timeout` server-side (`app/server.mjs:44`), `history.scrollRestoration` (`app/src/main.ts:92`), native form controls with visible labels, `loading="lazy"`/`decoding="async"` sprites (`app/src/components.ts:66`), CSS custom properties and `aspect-ratio` (`app/src/style.css:374`).
+- **Types at the boundary**: every PokeAPI resource is modeled as an interface in one module (`app/src/api.ts:24-115`), and all data access goes through `get`/`getResource` — pages never call `fetch` themselves. Config (`API_BASE_URL`) lives in one place per side (`app/src/api.ts:9`, `app/server.mjs:9`), and URL-state handling is abstracted (`app/src/url-state.ts`).
+- **Main churn risk**: the route patterns are defined twice — `app/src/main.ts:20-27` (client) and `app/server.mjs:36-45` (server, for HTTP 404 status). Adding a route means editing both files with no shared source of truth. Secondarily, superseded navigations are guarded by token counters (`app/src/main.ts:53`, `app/src/pages/pokemon.ts:124-131`) rather than cancelled with `AbortController`, so in-flight fetches still complete.
+
+No deprecated or legacy-era APIs anywhere in the codebase; strict mode, `isolatedModules`, and `noUnusedLocals` are on (`app/tsconfig.json:11-14`), and the build runs a real type-check before bundling (`app/package.json:10`).
+
+```json
+{
+  "dimension": "forward-thinking",
+  "criteria": {
+    "latest_apis": {
+      "score": 5,
+      "evidence": [
+        "app/package.json:9-10 — vite ^8.3.5 and typescript ^7.0.2, both verified current stable (vite.dev/blog/announcing-vite8, March 2026; devblogs.microsoft.com/typescript/announcing-typescript-7-0, July 2026)",
+        "app/src/api.ts:9 — import.meta.env.VITE_API_BASE_URL with vite/client types, the current Vite config convention",
+        "app/src/dom.ts:33 — Element.replaceChildren, the modern API for clearing/refilling containers",
+        "app/src/format.ts:29 — Array.prototype.findLast (ES2023) for the latest English flavor text",
+        "app/server.mjs:44 — AbortSignal.timeout for the server-side existence check"
+      ],
+      "rationale": "No UI framework is involved, so this comes down to the Vite/TS toolchain and DOM platform: both are on the exact current stable major, and the code uses current DOM/JS APIs throughout. No legacy patterns anywhere."
+    },
+    "platform": {
+      "score": 4,
+      "evidence": [
+        "app/src/api.ts:133-140 — fetch + in-memory promise cache, no hand-rolled HTTP",
+        "app/src/pages/home.ts:14-38 — URLSearchParams for filter state, native <select>/<input type=search> with visible labels",
+        "app/src/components.ts:66 — loading=\"lazy\" and decoding=\"async\" on sprite images",
+        "app/src/main.ts:70-77 — navigation as a delegated document click listener over real <a href> links, so it degrades without JS",
+        "app/src/main.ts:53-57 — superseded navigations guarded by a token counter instead of AbortController; in-flight fetches are never cancelled",
+        "app/src/style.css:374 — aspect-ratio and custom properties; CSS is otherwise flat (no nesting), which is acceptable but not maximal"
+      ],
+      "rationale": "Reaches for the platform first almost everywhere; the one notable miss is using counters instead of AbortController to cancel stale requests, and the flat CSS misses modern nesting."
+    },
+    "dependencies": {
+      "score": 5,
+      "evidence": [
+        "app/package.json:8-13 — zero runtime dependencies; devDependencies are only typescript and vite",
+        "app/src/dom.ts:8-29 — a ~20-line typed element helper instead of a rendering library",
+        "app/server.mjs:1-5 — static server built on node:http, node:fs/promises, no express/sirv"
+      ],
+      "rationale": "Minimal and modern: nothing ships to the browser except the app's own code, and the two dev dependencies are both the latest stable majors."
+    },
+    "churn_resistance": {
+      "score": 4,
+      "evidence": [
+        "app/src/api.ts:24-115 — all PokeAPI resources modeled as interfaces at the boundary; pages only consume typed data",
+        "app/src/api.ts:130-145 — every HTTP call goes through get/getResource, so a new API version would touch one module",
+        "app/src/url-state.ts:1-20 — URL mutation centralized in one tiny module",
+        "app/tsconfig.json:11-14 — strict, isolatedModules, noUnusedLocals",
+        "app/src/main.ts:20-27 vs app/server.mjs:36-45 — route patterns duplicated between client router and server 404 logic; adding a route means editing both, with no shared source of truth",
+        "app/server.mjs:30 vs app/src/api.ts:9 — the window.__API_BASE_URL__ injection convention is implicitly coupled across server and client with no shared constant"
+      ],
+      "rationale": "Data access, types, config, and URL state are all behind single well-defined modules and no framework internals are relied on; the one real churn point is the route table duplicated between server and client, plus the duplicated API-base injection convention."
+    }
+  },
+  "overall": 4,
+  "findings": [
+    {
+      "severity": "medium",
+      "location": "app/server.mjs:36-45",
+      "issue": "Route patterns are duplicated between the client router (app/src/main.ts:20-27) and the server's 404-status logic; adding or renaming a route requires editing both files, and they can silently drift.",
+      "suggestion": "Extract one shared route table (patterns + resource kinds) into a module the server imports at runtime (e.g. src/routes.ts consumed by server.mjs alongside dist), so both sides derive from a single source of truth."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/main.ts:53",
+      "issue": "Stale navigations are handled with token counters (navigation in main.ts, token in pages/pokemon.ts:124-131) instead of cancelling the underlying fetch; superseded requests still consume network/API load.",
+      "suggestion": "Thread an AbortController through render/loadPage and call controller.abort() when a new navigation starts, passing its signal to fetch in api.ts."
+    },
+    {
+      "severity": "low",
+      "location": "app/server.mjs:30",
+      "issue": "The window.__API_BASE_URL__ global-injection convention is coupled by string matching between server.mjs and src/api.ts:9 with no shared constant or documented contract.",
+      "suggestion": "Give the injection a single owner (e.g. a shared key name exported from one module, or a JSON script tag the client parses), so changing the bootstrap format can't break one side silently."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/api.ts:130",
+      "issue": "The in-memory cache holds settled responses indefinitely (no TTL/eviction), fine for this data snapshot but the cache key is the raw URL, so any API_BASE_URL change at runtime would not be picked up.",
+      "suggestion": "Document the cache's lifetime assumption or key the cache on API_BASE_URL so the assumption is explicit if requirements change."
+    }
+  ],
+  "summary": "A deliberately lean, framework-free app on the exact current stable toolchain (Vite 8, TypeScript 7 native) with zero runtime dependencies and consistently current DOM/platform APIs. Data access, types, config, and URL state are each behind one well-defined module, so API or framework changes would touch few files. The main forward-looking weakness is the route table duplicated between client and server, which will drift as routes are added."
+  ,
+  "apis": [
+    { "api": "fetch", "location": "app/src/api.ts:133", "status": "current", "replacement": "" },
+    { "api": "AbortSignal.timeout", "location": "app/server.mjs:44", "status": "current", "replacement": "" },
+    { "api": "Element.replaceChildren", "location": "app/src/dom.ts:33", "status": "current", "replacement": "" },
+    { "api": "Array.prototype.findLast", "location": "app/src/format.ts:29", "status": "current", "replacement": "" },
+    { "api": "import.meta.env (Vite)", "location": "app/src/api.ts:9", "status": "current", "replacement": "" },
+    { "api": "history.scrollRestoration/pushState/replaceState", "location": "app/src/main.ts:92", "status": "current", "replacement": "" }
+  ],
+  "dependencies": [
+    { "name": "typescript", "verdict": "modern", "note": "^7.0.2, the current stable native (Go) compiler released 2026-07; used only via the tsc CLI in the build script, so the lack of a 7.0 programmatic API is not an issue here." },
+    { "name": "vite", "verdict": "modern", "note": "^8.3.5, the current stable major (Rolldown-based, released March 2026, confirmed current latest on npm); no plugins or config needed for this app." }
+  ]
+}
+```

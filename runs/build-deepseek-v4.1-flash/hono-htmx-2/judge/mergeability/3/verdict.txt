@@ -1,0 +1,135 @@
+I've completed a thorough review. Verified versions: `hono@4.13.14` and `@hono/node-server@2.1.5` are exactly the current stable releases (checked npm/GitHub, 2026-10), `htmx.org@2.0.11` matches htmx 2 semantics. I confirmed the htmx trigger/`serveStatic` idioms against the current htmx docs and the `@hono/node-server` README.
+
+## Review
+
+**What's solid.** Routing uses Hono exactly as the docs show (`c.req.param/query/header`, `c.html`, `app.notFound`, `app.onError` with the v4 `(err, c)` signature) — `app/server.mjs:49-136`. Dependency versions are pin-current. The htmx usage is genuinely idiomatic: `hx-target`/`hx-swap="outerHTML"` partials gated on an `HX-Target` check (`server.mjs:53-54`, `server.mjs:119-121`), a `HX-Push-Url` response header that wins over the attribute so a clamped page number lands in the URL (`server.mjs:60-62`), `delay:300ms` debounce matching the spec (`views.mjs:103`), and the target-gating conveniently also protects against the classic history-restore/partial trap. Request coalescing via a `pending` promise map with error-side cache invalidation (`api.mjs:33-67`) and the self-clearing `memoize` (`api.mjs:134-145`) are careful. Splitting into `api.mjs` / `render.mjs` / `views.mjs` is a reasonable layering for a no-build htmx app.
+
+**The bug.** In the moves tables, the sortable column keys `move` and `type` (`app/src/views.mjs:326-327`) don't exist on the row objects, which have `moveName`/`moveDisplay`/`typeName`/`typeDisplay` (`app/src/views.mjs:427-436`). `sortRows` then hits the both-missing early return, which ignores `direction` entirely (`app/src/views.mjs:283-284`) — so clicking the **Move** or **Type** header is a silent no-op that stays in default order, while the header gets `aria-sort="ascending"/"descending"` (`views.mjs:346`), lying to assistive tech. Level/Power/Accuracy/PP/Category sort correctly; Move and Type never do.
+
+**Other issues.** `versionGroupCache` stores the raw promise and never clears rejections (`api.mjs:180-186`) — unlike `memoize`, one transient API error permanently 500s that version group until restart. Three dead exported helpers (`views.mjs:596-614`) duplicate the live route orchestration in `server.mjs:73-93` (plus unused `typeDisplayName` at `api.mjs:192`) — the tell-tale sign of an unsettled data/view boundary. Each sort click re-runs the entire page data pipeline — species, default Pokémon, evolution chain, all move details — to re-render one table (`server.mjs:95-115` → `views.mjs:556-571`). Static assets are hand-served from boot-time `readFileSync` with no `Cache-Control` (`server.mjs:28-46`) instead of `serveStatic` from `@hono/node-server/serve-static`, so the ~50KB htmx bundle refetches on every page load. `onError` serves the "Not found" page with status 500 (`server.mjs:138-141`). `fetchJson` has no timeout or AbortController (`api.mjs:43-58`). And there is not a single comment in 1,557 LOC.
+
+Verdict: sound architecture and current, idiomatic framework use, but one real silent bug in the flagship interactive feature plus dead code and some home-grown plumbing mean a round of changes before merge.
+
+```json
+{
+  "dimension": "mergeability",
+  "criteria": {
+    "idiomatic": {
+      "score": 4,
+      "evidence": [
+        "app/server.mjs:49-136 — routing, c.req.param/query/header, c.html, notFound/onError all match current Hono 4 docs",
+        "app/package.json:14-16 — hono 4.13.14 and @hono/node-server 2.1.5, exactly current stable releases",
+        "app/src/views.mjs:100-107 — idiomatic htmx: hx-get/hx-target/hx-swap outerHTML/hx-push-url, input changed delay:300ms per spec",
+        "app/server.mjs:60-62 — HX-Push-Url response header used correctly to push the clamped page URL",
+        "app/server.mjs:28-46 — hand-rolled static serving (readFileSync + c.body) instead of serveStatic from @hono/node-server/serve-static",
+        "app/src/render.mjs:16-42 — raw string templates with manual escapeHtml rather than hono/jsx auto-escaping"
+      ],
+      "rationale": "Hono itself is used exactly per the current stable docs and versions are pin-current, and the htmx integration (target-checked partials, HX-Push-Url, debounce) is textbook; the deductions are the hand-rolled static file routes where serveStatic exists and manual HTML escaping where the framework offers JSX."
+    },
+    "correctness_risks": {
+      "score": 3,
+      "evidence": [
+        "app/src/views.mjs:326-327 — sort keys 'move'/'type' don't exist on rows (fields are moveName/moveDisplay/typeName/typeDisplay, views.mjs:427-436)",
+        "app/src/views.mjs:283-284 — both-missing early return ignores direction, so sorting by Move/Type silently stays in default order",
+        "app/src/views.mjs:346 — the no-op header still gets aria-sort=ascending/descending, lying to assistive tech",
+        "app/src/api.mjs:180-186 — versionGroupCache caches the raw promise; a rejection is cached permanently (memoize at api.mjs:134-145 clears, this doesn't)",
+        "app/src/api.mjs:43-58 — fetchJson has no timeout/AbortController; a hung upstream hangs requests forever",
+        "app/server.mjs:138-141 — onError serves the 'Not found' page with status 500, conflating errors with 404s",
+        "app/server.mjs:43-46 — static responses carry no Cache-Control, so ~50KB htmx.min.js refetches every page load"
+      ],
+      "rationale": "One real, silent bug in a core interactive feature (Move/Type column sort is a no-op while aria-sort claims otherwise) plus a permanently-cached-rejection cache and no fetch timeout; the data layer is otherwise careful (coalesced fetches, rejection-safe memoize, 404 caching)."
+    },
+    "global_abstractions": {
+      "score": 3,
+      "evidence": [
+        "app/src/views.mjs:596-614 — dead renderMovePageByName/renderAbilityPageByName/renderTypePageByName duplicate the live orchestration in server.mjs:73-93",
+        "app/src/api.mjs:192 — unused typeDisplayName; api.mjs mixes fetching, formatting helpers and two cache regimes",
+        "app/src/views.mjs:404-433 — views.mjs pulls api getters directly, so data assembly lives in the view module alongside rendering",
+        "app/src/api.mjs:31-32 — hidden module-level cache/pending state with no TTL or eviction",
+        "app/src/render.mjs:44-90 — small, well-bounded render primitives (a genuinely good boundary)"
+      ],
+      "rationale": "The four-module split is sensible and render.mjs earns its keep, but the views module mixes data assembly with rendering, the dead *ByName helpers show an unsettled server/view boundary, and api.mjs is a grab-bag with hidden module-level cache state that will need untangling as the app grows."
+    },
+    "readability": {
+      "score": 3,
+      "evidence": [
+        "app/src/views.mjs:1-624 — 624 lines mixing page data loading, sorting logic and rendering",
+        "app/src/views.mjs:596-614 — dead exports sit next to live code, inviting 'which path is real?' confusion",
+        "app/src/api.mjs:1-45 — clear naming and small pure helpers (humanize, formatDex, englishName)",
+        "app/server.mjs:1-144 — routes are short, uniform and easy to scan",
+        "app/ (measured commentLines: 0) — zero comments across 1,557 LOC; nothing explains the cache regime, partial-response contract or sort-key mapping"
+      ],
+      "rationale": "Naming is consistent, functions are small and the route table scans well, but no comment anywhere explains the non-obvious choices (cache invariants, HX-Target partial contract, sort keys), and views.mjs's dual responsibility plus dead code makes a first read slower than it should be."
+    },
+    "review_cost": {
+      "score": 3,
+      "evidence": [
+        "app/src/views.mjs:326-327 — sort-key mismatch must be fixed before merge (spec: every column sortable)",
+        "app/src/api.mjs:180-186 — rejection handling for versionGroupCache needs the memoize pattern",
+        "app/src/views.mjs:596-614 + app/src/api.mjs:192 — dead code to delete",
+        "app/server.mjs:28-46 — swap to serveStatic and add Cache-Control headers",
+        "app/server.mjs:136-141 — notFound/onError otherwise fine as-is"
+      ],
+      "rationale": "Approve-able structure with one must-fix bug, one cache fix and a dead-code cleanup — a single round of concrete changes, not rework; everything else is nits."
+    }
+  },
+  "overall": 3,
+  "findings": [
+    {
+      "severity": "high",
+      "location": "app/src/views.mjs:326",
+      "issue": "Sortable column keys 'move' and 'type' don't exist on the row objects (which use moveName/moveDisplay/typeName/typeDisplay, views.mjs:427-436), so sorting by the Move or Type header hits the both-missing branch in sortRows (views.mjs:283-284), which ignores direction — the table silently stays in default order while the header gets aria-sort=ascending/descending (views.mjs:346).",
+      "suggestion": "Map column keys to row fields (e.g. key 'move' → moveDisplay, 'type' → typeDisplay), or rename row fields to match; add a guard that ignores unknown sortKey values so aria-sort can't lie."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/api.mjs:180",
+      "issue": "versionGroupCache stores the raw promise and never evicts on rejection; one transient API failure permanently 500s that version group until restart (unlike memoize at api.mjs:134-145, which clears on error).",
+      "suggestion": "Reuse the rejection-clearing memoize pattern, or delete the cache entry when the promise rejects."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/views.mjs:596",
+      "issue": "Dead exports renderMovePageByName/renderAbilityPageByName/renderTypePageByName (and unused typeDisplayName at api.mjs:192) duplicate the data orchestration that server.mjs:73-93 performs inline — two near-identical copies, one of which is never called.",
+      "suggestion": "Delete the dead helpers (or make the routes use them and delete the inline copies), so one canonical place assembles data per page."
+    },
+    {
+      "severity": "medium",
+      "location": "app/server.mjs:95",
+      "issue": "Each sort click re-runs the entire page pipeline — getSpecies, default Pokémon, evolution chain, all move details and version groups (views.mjs:556-571) — to re-render a single table, relying entirely on the process cache to keep it cheap.",
+      "suggestion": "Either sort client-side for already-rendered tables, or cache the computed movesData keyed by species+game so the sort endpoint is a pure re-render."
+    },
+    {
+      "severity": "low",
+      "location": "app/server.mjs:28",
+      "issue": "Static assets are hand-served via boot-time readFileSync and c.body with hardcoded content types, instead of serveStatic from @hono/node-server/serve-static, and responses carry no Cache-Control so the ~50KB htmx bundle refetches on every page load.",
+      "suggestion": "Use serveStatic({ root: './public' }) and add Cache-Control headers for hashed/immutable assets."
+    },
+    {
+      "severity": "low",
+      "location": "app/server.mjs:138",
+      "issue": "onError logs the error but serves the 'Not found' page body with status 500, conflating server errors with 404s for both users and monitoring.",
+      "suggestion": "Render a distinct error page ('Something went wrong') for 500s."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/api.mjs:43",
+      "issue": "fetchJson has no timeout or AbortController, so a hung upstream hangs requests indefinitely and can pile up the pending map.",
+      "suggestion": "Wrap fetch in AbortSignal.timeout(...) and treat timeouts as retriable errors."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/api.mjs:31",
+      "issue": "The runtime cache is an unbounded Map with no TTL or eviction while the spec says to treat the API as a live service whose data can change at any moment (spec-allowed, but permanently stale once warm).",
+      "suggestion": "Add a simple TTL or a bounded LRU, and document the intended staleness window."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/views.mjs:1",
+      "issue": "views.mjs is 624 lines mixing data assembly (getHomeData, getPokemonPageData, getMovesData) with rendering, and the whole codebase has zero comments (measured commentLines: 0) — the cache regime, HX-Target partial contract and sort-key mapping are all undocumented invariants.",
+      "suggestion": "Split data assembly from rendering, and add short comments on the non-obvious invariants (partial-response gating, cache behavior)."
+    }
+  ],
+  "summary": "A well-structured, current-idiom Hono + htmx app on pin-current dependency versions with genuinely careful htmx partial handling and request coalescing. Its one must-fix defect is that sorting by the Move or Type table header is a silent no-op that still sets aria-sort, caused by sort keys that don't match row field names. Merge after fixing that bug, the permanently-cached-rejection version-group cache, and deleting the duplicated dead route helpers — the rest is polish."
+}
+```

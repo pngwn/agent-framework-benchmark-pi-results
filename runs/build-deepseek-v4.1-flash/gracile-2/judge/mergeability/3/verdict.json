@@ -1,0 +1,129 @@
+{
+  "dimension": "mergeability",
+  "criteria": {
+    "idiomatic": {
+      "score": 4,
+      "evidence": [
+        "app/server.js:1-19 — near-verbatim copy of Gracile's official 'Minimal server (Express)' starter (nodeAdapter + getClientBuildPath), adapted for $PORT",
+        "app/src/document.js:1-14 — uses documented server-only html from '@gracile/gracile/server-html' and hashed stylesheet via import.meta.url",
+        "app/src/document.js:28 — required <route-template-outlet> placeholder, exactly as current docs prescribe",
+        "app/src/routes/(home).js:33-37 — defineRoute({ handler: { GET }, document, template }) with props flowing handler→template per docs",
+        "app/src/routes/(home).client.js:1 — sibling .client.js auto-bundled per route (the documented way to attach client scripts; confirmed in dist/server/entrypoint.js)",
+        "app/package.json:13 — pins @gracile/gracile 0.11.0, the current stable release",
+        "app/src/routes/(home).js:15 — home-grown GRACILE_BUILD env gate (undocumented pattern) instead of the framework's prerender/output config"
+      ],
+      "rationale": "Reads like the framework's own examples: document/route/client-script conventions, Express adapter and version pin all match current docs. The only non-doc pattern is the duplicated build-time env gate, which is harmless but home-grown."
+    },
+    "correctness_risks": {
+      "score": 3,
+      "evidence": [
+        "app/src/routes/pokemon/[name].js:272-275 — any error (network, 500) becomes HTTP 404 'Not found'; same conflation in moves/[name].js:47, abilities/[name].js:45, types/[name].js:71",
+        "app/src/routes/404.js:8 — catch-all 404 route responds with status 200 (no responseInit.status)",
+        "app/src/routes/(home).client.js:44 — on failed/non-ok refresh the UI silently stays stale while the URL was already updated",
+        "app/src/lib/api.js:3 — unbounded module-level cache Map; keyed by URL, never evicts successful entries (bounded in practice only because the API snapshot is fixed)",
+        "app/src/routes/(home).client.js:38 — requestNumber race guard correctly discards stale debounced responses",
+        "app/src/lib/api.js:41 — rejected promises evicted from cache, avoiding poison-cache stalls"
+      ],
+      "rationale": "Races and escaping are handled well (lit templates, race guard, cache eviction), but the error→404 conflation, a 200-status catch-all, and the silently-stale client refresh are real fragilities the tests don't catch."
+    },
+    "global_abstractions": {
+      "score": 3,
+      "evidence": [
+        "app/src/lib/api.js:1-247 — single 247-line god module: fetch client + cache + humanize/englishName/dexNumber display helpers + typeClassName (a CSS concern) + species/type/generation indexes; imported by every route",
+        "app/src/lib/api.js:100-101 — typeClassName (presentation/CSS) lives in the data module, so components.js:11 depends on api.js for a class name",
+        "app/src/routes/404.js:14 — 'Not found' markup duplicated 5× (also pokemon/[name].js:287, abilities/[name].js:58, moves/[name].js:60, types/[name].js:84)",
+        "app/src/routes/(home).js:15 — BUILDING() helper duplicated verbatim in 6 route files",
+        "app/src/routes/(home).client.js:1 — client scripts import nothing from src/lib, so the server/client boundary is clean",
+        "app/src/lib/components.js:6-52 — pokemonCard/typeBadge components are small, shared and earn their keep"
+      ],
+      "rationale": "api.js is a locally-reasonable module that everything now funnels through and that mixes data, formatting and styling concerns — it will need untangling before it grows; the repeated not-found template and BUILDING gate are the same duplication disease. Boundaries between server and client code are, to the app's credit, clean."
+    },
+    "readability": {
+      "score": 4,
+      "evidence": [
+        "app/src/routes/** — route files mirror the URL tree exactly (pokemon/[name].js, types/index.js, (home).js), matching Gracile's routing docs",
+        "app/src/routes/pokemon/[name].js:160-281 — GET handler is long (~120 lines) but linear and well-factored into buildEvolutionTree/loadMoveRows/moveTable helpers",
+        "app/src/document.css:1-499 — single global stylesheet organised with section comments (/* Filters */, /* Pokémon cards */, /* Moves */)",
+        "app/src/lib/api.js:53-55 — getRecordByUrl has a dead conditional (both branches identical), a small readability wart",
+        "app/src/features/ — empty directory left in the tree",
+        "whole repo — exactly one comment; naming is otherwise descriptive and consistent across files"
+      ],
+      "rationale": "A new teammate finds their way in minutes: file layout mirrors URLs, helpers are well named, CSS is sectioned. Rough spots: the long pokemon handler, the dead conditional, the empty features/ dir, and near-zero explanatory comments for non-obvious choices like the BUILDING gate."
+    },
+    "review_cost": {
+      "score": 3,
+      "evidence": [
+        "app/src/routes/pokemon/[name].js:272-275 — reviewer would ask: distinguish 404 from other failures before merging",
+        "app/src/routes/404.js:8 — one-line fix: set responseInit.status = 404",
+        "app/src/lib/api.js — reviewer would ask to split fetch/caching from formatting/domain indexes",
+        "app/src/routes/404.js:14 — reviewer would ask to extract the shared not-found template",
+        "app/src/routes/(home).client.js:44 — reviewer would ask for user-visible feedback (or revert of URL) on failed refresh"
+      ],
+      "rationale": "No structural rework needed, but there is a definite round of changes: error-status handling, the api.js split, the not-found dedup, and the 404 status — all small, all things a careful reviewer would request before approving."
+    }
+  },
+  "overall": 3,
+  "findings": [
+    {
+      "severity": "medium",
+      "location": "app/src/routes/pokemon/[name].js:274",
+      "issue": "The catch block sets responseInit.status = 404 for every failure, so API/network/500 errors render a 'Not found' page with a 404 status; the same pattern is in moves/[name].js:47, abilities/[name].js:45 and types/[name].js:71.",
+      "suggestion": "Check error.status === 404 for the not-found path; otherwise log and set 500 with a distinct server-error template."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/lib/api.js:1",
+      "issue": "247-line god module mixing the fetch client, global cache, display formatting, CSS class naming and domain indexes; every route depends on it.",
+      "suggestion": "Split into api/client.js (fetch + cache), api/pokemon.js (indexes/maps), and lib/format.js (humanize, englishName, dexNumber, displayValue); move typeClassName into components.js."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/routes/404.js:8",
+      "issue": "The catch-all 404 route serves its page with HTTP 200.",
+      "suggestion": "Use the handler's responseInit parameter to set status 404, as the other routes already do."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/routes/404.js:14",
+      "issue": "The 'Not found' template is duplicated five times across routes (404.js:14, pokemon/[name].js:287, abilities/[name].js:58, moves/[name].js:60, types/[name].js:84).",
+      "suggestion": "Extract a shared notFoundTemplate() into src/lib/components.js and reuse it from the handlers' notFound branch."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/routes/(home).client.js:44",
+      "issue": "When the refresh fetch fails or returns non-ok, the old results stay on screen while the URL has already been updated — visible state and address bar disagree.",
+      "suggestion": "On failure, either restore the previous URL/history entry or surface an inline error message; at minimum retry or fall back to a full navigation."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/routes/(home).js:15",
+      "issue": "The undocumented GRACILE_BUILD env gate is duplicated in all six route files, and the build output (dist/server/entrypoint.js) shows server-mode builds don't invoke handlers, so it may be entirely dead code.",
+      "suggestion": "Hoist a single isBuild guard into src/lib/api.js (or verify it's needed and document why in a comment)."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/lib/api.js:40",
+      "issue": "Module-level response cache never evicts successful entries; safe only because the API is a fixed snapshot — against the live API the spec describes, memory grows with distinct URLs forever.",
+      "suggestion": "Cap the Map (simple LRU) or add a TTL, keeping the rejected-promise eviction that already exists."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/lib/api.js:53-55",
+      "issue": "getRecordByUrl has a dead conditional — both branches return getJson(url).",
+      "suggestion": "Reduce to a one-liner export, or make the absolute-URL branch meaningful (e.g. rewrite pokeapi.co URLs to the configured API base)."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/features/",
+      "issue": "Empty directory committed in the source tree.",
+      "suggestion": "Delete it (or move components.js here if the features/ convention is intended)."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/routes/pokemon/[name].js:110",
+      "issue": "All move table headers render aria-sort=\"none\" initially even though the Level Up table is server-sorted by level, so the initial sort state is misreported to assistive tech.",
+      "suggestion": "Mark the initially-sorted column (Level for level-up tables, Move otherwise) with aria-sort=\"ascending\" in the server render."
+    }
+  ],
+  "summary": "This is a solidly idiomatic Gracile 0.11 app: document/route/client-script conventions, the Express adapter, and the version pin all match the framework's current docs and starters, and correctness fundamentals (escaping, race guards, cache eviction) are handled. The main debt is structural — a god-module api.js, a five-fold duplicated not-found template, and an error handler that conflates every failure with 404 — plus a 200-status catch-all and a silently-stale client refresh. Mergeable after one round of small, mechanical changes; nothing requires rework."
+}

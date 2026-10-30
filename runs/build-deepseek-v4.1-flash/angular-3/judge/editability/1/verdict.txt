@@ -1,0 +1,174 @@
+I have a complete picture of the codebase and verified current Angular 22 idioms (`@Service()` is the current stable form per angular.dev migration docs, `resource()` is stable as of v22, zoneless is the default — no zone.js in deps). Here is my review of the editability dimension.
+
+```json
+{
+  "dimension": "editability",
+  "criteria": {
+    "removability": {
+      "score": 4,
+      "evidence": [
+        "app/src/app/app.routes.ts:18-20 — abilities route is one self-contained lazy-loaded entry",
+        "app/src/app/pages/ability-page.ts — whole feature in one file, deletable",
+        "app/src/app/app.ts:13-15 — nav has no Abilities link, so no shell edit needed",
+        "app/src/app/pages/pokemon-page.ts:128-143 — Abilities section is the only other consumer of the route",
+        "app/src/app/shared/pokemon-card.ts:29-31,39 — card carries an ability-specific `hiddenAbility` input",
+        "app/src/styles.css:219 — `.hidden-ability` CSS lives in the single global stylesheet, would be left behind",
+        "app/src/app/core/pokedex-data.ts:220-224 — AbilityRecord model + getAbility live in the shared data service"
+      ],
+      "rationale": "Dropping Abilities is close to 'delete a page and a route', but the feature's model, a card input and a CSS rule are scattered across the shared data service, shared card component and the global stylesheet, so full removal touches ~5 small spots."
+    },
+    "changeability": {
+      "score": 3,
+      "evidence": [
+        "app/src/app/core/poke-api.ts:28-30 — sprite URL pattern is centralized in `spriteUrl(pokemonId)`",
+        "app/src/app/pages/move-page.ts:98 — but each page re-exposes it via its own `spriteUrl` lambda and passes a *species* id as a *pokemon* id",
+        "app/src/app/pages/ability-page.ts:63 — same duplicated lambda",
+        "app/src/app/pages/type-page.ts:95 — same duplicated lambda",
+        "app/src/app/pages/home-page.ts:178 — home has its own variant: `front_default ?? api.spriteUrl(entry.id)`",
+        "app/src/app/pages/pokemon-page.ts:216-220 — only place that actually resolves species→default variety, so a Deoxys-style fix can't just be dropped into PokeApi and cover every list",
+        "app/src/app/core/helpers.ts:56,68 — `isAlternateForm` and `displayValue` exist but pages inline `id > 10_000` (move-page.ts:112, ability-page.ts:76, type-page.ts:112) and their own `display` lambdas (move-page.ts:41, move-table.ts:127)"
+      ],
+      "rationale": "A pure URL-pattern fix lands in one place (PokeApi.spriteUrl) and covers move/ability/type cards; but a fix that must resolve a species' default Pokémon, or any change to card-list shaping, has to be repeated across four page loaders, and the shared helpers that should own that logic are dead code."
+    },
+    "coupling": {
+      "score": 4,
+      "evidence": [
+        "app/src/app/shared/pokemon-card.ts:35-40 — card is a pure input-driven component with no service knowledge, a clean seam",
+        "app/src/app/core/poke-api.ts + pokedex-data.ts — pages depend only on the narrow data-service interface",
+        "app/server.mjs vs app/src/core/runtime-config.ts + index.html:9-11 — server and client are cleanly separated via a runtime-config placeholder",
+        "app/src/app/pages/home-page.ts:133,196-198 — shadow `view` signal copies resource output into local state to survive reloads, a small smell",
+        "app/src/app/pages/pokemon-page.ts:286 — `moveTables` loader reads `this.base.value()!` from a sibling resource, cross-resource coupling",
+        "app/src/app/pages/pokemon-page.ts:344-353 — effect + setTimeout pokes the DOM for the #moves fragment instead of a routing-level mechanism"
+      ],
+      "rationale": "Components depend on narrow services and explicit inputs, and the server/client split is exemplary; the tangles are local — home-page's shadow signal, the nested-resource read in pokemon-page, and direct DOM scrolling."
+    },
+    "abstraction_design": {
+      "score": 3,
+      "evidence": [
+        "app/src/app/shared/move-table.ts:118-124 — MoveTable generalizes over method names and column sort keys instead of boolean flags; stretches well",
+        "app/src/app/core/pokedex-data.ts:74-134 — 'list + index' abstraction handles species/types/generations uniformly and is trivially extendable",
+        "app/src/app/pages/move-page.ts:105-118 — the pokemon-ref→species-card pipeline (idFromUrl, >10_000 filter, dedupe, humanize, sort, sprite) is copied verbatim",
+        "app/src/app/pages/type-page.ts:105-120 — same ~15 lines again",
+        "app/src/app/pages/ability-page.ts:70-84 — third near-copy, differing only by the hidden flag",
+        "app/src/app/core/pokedex-data.ts:88-93 — VersionGroupRecord carries a redundant `version_group` field duplicating `name`"
+      ],
+      "rationale": "The data layer, card component and move table are designed around the app's real variation and stretch nicely, but the one abstraction the app actually needed three times — turning pokemon references into a sorted species card list — was copy-pasted into each page instead of lifted into PokedexData or a card-list component."
+    }
+  },
+  "overall": 4,
+  "findings": [
+    {
+      "severity": "medium",
+      "location": "app/src/app/pages/move-page.ts:105-118",
+      "issue": "The pokemon-ref→species-card pipeline (alternate-form filter, dedupe, species lookup, humanize, sort, sprite) is duplicated across three loaders (also ability-page.ts:70-84 and type-page.ts:105-120), so any card-list behavior change is a 3-4 file edit.",
+      "suggestion": "Lift it into PokedexData or a shared helper, e.g. `speciesCardsFromRefs(refs: NamedRef[], species: SpeciesEntry[])`, returning the card entries the pages map over; ability-page's hidden flag can be a separate lookup it composes on top."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/app/core/helpers.ts:56,68",
+      "issue": "`isAlternateForm` and `displayValue` are dead code — every page re-inlines `id > 10_000` and its own `display` lambda (move-page.ts:41,112; ability-page.ts:76; type-page.ts:112; move-table.ts:127).",
+      "suggestion": "Delete the dead helpers or (better) actually use them, so the alternate-form threshold and the em-dash rule each have exactly one definition."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/app/pages/pokemon-page.ts:216-220,237 and app/src/app/core/poke-api.ts:28",
+      "issue": "`spriteUrl(pokemonId)` is fed species ids at five call sites; the invariant 'species id == default pokemon id' is implicit and pokemon-page.ts:216-220 is the only place that resolves varieties, so a Deoxys-style bug would need per-page fixes.",
+      "suggestion": "Name the invariant: have pages pass a `SpeciesEntry` (or add a `defaultPokemonSpriteUrl(species)` helper next to the existing variety-resolution logic) so the mapping lives in one place."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/app/pages/home-page.ts:133,196-198",
+      "issue": "A shadow `view` signal mirrors the resource's value via an effect to keep the previous render during reloads — a hand-rolled workaround for resource semantics that duplicates state.",
+      "suggestion": "Use `linkedSignal` or read the resource's retained value with status guards; either removes the duplicated state and the effect."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/app/shared/move-table.ts:31-44",
+      "issue": "Both the `<th>` and its inner `<button>` carry `(click)` handlers (each with stopPropagation) for every column — duplicated handlers, and a future edit that removes one stopPropagation toggles sort twice.",
+      "suggestion": "Keep a single click handler per column (the button alone is the right accessible target)."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/app/pages/pokemon-page.ts:286",
+      "issue": "`moveTables` loader dereferences `this.base.value()!` from the sibling `base` resource, coupling two resources through an untracked read inside a loader.",
+      "suggestion": "Pass the needed data through `params` (base already exposes hasValue) or merge into a single resource so the dependency is explicit."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/styles.css (all 540+ lines global)",
+      "issue": "All styles are global with no component scoping; feature-specific rules like `.hidden-ability` (styles.css:219) aren't co-located with the components that use them, so deleting a page silently leaves dead CSS behind.",
+      "suggestion": "Move per-feature styles into the owning component's `styles` (Angular's default encapsulation) and keep only tokens/base in the global stylesheet."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/app/pages/pokemon-page.ts:344-353",
+      "issue": "An effect plus setTimeout manually scrolls to #moves when the URL has a fragment, reading global window state from the component.",
+      "suggestion": "Handle anchors at the routing level (ViewportScroller / fragment handling in the router config) rather than in a component effect."
+    }
+  ],
+  "summary": "A clean, current-Angular-22 architecture: resource-based pages over a narrow PokeApi/PokedexData seam, an input-only card component, lazy routes and an exemplary server/client split with runtime config injection. The one systematic weakness is that the pokemon-ref→card-list shaping was copy-pasted into each page loader, leaving helpers like isAlternateForm/displayValue as dead code and making list-level changes N-file edits. Everything else — removability, routing, data-source changes — is close to ideal; the fix is a small, mechanical extraction.",
+  "scenarios": [
+    {
+      "change": "Remove the Abilities pages and every link to them",
+      "files": [
+        "app/src/app/app.routes.ts",
+        "app/src/app/pages/ability-page.ts",
+        "app/src/app/pages/pokemon-page.ts",
+        "app/src/app/shared/pokemon-card.ts",
+        "app/src/app/core/pokedex-data.ts",
+        "app/src/styles.css"
+      ],
+      "difficulty": 4,
+      "notes": "Delete route + page, cut the Abilities section in pokemon-page.ts:128-143; no nav link exists. Full cleanliness also means removing AbilityRecord/getAbility from the shared data service, the hiddenAbility input from the shared card, and .hidden-ability from the global stylesheet — all small, all findable by grep, but scattered."
+    },
+    {
+      "change": "Fix wrong sprites for species whose default Pokémon has a different name (e.g. Deoxys)",
+      "files": [
+        "app/src/app/core/poke-api.ts",
+        "app/src/app/pages/move-page.ts",
+        "app/src/app/pages/ability-page.ts",
+        "app/src/app/pages/type-page.ts",
+        "app/src/app/pages/home-page.ts",
+        "app/src/app/pages/pokemon-page.ts"
+      ],
+      "difficulty": 3,
+      "notes": "If it's just the URL pattern, PokeApi.spriteUrl (poke-api.ts:28) is the single fix and covers every list. But the mapping 'species id → default Pokémon' is implicit at five call sites (each page passes a species id to a method named for pokemon ids); a fix requiring variety resolution must be replicated per loader, since only pokemon-page.ts:216-220 knows how to resolve varieties."
+    },
+    {
+      "change": "Add sorting by name to every list of Pokémon cards",
+      "files": [
+        "app/src/app/pages/home-page.ts",
+        "app/src/app/pages/move-page.ts",
+        "app/src/app/pages/ability-page.ts",
+        "app/src/app/pages/type-page.ts"
+      ],
+      "difficulty": 2,
+      "notes": "Four independent loaders each build and sort their own card array (move-page.ts:118, ability-page.ts:83, type-page.ts:120, home-page.ts:153-155), so the same comparator is written four times — and home's sort is on the filtered species list, so its edit looks different from the other three. The shared PokemonCard component itself needs no change."
+    },
+    {
+      "change": "Add an Items section (/items, /items/:name) shaped like Moves",
+      "files": [
+        "app/src/app/app.routes.ts",
+        "app/src/app/core/pokedex-data.ts",
+        "app/src/app/pages/item-list-page.ts (new, modeled on type-list-page.ts)",
+        "app/src/app/pages/item-page.ts (new, modeled on move-page.ts)",
+        "app/src/styles.css"
+      ],
+      "difficulty": 3,
+      "notes": "The data layer is the reusable seam: add getItems/getItem to PokedexData and the PokeApi cache, helpers, NotFound, section-card/layout CSS and the title-effect pattern all carry over. But the ~150-line page scaffold (resource + params + data interface + title effect + template) is a per-page pattern, so roughly the whole page body is copied from move-page/type-list-page rather than composed from shared pieces."
+    },
+    {
+      "change": "Change the API base URL and caching rules",
+      "files": [
+        "app/server.mjs",
+        "app/src/index.html",
+        "app/src/app/core/runtime-config.ts",
+        "app/src/app/core/poke-api.ts",
+        "app/src/app/core/pokedex-data.ts"
+      ],
+      "difficulty": 3,
+      "notes": "Base URL is known in four places, but the flow is clean and one-directional: env var (server.mjs:12) → injected placeholder (index.html:10) → read once (runtime-config.ts:12-13) → consumed only by PokeApi. Caching is split in two: raw response cache in poke-api.ts:14-25 and memoized list/index promises in pokedex-data.ts:92-134, so adding TTL or invalidation means reworking both layers, and the duplicate default 'http://localhost:9000' appears in both server.mjs and runtime-config.ts."
+    }
+  ]
+}
+```

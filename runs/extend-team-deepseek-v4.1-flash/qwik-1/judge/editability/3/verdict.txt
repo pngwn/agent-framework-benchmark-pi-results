@@ -1,0 +1,126 @@
+I've reviewed the full app. Framework check: the app pins `@builder.io/qwik ^1.20.3` (released 2026-10-25), which is the current stable line — Qwik 2.0 is still at RC. Every API in use (`routeLoader$`, `useTask$`, `useSignal`, `useComputed$`, `preventdefault:submit`, `resolveValue` in `head`, `status(404)`) is the current recommended Qwik City pattern; nothing deprecated.
+
+The architecture is a clean three-layer split: `lib/api.ts` (transport + cache), `lib/data.ts` (per-page server data builders), thin route components over reusable `components/`. The main editability drag is that Pokémon `Card` objects are constructed in three separate places inside `data.ts`, so anything that touches cards (sprites, sorting, extra fields) needs multiple edits even though it's all one file.
+
+```json
+{
+  "dimension": "editability",
+  "criteria": {
+    "removability": {
+      "score": 4,
+      "evidence": [
+        "app/src/routes/abilities/[name]/index.tsx:1-34 — the entire Abilities feature is one route file, self-contained",
+        "app/src/routes/layout.tsx:17-27 — nav has no Abilities link, so no nav edit needed",
+        "app/src/routes/pokemon/[name]/index.tsx:110-118 — the only cross-reference is the Abilities section on the Pokémon page",
+        "app/src/lib/data.ts:315-330 — abilityPage would become dead code and must be removed separately"
+      ],
+      "rationale": "Deleting the route directory gets you most of the way; the only entanglement is the spec-mandated Abilities section on the Pokémon page and the paired `abilityPage` helper, all grep-able with one search for 'abilit'."
+    },
+    "changeability": {
+      "score": 4,
+      "evidence": [
+        "app/src/lib/data.ts:23 — spriteUrl is the single sprite-URL constructor for two of three card sites",
+        "app/src/lib/data.ts:81 — cardsForPokemon builds cards for move/ability/type pages",
+        "app/src/lib/data.ts:139-140 — homePage builds cards separately (duplicate construction)",
+        "app/src/lib/data.ts:432 — teamPage builds a third card variant using pokemon.sprites.front_default instead of spriteUrl",
+        "app/src/lib/format.ts:1-46 — humanize/dexNumber/flavor helpers centralized, one obvious home for text fixes"
+      ],
+      "rationale": "Most page-level fixes land in exactly one function per page (homePage/pokemonPage/movePage...), and text formatting is fully centralized. But the sprite-fix scenario shows the card shape is built in three places in one file, so a card-level fix is two or three edits rather than one."
+    },
+    "coupling": {
+      "score": 4,
+      "evidence": [
+        "app/src/lib/api.ts:1-74 — transport and caching isolated behind get/find; nothing else knows about fetch or the cache",
+        "app/src/lib/data.ts:1-3 — 'Server only' module comment; routes only consume the returned plain objects",
+        "app/src/lib/team.ts:36-48 — cookie DOM code deliberately kept out of the server-only module, with a comment explaining why",
+        "app/src/components/ui.tsx:4 — components import Card/EvolutionNode types from lib/data (type-only, erased at build, but couples component types to the server module)",
+        "app/src/routes/layout.tsx:5-8 — cache-control policy declared once for all pages"
+      ],
+      "rationale": "Layering is genuinely clean: routes depend on narrow, serializable page objects; server/client state (the team cookie) is explicit and documented. Minor tangles: ui components typing themselves off the server data module, and data.ts being a shared god module every route imports from."
+    },
+    "abstraction_design": {
+      "score": 4,
+      "evidence": [
+        "app/src/components/ui.tsx:35-42 — CardList/PokemonCard reused by home, moves, abilities and types pages",
+        "app/src/components/move-table.tsx:1-30 — MoveTable is a generic sortable table driven by data, no per-page copy",
+        "app/src/components/ui.tsx:4-33 — Section/TypeBadge small composable primitives; TypeBadge's `link?: boolean` is mild flag creep",
+        "app/src/lib/data.ts:74-83 — cardsForPokemon already models the real variation (extra callback for hidden-ability flagging) instead of duplicating filtering",
+        "app/src/routes/moves/[name]/index.tsx:5-33 — route skeleton (loader/status 404/NotFound/head) is ~30 lines that would be copied for an Items section"
+      ],
+      "rationale": "The components stretch well: an Items page would reuse Section, TypeBadge, CardList, orDash, pageTitle and the loader pattern, copying only the thin route file and adding an itemPage builder. Cost: the per-route boilerplate is inherently duplicated Qwik City code, and card construction (the app's one shared data shape) isn't abstracted to a single factory."
+    }
+  },
+  "overall": 4,
+  "findings": [
+    {
+      "severity": "medium",
+      "location": "app/src/lib/data.ts:81",
+      "issue": "Pokémon Card objects are constructed in three places (cardsForPokemon:81, homePage:139, teamPage:432), so changes to card shape — sprite rules, sorting, new fields — must be made three times, and teamPage already diverges (uses front_default instead of spriteUrl).",
+      "suggestion": "Extract a single card factory (e.g. makeCard(id, speciesName, extra)) or make homePage/teamPage build their cards through cardsForPokemon-style shared code, so every card list shares one construction path."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/lib/data.ts:1",
+      "issue": "data.ts is a 449-line module holding the server data builders for every page (home, pokemon, moves, abilities, types, team), which every route imports from.",
+      "suggestion": "Split per domain (lib/pages/pokemon.ts, moves.ts, types.ts, team.ts) keeping shared helpers (speciesById, cardsForPokemon, typeRef) in a small core module; navigation by file then mirrors the routes."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/routes/moves/[name]/index.tsx:5",
+      "issue": "The routeLoader$ + status(404) + NotFound + head/resolveValue boilerplate is repeated nearly identically in four route files.",
+      "suggestion": "Acceptable in Qwik City (it's the idiomatic pattern), but a tiny shared helper for the head title resolution and 404 wrapper would trim each route to its unique markup."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/lib/team.ts:36",
+      "issue": "team.ts mixes pure normalization (parseTeam/normalizeTeam), coverage math, and browser document.cookie manipulation in one module imported by both server and client code.",
+      "suggestion": "Keep the shared pure module and move saveTeamCookie into a small client-only module (e.g. lib/team-cookie.ts); the existing comment shows the author was aware of the trade-off."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/lib/data.ts:23",
+      "issue": "spriteUrl hardcodes the media path pattern, so while the API base is centralized in api.ts, knowledge of the sprite URL scheme is split across api.ts (base) and data.ts (path shape).",
+      "suggestion": "Fine as is; if media rules ever change, consider moving sprite/artwork URL construction into api.ts next to apiBase so all URL knowledge lives together."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/components/ui.tsx:4",
+      "issue": "Shared UI components import their prop types from ~/lib/data, a server-only data module, coupling the component layer's type surface to the server layer.",
+      "suggestion": "Hoist shared display types (Card, TypeRef, EvolutionNode) into a types-only module (e.g. lib/types.ts) that both data.ts and components import from."
+    }
+  ],
+  "summary": "This is a well-layered, idiomatic Qwik City 1.20 codebase: transport/caching in api.ts, per-page server builders in data.ts, thin routes over reusable components, and an explicit cookie-based client/server seam for team state. Editability is good — features map to one route file plus one data function, and the API base URL is a single function — but the shared Pokémon Card shape is constructed in three separate places, so card-level changes (sprites, sorting) ripple. The only structural drag is data.ts being a 449-line god module that could be split per domain.",
+  "scenarios": [
+    {
+      "change": "Remove the Abilities pages and every link to them",
+      "files": ["app/src/routes/abilities/[name]/index.tsx", "app/src/routes/pokemon/[name]/index.tsx", "app/src/lib/data.ts"],
+      "difficulty": 4,
+      "notes": "Delete the route directory, delete the Abilities section (pokemon/[name]/index.tsx:108-118), and delete abilityPage (data.ts:315-330). No nav link exists; a single grep for 'abilit' finds all sites. Mechanical, but three files rather than two."
+    },
+    {
+      "change": "Fix card sprites for species whose default Pokémon has a different name (Deoxys)",
+      "files": ["app/src/lib/data.ts"],
+      "difficulty": 3,
+      "notes": "The fix goes in data.ts, but card sprites are built in three spots: cardsForPokemon (line 81, via spriteUrl), homePage (line 139, via spriteUrl), and teamPage (line 432, via pokemon.sprites.front_default). A spriteUrl fix covers home + all CardList pages in one edit; the team page needs a second edit because it diverges."
+    },
+    {
+      "change": "Add sorting by name to every list of Pokémon cards",
+      "files": ["app/src/lib/data.ts", "app/src/routes/team/index.tsx"],
+      "difficulty": 3,
+      "notes": "Three card sources again: cardsForPokemon sorts by id (one change covers move/ability/type pages), homePage sorts matches by id (second change), and teamPage preserves add-order by feature contract — you must decide whether/how sorting applies there, likely a client-side sort in team/index.tsx. Alternatively sort inside CardList, but team bypasses CardList (inline ul at team/index.tsx:36)."
+    },
+    {
+      "change": "Add an Items section (/items, /items/:name) shaped like Moves",
+      "files": ["app/src/routes/items/[name]/index.tsx", "app/src/lib/data.ts", "app/src/routes/layout.tsx"],
+      "difficulty": 4,
+      "notes": "High reuse: Section, TypeBadge, CardList, orDash, pageTitle, NotFound and the loader pattern all transfer. You write a new ~30-line route skeleton (copy of moves/[name]) and a new itemPage in data.ts, plus optionally a nav link. No shared machinery needs changing — the copy is thin boilerplate, not logic."
+    },
+    {
+      "change": "Change the API base URL and caching rules",
+      "files": ["app/src/lib/api.ts", "app/src/routes/layout.tsx"],
+      "difficulty": 5,
+      "notes": "apiBase() (api.ts:3) is the single source of the base URL and spriteUrl (data.ts:23) delegates to it, so an env/URL change is one function. Caching lives in two small, obvious places: the FRESH_MS/refresh logic in api.ts:9-52 and the cacheControl policy in layout.tsx:5-8. Nobody else knows about either."
+    }
+  ]
+}
+```

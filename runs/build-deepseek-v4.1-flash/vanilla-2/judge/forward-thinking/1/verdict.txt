@@ -1,0 +1,165 @@
+## Review
+
+**What this is:** A zero-runtime-dependency vanilla JS SPA on Vite 8, with a hand-rolled ~110-line Node static server for production, a client-side router built on the History API, string-template rendering, and a two-module data layer.
+
+**Currency check (verified, not from memory):**
+- Vite's current stable is **8.3.5** (npm `latest` tag, published 2026-10; vite.dev/releases shows `vite@8.3` receiving regular patches). The app pins `^8.3.5` (`app/package.json:14`) and uses **zero config** — no `vite.config` file at all, so there is nothing to migrate when Vite 9 lands, and no deprecated options like the v8-removed `optimizeDeps.esbuildOptions`.
+- The **Navigation API** reached Baseline 2026 "Newly available" (MDN, updated 2026-01-14; web.dev "Modern client-side routing", 2026-02-17) and is the current-generation platform replacement for exactly the hand-rolled `pushState`/`popstate`/click-interception pattern this app uses. For a spec that targets only latest Chromium, that's the modern choice; the History API used instead is still fully supported (not deprecated).
+- Everything else — `fetch`, `URL`/`URLSearchParams`, ES modules, `String.replaceAll`, `node:`-prefixed builtins, custom properties, grid, `aspect-ratio` — is current.
+
+```json
+{
+  "dimension": "forward-thinking",
+  "criteria": {
+    "latest_apis": {
+      "score": 4,
+      "evidence": [
+        "app/package.json:14 — vite ^8.3.5, the current stable major (npm latest tag as of 2026-10-28), no config file anywhere in app/ so no v7-era options to migrate",
+        "app/index.html:21 — single native ES module entry, no legacy UMD/AMD/require shims, no @vitejs/plugin-legacy",
+        "app/src/main.js:866-874 — routing hand-rolled on History API (popstate/hashchange/pushState) rather than the platform's Navigation API",
+        "app/server.mjs:1-4 — node: prefixed builtins with fileURLToPath, current Node idiom (Node 24 per .nvmrc)"
+      ],
+      "rationale": "Vite usage is fully current and effectively upgrade-proof (zero config, no plugin API, no deprecated options). The one previous-generation choice is the SPA router: the Navigation API became Baseline Newly available in Jan 2026 and is the platform's current routing primitive for a Chromium-only app, while History API click-interception is the pattern web.dev now labels 'the old way' — it is still supported, so this costs a point, not two."
+    },
+    "platform": {
+      "score": 4,
+      "evidence": [
+        "app/src/api.js:37-41 — fetch for all data, JSON via response.json(), no XHR or axios",
+        "app/src/main.js:96-110 — URLSearchParams + new URL for filter state; api.js:70-76 regex-free URL resolution",
+        "app/src/ui.js:21 — sprites get explicit width/height (no layout shift), but no loading=\"lazy\"/decoding=\"async\" despite 48+ images per page",
+        "app/src/styles.css:380 — aspect-ratio and CSS custom properties from app/src/tokens.css:1 used throughout; no preprocessor",
+        "app/src/api.js:105-120 — hand-rolled mapLimit concurrency limiter; reasonable, no platform equivalent"
+      ],
+      "rationale": "The app reaches for the platform first (fetch, URL, ES modules, custom properties, grid) and duplicates nothing the platform provides. It ignores three current platform affordances that would each have been the better choice here: AbortController (a manual render-token is used instead), lazy image loading, and the Navigation API for routing."
+    },
+    "dependencies": {
+      "score": 5,
+      "evidence": [
+        "app/package.json:7-17 — zero runtime dependencies, single devDependency vite ^8.3.5",
+        "app/server.mjs:57-109 — hand-rolled static/SPA server (~110 lines) instead of pulling in express/sirv, justified by the runtime API_BASE_URL injection requirement",
+        "app/src/api.js:1-11 — no lodash/date-fns/axios: escaping, formatting and caching are ~100 lines of stdlib JS"
+      ],
+      "rationale": "This is the minimal-and-modern end of the scale: one dependency, and it's the current stable version of the build tool. Every job a library might do is either covered by the platform or by a small, readable local module."
+    },
+    "churn_resistance": {
+      "score": 3,
+      "evidence": [
+        "app/src/api.js:8-64 and app/src/data.js:16-97 — all data access and caching isolated behind two modules; renderers never call fetch directly",
+        "app/src/api.js:3-5 and app/server.mjs:34-37 — API base URL configured in exactly one place and injected at runtime (no build-time embed, matching the spec's live-API requirement)",
+        "app/src/main.js:46 and 176,244,268,435,597,612,618,630,657,663,695,733,817 — a manual renderToken guard is re-checked after every single await across 13 call sites; forget one and you get a stale-render race",
+        "app/src/main.js:439,457 — moves panel re-rendered by swapping outerHTML and recursively re-attaching handlers (main.js:412-464)",
+        "app/src/api.js:88-98 — escaping lives in helpers, but every template in main.js/ui.js must remember to apply them at ~30 interpolation sites",
+        "app/src/api.js:84-86 — spriteUrl hardcodes the /media path pattern rather than deriving from API-provided sprite URLs"
+      ],
+      "rationale": "The data layer and configuration are genuinely well isolated and a Vite upgrade would touch almost nothing, but the render layer is hand-managed: no types at the API boundary, stale-render cancellation enforced by discipline at 13 scattered sites, DOM updated via outerHTML swaps with recursive listener re-attachment, and HTML safety dependent on every call site remembering escapeHtml. Requirements changes to these pages will ripple through main.js more than they should."
+    }
+  },
+  "overall": 4,
+  "findings": [
+    {
+      "severity": "medium",
+      "location": "app/src/main.js:828-874",
+      "issue": "SPA routing is built on the History API with manual anchor-click interception, plus pushState/popstate/hashchange plumbing — the previous-generation pattern. It misses non-click navigations (form submits, location changes) and is ~50 lines of glue the platform now provides.",
+      "suggestion": "Use the Navigation API (Baseline Newly available since Jan 2026, in Chrome since 102): navigation.addEventListener('navigate', e => { if (canIntercept) e.intercept(() => renderRoute(e.destination)) }) replaces the click/popstate/hashchange handlers entirely. Keep History API as the fallback if you ever widen browser support."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/main.js:46",
+      "issue": "Route changes are guarded by a manual renderToken checked after each of ~13 awaits; in-flight requests keep running after navigation away and the guard pattern is easy to omit in new code.",
+      "suggestion": "Give each route render an AbortController, pass its signal to fetch (api.js:37 accepts no signal today), and abort on the next renderRoute. This cancels the network work instead of just discarding the result, and removes the token checks."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/ui.js:21",
+      "issue": "Sprite <img> tags have no loading=\"lazy\" or decoding=\"async\"; the home page loads 48 sprites, and 'Learned by'/'Pokémon of type' pages can render several hundred cards, all fetched eagerly.",
+      "suggestion": "Add loading=\"lazy\" decoding=\"async\" to card sprites (and loading=\"eager\" on the single artwork img on the Pokémon page) — the browser then handles the rest."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/main.js:340",
+      "issue": "Every page is a template literal with ~30 interpolation sites where forgetting escapeHtml/escapeAttr (app/src/api.js:88-98) injects API data as HTML. API data is treated as trusted only by convention; one missed escape is an XSS.",
+      "suggestion": "Introduce an auto-escaping tagged template (an `html` helper that marks safe strings and escapes the rest). It is ~15 lines, keeps the string-template approach, and makes correctness the default rather than per-call-site discipline."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/main.js:412-464",
+      "issue": "Moves panel updates replace the panel via outerHTML and then recursively re-attach handlers (attachMovesHandlers calls itself at 439-441 and 457-459); sort clicks also destroy and recreate the sort button, losing keyboard focus.",
+      "suggestion": "Delegate: attach one click listener on #moves and one change listener on the panel root, and re-render only the tables' tbody contents; preserve focus by re-focusing the sort button after render."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/data.js:14-24",
+      "issue": "No types at the API boundary: the PokeAPI resource shapes exist only implicitly in property chains (species.varieties, pokemon.types, type.damage_relations across main.js:596-720) with inconsistent optional chaining.",
+      "suggestion": "Add JSDoc @typedef blocks for Species, Pokemon, Type, Move and annotate api()'s return — zero tooling cost in a plain-JS Vite project, and it documents the contract the spec pins down."
+    },
+    {
+      "severity": "low",
+      "location": "app/server.mjs:73-78",
+      "issue": "Static assets are served with no Cache-Control header, even though Vite emits content-hashed filenames under /assets that never change between builds.",
+      "suggestion": "Send Cache-Control: public, max-age=31536000, immutable for /assets/* and a short max-age (or must-revalidate) for index.html — this is exactly what the fronting reverse proxy will expect to find."
+    },
+    {
+      "severity": "low",
+      "location": "app/server.mjs:34-37",
+      "issue": "Runtime config is injected by string-splicing a <script> before </head> in the built index.html and read from a window.__API_BASE_URL__ global (app/src/api.js:3) — a global variable and a string-surgery step that silently breaks if Vite ever emits no </head>.",
+      "suggestion": "Have the server serve a small /runtime-config.js module (export const API_BASE_URL = ...) and import it, or keep the global but read it in one module — which api.js already does; at minimum assert the splice succeeded at startup."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/api.js:84-86",
+      "issue": "Card sprites are built from a hardcoded /media/sprites/pokemon/<id>.png path rather than from sprite URLs the API already returns, coupling the card grid to the media layout.",
+      "suggestion": "Spec documents the pattern so this is defensible for the species list (which carries no sprite URLs), but derive from pokemon.sprites.front_default wherever a Pokémon resource is already fetched, and keep the constructed URL as the documented fallback with a comment citing the spec."
+    }
+  ],
+  "summary": "This is a lean, current-generation vanilla+Vite app: one dependency (Vite 8.3.5, today's stable), zero build config, platform-first data access, and a clean two-module data layer that isolates all API access and configuration. Its forward-looking weaknesses are concentrated in the render layer: a History-API router where the now-Baseline Navigation API is the current choice, manual render-token cancellation instead of AbortController, no lazy image loading, and XSS safety resting on per-call-site escaping discipline rather than an enforced helper. I'd merge it after the router/AbortController and escaping-helper items are addressed; none of them are architectural.",
+  "apis": [
+    { "api": "Vite 8.3.5 (Rolldown/Lightning CSS) build", "location": "app/package.json:14", "status": "current", "replacement": "" },
+    { "api": "History API (pushState/popstate/hashchange) SPA routing", "location": "app/src/main.js:828-874", "status": "current", "replacement": "Navigation API (navigation.addEventListener('navigate')), Baseline Newly available Jan 2026 — the current-generation platform routing primitive; History API is not deprecated" },
+    { "api": "fetch", "location": "app/src/api.js:37", "status": "current", "replacement": "" },
+    { "api": "URL / URLSearchParams", "location": "app/src/main.js:96-110", "status": "current", "replacement": "" },
+    { "api": "String.prototype.replaceAll", "location": "app/src/api.js:90-94", "status": "current", "replacement": "" },
+    { "api": "CSS custom properties / grid / aspect-ratio", "location": "app/src/styles.css:380", "status": "current", "replacement": "" },
+    { "api": "node:http static server with node: prefixed builtins", "location": "app/server.mjs:1-4", "status": "current", "replacement": "" }
+  ],
+  "dependencies": [
+    { "name": "vite", "verdict": "modern", "verdict_note": "", "note": "v8.3.5 is the current stable (npm latest tag, Oct 2026); used with zero config and no plugins, so no runtime bloat and almost no upgrade surface" }
+  ]
+}
+```
+
+```json
+{
+  "dimension": "forward-thinking",
+  "criteria": {
+    "latest_apis": { "score": 4, "evidence": ["app/package.json:14 — vite ^8.3.5, the current stable major, with no vite.config anywhere so nothing v8-era to migrate", "app/index.html:21 — single native ES module entry, no legacy plugin or UMD shim", "app/src/main.js:828-874 — SPA routing hand-rolled on History API instead of the platform's Navigation API", "app/server.mjs:1-4 — node: prefixed builtins with fileURLToPath on Node 24"], "rationale": "Vite usage is fully current and near upgrade-proof (zero config, no deprecated options), verified against vite.dev's supported-versions page and the npm latest tag. The one previous-generation choice is the router: the Navigation API became Baseline Newly available in Jan 2026 and is the current platform routing primitive for this Chromium-only app, while the History API used here is still supported, not deprecated." },
+    "platform": { "score": 4, "evidence": ["app/src/api.js:37-41 — fetch for all data, no XHR or axios", "app/src/main.js:96-110 — URLSearchParams + new URL for filter state", "app/src/ui.js:21 — sprites get explicit width/height but no loading=\"lazy\"/decoding=\"async\" despite 48+ images per page", "app/src/styles.css:380 — aspect-ratio and custom properties throughout, no preprocessor", "app/src/api.js:105-120 — hand-rolled mapLimit limiter (no platform equivalent)"], "rationale": "Platform-first where it counts (fetch, URL, ES modules, custom properties, grid, no polyfills, no libraries duplicating the platform), but it passes over three current affordances that would have been better here: AbortController (a manual render-token is used instead), lazy image loading, and the Navigation API for routing." },
+    "dependencies": { "score": 5, "evidence": ["app/package.json:7-17 — zero runtime dependencies, single devDependency vite ^8.3.5", "app/server.mjs:57-109 — ~110-line hand-rolled static/SPA server instead of express/sirv, justified by runtime config injection", "app/src/api.js:1-120 — escaping, formatting, caching and concurrency in ~120 lines of stdlib JS"], "rationale": "Minimal and modern: one dependency, it is the current stable build tool, and everything else is either platform-covered or a small readable local module." },
+    "churn_resistance": { "score": 3, "evidence": ["app/src/api.js:8-64 and app/src/data.js:16-97 — all data access isolated behind two modules; renderers never call fetch directly", "app/src/api.js:3-5 and app/server.mjs:34-37 — API base URL configured in exactly one place, injected at runtime", "app/src/main.js:46 with checks at 176,244,268,435,597,612,618,630,657,663,695,733,817 — manual renderToken guard re-checked after every await, 13 call sites of discipline", "app/src/main.js:439,457 — moves panel re-rendered via outerHTML swap plus recursive handler re-attachment", "app/src/api.js:88-98 — escaping applied manually at ~30 template interpolation sites", "app/src/api.js:84-86 — spriteUrl hardcodes the /media path pattern"], "rationale": "The data layer and configuration are genuinely well isolated and a Vite upgrade would touch almost nothing, but the render layer is hand-managed: no types at the API boundary, stale-render cancellation enforced at 13 scattered sites, outerHTML re-renders with recursive listener attachment, and HTML safety dependent on every call site remembering to escape." }
+  },
+  "overall": 4,
+  "findings": [
+    { "severity": "medium", "location": "app/src/main.js:828-874", "issue": "Router built on History API with manual anchor-click interception plus pushState/popstate/hashchange glue; it misses non-click navigations (form submits, location changes) and re-implements ~50 lines the platform now provides.", "suggestion": "Use the Navigation API (Baseline Newly available Jan 2026, in Chrome since 102): navigation.addEventListener('navigate', e => e.intercept(() => renderRoute(e.destination))) replaces the click/popstate/hashchange handlers." },
+    { "severity": "medium", "location": "app/src/main.js:46", "issue": "Route changes guarded by a manual renderToken checked after each of ~13 awaits; in-flight requests keep running after navigation away and the guard is easy to omit in new code.", "suggestion": "Give each render an AbortController, accept a signal in api() (app/src/api.js:37), and abort on the next navigation — cancels the network work and removes the token checks." },
+    { "severity": "medium", "location": "app/src/ui.js:21", "issue": "No loading=\"lazy\"/decoding=\"async\" on card sprites; 48 sprites per home page and potentially several hundred cards on type/ability/move pages all download eagerly.", "suggestion": "Add loading=\"lazy\" decoding=\"async\" to card sprites; keep the single Pokémon artwork image eager." },
+    { "severity": "medium", "location": "app/src/main.js:340", "issue": "Pages are template literals with ~30 interpolation sites where forgetting escapeHtml/escapeAttr (app/src/api.js:88-98) injects API data as HTML; one missed escape is an XSS.", "suggestion": "Introduce an auto-escaping tagged template `html` helper (~15 lines) so escaping is the default rather than per-call-site discipline." },
+    { "severity": "low", "location": "app/src/main.js:412-464", "issue": "Moves panel updates swap outerHTML then recursively re-attach handlers (439-441, 457-459); sort clicks also destroy the sort button, losing keyboard focus.", "suggestion": "Delegate one click and one change listener on #moves and re-render only the table bodies; re-focus the sort button after render." },
+    { "severity": "low", "location": "app/src/data.js:14-24", "issue": "No types at the API boundary; PokeAPI resource shapes exist only implicitly in property chains with inconsistent optional chaining across app/src/main.js:596-720.", "suggestion": "Add JSDoc @typedef for Species/Pokemon/Type/Move and annotate api()'s return — zero tooling cost in plain-JS Vite." },
+    { "severity": "low", "location": "app/server.mjs:73-78", "issue": "Static assets served with no Cache-Control header although Vite emits content-hashed /assets filenames that never change between builds.", "suggestion": "Send Cache-Control: public, max-age=31536000, immutable for /assets/* and must-revalidate for index.html." },
+    { "severity": "low", "location": "app/server.mjs:34-37", "issue": "Runtime config injected by string-splicing a script before </head> and read from a window.__API_BASE_URL__ global (app/src/api.js:3); the splice silently degrades if the built HTML ever lacks </head>.", "suggestion": "Serve a /runtime-config.js module the app imports, or at minimum assert the splice succeeded at startup." },
+    { "severity": "low", "location": "app/src/api.js:84-86", "issue": "Card sprites built from a hardcoded /media/sprites/pokemon/<id>.png pattern instead of API-provided sprite URLs, coupling the card grid to the media layout.", "suggestion": "Keep the constructed URL as the documented fallback (the spec sanctions the pattern for the species list), but derive from pokemon.sprites.front_default wherever a Pokémon resource is already fetched, and comment the spec citation." }
+  ],
+  "summary": "A lean, current-generation vanilla+Vite app: one dependency (Vite 8.3.5, today's stable), zero build config, platform-first data access, and a clean two-module data layer that isolates all API access and configuration. Its forward-looking weaknesses are concentrated in the render layer: a History-API router where the now-Baseline Navigation API is the current choice, manual render-token cancellation instead of AbortController, no lazy image loading, and XSS safety resting on per-call-site escaping discipline rather than an enforced helper. I'd merge once the router, AbortController and escaping-helper items are addressed; none are architectural.",
+  "apis": [
+    { "api": "Vite 8.3.5 (Rolldown/Lightning CSS) build", "location": "app/package.json:14", "status": "current", "replacement": "" },
+    { "api": "History API (pushState/popstate/hashchange) SPA routing", "location": "app/src/main.js:828-874", "status": "current", "replacement": "Navigation API (navigation.addEventListener('navigate')), Baseline Newly available Jan 2026 — current-generation platform routing; History API remains supported, not deprecated" },
+    { "api": "fetch", "location": "app/src/api.js:37", "status": "current", "replacement": "" },
+    { "api": "URL / URLSearchParams", "location": "app/src/main.js:96-110", "status": "current", "replacement": "" },
+    { "api": "String.prototype.replaceAll", "location": "app/src/api.js:90-94", "status": "current", "replacement": "" },
+    { "api": "CSS custom properties / grid / aspect-ratio", "location": "app/src/styles.css:380", "status": "current", "replacement": "" },
+    { "api": "node:http static server with node: prefixed builtins", "location": "app/server.mjs:1-4", "status": "current", "replacement": "" }
+  ],
+  "dependencies": [
+    { "name": "vite", "verdict": "modern", "note": "8.3.5 is the current stable (npm latest tag, Oct 2026); used with zero config and no plugins, so no runtime bloat and a minimal upgrade surface" }
+  ]
+}
+```

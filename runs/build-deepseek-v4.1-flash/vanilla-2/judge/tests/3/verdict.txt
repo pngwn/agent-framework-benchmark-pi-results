@@ -1,0 +1,143 @@
+I've reviewed the spec, the acceptance tests, and the full app source. The app contains **zero tests of its own** — no test runner in `package.json` (`app/package.json` has only `dev`/`build`/`start` scripts), no test files anywhere under `app/` (grep for `test|describe|it(|expect(` matches only incidental code), and the measured facts confirm `tests: { files: 0, cases: 0 }`. So the judgment below focuses on what the acceptance suite does not guard and what a refactor of this app could silently break.
+
+The app is a hand-rolled SPA with a lot of exactly the kind of logic that rots without tests: filtering/pagination, URL state, multi-key sorting, dedup/aggregation over API data, and race-guarded async rendering.
+
+```json
+{
+  "dimension": "tests",
+  "criteria": {
+    "coverage_of_risk": {
+      "score": 1,
+      "evidence": [
+        "app/package.json:6-9 — only dev/build/start scripts; no test script or runner installed",
+        "app/src/main.js:131-167 — renderHomeResults: search/type/generation filtering, 48-per-page slicing and page clamping, entirely untested",
+        "app/src/main.js:317-345 — sortRows/defaultRows: missing-values-last, direction flip, tie-breaks, untested",
+        "app/src/data.js:58-87 — buildSpeciesTypeMap: slot ordering, alternate-form exclusion, dedup, untested"
+      ],
+      "rationale": "No tests exist, so none of the app's riskiest logic — filtering, pagination, URL state, sorting, data mapping — is covered by anything the team owns."
+    },
+    "behaviour_not_implementation": {
+      "score": 1,
+      "evidence": [
+        "app/src/main.js:1-880 — no test file imports or exercises any of this module",
+        "app/src/api.js:28-46 — the response cache and failure-retry path are pure side-effecting internals that nothing observes"
+      ],
+      "rationale": "There are no tests at all, so nothing asserts behaviour either way."
+    },
+    "regression_power": {
+      "score": 1,
+      "evidence": [
+        "app/src/main.js:105-124 — readHomeFilters/homeUrl: URL query parsing and default-omission rules have no regression guard",
+        "app/src/main.js:465-521 — loadRowsForGame: dedup key `${method}|${move.name}|${level}` and level coercion are untested",
+        "app/src/main.js:522-562 — prepareMoves: default-game = highest order, ?game= fallback, untested"
+      ],
+      "rationale": "With zero tests, any refactor of the data layer or sorting passes silently; only the external acceptance suite catches breakage, and the team doesn't own it."
+    },
+    "signal_to_noise": {
+      "score": 3,
+      "evidence": [
+        "app/ — no test files exist, so there is no noise to filter"
+      ],
+      "rationale": "No tests means no low-value tests either; per the scale, the no-tests case scores 3."
+    }
+  },
+  "overall": 1,
+  "findings": [
+    {
+      "severity": "high",
+      "location": "app/package.json:6-9",
+      "issue": "No test runner, no test script, and zero test files; a 900-line SPA with filtering, pagination, sorting and URL state ships with nothing the team owns to catch regressions.",
+      "suggestion": "Add vitest (pairs naturally with the existing Vite toolchain) and start with unit tests for src/api.js and src/data.js pure functions, which need no DOM or network mocking."
+    },
+    {
+      "severity": "high",
+      "location": "app/src/main.js:131-167",
+      "issue": "Home filtering, pagination slicing and page clamping are unguarded: page math (`(page-1)*PAGE_SIZE`), the `No Pokémon found` empty state, the cross-page `<count> Pokémon` total, and the prev/next link omission on boundary pages.",
+      "suggestion": "Extract the filter/slice logic into a pure function and test boundary cases: page beyond totalPages, page 1, last page, empty results, combined filters."
+    },
+    {
+      "severity": "high",
+      "location": "app/src/main.js:317-345",
+      "issue": "sortRows implements subtle rules (missing values last in both directions, direction flip on second click, numeric vs localeCompare, moveName tie-break) that would break silently under refactor; descending-with-missing-values is a classic regression spot since `if (aMissing) return 1` ignores direction.",
+      "suggestion": "Property-style unit tests over row fixtures with null/string/number mixes, asserting order for both directions and tie-breaks."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/main.js:237-264",
+      "issue": "URL-state behaviour is untested: 200 ms debounce + replaceState for search, pushState for select changes, filters resetting to page 1, and default-value omission in homeUrl — a race or omission (e.g. leaking `page=1` into the query) would slip through.",
+      "suggestion": "A few Playwright tests in app/ asserting the URL after typing, selecting, and paginating, mirroring what the acceptance suite checks but owned by the app."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/main.js:465-521",
+      "issue": "loadRowsForGame dedup/aggregation is fragile and untested: the `seen` key `${method}|${move.name}|${level}` would keep duplicate rows if the same move appears twice at different levels in one version group, and `Number(detail.level_learned_at) || 0` turns a null level into a displayed `0` rather than `—`.",
+      "suggestion": "Unit test with a fixture covering machine/egg (level 0), duplicate learn entries, and a move missing type/damage_class."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/data.js:58-87",
+      "issue": "buildSpeciesTypeMap and speciesIdsFromPokemonRefs carry the alternate-form exclusion rule (id >= 10000) and slot ordering; a refactor that drops either would silently include Mega Evolutions in lists or shuffle card type badges.",
+      "suggestion": "Unit tests with a fake type payload containing an alternate-form entry and out-of-slot entries."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/main.js:812-823",
+      "issue": "Error handling conflates real 404s with bugs: any non-ApiError throw also renders the Not-found page (after console.error), so a regression that throws during renderPokemon would show users a 404 instead of failing loudly, and nothing would catch it.",
+      "suggestion": "Split the branches (404 → Not found; unexpected error → an error state with the message) and test both paths with a stubbed api()."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/main.js:36-44,866-875",
+      "issue": "The renderToken race-guard pattern is spread across every async render (six token checks in renderPokemon alone); reordering awaits or dropping one check causes stale-render bugs that no test would detect.",
+      "suggestion": "Once a runner exists, add one integration test that navigates quickly between two Pokémon pages and asserts the final h1 matches the last navigation."
+    }
+  ],
+  "summary": "The app ships with no tests of its own — no runner, no test script, no test files — leaving its riskiest logic (filtering, pagination, URL state, multi-key sorting, alternate-form exclusion, dedup, and the token-based race guards) protected only by the borrowed acceptance suite. The pure helpers in src/api.js and src/data.js are testable with no mocking, so the barrier to at least baseline coverage was low. Once someone refactors the data layer, regressions in ordering, exclusion rules and error paths would ship silently.",
+  "wroteTests": false,
+  "testCount": 0,
+  "valuableTests": [],
+  "lowValueTests": [],
+  "untested": [
+    {
+      "area": "Home filtering and pagination (app/src/main.js:131-167)",
+      "risk": "high",
+      "likelyBug": "Off-by-one in the 48-per-page slice, page clamp dropped so page>total shows an empty list, count text diverging from the filtered total, or prev/next links rendered on boundary pages"
+    },
+    {
+      "area": "URL filter state and history management (app/src/main.js:105-124, 237-264)",
+      "risk": "high",
+      "likelyBug": "Changing a filter no longer resets to page 1, defaults like `page=1` or `type=` leak into the query, debounce replaceState clobbers a subsequent pushState, or back/forward restores a stale view"
+    },
+    {
+      "area": "Moves table sorting (app/src/main.js:317-345)",
+      "risk": "high",
+      "likelyBug": "Missing values sorted first in descending order, direction flip broken, numeric level compared as string, or tie-break by move name lost so row order becomes nondeterministic"
+    },
+    {
+      "area": "Alternate-form exclusion and slot ordering (app/src/data.js:58-91, app/src/api.js:41-43)",
+      "risk": "high",
+      "likelyBug": "Mega/form Pokémon (IDs ≥ 10000) reappear in type/ability/move lists, or card type badges come out in API order instead of slot order"
+    },
+    {
+      "area": "Moves per-game assembly and dedup (app/src/main.js:465-562)",
+      "risk": "medium",
+      "likelyBug": "Same move listed twice when learnable at multiple levels, method tables ordered wrongly (fixed-then-alphabetical rule broken), or the default game no longer being the highest-order version group"
+    },
+    {
+      "area": "Error and not-found routing (app/src/main.js:786-823)",
+      "risk": "medium",
+      "likelyBug": "A render-time exception surfaces as a 404 page, or an invalid ?game= or unknown resource stops falling back to the default/Not-found view"
+    },
+    {
+      "area": "Async render race guards (app/src/main.js:595-650, renderToken checks)",
+      "risk": "medium",
+      "likelyBug": "Fast navigation renders the previous Pokémon's data onto the new route — stale-content bugs that only appear under timing changes or network latency"
+    },
+    {
+      "area": "Formatting helpers: humanize, formatDex, latestEnglishFlavor, displayValue (app/src/api.js:41-92)",
+      "risk": "low",
+      "likelyBug": "Whitespace collapsing dropped, wrong flavor entry picked (first instead of last English), dex padding lost, or '—' fallback for null power/accuracy replaced by 'null'"
+    }
+  ]
+}
+```

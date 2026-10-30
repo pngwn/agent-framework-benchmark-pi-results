@@ -1,0 +1,174 @@
+## Review: test quality — Pokédex Angular app (Angular 22)
+
+The agent wrote its own unit tests (2 files, ~10 cases, 22 assertions) using the current Angular CLI default setup: `@angular/build:unit-test` with Vitest (`app/angular.json:44-46`, `app/tsconfig.spec.json:7-8`, `app/package.json` devDeps `vitest` + `jsdom`) — verified against current Angular docs that Vitest is the default runner for new projects. The design is deliberately test-friendly: the riskiest logic was factored into pure modules (`core/format.ts`, `pages/home/home-data.ts`) that are tested without any TestBed or mocks.
+
+**What's covered well**
+
+- `app/src/app/core/format.spec.ts:6-19` — humanize and dex-number padding, exactly the spec's edge cases (`mr-mime → Mr Mime`, `#0025`).
+- `app/src/app/core/format.spec.ts:22-31` — the English-name pick with fallback, and latest-English-flavor-text with whitespace collapse — a genuinely fiddly data transformation (`app/src/app/core/format.ts:26-29`).
+- `app/src/app/core/format.spec.ts:33-37` — `idFromUrl`/`isDefaultForm` — this guards the "no alternate forms (ID > 10000) in any list" rule that runs through `app/src/app/core/poke-api.ts:113`, `:147`.
+- `app/src/app/core/format.spec.ts:39-41` — `orMissing(0) → '0'` catches the classic falsy-zero bug for move power.
+- `app/src/app/pages/home/home-data.spec.ts:28-45` — `filterSpecies` search/type/generation/combination logic (`app/src/app/pages/home/home-data.ts:62-70`), asserted as exact name arrays, no mocks.
+
+Every assertion is input→output on a public function — no private access, no snapshots, no call counts, no framework-behaviour padding. That's the right shape; it's just too little of it.
+
+**What isn't covered (the risk)**
+
+- `app/src/app/pages/pokemon/moves-data.ts:31-78` — the entire moves-table construction: the dedup key at `:38`, method ordering ranks at `:25-27`, default sort at `:74`. A refactor could duplicate or drop move rows silently.
+- `app/src/app/pages/pokemon/moves-table.ts:71-90` — the sortable-column comparator: nulls-last in both directions (`:80`), stable ties, the ascending-first flip in `sortBy`. This is the most bug-prone code in the app and has zero tests.
+- `app/src/app/pages/home/home.ts:36-38, 89-96` — page clamping (NaN, beyond-last-page) and the query-param serializer's omit-defaults rule; URL-state regressions would slip through.
+- `app/src/app/core/poke-api.ts:139-155` — `cardsFor`: deoxys-normal → species mapping, dedup by id, dex ordering.
+- `app/src/app/core/poke-api.ts:58-71` — cache TTL, in-flight sharing, failed-promise eviction.
+- No rendered-behaviour tests at all: `LoadState`'s NotFoundError-vs-generic-error branch (`app/src/app/shared/load-state.ts:10-17`) is unverified.
+
+```json
+{
+  "dimension": "tests",
+  "criteria": {
+    "coverage_of_risk": {
+      "score": 2,
+      "evidence": [
+        "app/src/app/pages/home/home-data.spec.ts:28-45 — the only filtering logic tested, and well",
+        "app/src/app/core/format.spec.ts:6-41 — name/flavor-text/ID/misding-value formatting covered",
+        "app/src/app/pages/pokemon/moves-data.ts:31-78 — moves dedup, method order and default sort: no tests",
+        "app/src/app/pages/pokemon/moves-table.ts:71-90 — column sort comparator (nulls-last, direction flip): no tests",
+        "app/src/app/pages/home/home.ts:36-38 — pagination clamping and queryParams URL serialization: no tests",
+        "app/src/app/core/poke-api.ts:139-155 — cardsFor species mapping/dedup: no tests",
+        "app/src/app/core/poke-api.ts:58-71 — response cache TTL/eviction: no tests"
+      ],
+      "rationale": "The agent picked the right kind of logic to test (pure data transformation) but only a small slice of it; the riskiest modules — moves tables, column sorting, pagination/URL state and the API service — are entirely untested."
+    },
+    "behaviour_not_implementation": {
+      "score": 4,
+      "evidence": [
+        "app/src/app/core/format.spec.ts:22-31 — asserts outputs of englishName/latestEnglishFlavorText, no internals",
+        "app/src/app/pages/home/home-data.spec.ts:26-30 — asserts resulting species names, not component state",
+        "app/src/app/core/format.spec.ts:33-37 — tests the public idFromUrl/isDefaultForm contract",
+        "app/src/app/shared/load-state.ts:10-17 — rendered error/not-found branches have no test at all"
+      ],
+      "rationale": "All assertions are input→output on public functions with no mocks, snapshots or call counts; the gap is that no rendered or component-level behaviour is exercised, not that internals are asserted."
+    },
+    "regression_power": {
+      "score": 3,
+      "evidence": [
+        "app/src/app/pages/home/home-data.spec.ts:34-35 — exact-array assertions: breaking search or type matching fails loudly",
+        "app/src/app/core/format.spec.ts:40 — orMissing(0)==='0' catches a falsy-zero regression a loose test would miss",
+        "app/src/app/pages/pokemon/moves-table.ts:80 — untested: flipping the null-handling sign sorts missing values first and nothing fails",
+        "app/src/app/pages/pokemon/moves-data.ts:38 — untested: breaking the dedup key duplicates or drops moves with no failure"
+      ],
+      "rationale": "The tests that exist are tight and would definitely fail on breakage, but they cover perhaps a third of the risky logic, so most behavioural regressions in sorting, pagination and the data layer would sail through."
+    },
+    "signal_to_noise": {
+      "score": 5,
+      "evidence": [
+        "app/src/app/core/format.spec.ts:6-41 — six cases, each mapping to a distinct spec rule",
+        "app/src/app/pages/home/home-data.spec.ts:43-45 — one case for combined filters instead of three near-duplicates",
+        "app/angular.json:44-46 — lean vitest unit-test builder, no heavy TestBed scaffolding anywhere"
+      ],
+      "rationale": "Every test earns its keep: each guards a spec-mandated edge case (padding, whitespace collapse, >10000 forms, em dash) with minimal fixtures; there is no padding or framework-testing."
+    }
+  },
+  "overall": 3,
+  "findings": [
+    {
+      "severity": "high",
+      "location": "app/src/app/pages/pokemon/moves-data.ts:31-78",
+      "issue": "loadMoveTables — per-method dedup key, method ranking and default sort — is completely untested; it's the most convoluted data transformation in the app.",
+      "suggestion": "Extract the table-building into a pure function of (pokemon.moves, game) and add cases: duplicates within a version group, level-up ordering by level then name, machine/egg/tutor order, methods with no moves omitted."
+    },
+    {
+      "severity": "high",
+      "location": "app/src/app/pages/pokemon/moves-table.ts:71-90",
+      "issue": "The sort comparator (missing values last in both directions, sign flip, stability) and the ascending-first click behaviour have no tests; a sign error or dropping the null branch would ship silently.",
+      "suggestion": "Test rows() directly with a small MoveTable: missing power sorted last ascending and descending, second click on the same column flips direction, ties keep default order."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/app/pages/home/home.ts:36-38",
+      "issue": "Page clamping (non-numeric or beyond-last page → valid page) is untested; a refactor of the pagination computed could loop users or blank the list.",
+      "suggestion": "Extract currentPage/pageCount as pure functions of (pageParam, matchCount) and test '?page=abc', '0', and '> pageCount'."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/app/pages/home/home.ts:89-96",
+      "issue": "The query-param serializer's omit-empty-and-default rule is untested; regressions would put ?page=1&q= in URLs and break deep links.",
+      "suggestion": "Test queryParams(filters, page) directly for the default-omission cases."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/app/core/poke-api.ts:139-155",
+      "issue": "cardsFor (alternate-form exclusion, deoxys-normal→deoxys species mapping, dedup by id, dex ordering) is untested, yet it feeds every card list in the app.",
+      "suggestion": "Give cardsFor an injectable speciesIndex (or split the mapping into a pure function) and test mixed form lists with duplicate entries."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/app/core/poke-api.ts:58-71",
+      "issue": "Cache TTL, in-flight promise sharing and failed-request eviction are untested; a refactor could serve stale data or permanently cache a rejected promise.",
+      "suggestion": "With a stubbed fetch, assert the 404→NotFoundError mapping and that a failed request is evicted (a retry succeeds)."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/app/pages/pokemon/pokemon-data.ts:87-95",
+      "issue": "statTotal, height/weight decimal formatting, and game ordering with fallback `order` are untested.",
+      "suggestion": "The math is small; one or two pure-function cases on the stat sum and toFixed(1) formatting would lock the spec's display rules."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/app/shared/load-state.ts:10-17",
+      "issue": "No component tests anywhere: the NotFoundError-vs-generic-error branch that drives the not-found page vs 'Something went wrong' is only covered by the acceptance suite.",
+      "suggestion": "One vitest+TestBed render test of LoadState with each error type would pin the not-found/error contract the team will own."
+    }
+  ],
+  "summary": "The agent wrote a small, current-stack Vitest suite whose ~10 tests are all behavioural, exact and aimed at spec-critical rules (humanized names, dex padding, flavor-text selection, alternate-form exclusion, filtering) — no noise, no mocks. But coverage stops at the two pure helpers it extracted; the riskiest code — moves tables, column sorting, pagination/URL state, and the PokeApi service — is untested. Good instincts, thin execution: a data-layer refactor today would break behaviour without failing a single app test.",
+  "wroteTests": true,
+  "testCount": 10,
+  "valuableTests": [
+    "uses the last English flavor text with whitespace collapsed — catches picking the first entry, the wrong language, or leaving \\n/\\f in rendered text",
+    "shows missing values as an em dash — catches the falsy-zero bug (a move with power 0 rendering as —) and null mishandling",
+    "reads IDs from resource URLs and spots alternate forms — catches Mega/alternate forms leaking into every card list",
+    "searches humanized names case-insensitively — catches matching raw API names ('Mr Mime' finding nothing) or case-sensitive search",
+    "combines all filters — catches AND-composition regressions when a filter change breaks another",
+    "matches a type in either slot — catches ignoring slot-2 types in the type filter"
+  ],
+  "lowValueTests": [
+    "returns everything without filters — near-baseline; it mostly verifies the fixture wiring, though it's cheap enough to keep"
+  ],
+  "untested": [
+    {
+      "area": "Moves table construction (app/src/app/pages/pokemon/moves-data.ts) — dedup key, method ordering, default sort",
+      "risk": "high",
+      "likelyBug": "Duplicated or dropped move rows after a data-layer refactor; methods appearing in the wrong order or with empty tables"
+    },
+    {
+      "area": "Sortable column headers (app/src/app/pages/pokemon/moves-table.ts) — comparator, nulls-last, direction flip, aria-sort",
+      "risk": "high",
+      "likelyBug": "Sign flip makes second click not reverse, or missing Power/Accuracy sorts first instead of last; aria-sort regression breaks the accessibility contract"
+    },
+    {
+      "area": "Pagination and URL query serialization (app/src/app/pages/home/home.ts) — page clamping, omit-default params",
+      "risk": "medium",
+      "likelyBug": "?page=0 or a page beyond the last blanking the list; default params (?page=1&q=) polluting shared URLs"
+    },
+    {
+      "area": "cardsFor (app/src/app/core/poke-api.ts) — alternate-form exclusion, species mapping, dedup, dex order",
+      "risk": "medium",
+      "likelyBug": "Mega Evolutions appearing in ability/move lists, duplicate cards for one species, or deoxys-normal linking to a 404"
+    },
+    {
+      "area": "PokeApi cache and error mapping (app/src/app/core/poke-api.ts:58-77)",
+      "risk": "medium",
+      "likelyBug": "A cached rejected promise making a resource permanently unavailable, or 404s surfacing as 'Something went wrong' instead of Not found"
+    },
+    {
+      "area": "Pokemon view assembly (app/src/app/pages/pokemon/pokemon-data.ts) — stat total, height/weight, games ordering",
+      "risk": "low",
+      "likelyBug": "Total row off by one stat, 0.4 m rendering as '0.40 m', game dropdown defaulting to the wrong version group"
+    },
+    {
+      "area": "LoadState / not-found rendering (app/src/app/shared/load-state.ts) — no component tests exist at all",
+      "risk": "low",
+      "likelyBug": "A 404 route rendering the generic error page (or vice versa), breaking titles and the 'Not found' heading contract"
+    }
+  ]
+}
+```

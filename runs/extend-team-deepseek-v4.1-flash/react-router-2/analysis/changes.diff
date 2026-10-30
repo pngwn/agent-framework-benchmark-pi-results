@@ -1,0 +1,496 @@
+diff --git a/app/app/app.css b/app/app/app.css
+index 02d1bae..48ac74e 100644
+--- a/app/app/app.css
++++ b/app/app/app.css
+@@ -221,6 +221,82 @@ a.type-badge:hover {
+   font-size: var(--text-xs);
+ }
+ 
++.card-grid__item--action {
++  display: flex;
++  flex-direction: column;
++}
++
++.card-grid__item--action .card {
++  flex: 1;
++  height: auto;
++}
++
++/* Buttons and team */
++
++.button {
++  display: inline-flex;
++  align-items: center;
++  justify-content: center;
++  min-height: 2.5rem;
++  padding: 0 var(--space-4);
++  background: var(--color-link);
++  border: 1px solid var(--color-link);
++  border-radius: var(--radius-md);
++  color: var(--color-on-accent);
++  font: inherit;
++  cursor: pointer;
++}
++
++.button:disabled {
++  background: var(--color-surface);
++  border-color: var(--color-border);
++  color: var(--color-text-muted);
++  cursor: not-allowed;
++}
++
++.button--secondary {
++  background: var(--color-surface);
++  border-color: var(--color-border);
++  color: var(--color-link);
++}
++
++.team-actions {
++  display: flex;
++  align-items: center;
++  gap: var(--space-3);
++  margin: var(--space-3) 0;
++}
++
++.team-actions__note {
++  color: var(--color-text-muted);
++  font-size: var(--text-sm);
++}
++
++.team-remove {
++  width: 100%;
++  margin-top: var(--space-2);
++  font-size: var(--text-sm);
++}
++
++.coverage {
++  width: 100%;
++  border-collapse: collapse;
++  font-size: var(--text-sm);
++}
++
++.coverage th,
++.coverage td {
++  padding: var(--space-2) var(--space-3);
++  border-bottom: 1px solid var(--color-border);
++  text-align: left;
++}
++
++.coverage thead th,
++.coverage tbody th {
++  color: var(--color-text-muted);
++  font-weight: var(--weight-normal);
++}
++
+ /* Home */
+ 
+ .filters {
+diff --git a/app/app/components/PokemonCards.tsx b/app/app/components/PokemonCards.tsx
+index 802d135..a461eea 100644
+--- a/app/app/components/PokemonCards.tsx
++++ b/app/app/components/PokemonCards.tsx
+@@ -3,11 +3,17 @@ import type { Card } from "../lib/types";
+ import { dexNumber } from "../lib/format";
+ import { TypeBadges } from "./TypeBadge";
+ 
+-export function PokemonCards({ cards }: { cards: Card[] }) {
++export function PokemonCards({
++  cards,
++  action,
++}: {
++  cards: Card[];
++  action?: (card: Card) => React.ReactNode;
++}) {
+   return (
+     <ul className="card-grid">
+       {cards.map((card, i) => (
+-        <li key={card.id}>
++        <li key={card.id} className={action ? "card-grid__item card-grid__item--action" : undefined}>
+           <Link to={`/pokemon/${card.name}`} className="card">
+             <img
+               className="card__sprite"
+@@ -22,6 +28,7 @@ export function PokemonCards({ cards }: { cards: Card[] }) {
+             {card.types && card.types.length > 0 && <TypeBadges types={card.types} />}
+             {card.hidden && <span className="card__note">Hidden ability</span>}
+           </Link>
++          {action?.(card)}
+         </li>
+       ))}
+     </ul>
+diff --git a/app/app/components/TeamProvider.tsx b/app/app/components/TeamProvider.tsx
+new file mode 100644
+index 0000000..0e0c8ed
+--- /dev/null
++++ b/app/app/components/TeamProvider.tsx
+@@ -0,0 +1,60 @@
++import { createContext, useCallback, useContext, useMemo, useRef, useState } from "react";
++import { MAX_TEAM_SIZE, normalizeTeam, writeTeamCookie } from "../lib/team";
++
++type TeamContextValue = {
++  team: string[];
++  isFull: boolean;
++  has: (name: string) => boolean;
++  add: (name: string) => void;
++  remove: (name: string) => void;
++};
++
++const TeamContext = createContext<TeamContextValue | null>(null);
++
++export function TeamProvider({ initialTeam, children }: { initialTeam: string[]; children: React.ReactNode }) {
++  const [team, setTeam] = useState(() => [...initialTeam]);
++  const latest = useRef(team);
++
++  const commit = useCallback((next: string[]) => {
++    const normalized = normalizeTeam(next);
++    latest.current = normalized;
++    setTeam(normalized);
++    writeTeamCookie(normalized);
++  }, []);
++
++  const add = useCallback(
++    (name: string) => {
++      if (latest.current.includes(name) || latest.current.length >= MAX_TEAM_SIZE) return;
++      commit([...latest.current, name]);
++    },
++    [commit],
++  );
++
++  const remove = useCallback(
++    (name: string) => {
++      if (!latest.current.includes(name)) return;
++      commit(latest.current.filter((member) => member !== name));
++    },
++    [commit],
++  );
++
++  const value = useMemo<TeamContextValue>(
++    () => ({
++      team,
++      isFull: team.length >= MAX_TEAM_SIZE,
++      has: (name) => team.includes(name),
++      add,
++      remove,
++    }),
++    [team, add, remove],
++  );
++
++  return <TeamContext.Provider value={value}>{children}</TeamContext.Provider>;
++}
++
++export function useTeam(): TeamContextValue {
++  const value = useContext(TeamContext);
++  if (!value) throw new Error("useTeam must be used inside a TeamProvider");
++  return value;
++}
++
+diff --git a/app/app/lib/api.server.ts b/app/app/lib/api.server.ts
+index 2c01091..6ca5b0d 100644
+--- a/app/app/lib/api.server.ts
++++ b/app/app/lib/api.server.ts
+@@ -3,6 +3,7 @@
+ import { data } from "react-router";
+ import { englishName, humanize, idFromUrl, type NamedResource, type Translated } from "./format";
+ import type { Card, TypeInfo } from "./types";
++import type { TypeRelation } from "./team";
+ 
+ const API_BASE_URL = (process.env.API_BASE_URL ?? "http://localhost:9000").replace(/\/$/, "");
+ const TTL_MS = 60_000;
+@@ -63,6 +64,7 @@ export type Index = {
+   speciesById: Map<number, { id: number; name: string; label: string }>;
+   types: TypeInfo[];
+   typeLabels: Map<string, string>;
++  typeRelations: TypeRelation[];
+   speciesTypes: Map<number, string[]>;
+   generations: { name: string; label: string; speciesIds: Set<number> }[];
+ };
+@@ -101,11 +103,19 @@ export function getIndex(): Promise<Index> {
+     );
+ 
+     const types = typeRecords.map((t) => ({ name: t.name, label: englishName(t.names, t.name) }));
++    const typeRelations = typeRecords.map((t) => ({
++      name: t.name,
++      label: englishName(t.names, t.name),
++      doubleDamageTo: (t.damage_relations.double_damage_to ?? []).map((r) => r.name),
++      halfDamageTo: (t.damage_relations.half_damage_to ?? []).map((r) => r.name),
++      noDamageTo: (t.damage_relations.no_damage_to ?? []).map((r) => r.name),
++    }));
+     return {
+       species,
+       speciesById,
+       types,
+       typeLabels: new Map(types.map((t) => [t.name, t.label])),
++      typeRelations,
+       speciesTypes,
+       generations: generationRecords.map((g) => ({
+         name: g.name,
+diff --git a/app/app/lib/team.ts b/app/app/lib/team.ts
+new file mode 100644
+index 0000000..6bafb99
+--- /dev/null
++++ b/app/app/lib/team.ts
+@@ -0,0 +1,78 @@
++import type { Card, TypeInfo } from "./types";
++
++export const TEAM_COOKIE = "team";
++export const MAX_TEAM_SIZE = 6;
++const TEAM_COOKIE_MAX_AGE = 60 * 60 * 24 * 365;
++
++/** Keeps API names in order, drops blanks and duplicates, and stops at six members. */
++export function normalizeTeam(names: string[]): string[] {
++  const team: string[] = [];
++  for (const raw of names) {
++    const name = raw.trim().toLowerCase();
++    if (!name || team.includes(name)) continue;
++    team.push(name);
++    if (team.length === MAX_TEAM_SIZE) break;
++  }
++  return team;
++}
++
++/** The team stored in the request's cookie header. */
++export function readTeamCookie(cookieHeader: string | null): string[] {
++  for (const part of (cookieHeader ?? "").split(";")) {
++    const equals = part.indexOf("=");
++    if (equals === -1 || part.slice(0, equals).trim() !== TEAM_COOKIE) continue;
++    try {
++      return normalizeTeam(decodeURIComponent(part.slice(equals + 1)).split(","));
++    } catch {
++      return [];
++    }
++  }
++  return [];
++}
++
++/** Persists the team in the browser for a year. Client-only. */
++export function writeTeamCookie(team: string[]): void {
++  document.cookie = `${TEAM_COOKIE}=${encodeURIComponent(
++    normalizeTeam(team).join(","),
++  )}; Path=/; Max-Age=${TEAM_COOKIE_MAX_AGE}; SameSite=Lax`;
++}
++
++export type TypeRelation = {
++  name: string;
++  label: string;
++  doubleDamageTo: string[];
++  halfDamageTo: string[];
++  noDamageTo: string[];
++};
++
++export type CoverageRow = { name: string; label: string; weak: number; resistant: number };
++
++function multiplier(relation: TypeRelation, defendingType: string): number {
++  if (relation.noDamageTo.includes(defendingType)) return 0;
++  if (relation.doubleDamageTo.includes(defendingType)) return 2;
++  if (relation.halfDamageTo.includes(defendingType)) return 0.5;
++  return 1;
++}
++
++/** Counts team members weak to and resistant to each attacking type. */
++export function typeCoverage(
++  members: { types?: TypeInfo[] }[],
++  relations: TypeRelation[],
++): CoverageRow[] {
++  return relations.map((relation) => {
++    let weak = 0;
++    let resistant = 0;
++    for (const member of members) {
++      const damage = (member.types ?? []).reduce(
++        (total, type) => total * multiplier(relation, type.name),
++        1,
++      );
++      if (damage > 1) weak += 1;
++      else if (damage < 1) resistant += 1;
++    }
++    return { name: relation.name, label: relation.label, weak, resistant };
++  });
++}
++
++export type TeamMember = Card & { types: TypeInfo[] };
++
+diff --git a/app/app/root.tsx b/app/app/root.tsx
+index 842be75..7cc163a 100644
+--- a/app/app/root.tsx
++++ b/app/app/root.tsx
+@@ -3,6 +3,8 @@ import type { Route } from "./+types/root";
+ import "./tokens.css";
+ import "./app.css";
+ import { pageTitle } from "./lib/format";
++import { readTeamCookie } from "./lib/team";
++import { TeamProvider } from "./components/TeamProvider";
+ 
+ export function Layout({ children }: { children: React.ReactNode }) {
+   return (
+@@ -29,6 +31,9 @@ export function Layout({ children }: { children: React.ReactNode }) {
+                 <li>
+                   <NavLink to="/types">Types</NavLink>
+                 </li>
++                <li>
++                  <NavLink to="/team">Team</NavLink>
++                </li>
+               </ul>
+             </nav>
+           </div>
+@@ -44,8 +49,16 @@ export function Layout({ children }: { children: React.ReactNode }) {
+   );
+ }
+ 
+-export default function App() {
+-  return <Outlet />;
++export async function loader({ request }: Route.LoaderArgs) {
++  return { team: readTeamCookie(request.headers.get("Cookie")) };
++}
++
++export default function App({ loaderData }: Route.ComponentProps) {
++  return (
++    <TeamProvider initialTeam={loaderData.team}>
++      <Outlet />
++    </TeamProvider>
++  );
+ }
+ 
+ export function ErrorBoundary({ error }: Route.ErrorBoundaryProps) {
+diff --git a/app/app/routes.ts b/app/app/routes.ts
+index 32018a6..864aad8 100644
+--- a/app/app/routes.ts
++++ b/app/app/routes.ts
+@@ -7,5 +7,6 @@ export default [
+   route("abilities/:name", "routes/ability.tsx"),
+   route("types", "routes/types.tsx"),
+   route("types/:name", "routes/type.tsx"),
++  route("team", "routes/team.tsx"),
+   route("*", "routes/not-found.tsx"),
+ ] satisfies RouteConfig;
+diff --git a/app/app/routes/pokemon.tsx b/app/app/routes/pokemon.tsx
+index 3045c08..3639666 100644
+--- a/app/app/routes/pokemon.tsx
++++ b/app/app/routes/pokemon.tsx
+@@ -14,6 +14,7 @@ import {
+ import { Section } from "../components/Section";
+ import { TypeBadges } from "../components/TypeBadge";
+ import { MoveTable, type MoveRow } from "../components/MoveTable";
++import { useTeam } from "../components/TeamProvider";
+ 
+ type Species = {
+   id: number;
+@@ -199,6 +200,8 @@ export default function PokemonPage({ loaderData }: Route.ComponentProps) {
+   const navigate = useNavigate();
+   const location = useLocation();
+   const gameRef = useRef<HTMLSelectElement>(null);
++  const { has, isFull, add, remove } = useTeam();
++  const inTeam = has(d.name);
+ 
+   const selectGame = (game: string) =>
+     navigate({ search: `?game=${encodeURIComponent(game)}`, hash: location.hash }, { preventScrollReset: true });
+@@ -223,6 +226,17 @@ export default function PokemonPage({ loaderData }: Route.ComponentProps) {
+           <p className="hero__dex">{dexNumber(d.id)}</p>
+           <h1>{d.label}</h1>
+           {d.genus && <p className="hero__genus">{d.genus}</p>}
++          <div className="team-actions">
++            <button
++              type="button"
++              className="button"
++              disabled={!inTeam && isFull}
++              onClick={() => (inTeam ? remove(d.name) : add(d.name))}
++            >
++              {inTeam ? "Remove from team" : "Add to team"}
++            </button>
++            {!inTeam && isFull && <span className="team-actions__note">Team is full</span>}
++          </div>
+           <TypeBadges types={d.types} link />
+           <dl className="facts">
+             <div>
+diff --git a/app/app/routes/team.tsx b/app/app/routes/team.tsx
+new file mode 100644
+index 0000000..68cb83e
+--- /dev/null
++++ b/app/app/routes/team.tsx
+@@ -0,0 +1,89 @@
++import { useEffect } from "react";
++import { Link, useRevalidator } from "react-router";
++import type { Route } from "./+types/team";
++import { getIndex, speciesCard } from "../lib/api.server";
++import { pageTitle } from "../lib/format";
++import { readTeamCookie, typeCoverage, type TeamMember } from "../lib/team";
++import { useTeam } from "../components/TeamProvider";
++import { PokemonCards } from "../components/PokemonCards";
++import { Section } from "../components/Section";
++
++export async function loader({ request }: Route.LoaderArgs) {
++  const teamNames = readTeamCookie(request.headers.get("Cookie"));
++  const index = await getIndex();
++  const members = teamNames
++    .map((name) => {
++      const species = index.species.find((s) => s.name === name);
++      const card = species ? speciesCard(index, species.id, true) : null;
++      return card ? ({ ...card, types: card.types ?? [] } satisfies TeamMember) : null;
++    })
++    .filter((member): member is TeamMember => member !== null);
++
++  return { teamNames, members, relations: index.typeRelations };
++}
++
++export default function TeamPage({ loaderData }: Route.ComponentProps) {
++  const { team, remove } = useTeam();
++  const revalidator = useRevalidator();
++
++  // If the team changed on another page since this route loaded, refresh its API data.
++  useEffect(() => {
++    if (team.join(",") !== loaderData.teamNames.join(",")) revalidator.revalidate();
++  }, [team, revalidator, loaderData.teamNames]);
++
++  const members = loaderData.members.filter((member) => team.includes(member.name));
++  const coverage = typeCoverage(members, loaderData.relations);
++
++  return (
++    <>
++      <title>{pageTitle("Team")}</title>
++      <h1>Team</h1>
++      <p className="count">{team.length} of 6</p>
++      {team.length === 0 ? (
++        <>
++          <p className="page-message">Your team is empty</p>
++          <p className="page-message">
++            <Link to="/">Browse Pokémon</Link>
++          </p>
++        </>
++      ) : (
++        <>
++          <PokemonCards
++            cards={members}
++            action={(card) => (
++              <button
++                type="button"
++                className="button button--secondary team-remove"
++                onClick={() => remove(card.name)}
++              >
++                Remove {card.label}
++              </button>
++            )}
++          />
++          <Section title="Type coverage">
++            <div className="table-scroll">
++              <table className="coverage">
++                <thead>
++                  <tr>
++                    <th scope="col">Type</th>
++                    <th scope="col">Weak</th>
++                    <th scope="col">Resistant</th>
++                  </tr>
++                </thead>
++                <tbody>
++                  {coverage.map((row) => (
++                    <tr key={row.name}>
++                      <th scope="row">{row.label}</th>
++                      <td>{row.weak}</td>
++                      <td>{row.resistant}</td>
++                    </tr>
++                  ))}
++                </tbody>
++              </table>
++            </div>
++          </Section>
++        </>
++      )}
++    </>
++  );
++}

@@ -1,0 +1,159 @@
+{
+  "dimension": "editability",
+  "criteria": {
+    "removability": {
+      "score": 3,
+      "evidence": [
+        "app/app/routes.ts:15 — abilities route is one clean line to delete",
+        "app/app/routes/ability.tsx:1-46 — feature route is self-contained, no nav entry to clean up (app/app/root.tsx:27-30)",
+        "app/app/lib/api.server.ts:450-470 — getAbilityPage must be removed by hand",
+        "app/app/routes/pokemon.tsx:131-143 — Abilities section + its data mapping (app/app/lib/api.server.ts:330-338) live in the Pokémon feature and must be edited too",
+        "app/app/components.tsx:71 — PokemonGrid's `hidden` prop / 'Hidden ability' span exists only for the ability page and would be left dead; app/app/app.css:340 `.hidden-ability` likewise"
+      ],
+      "rationale": "Removing Abilities means deleting a route file plus scattered edits across four other files (routes config, data layer, the Pokémon page that links to it, and the shared card component/CSS) — the cross-feature link makes a clean delete impossible, which is inherent to the spec, but the leftover `hidden` support in PokemonGrid is avoidable dead code."
+    },
+    "changeability": {
+      "score": 4,
+      "evidence": [
+        "app/app/lib/api.server.ts:120-128 — cardSprite is the single sprite-resolution point for every card list (home, move, ability, type) via cardFromPokemonRef at :154-170",
+        "app/app/lib/api.server.ts:158-168 — cardsFromRefs centralizes dedup + dex ordering for move/type lists",
+        "app/app/routes/pokemon.tsx:178-230 — MovesTable sorting logic exists once, not per column or per table",
+        "app/app/routes/move.tsx:32, app/app/routes/types.tsx:20, app/app/routes/type-detail.tsx:37, app/app/routes/pokemon.tsx:89,273 — the `type-badge type-<name>` markup is inlined five times despite TypeBadge existing at app/app/components.tsx:34-39",
+        "app/app/routes/move.tsx:5-22, ability.tsx:5-21, type-detail.tsx:5-22, pokemon.tsx:7-21 — the notFound sentinel/meta/redirect dance is copy-pasted four times"
+      ],
+      "rationale": "The high-value fixes (sprites, card ordering, move-table sorting, filtering) each land in exactly one obvious place thanks to the single data module, but presentation details like the type badge and the not-found handling would have to be fixed N times."
+    },
+    "coupling": {
+      "score": 3,
+      "evidence": [
+        "app/app/lib/api.server.ts — server-only module (`.server.ts` convention) consumed only by loaders; app/app/components.tsx and app/app/lib/format.ts are pure presentational/pure helpers",
+        "app/app/routes/move.tsx:5 — loader({ params }: any) and ({ loaderData }: any) throughout move/ability/type-detail/pokemon routes erase the loader-data contract, so a shape change in api.server.ts fails at runtime, not compile time",
+        "app/app/components.tsx:41-46 — Card type is a structural duplicate of PokemonCard at app/app/lib/api.server.ts:143-149, drift risk",
+        "app/app/routes/pokemon.tsx:46 — routes reach into the notFound sentinel rather than a shared boundary (no ErrorBoundary anywhere)",
+        "app/app/root.tsx:23-36 — app shell/nav correctly isolated from features"
+      ],
+      "rationale": "The server/client split is clean and components are presentational, but the routes' `any`-typed loader boundaries mean the interface between data layer and UI is implicit, and a few concepts (card shape, not-found, badge markup) are known in multiple places."
+    },
+    "abstraction_design": {
+      "score": 3,
+      "evidence": [
+        "app/app/components.tsx:3-25 — Section generates the aria-labelledby/id pairing once; reused on every page",
+        "app/app/components.tsx:49-77 — PokemonGrid is a real shared abstraction but already carries `showTypes` and optional `hidden` flag-parameter creep",
+        "app/app/components.tsx:34-39 — TypeBadge exists yet its exact markup is inlined in five other spots, so the abstraction only stretches halfway",
+        "app/app/lib/api.server.ts:404-440, 450-470, 478-528 — getMovePage/getAbilityPage/getTypePage repeat the same fetch→shape→cards skeleton with no shared resource-page helper; an Items feature will be copy-paste",
+        "app/app/routes/pokemon.tsx:178-289 — MovesTable is well-extracted but lives inside the 290-line route file rather than its own module"
+      ],
+      "rationale": "The components are sensibly sized for the app and stretch to most cases, but several abstractions exist and are bypassed (TypeBadge) or grow flags (PokemonGrid), and the per-resource page loaders are structured copy-paste rather than a reusable skeleton."
+    }
+  },
+  "overall": 4,
+  "findings": [
+    {
+      "severity": "medium",
+      "location": "app/app/routes/move.tsx:5,14,20; ability.tsx:5; type-detail.tsx:5; pokemon.tsx:7,11,45",
+      "issue": "Loaders and components are typed with `any` even though tsconfig includes `.react-router/types`; the framework's generated Route.LoaderArgs/Route.ComponentProps are unused, so refactors of the loader-data shape in api.server.ts compile fine and break at runtime.",
+      "suggestion": "Use `import type { Route } from './+types/<route>'` with Route.LoaderArgs / Route.ComponentProps / Route.MetaArgs, and type the getXPage return values so the compiler guides data-shape changes."
+    },
+    {
+      "severity": "medium",
+      "location": "app/app/routes/move.tsx:7-22; ability.tsx:6-21; type-detail.tsx:7-22; pokemon.tsx:10-21",
+      "issue": "The not-found flow (`data ?? { notFound: true }`, a meta() special case, and an early `return <NotFoundPage/>`) is hand-rolled and duplicated in four routes, and responds with HTTP 200 instead of 404.",
+      "suggestion": "Follow the framework pattern: throw `data('Not Found', { status: 404 })` from the loader and render one shared ErrorBoundary/NotFound (or at minimum extract a single helper for the sentinel + meta), so the behaviour lives in one place."
+    },
+    {
+      "severity": "medium",
+      "location": "app/app/routes/pokemon.tsx:89,273; move.tsx:32; types.tsx:20; type-detail.tsx:37",
+      "issue": "Type-badge markup (`type-badge type-${name}`) is inlined in five places although a TypeBadge component exists at components.tsx:34-39.",
+      "suggestion": "Give TypeBadge an optional `to` (link) variant and use it everywhere, so badge styling/structure changes in one file."
+    },
+    {
+      "severity": "medium",
+      "location": "app/app/lib/api.server.ts:450-470",
+      "issue": "getAbilityPage re-implements cardFromPokemonRef + unique-by-id + dex sort instead of reusing cardsFromRefs (:158-168); a change to card building or ordering must be applied twice.",
+      "suggestion": "Extend cardsFromRefs to pass an extra flag through (or accept a mapper) and use it for ability pages too, keeping one card-list builder."
+    },
+    {
+      "severity": "low",
+      "location": "app/app/components.tsx:41-46 vs app/app/lib/api.server.ts:143-149",
+      "issue": "`Card` in components.tsx is a hand-maintained structural duplicate of `PokemonCard`; the two will drift.",
+      "suggestion": "Export PokemonCard from (or move the type into) a shared module and have the component import it."
+    },
+    {
+      "severity": "low",
+      "location": "app/app/lib/api.server.ts:26-28,55,106,187",
+      "issue": "Caching is spread across several module-level promises (typeInfos, generations, speciesIndex, homeData, versionGroups) plus a never-evicting recordCache (:14-19); there is no single cache-policy seam, and changing rules (TTL, eviction) means reworking each one.",
+      "suggestion": "Introduce one memoize helper with an explicit policy (e.g. `cached(key, ttl, fn)`) and route every cached value through it so caching rules have a single knob."
+    },
+    {
+      "severity": "low",
+      "location": "app/app/components.tsx:49-77",
+      "issue": "PokemonGrid already has `showTypes` and optional `hidden` prop flags; the next card variation (e.g. sorting control or extra metadata) adds more booleans.",
+      "suggestion": "Either keep the grid dumb and pass prepared rows, or split card content into a small slot/variant prop before the flag list grows."
+    },
+    {
+      "severity": "low",
+      "location": "app/app/routes/home.tsx:44-74",
+      "issue": "navigateWithParam and onSearch duplicate the same URLSearchParams-mutation dance (delete `page`, set/delete the key, preventScrollReset).",
+      "suggestion": "Have onSearch call navigateWithParam('q', value, true) so query-param handling is written once."
+    },
+    {
+      "severity": "low",
+      "location": "app/app/routes/pokemon.tsx:1-289",
+      "issue": "The route file mixes the page layout with the MovesTable component and its sorting state machine, making it the largest and least navigable file in the app.",
+      "suggestion": "Move MovesTable (and its Column/sort types) into its own module under routes/ or components/."
+    }
+  ],
+  "summary": "This is a small, tidy app with an unusually good data-layer seam: everything that knows about the API (base URL, caching, sprites, card building) lives in one server-only module, so the realistic fixes — the Deoxys-style sprite bug, base-URL or cache changes, card-list ordering — each land in a single obvious file. What keeps it from being exemplary is pervasive `any` typing on loader boundaries, a hand-rolled 404 sentinel copy-pasted into four routes instead of the framework's ErrorBoundary pattern, and small duplications (inline type-badge markup, a second card-list builder, a duplicated Card type) that a future maintainer must remember to fix in N places. Most extension work (an Items section) is structured copy-paste rather than reuse, but the pattern is consistent enough to be safe.",
+  "scenarios": [
+    {
+      "change": "Remove the Abilities pages and every link to them",
+      "files": [
+        "app/app/routes.ts",
+        "app/app/routes/ability.tsx",
+        "app/app/lib/api.server.ts",
+        "app/app/routes/pokemon.tsx",
+        "app/app/components.tsx",
+        "app/app/app.css"
+      ],
+      "difficulty": 3,
+      "notes": "The route itself deletes cleanly (no nav link in root.tsx), but the Pokémon page's Abilities section + its data mapping, getAbilityPage, PokemonGrid's `hidden` support (components.tsx:71) and the `.hidden-ability` CSS rule all need separate edits, or dead code is left behind."
+    },
+    {
+      "change": "Fix the wrong-sprite bug for species whose default Pokémon differs (e.g. Deoxys)",
+      "files": [
+        "app/app/lib/api.server.ts"
+      ],
+      "difficulty": 5,
+      "notes": "Every card list (home, move 'Learned by', ability, type) is built through cardFromPokemonRef → cardSprite (api.server.ts:120-170), so one fix covers all lists; only the Pokémon page artwork (a different concept) lives elsewhere."
+    },
+    {
+      "change": "Add sorting by name to every list of Pokémon cards",
+      "files": [
+        "app/app/components.tsx",
+        "app/app/routes/home.tsx"
+      ],
+      "difficulty": 4,
+      "notes": "All four lists render through PokemonGrid, so the component is the natural single change point, but the home list must stay dex-ordered per spec, which forces either an opt-out prop (flag creep) or sorting at each call site — the card *building* is also duplicated in getAbilityPage, though ordering there is data-side."
+    },
+    {
+      "change": "Add an Items section (/items, /items/:name) shaped like Moves",
+      "files": [
+        "app/app/routes.ts",
+        "app/app/routes/items.tsx",
+        "app/app/routes/item.tsx",
+        "app/app/lib/api.server.ts",
+        "app/app/app.css"
+      ],
+      "difficulty": 3,
+      "notes": "The plumbing (fetchJson/getList/getRecord, format helpers, Section, NotFoundPage) and the route-config style are genuinely reusable, but the loader+meta+notFound+page skeleton must be copied from move.tsx/type-detail.tsx and a new getItem(s)Page written in api.server.ts — ~60% copy-paste of a small, consistent pattern; item sprites also need a new variant of spriteUrlForId."
+    },
+    {
+      "change": "Change the API base URL and caching rules",
+      "files": [
+        "app/app/lib/api.server.ts"
+      ],
+      "difficulty": 4,
+      "notes": "API_BASE_URL and the record cache are defined exactly once (:9, :14-19), so both changes touch one file; the catch is that caching is implemented in several distinct forms (recordCache plus five module-level memoized promises with no eviction), so changing the *policy* requires understanding the whole 500-line data module."
+    }
+  ]
+}

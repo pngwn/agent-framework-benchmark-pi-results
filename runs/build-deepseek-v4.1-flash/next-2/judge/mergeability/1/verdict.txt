@@ -1,0 +1,130 @@
+## Review summary
+
+The app is a clean, conventional App Router codebase: server components for data, two small client islands (`Filters.jsx`, `MovesSection.jsx`), a thin data layer (`lib/api.js`) with memoized promises, and shared display helpers. Async `params`/`searchParams`, `generateMetadata`, `Link`, and `dynamic = 'force-dynamic'` all match current Next 16 docs. The main gaps: 404s are hand-rolled via a `[...slug]` catch-all that renders at HTTP 200 instead of the framework's `notFound()` + `not-found.jsx` convention (which the spec explicitly encouraged and which is a one-line change), and `Filters` has a genuine back/forward bug — its debounced effect holds stale local state, so pressing Back after a search re-fires `router.replace` and snaps the URL back to the old query. Remaining items are nits: misplaced `TypeBadge`, a no-op `.map`, a duplicated id regex, and no error boundary for API failures.
+
+```json
+{
+  "dimension": "mergeability",
+  "criteria": {
+    "idiomatic": {
+      "score": 3,
+      "evidence": [
+        "app/app/pokemon/[name]/page.jsx:122 — `if (!species) return <NotFound />` renders the custom component instead of the documented `notFound()` throw, so the page returns HTTP 200 for missing resources",
+        "app/app/[...slug]/page.jsx:10 — a catch-all route re-implements the 404 page that `app/not-found.jsx` + the router's unmatched-route handling provide for free",
+        "app/components/PokemonCard.jsx:22 — plain `<img>` with manual width/height/lazy instead of `next/image` (remotePatterns could be configured from API_BASE_URL)",
+        "app/app/page.jsx:4 — `export const dynamic = 'force-dynamic'` with `cache: 'no-store'` (app/lib/api.js:35) uses the classic model; Next 16.4 docs recommend Cache Components for greenfield apps (defensible here given the live-data requirement)",
+        "app/app/pokemon/[name]/page.jsx:38-44 — `generateMetadata` with awaited Promise params matches current docs exactly",
+        "app/components/MovesSection.jsx:3-4 — correct modern client-island split with usePathname/useRouter/useSearchParams"
+      ],
+      "rationale": "Recognisably idiomatic App Router (async params, metadata API, server/client split all correct), but the 404 path is a home-grown workaround where the framework ships a convention, plus minor deviations like plain `<img>` and the classic caching model."
+    },
+    "correctness_risks": {
+      "score": 3,
+      "evidence": [
+        "app/components/Filters.jsx:22-30 — debounced effect compares local `search` to the `q` prop; after browser Back the state is stale, so the effect re-fires `router.replace` and snaps the URL back to the abandoned query (back button effectively broken after searching)",
+        "app/lib/api.js:41 — non-OK API responses throw with no `error.jsx` boundary anywhere, so an API blip renders Next's raw 500 page",
+        "app/lib/api.js:31,48-54 — `promiseCache` is an unbounded module-level Map that never evicts successful entries (bounded in practice by the API's finite resource set, but grows with every distinct pokemon/move/ability visited)",
+        "app/app/page.jsx:80 — 48 parallel `getDefaultPokemon` fetches via `Promise.all` with no concurrency limit, while `mapLimit` exists in lib/api.js:61",
+        "app/components/MovesSection.jsx:16-22 — game select correctly preserves other query params; no SSR/CSR mismatch found (initial sort state is deterministic)"
+      ],
+      "rationale": "One real user-facing bug (stale search state fighting browser history) plus a handful of minor fragilities: no error boundary, unbounded memo cache, and one unthrottled fetch fan-out. React's escaping covers XSS; no races found in the worker-pool code."
+    },
+    "global_abstractions": {
+      "score": 4,
+      "evidence": [
+        "app/lib/api.js — single, well-scoped data layer: request/memoize (`api`, lines 47-55), list loaders (getSpeciesList, getTypes, getVersionGroups) with error-invalidated memoization",
+        "app/lib/cards.js:14 — `buildPokemonCards` is a shared abstraction earning its keep, reused by move, ability and type pages",
+        "app/lib/format.js:74-77 — `typeColorStyle` (a styling helper) and `SPRITE_PLACEHOLDER` live in a file named 'format', making it a mild grab bag",
+        "app/components/PokemonCard.jsx:3 — `TypeBadge` is exported from PokemonCard.jsx but consumed by MovesSection and the type/move pages; misplaced boundary",
+        "app/components/PokemonCard.jsx:20 — the card renders its own `<li>`, coupling list structure into the leaf component"
+      ],
+      "rationale": "The lib/ layer has clear boundaries (api / format / cards) and honest ownership; the issues are placement nits (TypeBadge's home, styling in format.js) rather than god modules or hidden coupling."
+    },
+    "readability": {
+      "score": 4,
+      "evidence": [
+        "app/app/pokemon/[name]/page.jsx — page reads top-to-bottom: fetch, derive, render; helper `buildMoveTables` (line 66) isolates the trickiest logic",
+        "app/app/pokemon/[name]/page.jsx:34-42 — `EvolutionNode`/`EvolutionList` are mutual one-line wrappers around each other; pointless indirection",
+        "app/app/abilities/[name]/page.jsx:29 — inline regex duplicates `idFromUrl` from lib/format.js:38 already imported elsewhere",
+        "app/components/MovesSection.jsx:84 — `.map((row) => row)` is a no-op that obscures the intent (should be `[...table.rows]`)",
+        "whole codebase — only 2 comment lines; names are descriptive enough that this mostly doesn't hurt"
+      ],
+      "rationale": "Consistent structure, good names, small functions; a new teammate finds their way quickly. Rough spots are minor: the evolution wrapper pair, the duplicated regex, and a no-op map."
+    },
+    "review_cost": {
+      "score": 3,
+      "evidence": [
+        "app/app/[...slug]/page.jsx:10 and app/app/pokemon/[name]/page.jsx:122 — reviewer must ask for the `notFound()` / `app/not-found.jsx` migration in five pages plus route deletion",
+        "app/components/Filters.jsx:22-30 — back/forward bug needs a fix (sync state from URL or key the effect on navigation)",
+        "app/app/abilities/[name]/page.jsx:29, app/app/pokemon/[name]/page.jsx:34-42, app/components/MovesSection.jsx:84 — small dedupe/cleanup nits",
+        "app/lib/api.js:41 — no error boundary; likely requested as a follow-up"
+      ],
+      "rationale": "One focused round of changes: 404 convention, the Filters history bug, and a few cleanups. Nothing structural; no rework."
+    }
+  },
+  "overall": 4,
+  "findings": [
+    {
+      "severity": "medium",
+      "location": "app/components/Filters.jsx:22",
+      "issue": "Debounced effect compares local `search` state against the `q` prop; after browser Back/Forward the state is stale, so the timer re-fires router.replace and drags the URL back to the abandoned query, breaking history navigation after a search.",
+      "suggestion": "Sync local state when the URL changes (e.g. key the input off `useSearchParams().get('q')`, or reset state in an effect keyed on `q`), and only schedule a navigation when the change originates from typing."
+    },
+    {
+      "severity": "medium",
+      "location": "app/app/[...slug]/page.jsx:10",
+      "issue": "404 handling is hand-rolled: a catch-all route plus per-page `<NotFound />` returns, so every not-found page is served with HTTP 200 and the framework's `notFound()` + `not-found.jsx` convention is bypassed (the spec explicitly encouraged real 404s).",
+      "suggestion": "Delete the catch-all route, call `notFound()` from `next/navigation` where data is missing, and put the UI in `app/not-found.jsx` — this also gets the 404 status and noindex tag for free."
+    },
+    {
+      "severity": "low",
+      "location": "app/lib/api.js:41",
+      "issue": "API failures throw with no `error.jsx` boundary anywhere, so a backend blip surfaces as Next's default 500 page.",
+      "suggestion": "Add a root `app/error.jsx` with a retry affordance."
+    },
+    {
+      "severity": "low",
+      "location": "app/components/PokemonCard.jsx:3",
+      "issue": "`TypeBadge` is defined in and exported from `PokemonCard.jsx` but is a general primitive used by MovesSection, the type page and the move page; the card also renders its own `<li>`, leaking list structure into a leaf component.",
+      "suggestion": "Move `TypeBadge` to its own `components/TypeBadge.jsx` and let the parent own list markup."
+    },
+    {
+      "severity": "low",
+      "location": "app/app/pokemon/[name]/page.jsx:34",
+      "issue": "`EvolutionNode` and `EvolutionList` are mutual one-line wrappers (each just calls the other), adding indirection without meaning.",
+      "suggestion": "Collapse into a single recursive component (the `<ul>` wrapper can live inside the same function)."
+    },
+    {
+      "severity": "low",
+      "location": "app/app/abilities/[name]/page.jsx:29",
+      "issue": "Inline regex `entry.pokemon?.url?.match(/\\/(\\d+)\\/?$/)` duplicates `idFromUrl` already exported from lib/format.js:38.",
+      "suggestion": "Import and use `idFromUrl`."
+    },
+    {
+      "severity": "low",
+      "location": "app/app/page.jsx:80",
+      "issue": "Home page fires 48 parallel pokemon fetches with `Promise.all` while `mapLimit` exists in lib/api.js:61 and is used everywhere else; inconsistent and unthrottled.",
+      "suggestion": "Use `mapLimit(pageSpecies, 12, ...)` for consistency with the rest of the data layer."
+    },
+    {
+      "severity": "low",
+      "location": "app/lib/api.js:31",
+      "issue": "`promiseCache` never evicts successful entries, so memory grows with every distinct resource visited over the server's lifetime (bounded in practice by the API's finite catalog, but unbounded by design).",
+      "suggestion": "Acceptable given the spec explicitly permits in-memory caching; if kept, note the assumption in a comment or add a simple size cap."
+    },
+    {
+      "severity": "low",
+      "location": "app/components/MovesSection.jsx:84",
+      "issue": "`.map((row) => row)` is a no-op copy used only to avoid sorting the prop in place; it obscures intent.",
+      "suggestion": "Use `[...table.rows].sort(...)` (or memoize with `useMemo`)."
+    },
+    {
+      "severity": "low",
+      "location": "app/package.json:12",
+      "issue": "devDependencies is empty — no ESLint setup, yet Filters.jsx:24 carries an `eslint-disable-next-line` comment; the disable is unverifiable in CI.",
+      "suggestion": "Add `eslint` + `eslint-config-next` and a lint script, or drop the comment if linting is intentionally out of scope."
+    }
+  ],
+  "summary": "A tidy, recognisably idiomatic App Router implementation with a clean data layer, correct async params/metadata usage, and only two small client islands. The two things a reviewer will ask for are the hand-rolled 404 path (should be `notFound()` + `app/not-found.jsx`, which also yields the encouraged 404 status) and the stale-state bug in Filters that fights browser history after a search. Everything else is nits — merge after one focused round."
+}
+```

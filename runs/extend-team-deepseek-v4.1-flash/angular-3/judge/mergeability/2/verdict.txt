@@ -1,0 +1,79 @@
+I've reviewed the app thoroughly against the Angular v22 guidance (skill references, angular.dev API docs, and the v22 release notes). Verified: `@Service()` is the stable, recommended decorator in v22; `withEventReplay()` is now redundant since incremental hydration (which includes event replay) is on by default; `RESPONSE_INIT` mutation is the documented 404 pattern; resolvers + `withComponentInputBinding` remain the recommended data-loading approach (router resources are still dev-preview in 22.2).
+
+```json
+{
+  "dimension": "mergeability",
+  "criteria": {
+    "idiomatic": {
+      "score": 4,
+      "evidence": [
+        "app/src/app/data/team-store.ts:28 — @Service() decorator, the v22-recommended replacement for @Injectable({providedIn:'root'})",
+        "app/src/app/app.routes.ts:7-10 — ResolveFn + withComponentInputBinding + input.required in pages (app/src/app/pages/move/move-page.ts:38), exactly the current data-resolvers guidance",
+        "app/src/app/pages/not-found/not-found.ts:11-13 — injects RESPONSE_INIT (v21+ token) and sets 404, the documented pattern",
+        "app/src/app/shared/pokemon-card.ts:4-19 — signal inputs, computed, NgOptimizedImage with priority, @if/@for control flow",
+        "app/src/app/pages/pokemon/move-table.ts:73-77 — linkedSignal reset-on-table-change for the sort state",
+        "app/src/app/app.routes.server.ts:4-9 — per-request RenderMode.Server for all routes, matching the SSR guidance",
+        "app/src/app/app.config.ts:21 — provideClientHydration(withEventReplay()) is redundant in v22: incremental hydration (incl. event replay) is enabled by default (angular.dev docs, angular-cli#32996)",
+        "app/src/app/app.ts:33-52 — disables both built-in router scrolling features (app.config.ts:19) and hand-rolls Scroll-event handling"
+      ],
+      "rationale": "Reads like current Angular almost everywhere — @Service, signal inputs, linkedSignal, resolvers, control flow, SSR tokens. The two home-grown layers (the PageData/TransferState data path and the manual scroll manager) are justified but depart from framework primitives."
+    },
+    "correctness_risks": {
+      "score": 4,
+      "evidence": [
+        "app/src/app/pages/team/team-page.ts:79,82-92 — `void this.load(names)` inside the effect: a failed /_data fetch becomes an unhandled rejection with no error state and a stale VM",
+        "app/src/app/data/team-store.ts:44,66-72 — browser trusts localStorage while the server renders from the cookie; if localStorage is cleared but the cookie survives (Safari ITP, manual clear), SSR HTML and hydrated state diverge → hydration mismatch",
+        "app/src/app/data/page-data.ts:15-30 — client-side cache has TTL but no size bound, unlike the server cache's MAX_ENTRIES (server/api-client.ts:8,56)",
+        "app/src/app/pages/home/home.ts:55-58 — page is clamped to pageCount but ?page=999 stays in the URL, leaving URL and rendered 'Page n of m' inconsistent",
+        "app/src/app/app.routes.ts:38-40 — runGuardsAndResolvers correctly re-resolves on game change; app/src/app/data/page-data.ts:28 drops rejected promises from the cache; team-page.ts:75,91 has a loadId race guard"
+      ],
+      "rationale": "Careful work — race guards, 404→null, dedup, re-resolve on query changes are all handled. Remaining issues are minor: one swallowed rejection on the team page, a narrow cookie/localStorage divergence edge, and an unbounded (though TTL'd) client cache."
+    },
+    "global_abstractions": {
+      "score": 4,
+      "evidence": [
+        "app/src/app/shared/models.ts:1 — a single view-model contract shared by server loaders and components; clean seam between server and client",
+        "app/src/app/data/page-data.ts:33-39 + app/src/app/app.config.server.ts:9-11 — PAGE_DATA_LOADER token cleanly swaps the browser fetch for the server loader",
+        "app/src/server/loaders.ts:1-13 — one ~430-line module builds every page's VM; per-page functions with shared helpers, but it will need splitting as pages grow",
+        "app/src/server/api-client.ts:5-8,39-66 vs app/src/app/data/page-data.ts:15-30 — two near-identical TTL/promise caches, one per side of the server boundary",
+        "app/src/app/shared/pokemon-card.ts, type-badge.ts, card-list.ts — small, focused, genuinely reused components; no god component or utils grab-bag"
+      ],
+      "rationale": "Abstractions earn their keep: the VM contract and loader token make the server/client boundary explicit and testable. The cost is one large loaders.ts module and a small duplicated cache pattern that a reviewer might unify."
+    },
+    "readability": {
+      "score": 4,
+      "evidence": [
+        "app/src/server.ts:14-16 — comment explains exactly why allowedHosts is wildcarded (no Host-derived requests)",
+        "app/src/app/app.ts:35-36 — comment explains the scroll policy (top on page change, keep on filter change)",
+        "app/src/app/pages/home/home.ts:26-34 — the tricky linkedSignal/pushedQ debounce-sync dance is documented",
+        "app/src/app/data/page-data.ts:60-61 — TransferState reuse explained; app/src/server/loaders.ts:46 — section markers organize the large file",
+        "app/src/app/shared/format.ts:1-21 — tiny, well-documented pure helpers (and the only unit-tested module, format.spec.ts)"
+      ],
+      "rationale": "A new teammate can find their way fast: consistent v20+ naming (no suffixes), pages/ mirror routes, and the genuinely tricky parts carry why-comments. The densest spot is loaders.ts's length and the move-table sort logic, both readable but heavy."
+    },
+    "review_cost": {
+      "score": 4,
+      "evidence": [
+        "app/src/server.ts:17 — only structural pushback I'd expect: wildcard allowedHosts vs official SSR guidance",
+        "app/src/app/pages/team/team-page.ts:79 — add error handling to the effect-driven load",
+        "app/src/app/app.config.ts:21 and app/src/app/page-title-strategy.ts:9 — two one-line nits (redundant withEventReplay, @Injectable vs @Service)",
+        "app/src/app/app.routes.ts:55-60 — the FEATURE change itself is a textbook minimal diff: new store, resolver, page, nav link, one button (CHANGES.diff confirms)"
+      ],
+      "rationale": "I'd approve after one small round: fix the team-page rejection handling, justify or fix allowedHosts, and clean the two decorator/hydration nits. Nothing needs structural rework."
+    }
+  },
+  "overall": 4,
+  "findings": [
+    { "severity": "medium", "location": "app/src/server.ts:17", "issue": "AngularNodeAppEngine is configured with allowedHosts: ['*'], contradicting current SSR guidance to keep an explicit host list and avoid wildcards even behind a proxy.", "suggestion": "Configure the expected hosts (or document/proxy-validate Host at the edge and keep an explicit allow-list); keep the comment about why Host is not used for data fetching." },
+    { "severity": "medium", "location": "app/src/app/pages/team/team-page.ts:79", "issue": "`void this.load(names)` inside the effect swallows failures: a non-404 /_data error becomes an unhandled promise rejection and the page silently shows a stale team VM.", "suggestion": "Catch inside load(), set an error signal, and render a retry message on the team page." },
+    { "severity": "low", "location": "app/src/app/app.config.ts:21", "issue": "withEventReplay() is redundant on Angular v22 — provideClientHydration() already enables incremental hydration plus event replay by default.", "suggestion": "Drop withEventReplay() and rely on the v22 defaults (keep provideClientHydration())." },
+    { "severity": "low", "location": "app/src/app/data/team-store.ts:44", "issue": "Cookie sync is one-directional (localStorage→cookie only when non-empty); a surviving cookie with cleared localStorage makes SSR render a team the client doesn't have, causing hydration mismatch.", "suggestion": "On the browser, always make localStorage authoritative by writing the cookie from whatever was read (including empty), or read the cookie as the browser fallback." },
+    { "severity": "low", "location": "app/src/app/data/page-data.ts:15-30", "issue": "The client cache is TTL-bounded but not size-bounded, unlike the server cache's MAX_ENTRIES=4000; entries linger until re-read.", "suggestion": "Add a max-entries eviction like server/api-client.ts, or prune expired entries on set." },
+    { "severity": "low", "location": "app/src/app/app.ts:33-52", "issue": "Router's built-in scroll restoration and anchor scrolling are disabled and re-implemented by hand over Scroll events; dense, must be studied to trust.", "suggestion": "Prefer withInMemoryScrolling({scrollPositionRestoration:'top', anchorScrolling:'enabled'}) if it satisfies the spec, or keep the custom logic but move it into a small directive/service with tests." },
+    { "severity": "low", "location": "app/src/app/pages/home/home.ts:55-58", "issue": "Page number is clamped to pageCount for display while the URL keeps the out-of-range ?page value, so URL and shown page disagree.", "suggestion": "Either navigate to the clamped page or treat out-of-range as page 1 in the URL as well." },
+    { "severity": "low", "location": "app/src/app/page-title-strategy.ts:9", "issue": "Uses the legacy @Injectable() while the rest of the app uses the v22-stable @Service(); inconsistent and will be flagged by the ng generate @angular/core:service migration.", "suggestion": "Use @Service({autoProvided: false}) or no decorator since it's registered via useClass." },
+    { "severity": "low", "location": "app/src/server/api-client.ts:39-66", "issue": "Near-identical TTL/promise-cache logic duplicated across server/api-client.ts and app/data/page-data.ts with slightly different eviction behavior.", "suggestion": "Extract one tiny shared promise-cache helper (usable on both sides) or consciously document the two different policies." }
+  ],
+  "summary": "This is a confident, current-Angular codebase: v22 idioms (@Service, signal inputs, linkedSignal, resolvers with component input binding, RESPONSE_INIT 404s, per-request SSR) with a clean server/client boundary built on a shared view-model contract, and the team-builder feature lands as a model-minimal diff. Remaining issues are small: a wildcard allowedHosts against official guidance, one swallowed rejection on the team page, a narrow cookie/localStorage hydration edge, and a few redundant or duplicated bits. I'd merge after one round of nits."
+}
+```

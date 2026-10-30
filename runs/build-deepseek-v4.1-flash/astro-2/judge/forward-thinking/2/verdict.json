@@ -1,0 +1,136 @@
+{
+  "dimension": "forward-thinking",
+  "criteria": {
+    "latest_apis": {
+      "score": 4,
+      "evidence": [
+        "app/package.json:10-11 — astro 7.4.4 + @astrojs/node 11.1.9, the current major line (Astro 7.0 released 2026-06-22; lockfile pulls @astrojs/compiler-rs, the Rust-compiler era)",
+        "app/astro.config.mjs:4-9 — output:'server' + node adapter standalone, the currently documented SSR setup per docs.astro.build node guide",
+        "app/src/pages/pokemon/[name].astro:25-27 — Astro.response.status for 404, current documented API",
+        "app/astro.config.mjs:1-9 — no cache/routeRules despite Astro 7 having stabilized route caching (memoryCache(), routeRules, Astro.cache.set), which fits this fetch-per-request workload"
+      ],
+      "rationale": "Built on the current Astro major with no deprecated or legacy APIs anywhere (verified against the v7 upgrade guide's removals list). It doesn't reach for the newly-stable route caching or advanced routing, but those are opt-in conveniences, not current-generation replacements for what's here."
+    },
+    "platform": {
+      "score": 4,
+      "evidence": [
+        "app/src/lib/pokeapi.ts:44-53 — fetch with per-status handling (404 → NotFoundError), no HTTP library",
+        "app/src/pages/index.astro:101-118 — FormData + URLSearchParams + DOMParser for query-driven partial updates, no client framework",
+        "app/src/pages/index.astro:40-46 — native form (method=get) keeps filter state in the URL, works without JS",
+        "app/src/pages/index.astro:105-121 — race guard is a hand-rolled requestId counter instead of AbortController; superseded requests still complete",
+        "app/src/styles/tokens.css:5-7 — custom properties for all design tokens; system-ui font stack"
+      ],
+      "rationale": "Consistently reaches for the platform (fetch, URLSearchParams, FormData, DOMParser, native forms/tables) with zero polyfills or hand-rolled equivalents. The only gap is not aborting in-flight search requests."
+    },
+    "dependencies": {
+      "score": 5,
+      "evidence": [
+        "app/package.json:10-12 — exactly two dependencies: astro and @astrojs/node, both mandatory for server output",
+        "app/package-lock.json:1638-1646 — lockfile resolves astro 7.4.4 with the Rust compiler binding, current-era toolchain",
+        "app/src/pages/index.astro:99-121 — client-side interactivity is vanilla, no UI/state package"
+      ],
+      "rationale": "Minimal and modern: the framework, the adapter it requires, nothing else, exact-pinned with a consistent lockfile. Nothing heavy, nothing redundant, nothing to remove."
+    },
+    "churn_resistance": {
+      "score": 3,
+      "evidence": [
+        "app/src/lib/pokeapi.ts:1-131 — all upstream HTTP, caching, URL, humanization and formatting behind one module; pages never fetch directly",
+        "app/src/lib/data.ts:1-8 — view-model layer imports only from pokeapi.ts; API-shape knowledge is localized",
+        "app/tsconfig.json:4-5 — strict:false, and every API payload is any/any[] (pokeapi.ts:27-28, data.ts:29, pokemon/[name].astro:17-21), so schema drift is invisible",
+        "app/src/lib/data.ts:37-41,48-56,60-68,76-83,88-93,116-121,130-139 — memoize-with-reset-on-error boilerplate copy-pasted across eight accessors",
+        "app/src/pages/pokemon/[name].astro:249,311 and app/src/pages/moves/[name].astro:44 — '/types/<name>' and '/pokemon/<name>' URL schemes re-derived in multiple templates"
+      ],
+      "rationale": "The data access, caching and configuration are centralized and use only documented APIs, so a framework upgrade would touch few files — but the boundaries are untyped (strict off, any payloads) and there's enough copy-paste (memoization, URL building) that API or route-scheme changes ripple more than they should."
+    }
+  },
+  "overall": 4,
+  "findings": [
+    {
+      "severity": "medium",
+      "location": "app/src/lib/pokeapi.ts:27",
+      "issue": "The API boundary is untyped: the response cache is Promise<any>, payloads are any throughout (data.ts, pokemon/[name].astro:17-21), and tsconfig sets strict:false, so upstream API changes fail silently at render time instead of at build/check time.",
+      "suggestion": "Define payload interfaces (or a light schema check) at getJson/getList and turn on strict; the view-model types in data.ts:9-16 show the author already knows how."
+    },
+    {
+      "severity": "low",
+      "location": "app/astro.config.mjs:1-9",
+      "issue": "Astro 7 stabilized route caching (memoryCache() provider, routeRules, Astro.cache.set) and the app doesn't use it; heavy pages like /pokemon/[name] issue hundreds of upstream fetches per uncached request (pokemon/[name].astro:76-118) and rely solely on hand-rolled module-scope memoization.",
+      "suggestion": "Add cache: { provider: memoryCache() } plus routeRules maxAge for the detail routes; it's the framework-native way to get the same result with invalidation hooks for free."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/pages/index.astro:105-121",
+      "issue": "Debounced search guards races with a requestId counter; superseded fetches still run to completion and waste bandwidth during fast typing.",
+      "suggestion": "Keep an AbortController per navigation and abort the previous request when a new one starts."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/lib/data.ts:37-139",
+      "issue": "The promise-memoization-with-reset-on-error pattern is duplicated verbatim across eight accessors, each with its own module-level promise variable.",
+      "suggestion": "Extract a shared memoize(fn) helper so caching policy changes (TTL, eviction) happen in one place."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/pages/pokemon/[name].astro:249",
+      "issue": "Route URL schemes (/types/<name>, /pokemon/<name>, /moves/<name>, /abilities/<name>) are string-interpolated separately in five templates, so a URL-scheme change ripples.",
+      "suggestion": "Add tiny route helpers (e.g. typeHref(name), speciesHref(name)) next to the data layer."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/lib/pokeapi.ts:27",
+      "issue": "The in-memory cache is an unbounded Map of full JSON payloads with no eviction; with 1025 species plus moves, version groups and type details it can grow large in a long-lived server process.",
+      "suggestion": "Acceptable at this data scale (the spec allows runtime caching), but an LRU bound or moving to Astro's cache provider would make it explicit."
+    }
+  ],
+  "summary": "This is a genuinely current Astro 7 codebase — right major, right adapter series, zero deprecated APIs, and only the two dependencies the architecture strictly requires. It's platform-first on the client and cleanly centralized on the server, so framework upgrades would touch very little. The costs that will show up later are the untyped any-boundaries (strict is off), copy-pasted memoization/URL-building, and skipping Astro 7's newly-stable route caching, which would have replaced some of the hand-rolled plumbing for free.",
+  "apis": [
+    {
+      "api": "defineConfig (astro/config)",
+      "location": "app/astro.config.mjs:1",
+      "status": "current",
+      "replacement": ""
+    },
+    {
+      "api": "output: 'server'",
+      "location": "app/astro.config.mjs:5",
+      "status": "current",
+      "replacement": ""
+    },
+    {
+      "api": "@astrojs/node standalone adapter",
+      "location": "app/astro.config.mjs:6",
+      "status": "current",
+      "replacement": ""
+    },
+    {
+      "api": "Astro.params / Astro.url.searchParams",
+      "location": "app/src/pages/pokemon/[name].astro:15",
+      "status": "current",
+      "replacement": ""
+    },
+    {
+      "api": "Astro.response.status",
+      "location": "app/src/pages/pokemon/[name].astro:26",
+      "status": "current",
+      "replacement": ""
+    },
+    {
+      "api": "memoryCache()/routeRules (route caching, stable in Astro 7)",
+      "location": "app/astro.config.mjs:1",
+      "status": "current",
+      "replacement": "unused opportunity — would replace hand-rolled response caching"
+    }
+  ],
+  "dependencies": [
+    {
+      "name": "astro",
+      "verdict": "modern",
+      "note": "7.4.4, current major line (Astro 7.0 released 2026-06-22; lockfile includes the Rust compiler binding), exact-pinned with a consistent lockfile"
+    },
+    {
+      "name": "@astrojs/node",
+      "verdict": "modern",
+      "note": "11.1.9, current adapter series for Astro 7 (peer astro ^7.2.1), required for the server output the spec demands"
+    }
+  ]
+}

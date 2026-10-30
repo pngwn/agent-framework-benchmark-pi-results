@@ -1,0 +1,163 @@
+## Review: test quality
+
+The app contains **zero tests of its own** — confirmed both by the measured facts (`testLoc: 0`, `tests.files: 0`) and by inspection: no test runner in `devDependencies` (`app/package.json:26-33` has only types, plugins, srvx, typescript, vite), no `test` script (`app/package.json:8-12`), and no test files anywhere under `app/`. The only safety net is the harness-owned Playwright suite in `tests/`, which the agent cannot extend or depend on going forward.
+
+That's a real cost here, because `app/` contains a substantial, quite subtle data layer whose rules come straight from prose in the spec:
+
+- **Sorting** — `compareRows` (`app/src/components/MovesSection.tsx:29`) implements "missing values sort last in *both* directions" (lines 32-34) plus numeric vs. locale-compare keys. The single most likely refactor here — making missing values follow the sort direction, which looks like a bug fix — would silently break spec, and only one acceptance test (`tests/specs/pokemon.spec.mjs:137`) guards it today.
+- **Filtering & pagination** — `loadHome` (`app/src/lib/api.server.ts:258`) does type/generation intersection, humanized-name substring search, the 48-per-page slice, and the page clamp (`api.server.ts:307-310`). Off-by-one or clamp bugs (e.g. `totalPages = 0` when count is 0) would sail through a data-layer refactor.
+- **URL state** — `validateSearch` (`app/src/routes/index.tsx:13-23`) strips defaults, and `updateSearch` (`app/src/routes/index.tsx:45-61`, page reset at line 54) resets to page 1 on every filter change. Nothing verifies deep links or the reset-on-filter rule outside the acceptance suite.
+- **Alternate-form exclusion** — the `id > 10000` guard is duplicated in three places (`api.server.ts:173, 233, 532`); a refactor that touches one but not the others breaks "cards link to species pages" with no test to catch it.
+- **Error handling** — `apiGet` throws on any non-404 (`api.server.ts:68`) and *no route defines an `errorComponent`* (grep confirms), so an API 500 renders a framework default error page. This path is entirely untested and unhandled.
+- **Formatting rules** — `humanize`, `dexNumber`, `collapseWhitespace`, `englishEntry`, `latestEnglishFlavor`, `displayOrDash` (`app/src/lib/format.ts:1-43`) encode many spec rules (em dash for missing, latest-English, whitespace collapse) in ~40 pure lines that a vitest suite could cover in minutes.
+- **Memoization** — the TTL + in-flight dedup cache (`api.server.ts:40-57`) is exactly the kind of code that regresses quietly (caching rejected promises, dropping dedup → request storms).
+
+A vitest unit suite over `lib/format.ts`, `compareRows`, and `loadHome`/`loadTypePage` against fixture JSON would have cost maybe an hour and covered nearly all of this. Its absence means the next person who refactors the data layer is working without a net.
+
+```json
+{
+  "dimension": "tests",
+  "criteria": {
+    "coverage_of_risk": {
+      "score": 1,
+      "evidence": [
+        "app/package.json:8-12 — only dev/build/start scripts; no test script or runner installed",
+        "app/src/lib/api.server.ts:258-326 — loadHome filtering, search and 48-per-page pagination: zero coverage",
+        "app/src/components/MovesSection.tsx:29-46 — sort comparator with missing-values-last rule: zero coverage",
+        "app/src/lib/format.ts:1-43 — humanize/dexNumber/latest-English/em-dash rules: zero coverage",
+        "app/src/lib/api.server.ts:68 — non-404 API errors throw and no route has an errorComponent"
+      ],
+      "rationale": "No tests exist anywhere in app/, and the riskiest logic (filtering, pagination, sorting, URL state, error paths) is entirely unguarded apart from the harness-owned acceptance suite."
+    },
+    "behaviour_not_implementation": {
+      "score": 1,
+      "evidence": ["app/src — no test files found (find/grep for *.test.* and *.spec.* returned nothing)"],
+      "rationale": "There are no tests to judge; per the rubric this scores at the bottom."
+    },
+    "regression_power": {
+      "score": 1,
+      "evidence": [
+        "app/src/components/MovesSection.tsx:32-34 — a refactor making missing values follow sort direction would pass unnoticed",
+        "app/src/lib/api.server.ts:307-310 — off-by-one in the 48-per-page slice or the page clamp would pass unnoticed",
+        "app/src/lib/api.server.ts:173,233,532 — id > 10000 exclusion duplicated in three places; changing one breaks species links silently"
+      ],
+      "rationale": "Any behaviour break surfaces only through the acceptance suite the agent doesn't own; once that suite is no longer the only guard, refactors have no protection at all."
+    },
+    "signal_to_noise": {
+      "score": 3,
+      "evidence": ["app/ — zero tests, so no noise, but also no signal"],
+      "rationale": "Per the rubric, no tests scores 3: nothing to filter out, but nothing earned either."
+    }
+  },
+  "overall": 1,
+  "findings": [
+    {
+      "severity": "high",
+      "location": "app/package.json:8-33",
+      "issue": "No test runner, no test script, and zero test files; the entire app is guarded only by the harness-owned acceptance suite in tests/",
+      "suggestion": "Add vitest plus unit coverage for lib/format.ts, compareRows, and the load* functions against fixture JSON from the API shape"
+    },
+    {
+      "severity": "high",
+      "location": "app/src/components/MovesSection.tsx:29-46",
+      "issue": "Sort comparator implements spec-subtle rules (missing values last in both directions, numeric vs. lexical keys, aria-sort state) with no coverage; the obvious 'fix' of making missing values follow the direction would break spec silently",
+      "suggestion": "Unit-test compareRows directly: mixed missing/present values per column, ascending and descending"
+    },
+    {
+      "severity": "high",
+      "location": "app/src/lib/api.server.ts:258-326",
+      "issue": "loadHome concentrates filtering (type slot either, generation), humanized substring search, 48-per-page slicing and page clamping with no tests; totalPages is 0 when count is 0 and the clamp diverges from the URL page",
+      "suggestion": "Unit-test loadHome against mocked apiGet: combined filters, empty results, page boundaries and page > totalPages"
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/routes/index.tsx:13-23,45-61",
+      "issue": "URL-state contract (defaults omitted, page reset on filter change, page=1 stripping) is only covered by one acceptance test; a refactor of updateSearch could break deep links and the reset rule",
+      "suggestion": "Add tests for validateSearch and the updateSearch search-mapper over representative URL shapes"
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/lib/api.server.ts:173,233,532",
+      "issue": "The alternate-form exclusion (id > 10000) and species-vs-Pokémon ID mapping are duplicated across three code paths with no tests; inconsistency would break 'cards link to species pages' for forms like deoxys-normal",
+      "suggestion": "Extract one canonicalizePokemonRef helper and unit-test it with real and alternate-form IDs"
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/lib/api.server.ts:68",
+      "issue": "apiGet throws on any non-404 and no route defines an errorComponent, so an API 500 renders a raw framework error; the error path is untested and unhandled",
+      "suggestion": "Add route-level errorComponent and a test that a 500 from the API renders a friendly page"
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/lib/api.server.ts:249-256",
+      "issue": "evolutionNode recursion plus the nested-list rendering in pokemon.$name.tsx:39-52 handle branching chains (Eevee) with no coverage; a reshape of the tree or label logic would only be caught by one acceptance test",
+      "suggestion": "Unit-test evolutionNode against a branching chain fixture and assert the resulting tree"
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/lib/format.ts:1-43",
+      "issue": "Display-name rules (humanize, dexNumber padding, latest-English selection, whitespace collapse, em dash for missing) are pure and trivially testable but untested; they affect every page",
+      "suggestion": "Cover each helper with table-driven unit tests, including edge cases like empty tokens, numeric 0 and null power"
+    },
+    {
+      "severity": "low",
+      "location": "app/src/lib/api.server.ts:40-57",
+      "issue": "The in-memory TTL cache with in-flight dedup is subtle (a refactor could cache rejected promises or drop dedup, causing request storms); no tests pin its behaviour",
+      "suggestion": "Add unit tests for memo: cache hit, TTL expiry, concurrent calls sharing one promise, rejected promises not cached"
+    },
+    {
+      "severity": "low",
+      "location": "app/src/lib/data.functions.ts:9-10",
+      "issue": "Server functions use identity validators ((data) => data), so nothing verifies that search params arriving from the client match the expected shape (e.g. page as string vs number)",
+      "suggestion": "Validate and coerce input in the validators, or type the validators properly, and test the coercion"
+    }
+  ],
+  "summary": "The agent wrote no tests at all: no runner, no script, no files, despite owning a data layer full of spec-encoded rules. Every risky area — filtering, pagination, sorting, URL state, alternate-form mapping, error handling — is guarded only by the acceptance suite it doesn't own. A small vitest suite over lib/format.ts, compareRows and the load* functions would have been cheap insurance for a codebase the team will maintain for years.",
+  "wroteTests": false,
+  "testCount": 0,
+  "valuableTests": [],
+  "lowValueTests": [],
+  "untested": [
+    {
+      "area": "Home filtering, search and pagination (loadHome: type/generation intersection, humanized substring match, 48-per-page slice, page clamp)",
+      "risk": "high",
+      "likelyBug": "Off-by-one or clamp bugs — e.g. showing 47 cards on the last page, off-by-one on page 1, or totalPages=0 leaking into 'Page 0 of 0' — would slip through any data-layer refactor"
+    },
+    {
+      "area": "Sortable move tables (compareRows missing-values-last in both directions, aria-sort state, per-method default sort)",
+      "risk": "high",
+      "likelyBug": "A refactor that makes missing values follow the sort direction, or that applies the level-up ordering to all tables, would break spec silently"
+    },
+    {
+      "area": "URL search state (validateSearch default stripping, updateSearch page reset, deep links like /?type=fire&generation=generation-i)",
+      "risk": "high",
+      "likelyBug": "Deep links rendering unfiltered views, or filter changes keeping a stale page parameter, would regress without notice"
+    },
+    {
+      "area": "Alternate-form exclusion and species/Pokémon ID mapping (three duplicated id > 10000 guards, deoxys-normal → deoxys)",
+      "risk": "medium",
+      "likelyBug": "Cards linking to /pokemon/deoxys-normal or alternate forms appearing in lists if one of the three guards is missed in a refactor"
+    },
+    {
+      "area": "Error handling for non-404 API failures (apiGet throws; no route has an errorComponent)",
+      "risk": "medium",
+      "likelyBug": "An API 500 renders a raw framework error page instead of a friendly message; nothing today would reveal the gap"
+    },
+    {
+      "area": "Evolution chain recursion and nested-list rendering, including branching chains like Eevee",
+      "risk": "medium",
+      "likelyBug": "Flattened or misordered chains, or a crash on a single-species chain with no evolutions, would pass unreviewed refactoring"
+    },
+    {
+      "area": "Formatting rules: humanize, dexNumber padding, latest-English flavor/names, whitespace collapse, em dash for missing values",
+      "risk": "medium",
+      "likelyBug": "Wrong name casing, unpadded dex numbers, or '0' shown as '—' (displayOrDash treats 0 as a value) regressing across every page"
+    },
+    {
+      "area": "In-memory TTL cache with in-flight dedup (memo)",
+      "risk": "low",
+      "likelyBug": "Caching rejected promises or losing dedup, producing stale errors or request storms under load"
+    }
+  ]
+}
+```

@@ -1,0 +1,104 @@
+{
+  "dimension": "mergeability",
+  "criteria": {
+    "idiomatic": {
+      "score": 4,
+      "evidence": [
+        "app/vite.config.ts:1-15 — SvelteKit 3 shape: plugin-options config, function-form runes compiler option matching the official scaffold",
+        "app/package.json:25-27 — current '#lib/*' subpath-import convention instead of legacy '$lib'",
+        "app/src/routes/pokemon/[name]/+page.server.ts:6-9 — throwing error(404) API, generated PageServerLoad type",
+        "app/src/lib/components/Evolution.svelte:5 — self-import recursion, the documented replacement for svelte:self",
+        "app/src/routes/pokemon/[name]/+page.svelte:24 — $effect writes state to resync with load data; the official skill says avoid state updates inside effects"
+      ],
+      "rationale": "Genuinely current SvelteKit 3 + runes-mode Svelte 5 throughout, matching the official scaffold and generated types; docked one point for the $effect-state-sync pattern the framework guidance warns against, used in two places."
+    },
+    "correctness_risks": {
+      "score": 3,
+      "evidence": [
+        "app/src/routes/+page.svelte:38-40 — debounce timer is never cleared on unmount; a keystroke followed by a quick card click fires goto() after navigation and drags the user back to the filtered home page",
+        "app/src/lib/server/pokedex.ts:230-233 — a single failing sub-fetch in mapLimit/Promise.all 500s the entire Pokémon page instead of degrading",
+        "app/src/lib/server/pokedex.ts:234 — an unknown ?game= value silently falls back to the latest group while the URL keeps the stale parameter",
+        "app/src/lib/server/api.ts:44-55 — cache is TTL-bounded and failed promises evicted; no unbounded growth or leaked rejections found",
+        "app/src/routes/+page.svelte:17-19,32 — stale-keystroke race and in-flight navigation explicitly handled"
+      ],
+      "rationale": "No serious bugs and several races were clearly thought about, but a post-unmount timer firing goto, all-or-nothing fan-out failure, and a silently-ignored URL parameter are real minor fragilities."
+    },
+    "global_abstractions": {
+      "score": 4,
+      "evidence": [
+        "app/src/lib/server/api.ts — thin, bounded, documented cache; single server/client boundary respected",
+        "app/src/lib/server/pokedex.ts:71-434 — one 470-line module holds API shapes, helpers and all six page loaders; obvious first split needed but sectioned and coherent",
+        "app/src/lib/team.ts — team state centralized in one shared module with parse/serialize helpers; no duplicated cookie logic",
+        "app/src/lib/format.ts — small, focused helpers reused everywhere (humanize, orDash, pageTitle)"
+      ],
+      "rationale": "Abstractions are few and each earns its keep with clean boundaries (api/format/team/components); the only global concern is the single large data module and a load-data-copy pattern duplicated across two pages."
+    },
+    "readability": {
+      "score": 4,
+      "evidence": [
+        "app/src/lib/server/api.ts:23-27,46-47 — comments explain why (cache eviction, failed-request cleanup)",
+        "app/src/routes/+page.svelte:14-16 — comment explains the local-state choice for the search box",
+        "app/src/lib/server/pokedex.ts — clear per-page section banners; consistent naming (getPokemonPage, getMovePage, getTeamPage)",
+        "app/src/lib/components/MoveTable.svelte:28-37 — sort state and direction logic compact and self-describing",
+        "app/src/lib/server/pokedex.ts:71 — redundant re-export of types already in types.ts is a small rough spot"
+      ],
+      "rationale": "Consistent, well-named, comments explain intent rather than mechanics; the only drag is the length of the central data module."
+    },
+    "review_cost": {
+      "score": 4,
+      "evidence": [
+        "app/src/routes/+page.svelte:38-40 — ask: clear the debounce timer on destroy",
+        "app/src/routes/pokemon/[name]/+page.svelte:24 — ask: derive team from data + invalidate() instead of state-copying effect",
+        "app/src/lib/components/MoveTable.svelte:80 — each-block key embeds the index, defeating keyed reconciliation when sorting",
+        "app/src/lib/server/pokedex.ts:71-434 — ask: split by resource before it grows further"
+      ],
+      "rationale": "Approve with nits: all findings are localized, low-risk changes a reviewer would list in one pass rather than rework."
+    }
+  },
+  "overall": 4,
+  "findings": [
+    {
+      "severity": "medium",
+      "location": "app/src/routes/+page.svelte:40",
+      "issue": "The 200ms search debounce timer is never cancelled when the component unmounts; typing then clicking a card within the window fires goto('/?q=…') after navigation and bounces the user back to the search results.",
+      "suggestion": "Clear the timer on destroy (e.g. an $effect returning () => clearTimeout(timer), or clear at the start of update/afterNavigate) so pending input can't navigate after unmount."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/routes/pokemon/[name]/+page.svelte:24",
+      "issue": "Local copy of load data kept in $state and resynced by writing state inside an $effect (same pattern at app/src/routes/team/+page.svelte:13); the official Svelte guidance says avoid updating state in effects, and the duplication risks divergence and future confusion.",
+      "suggestion": "Treat the cookie-backed server data as the single source of truth: mutate via saveTeam() then invalidate()/invalidateAll() (or a {#key} on the param), removing both effects."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/lib/components/MoveTable.svelte:80",
+      "issue": "Each-block key `${row.name}-${row.level}-${i}` includes the index, so every sort changes all keys and recreates the row DOM, defeating the purpose of a keyed each.",
+      "suggestion": "Key by `${row.name}-${row.level}` (already unique per method table given the method|move|level dedup in pokedex.ts:238-241) and drop the index."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/lib/server/pokedex.ts:71-434",
+      "issue": "Single module holds API response types, helpers and the loaders for all six pages; it will grow into the file everyone touches.",
+      "suggestion": "Split by resource (species/pokemon, moves, abilities, types, team) with a shared api.ts, keeping the server-only boundary."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/lib/server/pokedex.ts:230-233",
+      "issue": "mapLimit + Promise.all means one failing sub-fetch (a single move or version-group record) fails the whole Pokémon page with a 500.",
+      "suggestion": "Catch per-item failures and either omit the row or surface a partial-data notice rather than failing the page."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/lib/server/pokedex.ts:234",
+      "issue": "An unrecognized ?game= value silently selects the latest version group while the URL keeps the invalid parameter, so the URL and UI disagree.",
+      "suggestion": "Either 404/strip the invalid parameter or return the effective selection so the page can rewrite the URL."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/lib/server/pokedex.ts:71",
+      "issue": "Re-exports the shared Card/EvolutionNode/MoveRow/MoveTable/TypeRef types already exported from app/src/lib/types.ts, creating two import paths for the same shapes.",
+      "suggestion": "Import the shared types directly from #lib/types.ts in consumers and drop the re-export."
+    }
+  ],
+  "summary": "A genuinely current, idiomatic SvelteKit 3 + Svelte 5 runes codebase: plugin-based config, #lib subpath imports, throwing error(), snippets, keyed eachs, server-only data module, and a cookie-backed team feature that integrates cleanly. The flaws are small and local — an uncancelled debounce timer, a state-in-$effect sync pattern used twice, an index-poisoned each key, and one oversized data module. I'd merge after a short round of nits."
+}

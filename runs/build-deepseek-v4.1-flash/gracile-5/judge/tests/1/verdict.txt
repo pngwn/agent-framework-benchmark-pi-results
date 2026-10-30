@@ -1,0 +1,152 @@
+# Review: test quality — Gracile + Lit Pokédex
+
+**What I found.** `app/` contains zero tests of its own: no test runner in `app/package.json:6-9` (only `build` and `start`), no `*.test.*`/`*.spec.*` files anywhere under `app/`, and the measured facts agree (`tests.files: 0`, `testLoc: 0`). All verification lives in the out-of-tree acceptance suite (`tests/specs/`), which is thorough for accessibility/URL behaviour but is not the app's own guard and won't catch regressions when someone refactors the data layer.
+
+The frustrating part is how testable this codebase already is: `app/src/lib/format.ts` is a file of pure functions (`humanize`, `latestEnglishFlavor`, `dexNumber`, `statLabel`, `displayValue`), and `app/src/lib/data.ts:285-348` (`buildMoveTables`), `app/src/routes/(home).ts:12-32` (`pageUrl`, `filterParams`) and `app/src/lib/api.ts:40-51` (`idFromUrl`, `isSpeciesId`) are all pure or trivially mockable. Nothing was written. And the absence has already cost a real bug: **`app/src/lib/api.ts:22` throws `HTTP ${res.status} ${res.statusText}` where the binding is `response`** — `res` does not exist in scope, and the built output proves it shipped (`app/dist/server/chunk/data.js:32`). Every non-OK API response raises a `ReferenceError` instead of the intended message, and `ApiError` (`api.ts:4`) is dead code. A five-line unit test of `api()` with a stubbed 404 fetch would have caught it. It currently mostly "works" because `tryApi` swallows everything, which also means a failed version-group lookup produces `NaN` order values (`data.ts:261`) and a poisoned promise cache (`api.ts:19-26`) — a transient upstream failure is cached for the process lifetime, even though the spec says the API is live and can change.
+
+Untested areas ranked by blast radius: move-table construction (method ordering, level sorting), client-side table sorting (`interactions.ts:66-108`, coupled to `data-sort-value` attributes emitted at `components.ts:117-124`), home filtering/pagination/clamping, format helpers (which drive every heading and the search match), not-found-vs-upstream-error conflation (`abilities/[name].ts:16`), and alternate-form exclusion plus hidden-ability aggregation (`data.ts:169-186`).
+
+```json
+{
+  "dimension": "tests",
+  "criteria": {
+    "coverage_of_risk": {
+      "score": 1,
+      "evidence": [
+        "app/package.json:6-9 — no test script, runner or devDependency for testing; only build/start",
+        "app/src/lib/data.ts:285-348 — buildMoveTables (method order, level sorting, missing values) has no tests",
+        "app/src/routes/(home).ts:44-82 — filter combination, page clamping and slicing untested",
+        "app/src/lib/api.ts:17-28 — api() error path untested and already broken"
+      ],
+      "rationale": "No tests exist at all; the riskiest logic (data transformation, filtering, sorting, pagination, error paths) is entirely uncovered."
+    },
+    "behaviour_not_implementation": {
+      "score": 1,
+      "evidence": [
+        "app/src/lib/format.ts:1-40 — pure, behaviour-testable helpers that nobody tests",
+        "app/src/client/interactions.ts:66-108 — client sorting with observable order/aria-sort behaviour, untested"
+      ],
+      "rationale": "There are no tests, so nothing asserts behaviour at any level."
+    },
+    "regression_power": {
+      "score": 1,
+      "evidence": [
+        "app/src/lib/api.ts:22 — live bug: `res.status` is undefined in scope (built output app/dist/server/chunk/data.js:32 proves it shipped); nothing failed",
+        "app/src/lib/api.ts:19-26 — rejected fetches are cached forever; a transient API failure is permanent for the process, undetectable without a test",
+        "app/src/lib/data.ts:261 — NaN order when a version-group fetch fails corrupts the default-game sort with no failing test"
+      ],
+      "rationale": "Nothing the app owns can fail, and at least one defect already slipped through and is in the production bundle."
+    },
+    "signal_to_noise": {
+      "score": 3,
+      "evidence": [
+        "app/src/lib/data.ts:231-238 — evolution recursion, another untested but trivially testable unit"
+      ],
+      "rationale": "No tests means no noise, per the anchor; neutral score."
+    }
+  },
+  "overall": 1,
+  "findings": [
+    {
+      "severity": "high",
+      "location": "app/src/lib/api.ts:22",
+      "issue": "Error path references undefined `res` (`HTTP ${res.status}`), so every non-OK API response throws ReferenceError; the ApiError class at api.ts:4 is never thrown and is dead code.",
+      "suggestion": "Use `response.status`/`response.statusText`, throw ApiError, and add a unit test with a stubbed 404 fetch — it would have caught this."
+    },
+    {
+      "severity": "high",
+      "location": "app/src/lib/api.ts:19-26",
+      "issue": "The in-memory cache stores the rejected promise, so one transient API failure permanently poisons that URL for the process lifetime, even though the spec treats the API as live and changing.",
+      "suggestion": "Delete the cache entry on rejection (cache.set after a successful fetch, or .catch cleanup), and test the retry path."
+    },
+    {
+      "severity": "high",
+      "location": "app/package.json:6-9",
+      "issue": "No test script, runner, or test files; 781 lines of script logic (filtering, sorting, pagination, formatting) are guarded only by the out-of-tree acceptance suite.",
+      "suggestion": "Add vitest (already a Vite project) and start with the pure units: format.ts helpers, buildMoveTables, pageUrl, idFromUrl/isSpeciesId."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/routes/abilities/[name].ts:16",
+      "issue": "`getAbilityPage(name).catch(() => null)` conflates 'not found' with 'upstream API error': a 500 renders the Not found page; getAbilityPage (data.ts:169) uses api() instead of tryApi, unlike every other lookup.",
+      "suggestion": "Use tryApi for the ability fetch and only 404 on genuine not-found; let real failures surface as 5xx."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/routes/(home).ts:60-62",
+      "issue": "Re-implements ID extraction and the <10000 species filter as an inline regex instead of reusing idFromUrl/isSpeciesId (api.ts:40-51); two copies that can drift.",
+      "suggestion": "Call the shared helpers and unit-test the type-filter path against alternate forms."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/lib/data.ts:261",
+      "issue": "`Number(detail?.order ?? idFromUrl(ref.url) ?? 0)` yields NaN when a version-group detail fetch fails, making the comparator (data.ts:264) and the default-game choice (data.ts:266) unspecified.",
+      "suggestion": "Guard with Number.isFinite and fall back to 0; test with a mocked failing detail fetch."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/lib/data.ts:283",
+      "issue": "Rows whose move-detail fetch failed are silently dropped from the tables, so a network hiccup shows fewer moves with no error or log.",
+      "suggestion": "Retry or log dropped moves; a test with one failed fetch should assert the visible behaviour."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/client/interactions.ts:71",
+      "issue": "Sorting correctness depends on data-sort-value attributes emitted in components.ts:117-124; a template refactor that renames them silently degrades every column to textContent comparison.",
+      "suggestion": "Extract the row comparison into a named testable function and assert it against missing values and both directions."
+    }
+  ],
+  "summary": "The app ships zero tests of its own: no runner, no script, no files, despite a data layer full of pure, minutes-to-test functions. The gap has already let a real bug through — api.ts:22 references an undefined `res`, so every API error path throws ReferenceError (confirmed in the built bundle), and rejected fetches are cached forever. Any refactor of filtering, move-table construction, or client sorting is now completely unguarded once the acceptance suite is gone.",
+  "wroteTests": false,
+  "testCount": 0,
+  "valuableTests": [],
+  "lowValueTests": [],
+  "untested": [
+    {
+      "area": "API client error handling (api.ts:17-28): non-OK responses, rejection caching, ApiError",
+      "risk": "high",
+      "likelyBug": "ReferenceError instead of a useful error on any 404/500 (already shipped at api.ts:22), plus one transient upstream failure permanently cached for the process lifetime."
+    },
+    {
+      "area": "Move table construction (data.ts:285-348): method ordering, level-up sort by level then name, missing-value rendering",
+      "risk": "high",
+      "likelyBug": "Reordered or missorted tables (e.g. 'Tutor' before 'Egg', level 100 before level 1) with no failing signal."
+    },
+    {
+      "area": "Client-side column sorting (interactions.ts:66-108) and its data-sort-value contract (components.ts:117-124)",
+      "risk": "high",
+      "likelyBug": "Direction flip, missing-values-last, or aria-sort exclusivity broken; a template rename silently falls back to textContent comparison, mis-sorting Power/Accuracy numerically."
+    },
+    {
+      "area": "Home filtering and pagination (routes/(home).ts:44-82): combined q/type/generation, page clamping, slice bounds, pageUrl param omission",
+      "risk": "high",
+      "likelyBug": "page=0/NaN/overflow producing empty lists or wrong 'Page n of m' text; filters dropping each other's results after a refactor."
+    },
+    {
+      "area": "Format helpers (format.ts:1-40): humanize, latestEnglishFlavor whitespace collapsing, dexNumber padding, statLabel mapping",
+      "risk": "medium",
+      "likelyBug": "Broken headings ('MR-MIME'), search no longer matching humanized names, un-collapsed \\f/\\n in flavor text, '#25' instead of '#0025'."
+    },
+    {
+      "area": "Not-found vs upstream-error paths (abilities/[name].ts:16, moves/[name].ts:10-14, pokemon/[name].ts:13-16, 404.ts)",
+      "risk": "medium",
+      "likelyBug": "An API outage renders 'Not found' pages (wrong status), or a missing resource 500s instead of 404ing."
+    },
+    {
+      "area": "Alternate-form exclusion and hidden-ability aggregation (data.ts:145-186, isSpeciesId at api.ts:49-51)",
+      "risk": "medium",
+      "likelyBug": "Mega/regional forms reappearing in Learned by / ability / type lists, or hidden abilities mislabelled after an OR-aggregation change."
+    },
+    {
+      "area": "Version-group ordering and default-game selection (data.ts:249-266)",
+      "risk": "medium",
+      "likelyBug": "NaN order values from a failed detail fetch giving an unordered Game select and the wrong default game."
+    },
+    {
+      "area": "Evolution tree recursion (data.ts:231-238) including branching chains like Eevee",
+      "risk": "low",
+      "likelyBug": "Flattened or truncated branches; a malformed chain shape renders wrong nesting without failing anything."
+    }
+  ]
+}
+```

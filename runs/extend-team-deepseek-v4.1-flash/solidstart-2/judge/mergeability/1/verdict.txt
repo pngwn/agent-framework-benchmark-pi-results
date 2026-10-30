@@ -1,0 +1,118 @@
+## Review summary
+
+The app is built on SolidStart **v2** (stable since Aug 2026: Vite 8 + Nitro v3, `vite.config.ts` instead of `app.config.ts`), and it matches the current docs almost line-for-line — `query` + `"use server"` + `createAsync` for data, `route.preload` exports, `@solidjs/start/http` for cookies, `FileRoutes`, `HttpStatusCode` for 404s, `createHandler({ mode: "async" })` in the entry server. Layering is clean: a thin RPC boundary (`queries.ts`), one server data module, shared contracts in `types.ts`, presentational components, and a small, pure team-cookie store. The main gap is that the framework's own docs tell you to wrap data loading in an `ErrorBoundary` and the app has none, so any non-404 API failure surfaces as an unhandled render error.
+
+```json
+{
+  "dimension": "mergeability",
+  "criteria": {
+    "idiomatic": {
+      "score": 5,
+      "evidence": [
+        "app/vite.config.ts:1-9 — exactly the documented SolidStart v2 setup: solidStart() from @solidjs/start/config plus nitro() from nitro/vite",
+        "app/src/lib/queries.ts:4-8 — query() with \"use server\" bodies, one thin module for the whole RPC boundary, as in the v2 data-fetching guide",
+        "app/src/routes/pokemon/[name].tsx:29-31 — exported route.preload with param-keyed query, matching the documented preload pattern (same at routes/index.tsx:12-19, types/index.tsx:9-11)",
+        "app/src/lib/server/pokeapi.ts:2 — getCookie imported from @solidjs/start/http, the correct v2 cookie entrypoint (v1's vinxi/http would break)",
+        "app/src/entry-server.tsx:12-14 — createHandler with mode:\"async\", a real documented option, chosen with a comment explaining why (fragment links like #moves need complete HTML)",
+        "app/src/components/NotFound.tsx:9 — HttpStatusCode for the 404, rendered through the idiomatic Switch/Match null-vs-resolved pattern used on all four detail routes"
+      ],
+      "rationale": "This reads like the framework's own v2 examples: every data load goes through query/createAsync with \"use server\", preloads are exported per route, and config, entry points and cookie access all use the current stable APIs."
+    },
+    "correctness_risks": {
+      "score": 4,
+      "evidence": [
+        "app/src/lib/server/pokeapi.ts:48 — non-404 API failures throw inside query fetchers, and a grep finds no ErrorBoundary anywhere in src; the router docs require one around Suspense for exactly this case",
+        "app/src/routes/team.tsx:19 — \"<n> of 6\" counts members the server could resolve, but team.full() (app/src/lib/team.tsx:43) uses raw cookie names; a cookie entry the API doesn't know (overlay data changes) makes the count disagree with the disabled Add-to-team button",
+        "app/src/lib/server/pokeapi.ts:53 — cache sweep only every 500 writes, so expired entries can linger between sweeps (bounded in practice by the fixed API surface, and expired hits are already rejected at line 42)",
+        "app/src/lib/server/pokeapi.ts:43-47 — 404s resolve to null and rejected promises are evicted from the cache (line 51), so no poisoned cache entries or fan-out duplication",
+        "app/src/routes/index.tsx:36 — debounce timer cleared via onCleanup; app/src/lib/team.tsx:31-35 — writes the cookie and signal together so SSR and hydration agree, avoiding a flash of the wrong button label"
+      ],
+      "rationale": "404 handling, in-flight deduplication, hydration consistency and timer cleanup are all handled deliberately; the two real gaps are the missing ErrorBoundary the docs call for and a count/state mismatch on the team page."
+    },
+    "global_abstractions": {
+      "score": 5,
+      "evidence": [
+        "app/src/lib/queries.ts:1-47 — every route's data flows through this thin query module; no component fetches directly, so server/client boundaries stay crisp",
+        "app/src/lib/server/pokeapi.ts:69-123 — shared card()/cardsFor()/typeLabels() factoring used identically by move, ability and type pages instead of three near-duplicate card builders",
+        "app/src/lib/team-store.ts:1-30 — pure cookie parse/serialize with no framework or DOM imports, trivially unit-testable and reused by both the server and the client provider",
+        "app/src/lib/types.ts:1-71 — the contract shared across the RPC boundary, so the server module and components can't drift apart",
+        "app/src/components/Section.tsx:10-17 — one small landmark component replaces what would otherwise be repeated aria-labelledby boilerplate in eight places"
+      ],
+      "rationale": "Abstractions are few and each earns its keep: one data layer, one RPC boundary, one pure cookie store, shared presentational components. Nothing here will need untangling."
+    },
+    "readability": {
+      "score": 5,
+      "evidence": [
+        "app/src/lib/server/pokeapi.ts:1-2 — top comment states the caching and dedup policy; section banners (lines 65, 125, 250, 331, 395) make a 440-line module navigable",
+        "app/src/routes/index.tsx:25 — comment explains why the search box keeps its own signal (typing stays smooth while the URL follows)",
+        "app/src/lib/team.tsx:13-15 — comment explains the SSR-initial/client-fallback hydration strategy",
+        "app/src/routes/moves/[name].tsx:14-16 vs abilities/[name].tsx:14-16 — the four detail routes use an identical Switch/Match-null NotFound structure, so the pattern is learned once",
+        "app/src/components/MoveTable.tsx:8-17 — column list as data, sort logic in one memo with a comment on missing-value placement"
+      ],
+      "rationale": "Naming is precise (homeFilters, cardsFor, parseTeamCookie), files are organised by concern, comments explain why rather than what, and route components are structurally consistent with each other."
+    },
+    "review_cost": {
+      "score": 4,
+      "evidence": [
+        "app/src/app.tsx:38-40 — Suspense has no ErrorBoundary sibling; a small, doc-recommended addition",
+        "app/package.json:12-14 — no devDependencies at all: typescript isn't installed despite strict mode (app/tsconfig.json:12), so tsc --noEmit can't run in CI",
+        "app/src/routes/index.tsx:7 vs app/src/routes/pokemon/[name].tsx:62 — the same search-param array coalescing written twice",
+        "app/src/lib/team-store.ts:20 — comma-list cookie fallback for a format the app never writes"
+      ],
+      "rationale": "I'd approve after one light pass: add an ErrorBoundary, a typecheck script, and fold the two small duplications; nothing structural needs to change."
+    }
+  },
+  "overall": 4,
+  "findings": [
+    {
+      "severity": "medium",
+      "location": "app/src/lib/server/pokeapi.ts:48",
+      "issue": "Non-404 API errors throw from every query fetcher, but no ErrorBoundary exists anywhere in the tree, so an API hiccup becomes an unhandled render error rather than a recoverable page.",
+      "suggestion": "Wrap the router's Suspense children (app/src/app.tsx:39) in an ErrorBoundary with a fallback that offers reset, as the Solid Router data-fetching docs prescribe."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/routes/team.tsx:19",
+      "issue": "\"<n> of 6\" counts only members the server could resolve (app/src/lib/server/pokeapi.ts:419 drops unknown names) while team.full() (app/src/lib/team.tsx:43) counts cookie entries, so the two can disagree if a stored species isn't in the API.",
+      "suggestion": "Render the count from team.names().length and let the card list fall back to what the server resolved."
+    },
+    {
+      "severity": "low",
+      "location": "app/package.json:12-14",
+      "issue": "Empty devDependencies: typescript is absent even though the app is strict TS (app/tsconfig.json:12), so CI cannot typecheck.",
+      "suggestion": "Add typescript as a devDependency and a \"typecheck\": \"tsc --noEmit\" script wired into the build pipeline."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/routes/index.tsx:7",
+      "issue": "Search-param array coalescing is duplicated: first() here versus the inline Array.isArray check in app/src/routes/pokemon/[name].tsx:62.",
+      "suggestion": "Move the coalescing helper into lib/format.ts (or a small lib/params.ts) and use it in both routes."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/lib/team-store.ts:20",
+      "issue": "parseTeamCookie accepts a comma-separated format that teamCookie() never writes, leaving dead format-detection logic (including the startsWith(\"%\") heuristic above it).",
+      "suggestion": "Support only the JSON format the app writes, and fail closed on anything else."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/lib/server/pokeapi.ts:100",
+      "issue": "Per-call concurrency limits (18, 10, 16, 24 at lines 100, 139, 222, 277) are magic numbers tied to dataset sizes and unexplained.",
+      "suggestion": "Name them (e.g. TYPE_FETCH_CONCURRENCY) next to the other constants at lines 20-23, with a word on why each value was chosen."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/lib/server/pokeapi.ts:53",
+      "issue": "The cache is swept only every 500 writes, so expired entries can linger for up to 500 fetches between sweeps.",
+      "suggestion": "Sweep opportunistically on each miss (the count-based trigger is fine as a backstop) or use a periodic timer; the map is bounded by the API surface either way."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/routes/types/index.tsx:21",
+      "issue": "The type tile uses var(--type-<name>) with no fallback, unlike TypeBadge (app/src/components/TypeBadge.tsx:4) which falls back to --color-text-muted.",
+      "suggestion": "Add the same var(--type-x, var(--color-text-muted)) fallback for consistency if the API ever lists a type without a token."
+    }
+  ],
+  "summary": "A current-idiom SolidStart v2 app that reads like the framework's own docs: query/createAsync with \"use server\", per-route preloads, a single sectioned data layer behind a thin RPC boundary, and a pure, reusable team-cookie store. The only substantive ask is the ErrorBoundary the router docs prescribe for exactly this fetch-and-throw design, plus small nits around a typecheck script and two duplicated helpers. I would merge after one light pass."
+}
+```

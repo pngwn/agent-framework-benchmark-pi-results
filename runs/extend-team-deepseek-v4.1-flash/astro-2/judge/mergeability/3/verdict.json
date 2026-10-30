@@ -1,0 +1,119 @@
+{
+  "dimension": "mergeability",
+  "criteria": {
+    "idiomatic": {
+      "score": 4,
+      "evidence": [
+        "app/astro.config.mjs:1-8 — current `output: 'server'` + node adapter on Astro 7.4.2, matching today's documented SSR setup",
+        "app/src/pages/pokemon/[name].astro:17-26 — data fetched with top-level awaits in frontmatter, exactly the documented pattern",
+        "app/src/components/Evolution.astro:14 — documented `<Astro.self>` recursion for the evolution chain",
+        "app/src/pages/[404 and dynamic routes] — file-based routing with `[name].astro` and `404.astro`; plain `<a>` navigation as docs recommend",
+        "app/src/lib/api.ts:3 — `process.env.API_BASE_URL` where current Astro recommends `astro:env` getSecret",
+        "app/src/styles/global.css:1-669 — one global stylesheet instead of Astro's favored scoped styles",
+        "app/src/pages/index.astro:151-176 — hand-rolled fetch+DOMParser partial navigation rather than Astro 7 route caching / ClientRouter primitives"
+      ],
+      "rationale": "Genuinely idiomatic and on the current stable major; the deductions are small (process.env vs astro:env, global CSS, home-grown SWR cache and partial navigation where framework features exist)."
+    },
+    "correctness_risks": {
+      "score": 3,
+      "evidence": [
+        "app/src/lib/api.ts:20 — module-level `cache = new Map()` with no eviction: unbounded growth (1025 species + ~1000 move + type/version-group records) over a long-lived server",
+        "app/src/lib/pokedex.ts:44 — every page awaits the API with no try/catch; a transient API failure becomes an unhandled rejection and a raw 500",
+        "app/src/pages/team.astro:10-13 — `team.length` is shown as `n of 6` while `getTeamMembers` (pokedex.ts:190-207) silently drops invalid names, so the count can disagree with the rendered list",
+        "app/src/pages/index.astro:14 — `page` is clamped for display but the stale `?page=999` stays in the URL",
+        "app/src/lib/api.ts:50-58 — SWR path can launch duplicate background refreshes under concurrent requests (minor)",
+        "app/src/components/CardList.astro:11 — no `set:html`/raw injection anywhere; Astro auto-escaping covers all interpolated API data"
+      ],
+      "rationale": "No injection, SSR/CSR mismatch, or listener leaks (both fetch paths abort correctly), but the unbounded cache plus zero error handling around a live dependency API are real fragility."
+    },
+    "global_abstractions": {
+      "score": 4,
+      "evidence": [
+        "app/src/lib/api.ts — one small, well-bounded module owns HTTP + caching; pages never fetch directly",
+        "app/src/lib/pokedex.ts:1-230 — coherent domain layer; a bit of a grab-bag (labels, cards, coverage) but every function is used by multiple pages",
+        "app/src/layouts/Base.astro:33-80 — team cookie parsing/normalisation re-implemented client-side, diverging from app/src/lib/team.ts (raw array vs normaliseTeam rules); constants `TEAM_COOKIE`/`MAX_TEAM_SIZE` defined twice",
+        "app/src/components/MovesSection.astro:151-186 — a near-copy of index.astro's fetch+DOMParser+abort+popstate machinery rather than a shared helper"
+      ],
+      "rationale": "Boundaries are clean and the domain layer earns its keep; the deductions are the duplicated team-cookie logic and the duplicated partial-navigation code, both of which will drift."
+    },
+    "readability": {
+      "score": 4,
+      "evidence": [
+        "app/src/lib/api.ts:1-3, app/src/lib/team.ts:1-2, app/src/lib/pokedex.ts:52-55 — comments explain why (SWR rationale, cookie-over-localStorage rationale, form-dropping rationale)",
+        "app/src/styles/global.css — organized with section banners and consistent token usage",
+        "app/src/components/Section.astro, TypeBadge.astro, CardList.astro — small, single-purpose components with typed Props",
+        "app/src/components/MovesSection.astro:40-120 — dense but logically decomposed (rows → methods → tables)",
+        "app/src/lib/pokedex.ts:75 and MovesSection.astro:5-6 — pervasive `any` for API records undercuts the strict tsconfig (app/tsconfig.json:2)"
+      ],
+      "rationale": "A new teammate would find their way quickly; the only real rough spot is the wall of `any` where typed API models would carry meaning."
+    },
+    "review_cost": {
+      "score": 3,
+      "evidence": [
+        "app/src/lib/api.ts:20 — I'd ask for an LRU/size cap before merge",
+        "app/src/lib/pokedex.ts:44 and pages — I'd ask for a fallback when the API errors instead of 500s",
+        "app/src/layouts/Base.astro:33-80 vs app/src/lib/team.ts — I'd ask to unify the two team implementations",
+        "app/src/pages/team.astro:12 — count from `members.length`, not the raw cookie"
+      ],
+      "rationale": "Approvable after one focused round: cache bounds, error handling, and de-duplicating the team/partial-nav logic. Nothing structural needs rework."
+    }
+  },
+  "overall": 4,
+  "findings": [
+    {
+      "severity": "medium",
+      "location": "app/src/lib/api.ts:20",
+      "issue": "Unbounded in-memory cache: entries are never evicted, and Pokémon pages can pull hundreds of move records into it.",
+      "suggestion": "Cap the Map (LRU) or add a max-size guard; alternatively adopt Astro 7's `memoryCache()`/`Astro.cache` route caching, which is the framework-native way to cache these responses."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/lib/pokedex.ts:44",
+      "issue": "No error handling anywhere between pages and the live API; any fetch failure rejects through frontmatter awaits and yields a 500.",
+      "suggestion": "Wrap the per-page data loads in try/catch and render a friendly error (or reuse the NotFound pattern), and log API failures."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/layouts/Base.astro:33-80",
+      "issue": "Team state logic is duplicated: the client script re-implements cookie parse/write (without normaliseTeam's dedup/ordering rules) alongside app/src/lib/team.ts, with `TEAM_COOKIE`/`MAX_TEAM_SIZE` defined twice.",
+      "suggestion": "Extract one shared module (e.g. `lib/team-client.ts`) imported by the layout script, or pass the normalised team into the script via `define:vars`."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/pages/team.astro:12",
+      "issue": "`{team.length} of 6` counts raw cookie names while the list drops names that fail to resolve, so count and cards can disagree.",
+      "suggestion": "Use `members.length` for the count."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/components/MovesSection.astro:151-186",
+      "issue": "Near-duplicate partial-navigation machinery (AbortController + DOMParser + replaceWith + popstate) also exists in app/src/pages/index.astro:151-176.",
+      "suggestion": "Factor a shared `swapFragment(url, elementId)` helper into `src/lib/`."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/lib/api.ts:3",
+      "issue": "Reads `process.env.API_BASE_URL` directly, where current Astro recommends the typed `astro:env` API.",
+      "suggestion": "Declare the variable in `astro.config.mjs` via `astro:env` and use `getSecret('API_BASE_URL')`."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/components/MovesSection.astro:5-6",
+      "issue": "`pokemon: any` and untyped API records throughout pokedex.ts undermine the strict tsconfig.",
+      "suggestion": "Add minimal interfaces for the API resources (Species, Pokemon, Move, Type) in a `src/lib/types.ts`."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/pages/types/[name].astro:39",
+      "issue": "Type-page moves sorted by humanized label, but the spec says sorted by name (orders can differ, e.g. 'Ho-Oh' vs 'High Horsepower').",
+      "suggestion": "Sort by `m.name` and keep the label for display."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/pages/index.astro:14",
+      "issue": "Out-of-range `?page=` is clamped for display but the stale page number stays in the URL.",
+      "suggestion": "Redirect (or at least rewrite the URL) to the clamped page."
+    }
+  ],
+  "summary": "This is a well-crafted, current-generation Astro 7 SSR app: correct output mode and adapter, idiomatic frontmatter data loading, documented patterns like Astro.self, careful accessibility, and graceful no-JS fallbacks. The main merge blockers are an unbounded fetch cache, zero error handling against the live API, and duplicated team/partial-navigation logic that will drift. One focused review round, then it's a clean merge."
+}

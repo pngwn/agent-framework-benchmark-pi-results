@@ -1,0 +1,116 @@
+{
+  "dimension": "mergeability",
+  "criteria": {
+    "idiomatic": {
+      "score": 5,
+      "evidence": [
+        "app/src/views/layout.tsx:1-8 — jsxRenderer with the documented `declare module 'hono'` ContextRenderer augmentation",
+        "app/package.json:12-15 — pins hono 4.13.14 (current stable, verified) and @hono/node-server 2.x",
+        "app/src/index.tsx:14 — serveStatic imported from '@hono/node-server/serve-static', the current import path",
+        "app/src/views/team.tsx:2 — hono/cookie helpers (getCookie/setCookie/deleteCookie) as the skill documents",
+        "app/src/index.tsx:22-26,45-48 — htmx-aware partial/full split with Vary header and HX-Push-Url response header (htmx 2 name, not the removed v1 HX-Push)",
+        "app/src/views/home.tsx:76-82 — native form with action/method fallback plus htmx progressive enhancement (hx-trigger 'input changed delay:200ms', hx-include='closest form')",
+        "app/src/views/home.tsx:120-123 — hono/jsx `selected={...}` on <option>, relying on the framework's boolean-attr handling rather than hand-built strings"
+      ],
+      "rationale": "Reads like the framework's own examples: current versions, current import paths, and a fragment/full-page strategy that respects htmx 2's history-restore and push semantics (including the HX-History-Restore-Request check most implementations forget)."
+    },
+    "correctness_risks": {
+      "score": 4,
+      "evidence": [
+        "app/src/api.ts:35-60 — SWR cache with in-flight dedup and request-time fetching; revalidation errors are swallowed by design (api.ts:43)",
+        "app/src/views/pokemon.tsx:36-47 — missing-value sorting (nulls last in both directions) matches the spec's tricky edge",
+        "app/src/views/team.tsx:15-26 — readTeam dedupes and truncates to TEAM_SIZE on read, defensively",
+        "app/src/views/team.tsx:29-38 — cookie value joined with ','; comma is not a valid RFC 6265 cookie-octet, tolerated by browsers but fragile behind strict parsers",
+        "app/src/index.tsx:14 — serveStatic root './dist' resolves against process.cwd(); breaks if the server is started from another directory",
+        "app/src/api.ts:15-19 — fetch with no AbortSignal/timeout; a hung API hangs every request indefinitely",
+        "app/src/index.tsx:94-99 — /team/add accepts any name into the cookie without species validation (loadTeam later filters it, so harmless but untidy)"
+      ],
+      "rationale": "No real bugs found in the sort/filter/pagination/coverage logic after a careful read, and the htmx interactions handle back/forward and no-JS correctly; the remaining issues are robustness nits rather than defects."
+    },
+    "global_abstractions": {
+      "score": 4,
+      "evidence": [
+        "app/src/data.ts — a single, cohesive data module with JSDoc'd helpers; no utils grab-bag, no hidden state beyond the one documented api cache",
+        "app/src/data.ts:46-49 — mainTypes leaks the raw `record: any` next to the curated {name,label}, so views reach into API innards (app/src/views/team.tsx:68-69 reads record.damage_relations)",
+        "app/src/views/pokemon.tsx:4 — PokemonPage imports views/team for TeamButton/TEAM_SIZE; feature-to-feature view coupling, though the feature requires the button here",
+        "app/src/data.ts:66-73 — typesByPokemonId rebuilds a ~1300-entry map per request from cached type records; locally fine, but every page pays for it",
+        "app/src/views/components.tsx:20-21 — CardList gained one optional `action` prop for the team feature instead of a forked copy; good boundary discipline"
+      ],
+      "rationale": "Abstractions are few and mostly earn their keep; the one thing a future maintainer will untangle is raw API records (typed `any`) flowing through the data layer into views."
+    },
+    "readability": {
+      "score": 4,
+      "evidence": [
+        "app/src/api.ts:1-2,7 — file-top comments explain the caching strategy (why, not what)",
+        "app/src/index.tsx:21 — one-line comment explains the partial-vs-history-restore rule, the least obvious part of the app",
+        "app/src/views/home.tsx:21-40 — parseHomeQuery/homeUrl keep URL canonicalization in one obvious place",
+        "app/src/views/pokemon.tsx:78-118 — loadMoves mixes version-group resolution, dedup, move fetch-fanout and method ordering in one 40-line function; readable but dense",
+        "app/src/views/pokemon.tsx:224-240,288 — ~20 `(x: any)` casts in view code because api<T = any> (api.ts:35,48) is never given real types"
+      ],
+      "rationale": "A new teammate would find routes, views and data within minutes; the rough spots are the untyped API surface and pokemon.tsx carrying move-table machinery alongside the page component."
+    },
+    "review_cost": {
+      "score": 4,
+      "evidence": [
+        "app/src/api.ts:35,48 — ask: type the PokeAPI payloads so ~20 any-casts in views disappear",
+        "app/src/views/pokemon.tsx:137-176 — ask: extract MoveTable/sorting into its own module",
+        "app/src/views/team.tsx:29-38 — ask: swap the ',' cookie delimiter for '.' or a JSON array",
+        "app/package.json:9-11 — ask: add a unit-test runner; sortRows, typeCoverage, parseHomeQuery and readTeam are pure and would take trivially to test",
+        "app/src/index.tsx:14 — ask: derive the static root from import.meta rather than cwd"
+      ],
+      "rationale": "Approve-with-nits: nothing structural needs rework; the asks are typing, test coverage, and a handful of robustness tweaks."
+    }
+  },
+  "overall": 4,
+  "findings": [
+    {
+      "severity": "medium",
+      "location": "app/src/api.ts:35",
+      "issue": "The API layer is untyped (api<T = any>, apiUrl<T = any>), so every view relies on ~20 `any` casts (e.g. app/src/views/pokemon.tsx:224-240) and silent property mistakes would go unnoticed by `tsc --noEmit`.",
+      "suggestion": "Define interfaces for the PokeAPI resources used (species, pokemon, move, ability, type, generation) and annotate the call sites, or at minimum type the fields views actually read."
+    },
+    {
+      "severity": "medium",
+      "location": "app/package.json:9",
+      "issue": "The app ships no tests at all (0 test files) even though it contains pure, high-value logic: sortRows with its missing-values-last rule (pokemon.tsx:36-47), typeCoverage multipliers (team.tsx:88-107), parseHomeQuery clamping (home.tsx:21-31), readTeam dedup/truncation (team.tsx:15-26).",
+      "suggestion": "Add a lightweight runner (e.g. vitest or node:test) with unit tests for these helpers; they encode the spec's subtlest rules."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/views/team.tsx:29",
+      "issue": "Team cookie value is `names.join(',')`; comma is not a legal cookie-octet under RFC 6265, so a strict proxy or cookie parser between client and server could mangle or reject the team.",
+      "suggestion": "Join with '.' or '|' (never present in species names), or store a JSON array."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/index.tsx:14",
+      "issue": "serveStatic({ root: './dist' }) resolves relative to process.cwd(), so `npm start` works only when launched from app/; a supervisor or different working directory breaks all static assets.",
+      "suggestion": "Derive the path from the module location (e.g. new URL('../static', import.meta.url)) or document the cwd requirement."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/api.ts:15",
+      "issue": "fetch() to the API has no AbortSignal or timeout; a hung upstream stalls every page render with no error page.",
+      "suggestion": "Use AbortSignal.timeout(...) (or a small wrapper) and let the failure surface to the existing onError handler."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/data.ts:46-49",
+      "issue": "mainTypes() exposes the raw `record: any` alongside the curated {name, label}, so views depend on raw API JSON shape (team.tsx:68-69, data.ts:70) — a leaky data-layer boundary that also spreads the `any` typing.",
+      "suggestion": "Have the data module expose only what views need (e.g. precomputed damage-relation sets or a typed record)."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/index.tsx:94-99",
+      "issue": "POST /team/add/:name writes whatever path segment it receives into the persistent cookie without checking it names a real species.",
+      "suggestion": "Validate against the species list (or at least an /^[a-z0-9-]+$/ shape check) before writing the cookie."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/views/team.tsx:104",
+      "issue": "Conditional `disabled` via attribute spread is awkward and hides intent compared to the framework's native boolean handling.",
+      "suggestion": "Write `disabled={disabled || undefined}` — hono/jsx renders it as a boolean attribute on 4.13."
+    }
+  ],
+  "summary": "A genuinely idiomatic Hono 4 + htmx 2 app on the latest stable versions, with an unusually careful partial/full-page split (Vary, HX-Push-Url, history-restore) and a team-builder feature that follows the existing conventions exactly. I'd merge it after one round of nits: type the API payloads, add unit tests for the spec's subtle pure helpers, and fix the cookie delimiter and cwd-dependent static root. Overall 4: approve with minor changes."
+}

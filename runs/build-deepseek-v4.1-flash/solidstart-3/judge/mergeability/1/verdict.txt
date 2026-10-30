@@ -1,0 +1,148 @@
+## Review: SolidStart Pokédex (`app/`)
+
+I read `SPEC.md`, all of `app/src` (routes, components, `lib/`, entrypoints, config), and checked the current SolidStart v2 docs (`docs.solidjs.com/solid-start/v2` — data-fetching via `query`/`createAsync`, API routes via `APIEvent`, `vite.config.ts` with `solidStart()` + `nitro()` from `nitro/vite`, and the documented `ssr: false` SPA option).
+
+**Architecture in brief.** The app is SolidStart v2 with `ssr: false` (`app/vite.config.ts:5`), so it's a SPA: all data loads client-side via `createResource` through a same-origin proxy route (`app/src/routes/api-proxy/[...path].ts`), with a hand-rolled TTL cache + inflight dedupe (`app/src/lib/api.ts:23-33`) and module-level promise memoization (`app/src/lib/data.ts:28-32`).
+
+**What's good.** Vite config matches current v2 docs exactly; file routing, `useParams`/`useSearchParams`-driven resources, `For`/`Show`/`createMemo` usage, and `APIEvent`-typed proxy routes are all idiomatic. URL-as-state on the home page is done cleanly (debounced `q`, `page` reset on filter change, `queryHref` preserving filters for pagination links — `app/src/routes/index.tsx:14-21, 76-82`). The moves section (game select, per-method tables, sortable headers with `aria-sort`) is careful, and `MoveTable` resets sort state when rows change. 404 handling via resource-returns-null → shared `NotFound` component is a tidy pattern.
+
+**What I'd push back on.**
+1. **Data layer reimplements framework features.** v2's recommended data API is `query`/`createAsync` (request dedupe + keyed cache + optional `"use server"`); the app hand-rolls TTL/inflight caching and `??=`-promise memoization. That's acceptable, but the memoization **caches rejections forever** (`data.ts:67`, `118`): one transient proxy/API failure during a session permanently blanks the home page with no error UI and no retry (`index.tsx:42` fallback is a bare `<h1>`).
+2. **Un-aggregated fan-out.** Because `ssr: false`, every browser session re-runs the ~28-fetch home-data bootstrap (`data.ts:112,118`) through the proxy; a server-side `query` would amortize this across users and shrink time-to-content.
+3. **Unguarded move fetch.** `data.ts:405` fetches every move detail with no catch; one failure rejects the `moveData` resource, which is never read for errors, leaving the moves section stuck on "Loading moves…" (`pokemon/[name].tsx:195`).
+4. **`data.ts` is a ~420-line god module**, imported by every route, typed almost entirely `any` at the API edge, with the same `getSpeciesIndex → speciesById → dedupe → card` block duplicated three times (`data.ts:297`, `321`, `352`).
+5. Small smells: `document.documentElement.lang = "en"` side-effect in `App` (`app.tsx:12`), `typeLabel` double-imported under two names (`data.ts:2`), a misnamed `moveNames` helper that applies `typeLabel` to move names (`data.ts:365`), `.map` in JSX instead of `<For>` (`index.tsx:132`, `PokemonCard.tsx:29`), and an untouched template `README.md` that doesn't record the `ssr: false`/proxy decision.
+
+```json
+{
+  "dimension": "mergeability",
+  "criteria": {
+    "idiomatic": {
+      "score": 3,
+      "evidence": [
+        "app/vite.config.ts:5 — matches current v2 docs: solidStart() + nitro() from 'nitro/vite'",
+        "app/src/app.tsx:15-27 — FileRoutes + Router root + MetaProvider, textbook v2 structure",
+        "app/src/routes/api-proxy/[...path].ts:4 — APIEvent-typed API route per v2 docs",
+        "app/src/lib/api.ts:23-33 — hand-rolled TTL cache + inflight map; reimplements @solidjs/router query (v2's recommended createAsync/query dedupe+cache)",
+        "app/src/lib/data.ts:28-32 — module-level promise memoization instead of query/createAsync with 'use server'",
+        "app/src/app.tsx:12 — document.documentElement.lang side-effect in App body, a shell hack",
+        "app/src/routes/index.tsx:132 — .map in JSX instead of <For>, losing keyed reconciliation"
+      ],
+      "rationale": "Recognisably idiomatic SolidStart v2 (file routes, resources, API routes, config on the current docs), but the data layer hand-rolls what query/createAsync provide, SPA mode pushes all fetching to the client, and a couple of DOM side-effect/JSX shortcuts stray from the docs."
+    },
+    "correctness_risks": {
+      "score": 3,
+      "evidence": [
+        "app/src/lib/data.ts:67,118 — '??=' memoization caches rejected promises forever: one transient API failure blanks home/section for the whole session with no retry",
+        "app/src/routes/index.tsx:42 — Show when={data()} fallback is a bare <h1>; resource.error is never surfaced anywhere",
+        "app/src/lib/data.ts:405 — mapPool move-detail fetches have no catch; one failure rejects moveData and pokemon/[name].tsx:195 stays on 'Loading moves…' indefinitely",
+        "app/src/lib/data.ts:215-227 — bare catch{} maps 5xx/proxy outages to NotFound, conflating server errors with missing resources",
+        "app/src/lib/api.ts:24 — cache Map never evicts expired entries (bounded by API size, so minor)",
+        "app/src/routes/api-proxy/[...path].ts:18-22 — no upstream timeout; buffers whole body in memory",
+        "app/src/routes/index.tsx:51-53 — debounce timer cleaned up via onCleanup; good listener hygiene"
+      ],
+      "rationale": "No races or SSR mismatches found (ssr:false removes that class, and debounce/URL sync is careful), but rejection-caching without retry, unhandled resource errors, and a stuck moves section on a single failed fetch are real fragilities a reviewer would ask to fix."
+    },
+    "global_abstractions": {
+      "score": 3,
+      "evidence": [
+        "app/src/lib/data.ts:1-420 — ~420-line god data module every route imports; mixes caching policy, API shaping and per-page assembly",
+        "app/src/lib/data.ts:28-32 — hidden module-level promise caches as implicit global state",
+        "app/src/lib/data.ts:297-305,321-336,352-367 — near-identical getSpeciesIndex → speciesById → dedupe → card mapping duplicated across getMovePage/getAbilityPage/getTypePage",
+        "app/src/routes/moves/[name].tsx:14-24, abilities/[name].tsx:12-22, types/[name].tsx:23-33, pokemon/[name].tsx:73-77 — loading/NotFound scaffolding duplicated in all four detail routes",
+        "app/src/lib/format.ts — clean leaf module of small pure helpers, a genuinely good boundary",
+        "app/src/routes/api-proxy/[...path].ts — server concerns isolated in one route; no server code leaks into client modules"
+      ],
+      "rationale": "Server/client boundaries are actually clean (proxy route, pure helpers, small components), but data.ts is a god module with hidden caches and thrice-duplicated card-mapping logic that will need untangling as the app grows."
+    },
+    "readability": {
+      "score": 4,
+      "evidence": [
+        "app/src/lib/format.ts:8-21 — humanize/englishName/displayValue are small, well-named, self-documenting",
+        "app/src/components/MoveTable.tsx:44-107 — sort logic explicit and easy to follow; columns/valueFor/toggle read cleanly",
+        "app/src/routes/pokemon/[name].tsx:69-72 — the one comment in the codebase, and it explains a real 'why' (hash scroll after moves settle)",
+        "app/src/lib/data.ts:2 — typeLabel imported twice under two names (typeLabel, typeLabel as typeName)",
+        "app/src/lib/data.ts:365-366 — misnamed moveNames helper that applies typeLabel to move names; confusing",
+        "app/src/lib/data.ts — pervasive any at the API edge despite tsconfig strict:true",
+        "app/README.md — untouched template boilerplate; the ssr:false and proxy decisions are undocumented"
+      ],
+      "rationale": "A new teammate would find their way quickly: consistent route file shapes, good names, small components. Docks it a point: near-zero comments on non-obvious decisions, heavy any in the data layer, and a couple of confusing aliases."
+    },
+    "review_cost": {
+      "score": 3,
+      "evidence": [
+        "app/src/lib/data.ts:67,118,405 — rejection-caching and unguarded fetches need a fix round before approve",
+        "app/src/routes/index.tsx:42 and all detail routes — error states absent; each resource needs an error branch",
+        "app/src/lib/data.ts:1-420 — split-per-resource and typing pass requested",
+        "app/src/routes/index.tsx:117-135 — .map→<For> and select-value handling are nits",
+        "app/src/lib/api.ts:23-33 — would be replaced wholesale by query/createAsync if the team follows v2 docs"
+      ],
+      "rationale": "I'd approve the routing/UI/UX layer almost as-is, but the data layer needs one solid round: error handling for cached rejections and resource errors, plus splitting/typing data.ts. Not blocking-architecture, but more than nits."
+    }
+  },
+  "overall": 3,
+  "findings": [
+    {
+      "severity": "medium",
+      "location": "app/src/lib/data.ts:118",
+      "issue": "homePromise/speciesPromise '??=' memoization caches rejected promises forever; a single transient API failure during a session permanently blanks the home page with no retry or error UI",
+      "suggestion": "Reset the memo on rejection (e.g. p.catch(() => { homePromise = undefined })) or use the router's query(), which handles errors per-request; surface resource.error in index.tsx"
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/lib/data.ts:405",
+      "issue": "Move-detail fetches in getVersionGroupMoves have no catch; one failed fetch rejects the moveData resource and the Moves section sticks on 'Loading moves…' forever (pokemon/[name].tsx:195 never reads resource.error)",
+      "suggestion": "Wrap each apiGet in a catch returning a null/placeholder detail, or add an error fallback for moveData"
+    },
+    {
+      "severity": "medium",
+      "location": "app/vite.config.ts:5",
+      "issue": "ssr:false makes every browser session re-run the ~28-fetch home bootstrap through the proxy (data.ts:112,118), and the data layer reimplements query/createAsync caching by hand (api.ts:23-33)",
+      "suggestion": "Use v2's query()/createAsync (optionally with 'use server') so the server dedupes/caches and amortizes the fan-out across users; document the SPA decision if it's kept"
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/lib/data.ts:1",
+      "issue": "~420-line god data module imported by every route, typed almost entirely any, with the speciesById → dedupe → card mapping duplicated three times (data.ts:297, 321, 352)",
+      "suggestion": "Split per resource (pokemon/move/ability/type), extract one buildSpeciesCardList helper, and give the API responses real interfaces"
+    },
+    {
+      "severity": "low",
+      "location": "app/src/app.tsx:12",
+      "issue": "document.documentElement.lang = 'en' side-effect at App top level to patch the SPA shell, with no explanation",
+      "suggestion": "Handle lang in the HTML shell/entry (or document why), not via a runtime DOM mutation in App"
+    },
+    {
+      "severity": "low",
+      "location": "app/src/lib/data.ts:2",
+      "issue": "typeLabel imported twice under two names (typeLabel, typeLabel as typeName) and moveNames helper at data.ts:365 misuses typeLabel for move names",
+      "suggestion": "One name per import; give move-label code its own humanize-based helper"
+    },
+    {
+      "severity": "low",
+      "location": "app/src/routes/index.tsx:132",
+      "issue": ".map inside JSX (also PokemonCard.tsx:29) recreates all 48 card nodes on every keystroke/pagination instead of keyed <For>",
+      "suggestion": "Use <For each={pageItems()}> and <For each={props.card.types}>"
+    },
+    {
+      "severity": "low",
+      "location": "app/src/routes/api-proxy/[...path].ts:18",
+      "issue": "No upstream timeout/abort and whole-body arrayBuffer buffering; path is passed through unsanitized",
+      "suggestion": "Add an AbortController timeout, stream the response body, and keep the proxy restricted to known resource prefixes"
+    },
+    {
+      "severity": "low",
+      "location": "app/src/lib/data.ts:215",
+      "issue": "Bare catch{} in getPokemonPage/getMovePage/getAbilityPage treats 5xx and proxy outages as 'Not found'",
+      "suggestion": "Distinguish ApiError 404 from other failures and show an error state rather than NotFound"
+    },
+    {
+      "severity": "low",
+      "location": "app/README.md:1",
+      "issue": "README is untouched template boilerplate; the consequential ssr:false, proxy-route and client-cache decisions are recorded nowhere",
+      "suggestion": "Add a short architecture note covering rendering mode, the /api-proxy route and the client-side cache policy"
+    }
+  ],
+  "summary": "A solid, recognisably idiomatic SolidStart v2 app: file routing, URL-driven filters, careful accessibility and a moves section done right. The data layer is the weak spot — it reimplements the framework's query/createAsync caching by hand, caches rejected promises without retry, and concentrates everything in one any-typed god module. I'd want one focused round on data-layer error handling and structure before merging."
+}
+```

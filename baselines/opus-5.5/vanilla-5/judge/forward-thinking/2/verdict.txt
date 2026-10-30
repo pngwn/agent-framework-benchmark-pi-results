@@ -1,0 +1,125 @@
+## Review: `app/` — vanilla TS + Vite Pokédex
+
+I read `SPEC.md`, all of `app/src/` (9 modules), `app/server.mjs`, `app/index.html`, `app/tsconfig.json`, and checked Vite/TypeScript/URLPattern currency against current sources (Vite 8.3 is the live stable line — 8.3.5 shipped 2026-10-21; `create-vite` now defaults to TypeScript 7; `URLPattern` hit Baseline "newly available" Sept 2025).
+
+**What's strong.** This is a deliberately lean, current-generation setup: zero runtime dependencies, two current devDeps, a 65-line zero-dependency static server instead of Express, a typed API boundary (`app/src/api.ts:33-103`) that every page goes through, URL state isolated in one module (`app/src/url-state.ts`), routes in one table (`app/src/main.ts:19-27`), and runtime API-origin injection so the build isn't coupled to the environment (`app/server.mjs:24-26` with the consumer at `app/src/api.ts:11-14`). Modern platform usage is consistent: `fetch`, `URL`/`URLSearchParams`, `replaceChildren`, `findLast`, `padStart`, `replaceAll`, `AbortSignal.timeout`, `aspect-ratio`, lazy/async-decoded sprites with intrinsic sizes.
+
+**What ages it.** The route regexes are defined twice — once client-side (`app/src/main.ts:19-27`) and again in the server for 404 probing (`app/server.mjs:36-42`); any route change ripples to two files in two runtimes. The server does an *uncached upstream API round trip on every HTML navigation* (`app/server.mjs:46-52`) just to pick a status code. The client's fetch layer has no timeout/abort (`app/src/api.ts:112-120`), so a slow API leaves a permanent "Loading…". And the hand-rolled regex router sits next to a now-Baseline platform API (`URLPattern`) that does exactly this.
+
+```json
+{
+  "dimension": "forward-thinking",
+  "criteria": {
+    "latest_apis": {
+      "score": 5,
+      "evidence": [
+        "app/package.json:13-15 — vite ^8.3.5, typescript ^7.0.2: exactly the current stable lines (Vite 8.3.5 released 2026-10-21 per vitejs/vite CHANGELOG; create-vite now templates TS 7)",
+        "app/src/api.ts:12 — import.meta.env.VITE_API_BASE_URL, still the current Vite env mechanism in Vite 8",
+        "app/tsconfig.json:2-13 — moduleResolution 'bundler', isolatedModules, strict: the current recommended shape for a Vite TS app, no legacy flags",
+        "app/package.json:9 — build is 'tsc --noEmit && vite build', no stale config files or hand-copied scaffolding that a newer release would emit differently"
+      ],
+      "rationale": "Toolchain and config are exactly the current stable generation (verified against Vite's Oct 2026 release notes), with no legacy-era patterns anywhere; there is almost no framework surface to misuse and what exists is used correctly."
+    },
+    "platform": {
+      "score": 4,
+      "evidence": [
+        "app/src/main.ts:19-27,86-97 — hand-rolled RegExp routing + click interception where URLPattern (Baseline newly available since Sept 2025, in Chrome since 95, per MDN/web.dev) is now the platform answer",
+        "app/src/api.ts:113-120 — client fetch has no AbortSignal/timeout, unlike the server which uses AbortSignal.timeout(3000) at app/server.mjs:47",
+        "app/src/pages/home.ts:40 — inline 'pokemon.url.match(/\\/(\\d+)\\/?$/)' instead of parsing with new URL(url).pathname",
+        "app/src/dom.ts:38 — replaceChildren (platform) used rather than innerHTML or a hand-rolled clear loop",
+        "app/src/format.ts:31 — findLast (ES2023) for latest English flavor text; app/src/pages/move.ts:14 — replaceAll",
+        "app/src/components.ts:57 — width/height + loading='lazy' + decoding='async' on sprites; app/src/style.css:374 — aspect-ratio"
+      ],
+      "rationale": "Platform-first in nearly all cases (fetch, URL/URLSearchParams, AbortSignal.timeout, replaceChildren, findLast, native dialog-less routing with history API), but the router is a hand-rolled regex now that URLPattern is Baseline, and client fetches lack any abort/timeout the platform provides for free."
+    },
+    "dependencies": {
+      "score": 5,
+      "evidence": [
+        "app/package.json:13-15 — only devDependencies: typescript ^7.0.2 and vite ^8.3.5; zero runtime dependencies",
+        "app/server.mjs:1-6 — production server is 65 lines of node:http/node:fs/promises instead of express/sirv/servor",
+        "app/src/dom.ts:1-45 — 45-line h()/append() helper rather than a virtual-DOM or hyperscript package",
+        "app/src/style.css:1-4 — hand-written CSS with custom properties, no CSS framework (per spec)"
+      ],
+      "rationale": "Minimal and modern: no runtime deps at all, both devDeps are the current stable majors, and every place a package could have been pulled in (static server, DOM builder, styling) the platform/platform-adjacent choice was made instead."
+    },
+    "churn_resistance": {
+      "score": 4,
+      "evidence": [
+        "app/src/main.ts:19-27 vs app/server.mjs:36-42 — route patterns duplicated across client and server (two runtimes, two regex lists); a route change touches both",
+        "app/src/api.ts:33-103 — all API access and response types behind one module; every page imports from here, so API-shape changes are localized",
+        "app/src/api.ts:11-14 + app/server.mjs:24-26 — API origin resolved in exactly one client module, injected at serve time so an environment change needs no rebuild",
+        "app/src/url-state.ts:1-21 — URL/history state changes isolated in one tiny module",
+        "app/src/pages/home.ts:32-52 — cross-resource type/generation maps derived inline inside the page module rather than the api data layer",
+        "app/src/main.ts:55-60 — navigation guarded by a monotonic token, so no reliance on framework internals or ordering; app/src/api.ts:107-109 — in-memory cache with failed requests evicted"
+      ],
+      "rationale": "Boundaries are excellent (typed API layer, single config point, isolated URL state), so most upgrades would touch few files; the main ripple risk is the client/server route-pattern duplication and page-local data derivation in home.ts."
+    }
+  },
+  "overall": 4,
+  "findings": [
+    {
+      "severity": "medium",
+      "location": "app/server.mjs:36-42",
+      "issue": "Route regexes and resource names are duplicated from app/src/main.ts:19-27; the two lists will drift when routes change (server is plain .mjs, client is TS).",
+      "suggestion": "Share one source of truth — e.g. a plain routes.mjs/JSON (pathname pattern + API resource) imported by server.mjs and by a thin TS wrapper, or have the server proxy unknown paths to the API once and cache the verdict."
+    },
+    {
+      "severity": "medium",
+      "location": "app/server.mjs:46-52",
+      "issue": "Every HTML request performs an uncached upstream API round trip (3s timeout) just to pick 200 vs 404, adding latency to every navigation and a self-inflicted dependency on API uptime for the HTML shell.",
+      "suggestion": "Cache the per-pathname status verdict (or per resource/name pair) in a small Map with TTL, and fall back to serving 200 immediately when the API is slow rather than blocking the shell."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/api.ts:113-120",
+      "issue": "Client fetches have no timeout or abort; a hung API response leaves the page stuck on 'Loading…' indefinitely (the render timeout at main.ts:46 only shows text, never cancels).",
+      "suggestion": "Pass { signal: AbortSignal.timeout(8000) } like the server does, and surface the failure through the existing errorPage()."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/main.ts:19-27",
+      "issue": "Hand-rolled RegExp router; URLPattern has been Baseline newly available since Sept 2025 (Chrome since 95) and is the platform API for exactly this pattern matching.",
+      "suggestion": "Use new URLPattern({ pathname: '/pokemon/:name' }) for the route table — declarative, extracts named groups, and one construct shared with server.mjs's RESOURCE_ROUTES."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/pages/home.ts:38-52",
+      "issue": "Cross-resource maps (pokemon types, species generation) are derived inline in the page module; other pages get the same kind of data through the api.ts layer.",
+      "suggestion": "Move these derivations into api.ts (e.g. pokemonTypeMap(), speciesGenerationMap()) so API-shape changes stay in one module and home.ts is pure view logic."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/pages/home.ts:40",
+      "issue": "Duplicated ID-from-URL regex (Number(pokemon.url.match(/\\/(\\d+)\\/?$/))) instead of the existing idFromUrl helper in format.ts:19 used elsewhere.",
+      "suggestion": "Import idFromUrl from ../format like components.ts:5 already does."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/main.ts:96",
+      "issue": "history.scrollRestoration = 'auto' is a no-op — 'auto' is already the default value.",
+      "suggestion": "Delete the line, or set it to 'manual' only if custom scroll restoration is actually wanted."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/api.ts:11-14",
+      "issue": "API base URL resolution spans a window global (__API_BASE_URL__) plus import.meta.env fallback; workable but the declare global Window augmentation is an unusual config seam for a Vite app.",
+      "suggestion": "Keep it (runtime injection is a sound choice) but consider a JSON script tag parsed in api.ts so the contract is data rather than a typed window property."
+    }
+  ],
+  "summary": "A lean, current-generation vanilla Vite+TS app: Vite 8.3 and TypeScript 7 (both verified current), zero runtime dependencies, and clean module boundaries that would survive framework churn well. The main forward-looking weaknesses are client/server route-pattern duplication with an uncached upstream 404 probe on every HTML request, and a few spots (regex router, no client fetch timeout) where the platform now offers a better primitive. I'd merge with the two medium findings addressed.",
+  "apis": [
+    { "api": "import.meta.env", "location": "app/src/api.ts:12", "status": "current", "replacement": "" },
+    { "api": "fetch", "location": "app/src/api.ts:114", "status": "current", "replacement": "" },
+    { "api": "AbortSignal.timeout()", "location": "app/server.mjs:47", "status": "current", "replacement": "" },
+    { "api": "Element.replaceChildren()", "location": "app/src/dom.ts:38", "status": "current", "replacement": "" },
+    { "api": "Array.prototype.findLast", "location": "app/src/format.ts:31", "status": "current", "replacement": "" },
+    { "api": "history.pushState/replaceState", "location": "app/src/url-state.ts:13", "status": "current", "replacement": "" },
+    { "api": "RegExp route matching", "location": "app/src/main.ts:19", "status": "legacy", "replacement": "URLPattern (Baseline since Sept 2025, per MDN/web.dev)" }
+  ],
+  "dependencies": [
+    { "name": "vite", "verdict": "modern", "note": "^8.3.5 is the current stable line (8.3.5 released 2026-10-21 per vitejs/vite releases); used with zero config and no plugins, minimizing upgrade surface." },
+    { "name": "typescript", "verdict": "modern", "note": "^7.0.2 is the current major that create-vite now templates with; strict config with moduleResolution 'bundler'." },
+    { "name": "(none at runtime)", "verdict": "modern", "note": "Zero runtime dependencies; routing, DOM building, and the production static server are all hand-written on platform primitives, which is the leanest possible dependency posture." }
+  ]
+}
+```

@@ -1,0 +1,175 @@
+## Review notes
+
+**Framework currency.** `app/package.json:11-13` pins `astro@7.4.4` / `@astrojs/node@11.1.9` — that *is* the current stable (released 2026-10-28). `astro.config.mjs` uses the modern `output: 'server'` + adapter pattern; per-route SSR matches the spec's "no build-time data" constraint. No outdated API usage found; `Astro.response.status = 404` (`app/src/pages/moves/[name].astro:24`) remains the idiomatic way to 404 in Astro 7.
+
+**Scenario walkthroughs.**
+
+1. **Remove Abilities** — delete `app/src/pages/abilities/[name].astro` and cut the Abilities section in `app/src/pages/pokemon/[name].astro:248-257`. The nav (`app/src/layouts/BaseLayout.astro:19-24`) links only Pokémon and Types, so nothing else references the route. The only residue is `PokemonCard`'s now-unused `hidden` prop (`app/src/components/PokemonCard.astro:4`). Very clean.
+
+2. **Sprite bug (Deoxys)** — every card list (home, moves, abilities, types) renders a `SpeciesRef` through the single `PokemonCard` component, whose sprite comes from one helper: `app/src/components/PokemonCard.astro:10` → `spriteUrl` in `app/src/lib/pokeapi.ts:26-28`. One fix covers every list. Caveat: the URL is derived from a hardcoded media pattern rather than the API-provided `sprites.front_default` — spec-sanctioned, but a latent coupling to the API's URL layout.
+
+3. **Sorting cards by name** — four pages each assemble their own array: `index.astro:28-46` (filter pipeline + pagination slice), `moves/[name].astro:74-83`, `abilities/[name].astro:37-49`, `types/[name].astro:58-71`. There is no shared list builder, so this is four edits, one of which (home) interacts with pagination.
+
+4. **Items section shaped like Moves** — the reusable parts are real (`pokeapi.ts` helpers, `getSpeciesIndex`, `PokemonCard`, `NotFound`, `BaseLayout`), but `moves/[name].astro` is a monolithic page: the not-found try/catch, the detail `dl`, the "N Pokémon" + card-grid section, and the id→species pipeline would all be copied. Roughly 60% of the moves page is a clone of the abilities page already (`moves/[name].astro:14-28` vs `abilities/[name].astro:14-32`).
+
+5. **Data source change** — base URL is one place (`pokeapi.ts:1`), excellent. Caching rules live in the `getJson` promise cache (`pokeapi.ts:17-48`) plus **seven** hand-rolled memoized promises with repeated reset-on-error boilerplate in `app/src/lib/data.ts` (lines 40, 58, 72, 90, 109, 121, 183). A TTL or eviction change means reworking all of them.
+
+**Other coupling observations.** `TypeBadge.astro` exists but is bypassed — four pages inline the same `<a class="type-badge" data-type=...>` markup (`pokemon/[name].astro:204`, `pokemon/[name].astro:337`, `types/[name].astro:79`, `moves/[name].astro:72`), so a markup change to badges touches five sites (styling, at least, is centralized in `global.css:192`). `index.astro` duplicates the "omit empty/default params" rule between server `pageHref` (`index.astro:33-40`) and the client `navigate` (`index.astro:105-113`) — a sync-drift risk. Dex-number formatting exists as `dexNumber` (`pokeapi.ts:113-115`) yet is re-inlined at `pokemon/[name].astro:196`. The client sort script is well-seamed (operates only on `data-*` attributes emitted in the same file), and layering is consistently pages → components → lib with narrow props.
+
+```json
+{
+  "dimension": "editability",
+  "criteria": {
+    "removability": {
+      "score": 5,
+      "evidence": [
+        "app/src/pages/abilities/[name].astro:1 — self-contained route; deleting the directory removes the feature",
+        "app/src/pages/pokemon/[name].astro:248-257 — the only inbound links (Abilities section) live in one obvious block",
+        "app/src/layouts/BaseLayout.astro:19-24 — nav contains no Abilities link, so no nav edit needed",
+        "app/src/components/PokemonCard.astro:4 — only residue is the hidden prop, harmless if left"
+      ],
+      "rationale": "Removing Abilities is exactly the 5-case: delete a route file and cut one section; no dead code spread elsewhere."
+    },
+    "changeability": {
+      "score": 3,
+      "evidence": [
+        "app/src/components/PokemonCard.astro:10 — sprite fix lands in one component covering all four card lists",
+        "app/src/lib/pokeapi.ts:26-28 — spriteUrl is the single URL-construction site",
+        "app/src/pages/moves/[name].astro:74-83 — id→species pipeline duplicated (also types/[name].astro:58-71, abilities/[name].astro:37-49)",
+        "app/src/pages/types/[name].astro:79 — type-badge markup inlined despite components/TypeBadge.astro existing",
+        "app/src/pages/pokemon/[name].astro:196 — dex number re-implemented inline instead of dexNumber (pokeapi.ts:113)"
+      ],
+      "rationale": "The headline card bug fixes in one obvious place, but several other cross-cutting concerns (species resolution, not-found handling, badge markup) are duplicated and would need N edits."
+    },
+    "coupling": {
+      "score": 4,
+      "evidence": [
+        "app/src/lib/pokeapi.ts:1 — API base URL known in exactly one module; pages never construct raw URLs",
+        "app/src/components/PokemonCard.astro:4-5 — narrow props interface, no knowledge of pages",
+        "app/src/pages/pokemon/[name].astro:381-419 — client sort script coupled only via data-* attributes, a clean seam",
+        "app/src/lib/pokeapi.ts:26-28 — sprite URL derived from a hardcoded media pattern rather than API-provided front_default, coupling to URL layout",
+        "app/src/pages/index.astro:105-113 — client navigate re-implements the param-omission rule from server pageHref (index.astro:33-40)"
+      ],
+      "rationale": "Clean layering, narrow interfaces, explicit module-level caches; docked for the hardcoded sprite pattern and the server/client param duplication."
+    },
+    "abstraction_design": {
+      "score": 3,
+      "evidence": [
+        "app/src/components/PokemonCard.astro — stretches well: same component serves home (with types) and detail pages (with hidden note)",
+        "app/src/pages/moves/[name].astro:14-28 — detail-page shape (fetch, notFound, dl, effect, card list) cloned in abilities/[name].astro:14-32 rather than shared",
+        "app/src/lib/data.ts:35-44 — memoization boilerplate repeated seven times (lines 40, 58, 72, 90, 109, 121, 183)",
+        "app/src/lib/data.ts:52-60 vs 135-142 — TypeInfo mapping logic duplicated between getTypes and getHomeIndex"
+      ],
+      "rationale": "The card/evolution components are designed around real variation, but the Moves-shaped page pattern and the caching pattern are copy-paste, so an Items section means cloning, not extending."
+    }
+  },
+  "overall": 4,
+  "findings": [
+    {
+      "severity": "medium",
+      "location": "app/src/pages/moves/[name].astro:74-83",
+      "issue": "The Pokémon-id→species resolution pipeline (extract ids ≤10000, dedupe, sort, map through speciesIndex) is duplicated across moves, types and abilities pages with slight variations",
+      "suggestion": "Add a shared helper in lib/data.ts, e.g. resolveSpecies(pokemonRefs, extra) returning SpeciesRef[], so exclusion rules and mapping change in one place"
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/pages/pokemon/[name].astro:204",
+      "issue": "TypeBadge.astro exists but is bypassed; the same <a class=\"type-badge\" data-type=…> markup is hand-inlined at pokemon:204, pokemon:337, types/[name].astro:79 and moves/[name].astro:72",
+      "suggestion": "Use the TypeBadge component everywhere (pass label), so badge markup and fallback behaviour change in one file"
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/lib/data.ts:35-44",
+      "issue": "Seven hand-rolled promise-memoization blocks with identical reset-on-error boilerplate (lines 40, 58, 72, 90, 109, 121, 183)",
+      "suggestion": "Extract a memoize(key, factory) helper; changing cache policy (TTL, eviction) then touches one place"
+    },
+    {
+      "severity": "low",
+      "location": "app/src/pages/types/[name].astro:14-28",
+      "issue": "The not-found try/catch + Astro.response.status = 404 pattern is duplicated in all four [name].astro pages",
+      "suggestion": "Extract a fetchDetail(name, resource) helper that returns { data, notFound } or sets the response status"
+    },
+    {
+      "severity": "low",
+      "location": "app/src/pages/index.astro:105-113",
+      "issue": "The 'omit empty/default query params' rule is implemented twice — server pageHref (index.astro:33-40) and client navigate — and must be kept in sync manually",
+      "suggestion": "Have the client script reuse a single shared param-serialization helper (e.g. a small exported module imported by both)"
+    },
+    {
+      "severity": "low",
+      "location": "app/src/pages/pokemon/[name].astro:196",
+      "issue": "Dex number formatting re-inlined (#${String(species.id).padStart(4, '0')}) although dexNumber() exists in lib/pokeapi.ts:113",
+      "suggestion": "Call the existing helper"
+    },
+    {
+      "severity": "low",
+      "location": "app/src/lib/data.ts:135-142",
+      "issue": "TypeInfo/GenerationInfo mapping duplicated between getTypes/getGenerations and getHomeIndex",
+      "suggestion": "Derive getTypes()/getGenerations() from the same mapping functions used by getHomeIndex"
+    },
+    {
+      "severity": "low",
+      "location": "app/src/pages/moves/[name].astro:12",
+      "issue": "Detail pages and lib functions operate on any-typed API payloads, weakening the typed seam data.ts establishes with SpeciesRef/TypeInfo",
+      "suggestion": "Add minimal interfaces for the resources pages consume (Move, Ability, TypeDetail) so refactors are type-checked"
+    },
+    {
+      "severity": "low",
+      "location": "app/src/lib/pokeapi.ts:26-28",
+      "issue": "Card sprite URL is derived from a hardcoded /media/sprites/pokemon/<id>.png pattern rather than the API-provided sprites.front_default",
+      "suggestion": "Spec-sanctioned and avoids 1000+ fetches, but document the assumption next to spriteUrl, or make the pattern a named constant"
+    }
+  ],
+  "summary": "A small, cleanly layered Astro 7 app that is easy to delete from and mostly easy to fix: every Pokémon card renders through one component backed by one URL helper, and the API base URL lives in a single module. The main editability debt is copy-paste rather than tangle — the Pokémon-id→species pipeline, the detail-page shape, badge markup and memoization boilerplate are each duplicated three to seven times. Extending the list pages (sorting, an Items section, cache policy changes) means editing or cloning several near-identical blocks.",
+  "scenarios": [
+    {
+      "change": "Remove the Abilities pages and every link to them",
+      "files": [
+        "app/src/pages/abilities/[name].astro",
+        "app/src/pages/pokemon/[name].astro"
+      ],
+      "difficulty": 5,
+      "notes": "Delete the route file and cut one clearly-delimited section (pokemon/[name].astro:248-257); the nav never links to abilities. Only residue is PokemonCard's hidden prop."
+    },
+    {
+      "change": "Fix wrong sprite for species whose default Pokémon has a different name (Deoxys)",
+      "files": [
+        "app/src/components/PokemonCard.astro",
+        "app/src/lib/pokeapi.ts"
+      ],
+      "difficulty": 5,
+      "notes": "All four card lists render SpeciesRef objects through the single PokemonCard component, whose sprite comes from one helper (spriteUrl); one fix covers every list. The fix may require deciding between the ID-derived pattern and the API-provided front_default URL."
+    },
+    {
+      "change": "Add sorting by name to every list of Pokémon cards",
+      "files": [
+        "app/src/pages/index.astro",
+        "app/src/pages/moves/[name].astro",
+        "app/src/pages/abilities/[name].astro",
+        "app/src/pages/types/[name].astro"
+      ],
+      "difficulty": 2,
+      "notes": "Four pages each assemble their own species array with page-local filtering/sorting (index.astro:28-46, moves:74-83, abilities:37-49, types:58-71); there is no shared list builder, and the home page's sort also interacts with pagination."
+    },
+    {
+      "change": "Add an Items section (/items, /items/:name) shaped like Moves",
+      "files": [
+        "app/src/pages/items/[name].astro (new)",
+        "app/src/lib/data.ts",
+        "app/src/styles/global.css"
+      ],
+      "difficulty": 3,
+      "notes": "pokeapi helpers, getSpeciesIndex, PokemonCard, NotFound and BaseLayout reuse directly, but the moves page is monolithic: not-found handling, the detail dl, the 'N Pokémon' card-grid section and the id→species pipeline would all be cloned from moves/[name].astro (which itself is ~60% a copy of abilities/[name].astro)."
+    },
+    {
+      "change": "Change the API base URL and caching rules",
+      "files": [
+        "app/src/lib/pokeapi.ts",
+        "app/src/lib/data.ts"
+      ],
+      "difficulty": 3,
+      "notes": "Base URL is trivially one constant (pokeapi.ts:1). Caching rules, however, span the getJson promise cache (pokeapi.ts:17-48) plus seven hand-rolled memoized promises in data.ts, each with its own reset-on-error boilerplate — a TTL/eviction change touches all of them."
+    }
+  ]
+}
+```

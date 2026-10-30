@@ -1,0 +1,153 @@
+# Editability review — Pokédex app (Next.js 16)
+
+## Scenario walkthroughs
+
+**1. Remove the Abilities pages.** Delete `app/src/app/abilities/` and remove the Abilities section from `app/src/app/pokemon/[name]/page.tsx:120-128`. No nav link exists for abilities (nav is Pokémon/Types/Team, `app/src/app/layout.tsx:20-27`), so no other mandatory edits. Optional dead code left behind: `getAbility`/`ApiAbility` (`app/src/lib/api.ts:163`), `CardData.hiddenAbility` (`app/src/lib/api.ts:219`), and `.plain-list`/`.card-note` CSS (`app/src/app/globals.css:124,227`). Essentially delete-a-route plus one section.
+
+**2. Sprite bug (species vs default-Pokémon).** Every card list renders through `PokemonCard` (`app/src/components/pokemon-cards.tsx`), which computes the sprite in exactly one place (`pokemon-cards.tsx:10`, `spriteUrl(card.id)`), so a markup-level fix covers home, moves, abilities, types and team at once. But the data-side semantics of `CardData.id` are constructed three ways: `pokemonCards` uses the *Pokémon* id from the ref URL (`app/src/lib/api.ts:240-250`), `getSpeciesIndex` and `loadTeam` use the *species* id (`api.ts:232-236`, `app/src/app/team/page.tsx:45-48`). A real fix (show the species' default Pokémon) would go in `pokemonCards` and require re-verifying the other two constructors, plus the default-variety resolution duplicated in `loadSpecies` (`app/src/app/pokemon/[name]/page.tsx:43-45`) and `loadTeam` (`app/src/app/team/page.tsx:40-42`).
+
+**3. Sort every card list by name.** All four secondary lists go through `PokemonCardList` (`app/src/app/moves/[name]/page.tsx:39`, `app/src/app/abilities/[name]/page.tsx:31`, `app/src/app/types/[name]/page.tsx:51`, `app/src/app/page.tsx:73`); the team page renders `PokemonCard` directly (`app/src/app/team/page.tsx:96-101`). A default sort or a `sortBy` prop in `pokemon-cards.tsx` plus one sort in the team page covers everything; `CardData.name` is always present.
+
+**4. Add an Items section shaped like Moves.** There's no shared "resource detail page" skeleton: the `cache`-load + `generateMetadata` + `notFound` boilerplate is repeated per route (`app/src/app/moves/[name]/page.tsx:14-25`, same in pokemon/abilities/types pages). You'd copy ~20 lines of boilerplate plus resource-specific markup into `items/[name]/page.tsx`, but genuinely reuse `Section`, `PokemonCardList`, `format.ts` helpers, and the `fetchApi`/typed-resource pattern in `api.ts` (just add `ApiItem`/`getItem`).
+
+**5. Change API base URL / caching rules.** All knowledge is in `app/src/lib/api.ts`: `apiBaseUrl` (line 7), URL building (line 37-42), fetch + cache TTL/size/concurrency (`api.ts:15-17,44-95`), and media URLs (`api.ts:274,280`). One file. The `connection()` calls in six pages are about render strategy, not the data source, and are idiomatic for Next 16 request-time rendering.
+
+## Assessment
+
+This is a well-factored small app. Data access, formatting, and API shape knowledge are each concentrated in one module; every card list funnels through one component; server/client boundaries are explicit (`server-only` in `api.ts`/`team-server.ts`, cookie utilities in `team.ts` shared by both sides). The main editability risks are three duplicated micro-logics: URL query serialization (page + filters), default-variety resolution (two pages), and the "follow server value" controlled-state pattern (filters, game-select, team-toggle). Nothing is entangled; nothing requires flag-parameter gymnastics.
+
+```json
+{
+  "dimension": "editability",
+  "criteria": {
+    "removability": {
+      "score": 4,
+      "evidence": [
+        "app/src/app/abilities/[name]/page.tsx:1 — the entire feature lives in one route directory",
+        "app/src/app/pokemon/[name]/page.tsx:120-128 — the only inbound links are this one Abilities section",
+        "app/src/app/layout.tsx:20-27 — nav has no abilities link, so no nav edit needed",
+        "app/src/lib/api.ts:163 — getAbility/ApiAbility would become dead code (optional cleanup)",
+        "app/src/app/globals.css:124 — .plain-list used only by the Abilities section"
+      ],
+      "rationale": "Deleting the route plus one section removes the feature; slight friction from residual dead code (getAbility, CardData.hiddenAbility, .plain-list/.card-note CSS) you'd want to sweep up."
+    },
+    "changeability": {
+      "score": 4,
+      "evidence": [
+        "app/src/components/pokemon-cards.tsx:10 — sprite rendered in one place for every card list",
+        "app/src/lib/api.ts:240-250 — pokemonCards keys cards by Pokémon id, while getSpeciesIndex (api.ts:232-236) and team/page.tsx:45-48 use species id; ambiguous CardData.id semantics",
+        "app/src/app/page.tsx:19-27 — pageHref duplicates the URL query schema",
+        "app/src/app/filters.tsx:11-18 — href builds the same query separately; a new filter param needs both",
+        "app/src/app/pokemon/[name]/page.tsx:43-45 — default-variety resolution duplicated at team/page.tsx:40-42"
+      ],
+      "rationale": "Most fixes land in one obvious place (PokemonCard, api.ts, format.ts), but the URL-serialization and default-Pokémon logic each exist twice and must be changed in sync."
+    },
+    "coupling": {
+      "score": 4,
+      "evidence": [
+        "app/src/lib/api.ts:1 — 'server-only' guard keeps all API knowledge server-side",
+        "app/src/lib/team.ts:32-44 vs app/src/lib/team-server.ts:14-18 — clean client/server split of team state with the cookie as an explicit shared contract",
+        "app/src/app/pokemon/[name]/moves-table.tsx:30 — client tables receive plain data props (MoveRow), no server internals leak",
+        "app/src/app/page.tsx:19-27 and app/src/app/filters.tsx:11-18 — the q/type/generation query schema is known in two modules",
+        "app/src/app/team/page.tsx:38 — builds its own English-label map instead of reusing getTypeLabels (api.ts:189)"
+      ],
+      "rationale": "Components depend on narrow, mostly-primitive props with clear seams; the main tangle is the URL query schema duplicated between server pagination links and the client filters."
+    },
+    "abstraction_design": {
+      "score": 4,
+      "evidence": [
+        "app/src/lib/api.ts:236-254 — pokemonCards(refs, extra) absorbs each caller's variation (hiddenAbility, types) without flag parameters",
+        "app/src/lib/api.ts:187-197 — TypeInfo/typeInfo isolates English-label lookup so pages never touch raw API names",
+        "app/src/app/pokemon/[name]/moves-table.tsx:18-45 — MovesTable is generic over row data and columns, ready for similar tables",
+        "app/src/app/moves/[name]/page.tsx:14-25 — resource-page boilerplate (cache load, generateMetadata, notFound) repeated per route with no shared skeleton",
+        "app/src/components/type-badge.tsx:9 — mild boolean-flag creep (plain, also StatRow 'total', MovesTable 'showLevel')"
+      ],
+      "rationale": "The abstractions track the app's real variation (cards, types, sections) and stretch well; a new resource page must copy the metadata/404 boilerplate rather than reuse it."
+    }
+  },
+  "overall": 4,
+  "findings": [
+    {
+      "severity": "medium",
+      "location": "app/src/app/filters.tsx:11-18",
+      "issue": "The filter URL query (q/type/generation) is serialized here and again in pageHref in app/src/app/page.tsx:19-27; adding or renaming a filter parameter requires editing both in sync, and a mismatch breaks pagination or filter restoration.",
+      "suggestion": "Export a single buildFilterHref(values, page?) (or shared param keys) from one module and use it in both the client filters and server pagination links."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/app/pokemon/[name]/page.tsx:43-45",
+      "issue": "Default-variety resolution (species.varieties → is_default → Pokémon id) is duplicated in loadSpecies and loadTeam (app/src/app/team/page.tsx:40-42), and pokemonCards (api.ts:240) resolves Pokémon→species a third way, by id only.",
+      "suggestion": "Add a lib/api.ts helper like getDefaultPokemon(species) (and a species-ref lookup) so the mapping lives in one place — this is exactly the seam a Deoxys-style sprite fix needs."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/lib/api.ts:214",
+      "issue": "CardData.id is the species id in getSpeciesIndex and loadTeam but the Pokémon id in pokemonCards (api.ts:240-250); the type is ambiguous about which, which is the latent root of a wrong-sprite/dex-number bug.",
+      "suggestion": "Document (or rename to speciesId and resolve it inside pokemonCards via the existing species list) so every card constructor agrees on semantics."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/app/team/page.tsx:38",
+      "issue": "loadTeam builds its own English-name map from getAllTypes instead of reusing getTypeLabels (api.ts:189), duplicating label logic.",
+      "suggestion": "Call getTypeLabels() and drop the local map."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/app/moves/[name]/page.tsx:14-25",
+      "issue": "The resource-page skeleton (cache() loader, generateMetadata with 'Not found', await connection(), notFound) is copy-pasted across the four detail routes with no shared helper, so each new resource (e.g. Items) re-copies it.",
+      "suggestion": "Extract a small withResourcePage or loadResource helper (loader + metadata factory) in lib, or accept the duplication consciously as framework idiom."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/app/pokemon/[name]/game-select.tsx:18-21",
+      "issue": "The 'sync controlled state when the server value changes' pattern (prev-state pair) is hand-rolled here, in filters.tsx:31-38 and partially in team-toggle.tsx:22-25; fixing a bug in it means three edits.",
+      "suggestion": "Extract a useSyncedServerValue(value) hook in components and reuse it."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/app/types/page.tsx:10",
+      "issue": "Types are enumerated and labeled per page (getAllTypes + englishName at app/types/page.tsx:10, app/page.tsx:35, app/team/page.tsx:28, pokemon/[name]/page.tsx:63); fine today, but each new type-taking page re-derives labels.",
+      "suggestion": "Consider a single cached allTypes-with-labels accessor that pages share."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/app/pokemon/[name]/page.tsx:59",
+      "issue": "Slot-sorted type mapping (sort by slot, then typeInfo) is duplicated in app/src/app/team/page.tsx:46-47.",
+      "suggestion": "Add a toTypeInfo(pokemon.types, labels) helper in lib/api.ts."
+    }
+  ],
+  "summary": "A cleanly layered app where data access, formatting, and card rendering each funnel through single modules, so most changes and removals touch one or two files. The recurring cost is triplicated micro-logic: URL query serialization, default-Pokémon resolution, and controlled-state syncing from server props. Server/client boundaries and team-state handling are exemplary for a feature bolted onto an existing app.",
+  "scenarios": [
+    {
+      "change": "Remove the Abilities pages and all links to them",
+      "files": ["app/src/app/abilities/[name]/page.tsx", "app/src/app/pokemon/[name]/page.tsx", "app/src/lib/api.ts", "app/src/app/globals.css"],
+      "difficulty": 5,
+      "notes": "Only mandatory edits are deleting the route dir and the Abilities section on the Pokémon page (abilities/pokemon-.../page.tsx:120-128); no nav link exists. Optional: remove getAbility/ApiAbility, CardData.hiddenAbility and .plain-list/.card-note CSS to avoid dead code."
+    },
+    {
+      "change": "Fix the wrong-sprite bug for species whose default Pokémon has a different name",
+      "files": ["app/src/components/pokemon-cards.tsx", "app/src/lib/api.ts", "app/src/app/pokemon/[name]/page.tsx", "app/src/app/team/page.tsx"],
+      "difficulty": 4,
+      "notes": "Rendering is centralized (pokemon-cards.tsx:10 is the only sprite call, shared by every list), so one fix covers all lists — but it must go in the data layer (pokemonCards, api.ts:240-250, where id is the Pokémon id) and the default-variety logic is duplicated in loadSpecies and loadTeam, so you have to verify three constructors agree."
+    },
+    {
+      "change": "Add sorting by name to every list of Pokémon cards",
+      "files": ["app/src/components/pokemon-cards.tsx", "app/src/app/team/page.tsx"],
+      "difficulty": 4,
+      "notes": "Four of five lists render via PokemonCardList, so a default sort or sortBy prop in pokemon-cards.tsx covers them; the team page renders PokemonCard directly and needs its own member sort. CardData.name is always populated, so no data changes."
+    },
+    {
+      "change": "Add an Items section (/items, /items/:name) shaped like Moves",
+      "files": ["app/src/app/items/page.tsx", "app/src/app/items/[name]/page.tsx", "app/src/lib/api.ts"],
+      "difficulty": 3,
+      "notes": "Data helpers, Section, PokemonCardList, format.ts and the Section/list idioms are all reusable; but there's no shared resource-page skeleton, so the cache-load/generateMetadata/notFound boilerplate and the facts-panel markup get copied from the Moves page (~100 lines, most of it genuinely resource-specific)."
+    },
+    {
+      "change": "Change the API base URL and caching rules",
+      "files": ["app/src/lib/api.ts"],
+      "difficulty": 5,
+      "notes": "apiBaseUrl (api.ts:7), URL construction (api.ts:37-42), fetch options and the in-memory cache (TTL/size/concurrency, api.ts:15-17 and 44-95), and media URL rewriting (api.ts:274,280) all live in one module. The connection() calls in six pages are a separate render-strategy concern."
+    }
+  ]
+}
+```

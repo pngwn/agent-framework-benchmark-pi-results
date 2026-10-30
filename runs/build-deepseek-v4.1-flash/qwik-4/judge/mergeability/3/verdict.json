@@ -1,0 +1,111 @@
+{
+  "dimension": "mergeability",
+  "criteria": {
+    "idiomatic": {
+      "score": 3,
+      "evidence": [
+        "app/src/routes/index.tsx:64 — window.history.replaceState to sync filter URL instead of Qwik City's router (useNavigate/useLocation-driven URL state)",
+        "app/src/routes/pokemon/[name]/index.tsx:417 — window.location.assign for the game select, forcing a full page reload instead of SPA navigation",
+        "app/src/routes/[...catchall]/index.tsx:1 — custom catch-all + NotFound component instead of the documented 404.tsx route; loaders return a {notFound:true} sentinel instead of ev.error(404) (qwik.dev/docs/advanced/routing, qwik.dev/docs/error-handling)",
+        "app/src/routes/pokemon/[name]/index.tsx:409 — head: DocumentHead with resolveValue(usePokemonData) is the textbook Qwik City pattern",
+        "app/src/entry.ssr.tsx:22 — lang='en' via containerAttributes is the recommended starter approach"
+      ],
+      "rationale": "Route loaders, useSignal/useComputed$, component$, head functions and the SSR entry all read like the framework's own docs, so the core is recognisably idiomatic — but URL state is managed by hand (history/location instead of the router API) and 404 handling bypasses the framework's 404.tsx/ServerError pipeline."
+    },
+    "correctness_risks": {
+      "score": 3,
+      "evidence": [
+        "app/src/lib/data.ts:74-78 — fetch failures are swallowed and the promise resolving to null is cached in store.promises forever; a transient API hiccup at cold start permanently degrades pages (null sprites/empty types) until process restart",
+        "app/src/lib/data.ts:73 — !response.ok also returns null with no logging, so a 500 from the API is indistinguishable from 'resource does not exist' and feeds the notFound sentinel",
+        "app/src/routes/index.tsx:36-38 — entire 1025-entry catalog returned from the routeLoader and serialized into every home-page HTML for client-side filtering (visible via useComputed$ at index.tsx:43), a ~150KB+ qwik JSON payload per request",
+        "app/src/routes/index.tsx:69-71 — <select> sets both value={} and selected on options, redundant and slightly fragile across hydration",
+        "app/src/routes/index.tsx:29 — page signal clamped visually (currentPage) but a stale ?page=999 URL is left in the address bar"
+      ],
+      "rationale": "No race conditions, unescaped HTML or leaked listeners found, and rendering is SSR-consistent; but the silent, permanently cached failure path in the fetch layer plus the per-request full-catalog payload are fragility a reviewer must address before this is trusted behind a flaky API."
+    },
+    "global_abstractions": {
+      "score": 3,
+      "evidence": [
+        "app/src/lib/data.ts:1-340 — single 340-line module holds all data access, the global cache, pure formatters (humanize, displayDex, formatValue) and home-query parsing (parseHomeQuery at data.ts:349)",
+        "app/src/lib/data.ts:57-59 — hidden global state on globalThis.__pokedexStore; the init statement leaks into the client bundle (app/dist/build/q-DivkbU9H.js:1 carries __pokedexStore init even though the server fetchers are tree-shaken)",
+        "app/src/components/ui.tsx:6 — PokemonCard embeds its own <li>, coupling the card to list contexts (used consistently, but it's a leaky component boundary)",
+        "app/src/routes/index.tsx:61-115 — three near-identical onInput$/onChange$ handlers duplicating the signal+replaceState dance"
+      ],
+      "rationale": "One god data module and one global cache are locally defensible (the spec explicitly permits in-memory caching) and boundaries are mostly clean, but mixing client-safe formatters with server-only fetchers in data.ts and the global-store side effect reaching the client bundle are entanglements that will need untangling."
+    },
+    "readability": {
+      "score": 4,
+      "evidence": [
+        "app/src/lib/data.ts:1-8 — header comment explains the caching strategy and why, the only real 'why' comment in the app",
+        "app/src/routes/types/[name]/index.tsx:12-19 — RELATIONS table maps spec terms to API keys declaratively; easy to audit",
+        "app/src/lib/data.ts:33 — pervasive 'any' for API records (TypeOption.record: any) leaves shapes unchecked",
+        "app/src/routes/index.tsx:246-260 — inline type annotations like (type: { name: string; label: string }) in templates clutter JSX, a symptom of the notFound union widening loader types",
+        "app/src/routes/index.tsx — file runs ~190 lines with three repeated control blocks; pokemon/[name]/index.tsx at ~430 lines is the largest file but splits loader/rendering cleanly"
+      ],
+      "rationale": "Naming is clear, file layout follows Qwik City conventions (routes/components/lib), and the data module documents its intent; the rough spots are any-typed API records and cluttered inline annotations rather than structural confusion."
+    },
+    "review_cost": {
+      "score": 3,
+      "evidence": [
+        "app/src/lib/data.ts:74-78 — reviewer must require: don't cache failed fetches, log errors",
+        "app/src/routes/index.tsx:36-38 — reviewer must require a payload strategy (server-side filtering via the loader's url) or acceptance of the full-catalog payload",
+        "app/src/routes/index.tsx:64,80,103 and app/src/routes/pokemon/[name]/index.tsx:417 — all URL mutations rewritten to router APIs",
+        "app/src/routes/[...catchall]/index.tsx:1 — switch to 404.tsx + ev.error(404) for real status codes",
+        "app/src/lib/data.ts:33 — split pure formatters out and type the API payloads"
+      ],
+      "rationale": "This is a normal round-of-review approval: the app is coherent and works, but the failure-handling, URL-mutation and 404 idioms plus the home payload size are all things a team would ask to change before merge."
+    }
+  },
+  "overall": 3,
+  "findings": [
+    {
+      "severity": "medium",
+      "location": "app/src/lib/data.ts:70-79",
+      "issue": "fetchJson caches the promise for every URL even when it resolves to null (network error or non-ok response), so a transient API failure at cold start permanently poisons the in-memory cache — e.g. getHomeCatalog would bake in entries with empty types and null sprites until restart, and missing records become indistinguishable from genuine 404s",
+      "suggestion": "Only store the promise in the cache on success (or delete the entry when it resolves to null), distinguish non-ok responses from thrown errors, and log failures instead of silently returning null"
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/routes/index.tsx:18-38",
+      "issue": "The home routeLoader returns the entire 1025-entry catalog, which Qwik serializes into every home-page HTML payload (~150KB+) because useComputed$ filters it on the client",
+      "suggestion": "Filter/paginate server-side inside routeLoader$ from the request's url params (the framework-native URL-driven loader pattern), returning only the 48 visible cards plus counts; keep client-side filtering only if the payload tradeoff is consciously accepted and trimmed"
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/routes/index.tsx:64",
+      "issue": "Filter state is written with window.history.replaceState (three near-identical handlers at lines 64, 80, 103), bypassing Qwik City's router, and the game select at app/src/routes/pokemon/[name]/index.tsx:417 does a full window.location.assign — the router's own location state goes stale and SPA navigation is lost",
+      "suggestion": "Use Qwik City's navigation (useNavigate()/loc.url via the useLocation signal or location.href assignment the router intercepts) so URL updates flow through the framework"
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/routes/[...catchall]/index.tsx:1",
+      "issue": "404 handling is a hand-rolled sentinel ({notFound:true}) plus a catch-all route, so missing resources respond with HTTP 200 and skip the framework's 404 pipeline that current Qwik City docs recommend",
+      "suggestion": "Add src/routes/404.tsx for unmatched URLs and throw ev.error(404) from the loaders when a resource is missing, so the server responds with the correct status"
+    },
+    {
+      "severity": "low",
+      "location": "app/src/lib/data.ts:57-59",
+      "issue": "Client components import pure formatters from data.ts (app/src/components/ui.tsx:2), dragging the module-scope global-store initialization into the client bundle (verified in dist/build/q-DivkbU9H.js:1) — a leaky server/client boundary that only works because tree-shaking happens to drop the fetchers",
+      "suggestion": "Move humanize/displayDex/formatValue into a client-safe src/lib/format.ts and keep data.ts strictly server-only"
+    },
+    {
+      "severity": "low",
+      "location": "app/src/lib/data.ts:33",
+      "issue": "API records are typed as any throughout (TypeOption.record: any, record: any in every accessor), so payload shape changes fail silently at runtime",
+      "suggestion": "Define minimal interfaces for the API resources used (species, pokemon, type, move, ability) and annotate the accessors"
+    },
+    {
+      "severity": "low",
+      "location": "app/src/routes/index.tsx:61-115",
+      "issue": "Three near-duplicate onInput$/onChange$ handlers each repeat the signal-update, page-reset and replaceState sequence",
+      "suggestion": "Extract one setFilter$ helper that takes the field and new value and centralizes the URL/URL-sync behavior"
+    },
+    {
+      "severity": "low",
+      "location": "app/src/routes/index.tsx:69-71",
+      "issue": "Selects set both value={} and per-option selected attributes, a redundant pattern that invites hydration/controlled-state confusion",
+      "suggestion": "Pick one mechanism (the selected attribute on options is what actually survives SSR; drop the value prop or vice versa) and use it consistently"
+    }
+  ],
+  "summary": "A competent, recognisably idiomatic Qwik City app: route loaders, head functions and SSR setup follow the framework's own patterns, and the code is easy to find one's way around. The main merge blockers are the silent, permanently cached fetch failures in the shared data layer, the hand-rolled URL/404 handling that bypasses the router and the framework's 404 pipeline, and the full 1025-entry catalog serialized into every home-page payload. I'd ask for one focused round of changes before approving."
+}

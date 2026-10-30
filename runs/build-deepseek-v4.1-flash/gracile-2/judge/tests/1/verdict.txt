@@ -1,0 +1,170 @@
+I've reviewed the full app. Confirmed: `app/` contains **zero test files** (no `*.test.*`/`*.spec.*` anywhere, no test runner in `app/package.json` — only `build`, `dev`, `start`, `preview` scripts). All regression safety therefore rests on the external acceptance suite in `tests/`. My review focused on what that leaves exposed.
+
+Key risky, untested logic I verified by reading:
+
+- **Home filtering/pagination**: combined generation/type/search filtering, page clamping and URL-param omission — `app/src/routes/(home).js:22-31` (`homeHref` dropping default params), `:56-81` (filter chain, `Math.min` page clamp, 48/page slice).
+- **Move table assembly**: version-group detail filtering, per-method tables, ordering and level sort — `app/src/routes/pokemon/[name].js:124-157` (`loadMoveRows`), `:213-231` (method ordering incl. the `Level Up/Machine/Egg/Tutor` + alphabetical tail), `:60-68` (`sortMoveRows`).
+- **Alternate-form exclusion/dedup**: `MAX_REGULAR_ID` filter and species dedup — `app/src/lib/api.js:108-120`, `:222-243`; regex-based ID parsing at `:58-61` whose `NaN` output every downstream guard depends on.
+- **Error handling**: every route collapses *any* handler failure (including 500s and nested `getMove`/`getTypeInfo` fetch failures) into a `Not found` page with status 404 — `app/src/routes/pokemon/[name].js:272-275`, `routes/moves/[name].js:45-49`, `routes/abilities/[name].js:43-47`, `routes/types/[name].js:69-73`. A transient API failure is indistinguishable from a missing resource; nothing tests this.
+- **Client scripts**: search debounce/race-guard/pushState (`app/src/routes/(home).client.js:21-86`) and column sorting with missing-values-last semantics (`app/src/routes/pokemon/[name].client.js:15-54`) — pure DOM logic with no coverage.
+- **Pure helpers**: `humanize`, `englishName`, `latestEnglishFlavorText`, `displayValue`, `dexNumber` — `app/src/lib/api.js:64-105` — the display-name rule ("humanized in lists, English on pages") lives entirely here.
+- **Request cache**: promise-caching with eviction of failed requests — `app/src/lib/api.js:31-42`; a refactor that drops the `request.catch(...)` eviction would pin rejected promises in the cache for process lifetime.
+
+```json
+{
+  "dimension": "tests",
+  "criteria": {
+    "coverage_of_risk": {
+      "score": 1,
+      "evidence": [
+        "app/package.json:8-12 — no test script or runner; only build/dev/start/preview",
+        "app/src/routes/(home).js:56-81 — filter/pagination logic (combined type+generation+search, 48/page slice, page clamp) has no test",
+        "app/src/routes/pokemon/[name].js:124-157 — move-table data shaping (version-group filter, method grouping) has no test"
+      ],
+      "rationale": "The app contains no tests at all, so none of its substantial transformation, filtering, pagination and error-path logic is covered."
+    },
+    "behaviour_not_implementation": {
+      "score": 1,
+      "evidence": [
+        "app/src — zero test files (find for *.test.js/*.spec.js returns nothing; facts: tests.files 0)"
+      ],
+      "rationale": "No tests exist, so there is nothing to judge as behavioural or implementation-focused."
+    },
+    "regression_power": {
+      "score": 1,
+      "evidence": [
+        "app/src/lib/api.js:64-105 — humanize/englishName/latestEnglishFlavorText untested; a refactor to first-flavor-entry or losing whitespace collapse would pass silently",
+        "app/src/lib/api.js:222-243 — uniqueSpeciesFromPokemonReferences untested; losing the id<10000 filter or dedup would silently list Mega forms and duplicates"
+      ],
+      "rationale": "With no tests, any behaviour regression in the data layer only surfaces if the external acceptance suite happens to hit that exact case."
+    },
+    "signal_to_noise": {
+      "score": 3,
+      "evidence": [
+        "app/src — no tests, hence no noise either"
+      ],
+      "rationale": "No tests means no low-value padding, but also zero signal; per the anchor this is neutral."
+    }
+  },
+  "overall": 1,
+  "findings": [
+    {
+      "severity": "high",
+      "location": "app/package.json:8-12",
+      "issue": "No test files, test script, or test dependency anywhere in app/; all quality gates are the external acceptance suite.",
+      "suggestion": "Add at least unit tests for the pure helpers in lib/api.js and route-handler tests (Gracile handlers are plain async functions, easy to invoke with fixture data) before the next refactor of the data layer."
+    },
+    {
+      "severity": "high",
+      "location": "app/src/routes/pokemon/[name].js:272-275",
+      "issue": "catch-all turns every failure (API 500, transient network error, a nested getMove/getTypeInfo failure inside loadMoveRows) into a 404 'Not found' page; same pattern in routes/moves/[name].js:45-49, routes/abilities/[name].js:43-47 and routes/types/[name].js:69-73.",
+      "suggestion": "Distinguish ApiError status 404 from other errors (return 500 for those) and add tests for both paths — this masking bug is invisible to any happy-path check."
+    },
+    {
+      "severity": "high",
+      "location": "app/src/routes/(home).js:56-81",
+      "issue": "Combined filtering, page clamping (Math.min with totalPages), and the 48-per-page slice are untested; a refactor could double-apply a filter, break the clamp, or miscount without any failing signal.",
+      "suggestion": "Extract the filter/paginate step into a pure function and test it against the fixture data: no filters, each filter alone, filters combined, page out of range, zero matches."
+    },
+    {
+      "severity": "high",
+      "location": "app/src/routes/pokemon/[name].js:213-231",
+      "issue": "Method-table construction (METHOD_ORDER first then alphabetical, empty methods dropped, ?game= query respected) and level-then-name sorting (sortMoveRows, :60-68) are untested.",
+      "suggestion": "Unit-test loadMoveRows + sortMoveRows with a small synthetic pokemon.moves payload covering two version groups, an out-of-order method set, and a missing-level entry."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/lib/api.js:108-120",
+      "issue": "Alternate-form exclusion (id < MAX_REGULAR_ID) and the species index sort are the linchpin of every list page; an off-by-one or a broken idFromUrl regex (:58-61, feeding Number.isFinite guards) would silently include forms >10000 or drop/duplicate species.",
+      "suggestion": "Unit-test idFromUrl, getSpeciesIndex and uniqueSpeciesFromPokemonReferences with URLs for regular, mega (id 10001) and female-form Pokémon."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/lib/api.js:64-105",
+      "issue": "Display-name rule helpers (humanize vs englishName, latest English flavor text with whitespace collapse, displayValue em-dash) encode most of the spec's naming rules and are untested.",
+      "suggestion": "Table-driven tests for humanize('mr-mime'), englishName fallback, latestEnglishFlavorText picking the last en entry and collapsing \\n/\\f, and displayValue(null)."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/routes/(home).client.js:21-86",
+      "issue": "Client filter flow (debounce, replaceState vs pushState, stale-response guard via requestNumber, popstate sync) has no coverage; a race-condition or URL-regression here is only caught by manual browser testing.",
+      "suggestion": "Add a small Playwright component/route test typing into search, asserting results update without Enter and the URL gains/loses params correctly."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/routes/pokemon/[name].client.js:15-54",
+      "issue": "Column sorting (ascending-first toggle, aria-sort updates, missing-values-last in both directions) is pure client logic with no tests; a comparator regression would reorder tables silently.",
+      "suggestion": "Test compareRows directly (it's a top-level function in the client script) or via DOM: click Power ascending with a null-power row and assert it stays last."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/lib/api.js:31-42",
+      "issue": "Promise cache evicts failed requests (request.catch(() => cache.delete(url))); dropping that line in a refactor would pin a rejected promise in the cache for the process lifetime — every subsequent request for that resource 404s via the catch-all.",
+      "suggestion": "Unit-test getJson with a failing then succeeding fetch stub to assert the failure is not cached."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/routes/(home).js:99-114",
+      "issue": "The API-failure fallback renders a 200-looking shell with empty selects and '0 Pokémon' with status 500; nothing verifies this degraded state is sane.",
+      "suggestion": "A handler test with a rejected API stub asserting status 500 and a coherent error page."
+    }
+  ],
+  "summary": "The app ships no tests of its own — no test script, runner, or spec file — so every behaviour guarantee lives in the external acceptance suite. The riskiest code (filtering/pagination, move-table assembly, form exclusion/dedup, error paths, all client-side interactivity) is exactly the kind that breaks silently under refactor. The catch-all 404 handlers are the most dangerous gap: they mask server-side API failures as 'Not found', which no happy-path test would ever reveal.",
+  "wroteTests": false,
+  "testCount": 0,
+  "valuableTests": [],
+  "lowValueTests": [],
+  "untested": [
+    {
+      "area": "Home filtering, pagination and URL param construction (app/src/routes/(home).js:56-81, :22-31)",
+      "risk": "high",
+      "likelyBug": "Combined filters double-applied, page clamp lost (page=999 shows empty list), defaults leaked into pagination hrefs, or count/list mismatch"
+    },
+    {
+      "area": "Error paths on all detail routes — non-404 API failures rendered as 404 'Not found' (routes/pokemon/[name].js:272-275 and equivalents)",
+      "risk": "high",
+      "likelyBug": "Transient API 500s silently masked as missing resources; nobody notices until users report pages 'missing' during API incidents"
+    },
+    {
+      "area": "Move-table data shaping: version-group filtering, method ordering, level sort, ?game= handling (routes/pokemon/[name].js:124-157, :206-231)",
+      "risk": "high",
+      "likelyBug": "Moves from all games shown for one game, method tables reordered or empty tables kept, level column sorted lexicographically ('10' before '9')"
+    },
+    {
+      "area": "Alternate-form exclusion and species dedup (lib/api.js:108-120, :222-243, idFromUrl :58-61)",
+      "risk": "high",
+      "likelyBug": "Mega/regional forms (>10000) leak into Learned-by/ability/type lists, or deoxys varieties produce duplicate cards after a regex refactor"
+    },
+    {
+      "area": "Display-name and flavor-text helpers (lib/api.js:64-105)",
+      "risk": "medium",
+      "likelyBug": "First instead of last English flavor entry, whitespace not collapsed, cards showing English 'Mr. Mime' instead of humanized 'Mr Mime', missing values shown empty instead of '—'"
+    },
+    {
+      "area": "Client-side search flow: debounce, pushState/replaceState, stale-response guard ((home).client.js:21-86)",
+      "risk": "medium",
+      "likelyBug": "Race condition showing results for an older query, filter changes no longer resetting to page 1, or popstate leaving controls out of sync"
+    },
+    {
+      "area": "Client-side column sorting and aria-sort management ([name].client.js:15-54)",
+      "risk": "medium",
+      "likelyBug": "Missing values sorted first in one direction, aria-sort stuck on 'ascending', or numeric columns compared as text"
+    },
+    {
+      "area": "API response cache semantics (lib/api.js:31-42)",
+      "risk": "medium",
+      "likelyBug": "Failed requests cached as rejected promises forever, or cache never evicted so a data change requires a process restart to appear"
+    },
+    {
+      "area": "Stat total, height/weight conversion (routes/pokemon/[name].js:239-242, :251-252)",
+      "risk": "low",
+      "likelyBug": "Division by 10 dropped or toFixed removed after a refactor, showing decimetres as metres"
+    },
+    {
+      "area": "Home route degraded fallback on API failure ((home).js:99-114)",
+      "risk": "low",
+      "likelyBug": "Error state renders an odd empty page with status 500 that nobody has ever verified"
+    }
+  ]
+}
+```

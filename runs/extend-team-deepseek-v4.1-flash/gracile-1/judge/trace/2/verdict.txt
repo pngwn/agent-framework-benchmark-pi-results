@@ -1,0 +1,129 @@
+## Review: process (agent trace)
+
+The session is a clean, nearly linear 35-turn run: explore (turns 1–9) → verify the framework's actual API from the installed type definitions (10–18) → decide the architecture (19–20) → implement in one pass (20–29) → build, full `npm test`, `tsc --noEmit` (30–32) → cleanup (33–34). 63/63 tests passed on the **first** run, with zero fix cycles and zero re-reads or reverts.
+
+What stands out:
+
+- **The one architectural decision was made up front and it was the right one.** In turn 10 the agent reasoned explicitly that the "no flash of the wrong label" requirement rules out localStorage-only state under SSR, and chose a cookie so the server renders the correct toggle (`app/src/lib/team.ts:1`, `app/src/routes/team.ts:14`, `app/src/client/team-toggle.ts:22`). That pre-empted the single most likely test failure.
+- **It verified framework behavior instead of guessing.** Rather than trusting training-data knowledge of Gracile (or a web search), it read the installed `@gracile/server/dist/route.d.ts` and `@gracile/engine/dist/routes/collect.js` to confirm both that the handler receives `request` (turn 15–16) and that `(team).ts` would map to `/`, not `/team` — then correctly picked `team.ts` (`app/src/routes/team.ts:9`). No web searches were needed because ground truth was in `node_modules`.
+- **Failures were trivial and each was fixed in one step.** One malformed `read` call (turn 8), two bash probes of a not-yet-installed `node_modules` (turns 10–11), and one careless edit using a placeholder `"x"` as the anchor (turn 21). All recovered immediately, none repeated.
+- **The main gap is verification breadth.** The feature ships a new page, a new coverage table and new button UI, and the agent never looked at any of it: no `agent-browser` run, no screenshot, no manual HTTP probe, no hand-check of the edge cases the suite doesn't cover (malformed/oversized cookie, the `Team is full` state). The code handles those defensively (`app/src/lib/team.ts:11` `sanitizeTeam`), but only the Playwright suite ever exercised the result. It also used `bash cat` for nearly all file reading rather than the `read` tool, which is what produced the arg-validation error.
+
+Scores follow.
+
+```json
+{
+  "dimension": "process",
+  "criteria": {
+    "circularity": {
+      "score": 5,
+      "evidence": [
+        "trace.md turns 1-9 — reads SPEC/FEATURE/app/tests once each, no re-reads",
+        "trace.md turns 10-18 — single forward pass through framework type definitions",
+        "trace.md turns 20-29 — twelve sequential edits, each to a different file, no re-fixing",
+        "measured facts: repeatedCalls 0, rereadsUnchanged 0, editReverts 0, fixCycles 0"
+      ],
+      "rationale": "Every turn added information; nothing was re-derived, re-read or re-run. The only thing resembling a loop (turns 17-19, Gracile route-file naming) was resolved by reading the engine source, not by repeating a guess."
+    },
+    "debugging": {
+      "score": 5,
+      "evidence": [
+        "trace.md turn 8 — read called with wrong args; immediately re-issued as bash cat",
+        "trace.md turns 10-11 — node_modules missing; diagnosed and fixed with npm install",
+        "trace.md turn 21 — edit missed because of a placeholder anchor; re-targeted the correct text in one step",
+        "trace.md turn 15-16 — unknown API (handler request access) resolved by reading route.d.ts rather than guessing",
+        "trace.md turn 30 — reasoned correctly about CSS specificity (.coverage-table th[scope='row'] vs .data-table th) before relying on it"
+      ],
+      "rationale": "Nothing substantial ever failed, so the evidence is thin, but every failure that did occur was read, diagnosed and fixed in a single step with no shotgun edits. The deeper risks were prevented up front by verifying the framework API from source instead of assuming."
+    },
+    "verification_quality": {
+      "score": 3,
+      "evidence": [
+        "trace.md turn 31 — full npm test run (63 passed, 0 failed) after the last code edit (turn 29)",
+        "trace.md turn 32 — extra npx tsc --noEmit, clean",
+        "measured facts: browserCommands 0, screenshots 0, httpProbes 0, serverStarts 0",
+        "app/src/routes/team.ts:28-56 — brand-new coverage table and team list never viewed visually",
+        "app/src/client/team-toggle.ts:33-34 — 'Team is full' disabled state only exercised if a test hits it"
+      ],
+      "rationale": "It ran the full suite after its last change plus a bonus typecheck, which meets the bar but no more: the new /team page, coverage table and button UI were never opened in a browser or screenshot, and no edge case beyond the suite (malformed cookie, oversized cookie, full-team toggle) was checked, even though the code defensively handles them."
+    },
+    "tool_use": {
+      "score": 4,
+      "evidence": [
+        "measured facts: 51 calls, 4 failed (8%), all cheap and recovered in one step",
+        "trace.md turn 8 — read invoked with a 'command' arg; fell back to bash cat",
+        "trace.md turns 10-11 — two failed bash greps against non-existent node_modules before installing",
+        "trace.md turn 21 — edit failed on a placeholder 'x' anchor",
+        "trace.md turns 3-6 — bash cat used for nearly all file reading instead of the read tool"
+      ],
+      "rationale": "Mostly efficient: edits applied first time (6 of 7), and it went to the installed .d.ts files rather than the web for framework truth. Docked for the placeholder edit, the premature node_modules probes, and habitual bash cat where the read tool was specified."
+    },
+    "planning": {
+      "score": 5,
+      "evidence": [
+        "trace.md turns 1-9 — SPEC, FEATURE, all app sources and all test specs read before any edit",
+        "trace.md turn 10 — anticipated the SSR/localStorage flash-of-wrong-label trap and chose a cookie",
+        "trace.md turn 19 — derived Gracile's file-routing convention from collect.js and picked team.ts over (team).ts",
+        "trace.md turns 20-29 — implementation order lib -> data -> partials -> route -> client -> document -> CSS, no rework",
+        "measured facts: firstFullPassAt 0, fixCycles 0, 12 edits before the single test run"
+      ],
+      "rationale": "Requirements were fully understood before the first write, the riskiest design choice was made deliberately with the right tradeoff, and the work needed zero rework — the suite passed on the first attempt."
+    }
+  },
+  "overall": 4,
+  "findings": [
+    {
+      "severity": "medium",
+      "location": "app/src/routes/team.ts:23",
+      "issue": "New UI (team list, coverage table, toggle buttons, 'Team is full' state) was never viewed: zero browser commands, screenshots or HTTP probes across the whole session; only the Playwright suite and tsc exercised it.",
+      "suggestion": "After the suite passes, start the app and run agent-browser against /team and /pokemon/pikachu with a populated cookie, and hand-check the full-team and malformed-cookie paths the tests don't cover."
+    },
+    {
+      "severity": "low",
+      "location": "trace.md turn 8",
+      "issue": "Called the read tool with a bash-style 'command' argument, which failed validation, then fell back to bash cat for the rest of the session.",
+      "suggestion": "Use the read tool with its path/offset/limit schema; it avoids the error and gives cleaner truncation for large files."
+    },
+    {
+      "severity": "low",
+      "location": "trace.md turns 10-11",
+      "issue": "Two failed greps against app/node_modules before realizing dependencies weren't installed.",
+      "suggestion": "Check whether node_modules exists (or just run npm install) before grepping package internals."
+    },
+    {
+      "severity": "low",
+      "location": "trace.md turn 21",
+      "issue": "Edit submitted with a literal placeholder 'x' as oldText, guaranteeing a miss; one wasted call.",
+      "suggestion": "Always paste the real anchor text from the file when issuing an edit."
+    },
+    {
+      "severity": "low",
+      "location": "trace.md turns 3-6",
+      "issue": "Nearly all source reading was done via bash cat with whole-file dumps, contrary to the harness's read-tool guidance, and it caused the one arg-validation error.",
+      "suggestion": "Prefer read for file examination; reserve bash for grep/find-style searches."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/lib/team.ts:11",
+      "issue": "sanitizeTeam defensively handles malformed, duplicate and oversized cookies, but none of those paths was ever verified (no test covers them and no manual probe was made).",
+      "suggestion": "Add a quick manual or scripted check of a >6-entry and a garbage cookie against /team and /pokemon/:name."
+    }
+  ],
+  "summary": "An unusually disciplined 35-turn session: full requirements and framework-API reconnaissance before the first edit, one deliberate architectural decision (cookie-backed team state) that pre-empted the likeliest failure, and a first-pass 63/63 test run with zero fix cycles. Weaknesses are confined to a handful of cheap tool errors and, more notably, verification that stopped at the test suite plus a typecheck — the brand-new team UI was never once looked at in a browser or probed beyond what Playwright checks.",
+  "loops": [
+    {
+      "turns": "10-11",
+      "what": "Briefly probed for @gracile types in node_modules twice before realizing dependencies were not installed.",
+      "brokenBy": "npm install in app/ (turn 12), after which it never looked back."
+    }
+  ],
+  "verification": [
+    "ran the full npm test suite (63 passed, 0 failed) after the final code edit",
+    "ran npx tsc --noEmit in app/ (clean) beyond the harness requirement",
+    "ran the production vite build (npm run build) before the suite",
+    "verified framework API assumptions by reading installed @gracile .d.ts and engine route-collector source rather than docs",
+    "did NOT use agent-browser, screenshots, HTTP probes, or any manual edge-case check"
+  ],
+  "wastedTurnsEstimate": 3
+}
+```

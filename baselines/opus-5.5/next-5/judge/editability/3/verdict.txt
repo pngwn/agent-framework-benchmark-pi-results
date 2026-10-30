@@ -1,0 +1,142 @@
+I've reviewed the whole app (`app/src`), the spec, and checked the idioms against current Next.js (16.4.x: `params`/`searchParams` as Promises, separate `viewport` export, `connection()` from `next/server` to force dynamic rendering, `history.pushState` integration for shallow URL updates — all current and correct, so nothing to flag as outdated).
+
+## Scenario walkthroughs
+
+1. **Remove Abilities** — delete `app/src/app/abilities/`, then remove the Abilities section in `app/src/app/pokemon/[name]/page.tsx:160-174` (the only inbound links). Trivial leftovers: `.bullets` CSS (`globals.css:372`) becomes dead, and `layout.tsx:9`'s description mentions "abilities". No nav link exists. Difficulty 4.
+2. **Sprite bug** — the URL is built in exactly one function, `spriteUrl()` at `app/src/components/PokemonCard.tsx:15`, and every list renders through `PokemonCard` (home at `HomeView.tsx:140`; moves/abilities/types via `PokemonCardList`). One fix covers all four lists. Caveat: if the fix needs actual Pokémon-record sprite data, `CardData` must gain a field and both producers (`cards.ts` and `page.tsx`) update. Difficulty 4.
+3. **Sort by name** — sorting happens in two independent places: `cards.ts:22` (moves/abilities/types lists) and `page.tsx:65` (home), which builds its own parallel entry shape instead of reusing the card abstraction. Adding a user-facing sort control also means new client components for three server-rendered pages. Difficulty 3.
+4. **Items section** — `lib/api`, `lib/format`, `Section`, `PokemonCardList` all stretch cleanly; but the detail-page boilerplate (fetch-by-slug + `notFound()` + `generateMetadata`) is copy-pasted in four pages, so a fifth copy is the path of least resistance rather than a shared helper. Difficulty 3.
+5. **API base URL / caching** — genuinely centralized: `apiBaseUrl()` and the re-rooting of absolute API URLs (`api.ts:17-19, 41-42`), TTL/max-entries (`api.ts:10-11`), and `cache: 'no-store'` (`api.ts:31`) all live in `api.ts`; callers only call `apiBaseUrl()`. One leak: `spriteUrl` in `PokemonCard.tsx:15-17` separately hardcodes the media path scheme. Difficulty 4.
+
+## Scoring rationale
+
+- **removability: 4** — routes are self-contained directories; abilities costs one directory delete plus one section edit; only minor dead CSS/text left behind.
+- **changeability: 4** — the concrete bug has a single, obvious fix point covering all lists; docking for the 4× duplicated slug-fetch/`notFound`/`generateMetadata` boilerplate and the 5× repeated `typeLabels.get(x) ?? humanize(x)` fallback (`types/[name]/page.tsx:39` is the only place that localized it).
+- **coupling: 3** — props are narrow, server/client split is clean and explicit; but the positional `IndexEntry` tuple (`HomeView.tsx:19`, consumed with magic `e[2]`/`e[3]` at `HomeView.tsx:66-67`) tightly couples `page.tsx` and `HomeView`; `MovesSection` takes game state from two sources (`initialGame` prop *and* `useSearchParams`, `MovesSection.tsx:117-120`); and `lib/cards.ts:3` imports a type from `components/` (layering inversion).
+- **abstraction_design: 3** — `Section`, `cardsFor(refs, note)` (callback instead of flag params, `cards.ts:11`), and `CardData` are well-shaped; but `CardData` didn't stretch to the home page's needs (types+generation), so home bypasses it with a bespoke tuple, and the detail-page pattern is pure copy-paste across four routes.
+
+```json
+{
+  "dimension": "editability",
+  "criteria": {
+    "removability": {
+      "score": 4,
+      "evidence": [
+        "app/src/app/abilities/[name]/page.tsx — entire feature lives in one route directory; nothing else imports from it",
+        "app/src/app/pokemon/[name]/page.tsx:160 — only inbound link is the Abilities section here; nav (app/src/app/layout.tsx:22-28) has no Abilities link",
+        "app/src/app/globals.css:372 — .bullets rule becomes dead CSS after removal",
+        "app/src/app/layout.tsx:9 — description text mentions 'abilities', a one-word edit"
+      ],
+      "rationale": "Deleting a feature is one directory plus one section edit in the Pokémon page; only trivia (a CSS rule, a description word) is left behind."
+    },
+    "changeability": {
+      "score": 4,
+      "evidence": [
+        "app/src/components/PokemonCard.tsx:15 — spriteUrl() is the single sprite-URL source; every card list renders through PokemonCard (app/src/app/HomeView.tsx:140, app/src/app/moves/[name]/page.tsx:46)",
+        "app/src/app/pokemon/[name]/page.tsx:30-37 — fetch-by-slug + notFound pattern duplicated identically in moves/[name]/page.tsx:14-21, abilities/[name]/page.tsx:14-21, types/[name]/page.tsx:18-25",
+        "app/src/app/moves/[name]/page.tsx:37 — 'typeLabels.get(x) ?? humanize(x)' fallback repeated at pokemon/[name]/page.tsx:79,108, types/[name]/page.tsx:39, HomeView.tsx:156",
+        "app/src/lib/cards.ts:22 — one comparator orders three of the four card lists; home sorts separately at app/src/app/page.tsx:65"
+      ],
+      "rationale": "The headline bug has one obvious fix point covering all lists, but the resource-page boilerplate and type-label fallback are duplicated 4-5x, so many other changes land in several files."
+    },
+    "coupling": {
+      "score": 3,
+      "evidence": [
+        "app/src/app/HomeView.tsx:19 — IndexEntry is a positional tuple [id, name, string[], string], consumed by magic index at HomeView.tsx:66-67; changing the shape requires synchronized edits in app/src/app/page.tsx:50-67",
+        "app/src/app/pokemon/[name]/MovesSection.tsx:117-120 — game selection read from both the initialGame prop and useSearchParams, two sources of truth",
+        "app/src/lib/cards.ts:3 — lib layer imports CardData from '@/components/PokemonCard', a layering inversion",
+        "app/src/lib/api.ts:37-39 — narrow seams done right: apiBaseUrl() encapsulates env handling so pages never re-implement it"
+      ],
+      "rationale": "Server/client split is clean and props are narrow, but the home-page tuple type and the dual game-state sources are real tangles between specific files."
+    },
+    "abstraction_design": {
+      "score": 3,
+      "evidence": [
+        "app/src/lib/cards.ts:11-15 — cardsFor(refs, note?) uses a callback instead of flags; stretched cleanly to abilities' 'Hidden ability' note (app/src/app/abilities/[name]/page.tsx:38)",
+        "app/src/components/Section.tsx:5-18 — minimal, reusable section abstraction used by every detail page",
+        "app/src/app/page.tsx:50-67 — CardData didn't stretch to home's needs (types + generation), so home builds a parallel bespoke shape instead of reusing cards.ts",
+        "app/src/app/moves/[name]/page.tsx:14-26 — detail-page pattern (get + notFound + generateMetadata) copied verbatim in four routes; an Items feature means a fifth copy"
+      ],
+      "rationale": "The shared components and data helpers are well-designed around real variation, but the home page bypasses the card abstraction and the resource-page pattern is pure copy-paste."
+    }
+  },
+  "overall": 4,
+  "findings": [
+    {
+      "severity": "medium",
+      "location": "app/src/app/HomeView.tsx:19",
+      "issue": "IndexEntry is an opaque positional tuple shared with page.tsx and consumed via magic indices (e[2], e[3] at HomeView.tsx:66-67); any shape change means synchronized edits in two files with no type error pointing at the index meaning.",
+      "suggestion": "Replace with a named object type (e.g. { id, name, types, generation }) defined in src/lib so both page.tsx and HomeView import it."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/app/moves/[name]/page.tsx:14",
+      "issue": "The fetch-by-slug + notFound() + generateMetadata + englishName-fallback pattern is duplicated across four detail pages (moves, abilities, types, pokemon), including the identical encodeURIComponent/decodeURIComponent/lowercase slug normalization.",
+      "suggestion": "Extract a shared helper (e.g. getResource(resource, name) in src/lib/api.ts plus a small generateMetadata factory) so slug handling and 404 behavior change in one place."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/lib/cards.ts:3",
+      "issue": "The lib layer imports CardData from '@/components/PokemonCard', inverting the natural layering (data layer depending on a view component).",
+      "suggestion": "Move CardData (and spriteUrl) into src/lib so components depend on lib, not the other way round."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/app/pokemon/[name]/MovesSection.tsx:117",
+      "issue": "Game selection has two sources of truth: the initialGame prop from server searchParams and useSearchParams() in the client, making the precedence logic easy to break during changes.",
+      "suggestion": "Pass the resolved searchParams value once (or read only useSearchParams) and drop the initialGame prop."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/app/moves/[name]/page.tsx:37",
+      "issue": "The 'typeLabels.get(name) ?? humanize(name)' fallback is repeated in five places across four files.",
+      "suggestion": "Add a typeLabel(labels, name) helper next to getTypeLabels() in src/lib/api.ts and use it everywhere."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/components/PokemonCard.tsx:15",
+      "issue": "spriteUrl hardcodes the /media/sprites/pokemon/<id>.png scheme inside a component, so the API's media layout is known in two places (here and src/lib/api.ts).",
+      "suggestion": "Move spriteUrl into src/lib next to apiBaseUrl so all knowledge of the API's URL layout lives in one module."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/app/page.tsx:50",
+      "issue": "Home re-implements card assembly (types-by-id, generation-by-id, dedup, sort) as a parallel shape to cards.ts instead of extending CardData, so card-related changes touch both implementations.",
+      "suggestion": "Extend CardData with the optional fields home needs (or add a builder in cards.ts) so all lists share one assembly path."
+    }
+  ],
+  "summary": "This is a well-organized App Router codebase: routes are self-contained, data access and formatting live in src/lib, and the server/client boundary is explicit, so the headline scenarios (remove a feature, fix the sprite bug, change the API base/caching) are mostly one-to-three-file changes. The main friction is copy-paste rather than entanglement: the detail-page boilerplate is duplicated four times, the home list bypasses the shared card abstraction with an opaque positional tuple, and a few label fallbacks repeat across files. Extending sideways (an Items section, per-list sorting) means copying the Moves pattern rather than reusing a helper.",
+  "scenarios": [
+    {
+      "change": "Remove the Abilities pages and every link to them",
+      "files": ["app/src/app/abilities/[name]/page.tsx", "app/src/app/pokemon/[name]/page.tsx", "app/src/app/globals.css", "app/src/app/layout.tsx"],
+      "difficulty": 4,
+      "notes": "Delete the abilities directory, cut the Abilities section from the Pokémon page, then sweep up one dead CSS rule (.bullets) and the word 'abilities' in the layout description. No nav or shared-code changes needed."
+    },
+    {
+      "change": "Fix the wrong-sprite bug for species like Deoxys",
+      "files": ["app/src/components/PokemonCard.tsx", "app/src/lib/cards.ts"],
+      "difficulty": 4,
+      "notes": "All four card lists render through PokemonCard/spriteUrl, so one function covers everything. If the fix needs Pokémon-record sprite data rather than an ID-derived path, CardData must gain a field and its two producers (cards.ts and the home page) update."
+    },
+    {
+      "change": "Add sorting by name to every list of Pokémon cards",
+      "files": ["app/src/lib/cards.ts", "app/src/app/page.tsx", "app/src/app/HomeView.tsx"],
+      "difficulty": 3,
+      "notes": "Default ordering lives in two independent places (cards.ts for three lists, page.tsx for home), and home's parallel entry shape means the change is made twice; a user-visible sort control also requires new client components on three server-rendered pages."
+    },
+    {
+      "change": "Add an Items section (/items, /items/:name) shaped like Moves",
+      "files": ["app/src/app/items/page.tsx", "app/src/app/items/[name]/page.tsx"],
+      "difficulty": 3,
+      "notes": "lib/api, lib/format, Section and the list-page pattern (types/page.tsx) are directly reusable, but the Moves detail page's slug-fetch/notFound/generateMetadata/facts-block boilerplate has no shared helper, so about half of it gets copied into a fifth route."
+    },
+    {
+      "change": "Change the API base URL and caching rules",
+      "files": ["app/src/lib/api.ts", "app/src/components/PokemonCard.tsx"],
+      "difficulty": 4,
+      "notes": "Base URL derivation, absolute-URL re-rooting, TTL, cache size and the no-store fetch policy are all in api.ts; callers just call apiBaseUrl(). Only spriteUrl in PokemonCard separately knows the media path scheme, so a media-layout change touches two files."
+    }
+  ]
+}
+```

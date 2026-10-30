@@ -1,0 +1,402 @@
+diff --git a/app/src/lib/server/pokedex.ts b/app/src/lib/server/pokedex.ts
+index ac5cdbd..65e31ce 100644
+--- a/app/src/lib/server/pokedex.ts
++++ b/app/src/lib/server/pokedex.ts
+@@ -1,5 +1,6 @@
+ import { apiBase, get, getOrThrow, idFromUrl, mapLimit } from './api.ts';
+ import { humanize } from '../format.ts';
++import { TEAM_SIZE } from '../team.ts';
+ import type { Card, EvolutionNode, MoveRow, MoveTable, TypeRef } from '../types.ts';
+ 
+ // --- API shapes (only the fields the app uses) -------------------------------------------
+@@ -343,6 +344,52 @@ export async function getAbilityPage(name: string) {
+ 	};
+ }
+ 
++// --- Team page ----------------------------------------------------------------------------
++
++export async function getTeamPage(names: string[]) {
++	if (!names.length) return { members: [], attackTypes: [] };
++
++	const [labels, types, records] = await Promise.all([
++		getTypeLabels(),
++		getTypes(),
++		mapLimit(names, TEAM_SIZE, async (name) => {
++			const species = await get<ApiSpecies>(`pokemon-species/${encodeURIComponent(name)}/`);
++			if (!species) return null;
++
++			const variety = species.varieties.find((v) => v.is_default)?.pokemon;
++			const pokemon = await getOrThrow<ApiPokemon>(variety ? variety.url : `pokemon/${species.id}/`);
++			const memberTypes = [...pokemon.types]
++				.sort((a, b) => a.slot - b.slot)
++				.map((t) => t.type.name);
++
++			return { species, memberTypes };
++		})
++	]);
++
++	const members = records
++		.filter((record) => record !== null)
++		.map(({ species, memberTypes }) => ({
++			name: species.name,
++			card: {
++				id: species.id,
++				name: species.name,
++				sprite: spriteUrl(species.id),
++				types: memberTypes.map((name) => typeRef(labels, name))
++			} satisfies Card
++		}));
++
++	return {
++		members,
++		attackTypes: types.map((type) => ({
++			name: type.name,
++			label: englishName(type),
++			double: type.damage_relations.double_damage_to.map((t) => t.name),
++			half: type.damage_relations.half_damage_to.map((t) => t.name),
++			none: type.damage_relations.no_damage_to.map((t) => t.name)
++		}))
++	};
++}
++
+ // --- Type pages ---------------------------------------------------------------------------
+ 
+ const RELATIONS = [
+diff --git a/app/src/lib/team.ts b/app/src/lib/team.ts
+new file mode 100644
+index 0000000..a9abd11
+--- /dev/null
++++ b/app/src/lib/team.ts
+@@ -0,0 +1,36 @@
++// The team lives in a cookie owned by the browser, so both the server (for the initial
++// render) and the client (when a Pokémon is added or removed) can read the same list.
++
++export const TEAM_SIZE = 6;
++export const TEAM_COOKIE = 'team';
++export const TEAM_COOKIE_MAX_AGE = 60 * 60 * 24 * 365;
++
++/** Parses a team cookie value into an ordered, duplicate-free list of species names. */
++export function parseTeam(value: string | null | undefined): string[] {
++	if (!value) return [];
++
++	let parsed: unknown;
++	try {
++		parsed = JSON.parse(value);
++	} catch {
++		try {
++			parsed = JSON.parse(decodeURIComponent(value));
++		} catch {
++			return [];
++		}
++	}
++
++	if (!Array.isArray(parsed)) return [];
++	const names = parsed.filter((name): name is string => typeof name === 'string' && name.length > 0);
++	return [...new Set(names.map((name) => name.toLowerCase()))].slice(0, TEAM_SIZE);
++}
++
++/** Serializes the team for storage in a cookie. */
++export function serializeTeam(names: string[]): string {
++	return encodeURIComponent(JSON.stringify(names.slice(0, TEAM_SIZE)));
++}
++
++/** Writes the team to the browser's cookie jar. Call only from the browser. */
++export function saveTeam(names: string[]): void {
++	document.cookie = `${TEAM_COOKIE}=${serializeTeam(names)}; Path=/; Max-Age=${TEAM_COOKIE_MAX_AGE}; SameSite=Lax`;
++}
+diff --git a/app/src/routes/+layout.svelte b/app/src/routes/+layout.svelte
+index 1f1d005..a6620a7 100644
+--- a/app/src/routes/+layout.svelte
++++ b/app/src/routes/+layout.svelte
+@@ -18,6 +18,7 @@
+ 			<ul>
+ 				<li><a href="/">Pokémon</a></li>
+ 				<li><a href="/types">Types</a></li>
++				<li><a href="/team">Team</a></li>
+ 			</ul>
+ 		</nav>
+ 	</div>
+diff --git a/app/src/routes/pokemon/[name]/+page.server.ts b/app/src/routes/pokemon/[name]/+page.server.ts
+index ed62a9d..8af3e09 100644
+--- a/app/src/routes/pokemon/[name]/+page.server.ts
++++ b/app/src/routes/pokemon/[name]/+page.server.ts
+@@ -1,9 +1,10 @@
+ import { error } from '@sveltejs/kit';
+ import { getPokemonPage } from '#lib/server/pokedex.ts';
++import { parseTeam, TEAM_COOKIE } from '#lib/team.ts';
+ import type { PageServerLoad } from './$types';
+ 
+-export const load: PageServerLoad = async ({ params, url }) => {
++export const load: PageServerLoad = async ({ params, url, cookies }) => {
+ 	const pokemon = await getPokemonPage(params.name, url.searchParams.get('game'));
+ 	if (!pokemon) error(404, 'Not found');
+-	return { pokemon };
++	return { pokemon, team: parseTeam(cookies.get(TEAM_COOKIE)) };
+ };
+diff --git a/app/src/routes/pokemon/[name]/+page.svelte b/app/src/routes/pokemon/[name]/+page.svelte
+index 2815388..379c8a7 100644
+--- a/app/src/routes/pokemon/[name]/+page.svelte
++++ b/app/src/routes/pokemon/[name]/+page.svelte
+@@ -6,6 +6,7 @@
+ 	import Evolution from '#lib/components/Evolution.svelte';
+ 	import MoveTable from '#lib/components/MoveTable.svelte';
+ 	import { dexNumber, humanize, pageTitle } from '#lib/format.ts';
++	import { saveTeam, TEAM_SIZE } from '#lib/team.ts';
+ 	import type { PageProps } from './$types';
+ 
+ 	let { data }: PageProps = $props();
+@@ -14,6 +15,22 @@
+ 	const total = $derived(pokemon.stats.reduce((sum, s) => sum + s.value, 0));
+ 	const MAX_STAT = 255;
+ 
++	let team = $state<string[]>([...data.team]);
++	const onTeam = $derived(team.includes(pokemon.name));
++	const teamFull = $derived(team.length >= TEAM_SIZE);
++
++	// Keep the local copy in step when navigating between Pokémon pages, which reuses
++	// this component while the server sends the team from the (updated) cookie.
++	$effect(() => {
++		team = [...data.team];
++	});
++
++	function toggleTeam() {
++		if (onTeam) team = team.filter((name) => name !== pokemon.name);
++		else if (!teamFull) team = [...team, pokemon.name];
++		saveTeam(team);
++	}
++
+ 	function selectGame(game: string) {
+ 		const url = new URL(page.url.href);
+ 		url.searchParams.set('game', game);
+@@ -35,6 +52,14 @@
+ 	<div class="details">
+ 		<p class="dex">{dexNumber(pokemon.id)}</p>
+ 		<h1>{pokemon.label}</h1>
++		<div class="team-action">
++			<button type="button" disabled={!onTeam && teamFull} onclick={toggleTeam}>
++				{onTeam ? 'Remove from team' : 'Add to team'}
++			</button>
++			{#if !onTeam && teamFull}
++				<span class="team-full">Team is full</span>
++			{/if}
++		</div>
+ 		{#if pokemon.genus}
+ 			<p class="genus">{pokemon.genus}</p>
+ 		{/if}
+@@ -166,6 +191,36 @@
+ 		color: var(--color-text-muted);
+ 	}
+ 
++	.team-action {
++		display: flex;
++		align-items: center;
++		gap: var(--space-3);
++		margin-top: var(--space-3);
++	}
++
++	.team-action button {
++		min-height: 2.5rem;
++		padding: 0 var(--space-4);
++		background: var(--color-surface);
++		border: 1px solid var(--color-border);
++		border-radius: var(--radius-md);
++		cursor: pointer;
++	}
++
++	.team-action button:hover:not(:disabled) {
++		border-color: var(--color-link);
++	}
++
++	.team-action button:disabled {
++		color: var(--color-text-muted);
++		cursor: not-allowed;
++	}
++
++	.team-full {
++		color: var(--color-text-muted);
++		font-size: var(--text-sm);
++	}
++
+ 	.genus {
+ 		margin-top: var(--space-1);
+ 	}
+diff --git a/app/src/routes/team/+page.server.ts b/app/src/routes/team/+page.server.ts
+new file mode 100644
+index 0000000..2b44424
+--- /dev/null
++++ b/app/src/routes/team/+page.server.ts
+@@ -0,0 +1,8 @@
++import { getTeamPage } from '#lib/server/pokedex.ts';
++import { parseTeam, TEAM_COOKIE } from '#lib/team.ts';
++import type { PageServerLoad } from './$types';
++
++export const load: PageServerLoad = async ({ cookies }) => {
++	const team = parseTeam(cookies.get(TEAM_COOKIE));
++	return { team, ...(await getTeamPage(team)) };
++};
+diff --git a/app/src/routes/team/+page.svelte b/app/src/routes/team/+page.svelte
+new file mode 100644
+index 0000000..533217d
+--- /dev/null
++++ b/app/src/routes/team/+page.svelte
+@@ -0,0 +1,160 @@
++<script lang="ts">
++	import Section from '#lib/components/Section.svelte';
++	import PokemonCard from '#lib/components/PokemonCard.svelte';
++	import { humanize, pageTitle } from '#lib/format.ts';
++	import { saveTeam, TEAM_SIZE } from '#lib/team.ts';
++	import type { PageProps } from './$types';
++
++	let { data }: PageProps = $props();
++
++	let members = $state([...data.members]);
++
++	// A client-side navigation to /team reuses this component, so sync with the new data.
++	$effect(() => {
++		members = [...data.members];
++	});
++
++	const coverage = $derived.by(() =>
++		data.attackTypes.map((attack) => {
++			let weak = 0;
++			let resistant = 0;
++			for (const member of members) {
++				let multiplier = 1;
++				for (const type of member.card.types ?? []) {
++					if (attack.none.includes(type.name)) multiplier *= 0;
++					else if (attack.half.includes(type.name)) multiplier *= 0.5;
++					else if (attack.double.includes(type.name)) multiplier *= 2;
++				}
++				if (multiplier > 1) weak++;
++				else if (multiplier < 1) resistant++;
++			}
++			return { name: attack.name, label: attack.label, weak, resistant };
++		})
++	);
++
++	function remove(name: string) {
++		members = members.filter((member) => member.name !== name);
++		saveTeam(members.map((member) => member.name));
++	}
++</script>
++
++<svelte:head>
++	<title>{pageTitle('Team')}</title>
++</svelte:head>
++
++<h1 class="page-heading">Team</h1>
++
++<p class="muted count">{members.length} of {TEAM_SIZE}</p>
++
++{#if members.length}
++	<ul class="team">
++		{#each members as member (member.name)}
++			<li>
++				<PokemonCard card={member.card} showTypes />
++				<button type="button" class="remove" onclick={() => remove(member.name)}>
++					Remove {humanize(member.name)}
++				</button>
++			</li>
++		{/each}
++	</ul>
++
++	<Section title="Type coverage">
++		<table class="coverage">
++			<thead>
++				<tr>
++					<th scope="col">Type</th>
++					<th scope="col">Weak</th>
++					<th scope="col">Resistant</th>
++				</tr>
++			</thead>
++			<tbody>
++				{#each coverage as row (row.name)}
++					<tr>
++						<th scope="row">{row.label}</th>
++						<td>{row.weak}</td>
++						<td>{row.resistant}</td>
++					</tr>
++				{/each}
++			</tbody>
++		</table>
++	</Section>
++{:else}
++	<div class="empty">
++		<p>Your team is empty</p>
++		<p><a href="/">Browse Pokémon</a></p>
++	</div>
++{/if}
++
++<style>
++	.count {
++		margin-bottom: var(--space-4);
++	}
++
++	.team {
++		display: grid;
++		grid-template-columns: repeat(auto-fill, minmax(var(--card-min-width), 1fr));
++		gap: var(--space-3);
++		margin: 0 0 var(--space-5);
++		padding: 0;
++		list-style: none;
++	}
++
++	.team li {
++		display: flex;
++		flex-direction: column;
++		gap: var(--space-2);
++	}
++
++	.remove {
++		min-height: 2.5rem;
++		padding: 0 var(--space-3);
++		background: var(--color-surface);
++		border: 1px solid var(--color-border);
++		border-radius: var(--radius-md);
++		cursor: pointer;
++	}
++
++	.remove:hover {
++		border-color: var(--color-link);
++	}
++
++	.coverage {
++		width: 100%;
++		border-collapse: collapse;
++	}
++
++	.coverage th,
++	.coverage td {
++		padding: var(--space-2) 0;
++		text-align: left;
++		border-bottom: 1px solid var(--color-border);
++	}
++
++	.coverage thead th {
++		color: var(--color-text-muted);
++		font-size: var(--text-sm);
++		font-weight: var(--weight-normal);
++	}
++
++	.coverage tbody th {
++		font-weight: var(--weight-normal);
++	}
++
++	.coverage tbody tr:last-child th,
++	.coverage tbody tr:last-child td {
++		border-bottom: 0;
++	}
++
++	.coverage td {
++		width: 6rem;
++	}
++
++	.empty {
++		padding: var(--space-6) 0;
++		text-align: center;
++	}
++
++	.empty p + p {
++		margin-top: var(--space-3);
++	}
++</style>

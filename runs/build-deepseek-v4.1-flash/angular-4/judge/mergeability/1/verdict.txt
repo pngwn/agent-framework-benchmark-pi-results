@@ -1,0 +1,144 @@
+I've reviewed the app thoroughly against the spec, Angular 22 (current stable per the v22 release notes — `resource`/`httpResource`/Signal Forms stabilized), and the official skill guidance. Here's my review.
+
+## Review summary
+
+**Structure**: clean `core/` (ApiService, CatalogService, format helpers, models), `pages/` per route, `shared/` (PokemonCard, NotFound) — sensible and consistent.
+
+**Strengths**
+- Modern Angular throughout: standalone components, `inject()`, OnPush everywhere, signal `input()`, `@if/@for` control flow, `toSignal` with explicit initial values, `computed` chains, recursive `ng-template` + `NgTemplateOutlet` for evolution trees (`app/src/app/pages/pokemon-page.html:160-174`).
+- `ApiService` is a well-bounded data layer: in-memory cache, media-URL resolution, path parsing (`app/src/app/core/api.service.ts:19-56`), and the sort/table-building logic in the Pokémon page is factored into small pure functions (`app/src/app/pages/pokemon-page.ts:127-200`).
+- Race handling is mostly right: `switchMap` chains cancel stale fetches, 404s route to a shared `NotFound` component, and filtering/sorting logic handles nulls ("missing values sort last") correctly.
+
+**Where I'd ask for changes**
+- Data fetching is pre-`resource`-era: hand-built `switchMap`/`forkJoin`/`shareReplay` chains + `toSignal`, when `resource`/`httpResource` (stable in v22, and the skill says "prefer httpResource for reads") would replace ~150 lines of plumbing with cancellation and status built in. Route params are read via `route.paramMap` boilerplate instead of `withComponentInputBinding()`.
+- Error semantics: `optional()` maps *every* error to `null`, and `get()` caches the errored observable (`api.service.ts:28-34`) — a transient network hiccup renders a permanent "Not found" until a full reload. This is the one thing I'd block on.
+- Three page components each rebuild an identical `speciesById` map and copy-paste the alternate-form filter/dedupe/sort block that `CatalogService.catalog$` already computes.
+- The `#moves` anchor jump is hand-rolled in an `effect` with a bare `setTimeout` (`pokemon-page.ts:371-380`), where `withInMemoryScrolling({anchorScrolling: 'enabled'})` or `afterRenderEffect` is the framework feature; the timer has no `onCleanup`.
+- Zero unit tests even though vitest + jsdom are installed and the unit-test builder is configured; the pure helpers in `format.ts` and `compareRows`/`buildTables` are trivially testable.
+- Minor: mixed naming suffixes in `core/` (`.service.ts` vs suffixless files), `dexNumber()` duplicating `padDex()`, a `as unknown as Map` cast, `track $index` on sortable rows.
+
+```json
+{
+  "dimension": "mergeability",
+  "criteria": {
+    "idiomatic": {
+      "score": 3,
+      "evidence": [
+        "app/src/app/core/api.service.ts:25-29 — hand-rolled HttpClient.get + shareReplay caching layer; httpResource/resource (stable in v22, preferred by the skill for reads) would provide this with cancellation and status signals built in",
+        "app/src/app/pages/pokemon-page.ts:200-205 — route params read via route.paramMap.pipe(map(...)) boilerplate instead of withComponentInputBinding() + input()",
+        "app/src/app/pages/pokemon-page.ts:370-380 — #moves scroll hand-rolled in effect() with setTimeout, where withInMemoryScrolling({anchorScrolling:'enabled'}) or afterRenderEffect is the framework feature; skill says effect is for syncing non-signal APIs, DOM work should use afterRenderEffect",
+        "app/src/app/pages/home-page.ts:53 — `params as unknown as Map<string, string>` cast on ParamMap instead of typing the parser",
+        "app/src/app/app.config.ts:1-11 — correct modern bootstrap: provideBrowserGlobalErrorListeners, provideRouter, standalone bootstrapApplication"
+      ],
+      "rationale": "Recognisably idiomatic modern Angular (signals, control flow, OnPush, inject), but the data-loading layer predates the now-stable resource/httpResource APIs and several framework features (component input binding, router anchor scrolling) are reimplemented by hand."
+    },
+    "correctness_risks": {
+      "score": 3,
+      "evidence": [
+        "app/src/app/core/api.service.ts:34 — optional() maps every error (including network failures, not just 404) to null, so a transient API outage renders 'Not found'",
+        "app/src/app/core/api.service.ts:28-29 — get() caches the errored observable with shareReplay refCount:false, so a failed fetch is replayed for the whole session; no recovery without a full reload",
+        "app/src/app/pages/type-page.ts:79 — speciesById miss falls back to the raw API URL as the species name, producing a card that links to /pokemon/https://… instead of dropping the entry",
+        "app/src/app/pages/pokemon-page.ts:371-380 — scroll effect's setTimeout has no onCleanup and re-scrolls to #moves on every table recompute (e.g. game switch) while the hash is present",
+        "app/src/app/shared/pokemon-card.ts:32-42 — triedFallback flag never resets when pokemonId input changes; onImageError subscribes manually without teardown (harmless but unmanaged)",
+        "app/src/app/pages/home-page.ts:132-136 — no debounce on search: router.navigate + full re-filter per keystroke (spec permits up to 300ms debounce)"
+      ],
+      "rationale": "Races are handled well (switchMap cancellation, null-guarded loading states) and there's no XSS surface (all text interpolation), but the shared error-caching semantics turn transient failures into permanent 'Not found' pages, plus a couple of small defensive-fallback bugs."
+    },
+    "global_abstractions": {
+      "score": 4,
+      "evidence": [
+        "app/src/app/core/api.service.ts:11-17 — ApiService is a clean, single-purpose boundary (cache, media URL, path parsing) with doc comments; unbounded session Map cache is explicitly permitted by the spec",
+        "app/src/app/core/catalog.service.ts:40-89 — CatalogService pre-loads species/types/generations into one catalog; appropriate for this domain though every page pays the startup cost of 18+9 detail fetches",
+        "app/src/app/pages/move-page.ts:42-44 — speciesById map rebuilt identically in three pages (also ability-page.ts:37-39, type-page.ts:42-44) even though catalog.service.ts:94-95 already builds one; the alternate-form filter/dedupe/sort block is copy-pasted in the same three components",
+        "app/src/app/core/api.service.ts:5-16 — API base URL read from a window.__POKEDEX_API_BASE_URL__ global injected by app/server.mjs:14-16; hidden config outside the framework's runtime-configuration patterns, though documented and practical for one-artifact deploys"
+      ],
+      "rationale": "The two service layers earn their keep and have clear boundaries; the deductions are triplicated catalog derivations that belong in CatalogService, and global config smuggled through a window variable rather than an InjectionToken or an app initializer."
+    },
+    "readability": {
+      "score": 4,
+      "evidence": [
+        "app/src/app/pages/pokemon-page.ts:127-200 — table building and sorting factored into small, named pure functions with clear types (MoveRow, SortState, compareRows)",
+        "app/src/app/pages/move-page.html:5 — loading guards like `@if (move() === undefined || (move() && species() === null))` are repeated with varying signals across three templates and take a moment to decode",
+        "app/src/app/pages/pokemon-page.ts:383-385 — dexNumber() reimplements padDex from app/src/app/core/format.ts:11-13 inline",
+        "app/src/app/core/catalog.service.ts:11-27 — exported interfaces (TypeInfo, GenerationInfo, Catalog) make the data shape explicit",
+        "app/src/app/pages/pokemon-page.html:36 — `class=\"type-link\" [class]=\"'type-link type-' + …\"` redundantly duplicates the class in both the static attribute and the binding, repeated across templates"
+      ],
+      "rationale": "A new teammate finds their way quickly: predictable folder layout, small functions, consistent template style and tokens-based CSS; only minor rough spots (cryptic loading guards, one duplicate helper, redundant class bindings)."
+    },
+    "review_cost": {
+      "score": 3,
+      "evidence": [
+        "app/src/app/core/api.service.ts:34 — the optional()-plus-cache error semantics need a round of changes (only 404 → null; don't cache failures)",
+        "app/src/app/pages/move-page.ts:42-44 — deduplicating the three speciesById/filter blocks into CatalogService is a requested refactor",
+        "app/angular.json:67-68 — unit-test builder configured and vitest/jsdom installed, but zero spec files exist despite easily testable pure helpers (format.ts, compareRows)",
+        "app/src/app/core/api.service.ts:1-2 — file naming mixes .service.ts with suffixless siblings in the same folder, against the style guide's 'don't mix styles in one folder' rule"
+      ],
+      "rationale": "Approvable in shape but needs a real round: fix error-caching behaviour, consolidate the duplicated catalog logic, and add tests for the pure helpers before I'd stamp it."
+    }
+  },
+  "overall": 3,
+  "findings": [
+    {
+      "severity": "medium",
+      "location": "app/src/app/core/api.service.ts:28",
+      "issue": "get() caches the request observable including failures (shareReplay refCount:false), and optional() collapses every error to null, so one transient network error renders a permanent 'Not found' page for the rest of the session",
+      "suggestion": "Only treat 404 as absent (check HttpErrorResponse status), and either skip caching failed requests or remove the errored entry from the cache so a retry can succeed"
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/app/pages/type-page.ts:79",
+      "issue": "When a Pokémon id is missing from the species catalog, the card falls back to the raw API URL as its name and link, producing /pokemon/https://… links",
+      "suggestion": "Drop entries with no matching species instead of inventing a name; a comment explaining when this can happen would also help"
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/app/pages/move-page.ts:42",
+      "issue": "The speciesById map plus the alternate-form filter/dedupe/sort logic is copy-pasted across move-page, ability-page and type-page, while catalog.service.ts:94 already builds the same map inside catalog$",
+      "suggestion": "Expose speciesById (and a shared 'cardsFromPokemonIds' helper) from CatalogService and delete the three copies"
+    },
+    {
+      "severity": "low",
+      "location": "app/src/app/pages/pokemon-page.ts:200",
+      "issue": "Data loading is hand-assembled from paramMap/switchMap/forkJoin/shareReplay chains (~150 lines) although resource()/httpResource are stable in Angular 22 and the official guidance prefers them for reads; route params could be input()s via withComponentInputBinding()",
+      "suggestion": "Replace the per-page RxJS pipelines with httpResource/resource (params from a computed over the route input), keeping the in-memory cache in a thin service"
+    },
+    {
+      "severity": "low",
+      "location": "app/src/app/pages/pokemon-page.ts:371",
+      "issue": "The #moves anchor jump is implemented as an effect with an untracked setTimeout that re-fires on every tables() change, instead of the router's anchorScrolling feature or afterRenderEffect",
+      "suggestion": "Enable withInMemoryScrolling({anchorScrolling: 'enabled'}) in provideRouter, or at minimum use afterRenderEffect and onCleanup for the timer, and only scroll once per navigation"
+    },
+    {
+      "severity": "low",
+      "location": "app/src/app/shared/pokemon-card.ts:32",
+      "issue": "triedFallback is a plain mutable flag that never resets when the pokemonId input changes, and the fallback fetch is subscribed without teardown",
+      "suggestion": "Track the attempted id (reset when pokemonId() differs) and store the subscription with takeUntilDestroy or unsubscribe in the fallback path"
+    },
+    {
+      "severity": "low",
+      "location": "app/angular.json:68",
+      "issue": "The Vitest unit-test builder is configured and vitest/jsdom are devDependencies, yet the app contains zero unit tests despite having easily testable pure functions (format.ts, compareRows/sortRows/buildTables)",
+      "suggestion": "Add spec files for the pure helpers — cheap, high-value coverage for the trickiest logic (em dashes, latest-English flavor text, missing-value sorting)"
+    },
+    {
+      "severity": "low",
+      "location": "app/src/app/core/api.service.ts:1",
+      "issue": "Naming style is mixed: api.service.ts/catalog.service.ts use the legacy .service suffix (classes ApiService/CatalogService) in the same folder as suffixless format.ts/models.ts, and models.ts doesn't follow the .model.ts convention the style guide keeps for data shapes",
+      "suggestion": "Pick one convention per folder — either rename to api.ts/catalog.ts with intent-based classes, or keep suffixed service names and move helpers accordingly"
+    },
+    {
+      "severity": "low",
+      "location": "app/src/app/pages/pokemon-page.ts:385",
+      "issue": "dexNumber() reimplements the padDex helper that already exists in core/format.ts:11",
+      "suggestion": "Import padDex and delete the inline copy"
+    },
+    {
+      "severity": "low",
+      "location": "app/src/app/pages/home-page.ts:53",
+      "issue": "parseQuery is fed the ActivatedRoute ParamMap through an `as unknown as Map<string, string>` cast, which hides the real interface and would break silently if the parser used Map-specific behaviour",
+      "suggestion": "Type parseQuery against ParamMap (or a minimal {get(name): string|null} interface) and drop the cast"
+    }
+  ],
+  "summary": "This is competent, recognisably modern Angular — signals, OnPush, new control flow, a clean core/pages/shared layout and well-factored pure logic — that I would merge after one round of changes. The blockers are the error-handling semantics (any failed fetch is cached as a permanent 'Not found'), triplicated catalog derivations across three pages, and a data layer built on pre-resource RxJS plumbing where the now-stable httpResource/resource APIs would delete most of it. Tests are entirely absent despite the tooling being installed, which raises the long-term cost of the trickiest sorting/formatting logic."
+}
+```

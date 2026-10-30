@@ -1,0 +1,538 @@
+diff --git a/app/src/client/team-page.ts b/app/src/client/team-page.ts
+new file mode 100644
+index 0000000..6452a62
+--- /dev/null
++++ b/app/src/client/team-page.ts
+@@ -0,0 +1,30 @@
++import { fetchFragment, isAbort } from './fragments.js';
++import { readTeam, writeTeam } from './team-store.js';
++
++/** Team page: removes a member and refreshes the server-rendered summary. */
++class TeamPage extends HTMLElement {
++	connectedCallback() {
++		this.addEventListener('click', (event) => {
++			const target = event.target;
++			if (!(target instanceof Element)) return;
++			const button = target.closest('button[data-team-remove]');
++			if (!(button instanceof HTMLButtonElement) || !this.contains(button)) return;
++
++			const name = button.dataset['teamRemove'];
++			if (!name) return;
++			writeTeam(readTeam().filter((member) => member !== name));
++			this.#refresh();
++		});
++	}
++
++	async #refresh() {
++		try {
++			const fresh = await fetchFragment('/team', 'team-page');
++			if (fresh) this.replaceWith(document.importNode(fresh, true));
++		} catch (error) {
++			if (!isAbort(error)) location.assign('/team');
++		}
++	}
++}
++
++customElements.define('team-page', TeamPage);
+diff --git a/app/src/client/team-store.ts b/app/src/client/team-store.ts
+new file mode 100644
+index 0000000..9c8f3e2
+--- /dev/null
++++ b/app/src/client/team-store.ts
+@@ -0,0 +1,21 @@
++import {
++	parseTeamCookie,
++	sanitizeTeam,
++	serializeTeamCookie,
++	TEAM_SIZE,
++} from '../lib/team.js';
++
++export { TEAM_SIZE };
++
++export const readTeam = () => parseTeamCookie(document.cookie);
++
++export function writeTeam(team: string[]) {
++	document.cookie = serializeTeamCookie(sanitizeTeam(team));
++}
++
++export function toggleTeamMember(name: string) {
++	const team = readTeam();
++	if (team.includes(name)) return team.filter((member) => member !== name);
++	if (team.length >= TEAM_SIZE) return team;
++	return [...team, name];
++}
+diff --git a/app/src/client/team-toggle.ts b/app/src/client/team-toggle.ts
+new file mode 100644
+index 0000000..530e02a
+--- /dev/null
++++ b/app/src/client/team-toggle.ts
+@@ -0,0 +1,48 @@
++import { readTeam, TEAM_SIZE, writeTeam } from './team-store.js';
++
++/**
++ * Button on a Pokémon page that adds or removes that species from the team.
++ * The server renders the correct state from the cookie, and this element keeps
++ * it in sync after activation without reloading the page.
++ */
++class TeamToggle extends HTMLElement {
++	#button: HTMLButtonElement | null = null;
++	#note: HTMLElement | null = null;
++
++	connectedCallback() {
++		this.#button = this.querySelector('button');
++		this.#note = this.querySelector('.team-toggle__note');
++		this.#button?.addEventListener('click', () => this.#toggle());
++		this.#render();
++	}
++
++	#toggle() {
++		const name = this.dataset['species'];
++		if (!name || !this.#button) return;
++		const team = readTeam();
++		if (team.includes(name)) {
++			writeTeam(team.filter((member) => member !== name));
++		} else {
++			if (team.length >= TEAM_SIZE) return;
++			writeTeam([...team, name]);
++		}
++		this.#render();
++	}
++
++	#render() {
++		const name = this.dataset['species'];
++		const team = readTeam();
++		const onTeam = Boolean(name && team.includes(name));
++		const full = team.length >= TEAM_SIZE;
++
++		if (this.#button) {
++			this.#button.textContent = onTeam ? 'Remove from team' : 'Add to team';
++			this.#button.disabled = !onTeam && full;
++		}
++		if (this.#note) {
++			this.#note.textContent = !onTeam && full ? 'Team is full' : '';
++		}
++	}
++}
++
++customElements.define('team-toggle', TeamToggle);
+diff --git a/app/src/components/partials.ts b/app/src/components/partials.ts
+index 8159682..e639e3a 100644
+--- a/app/src/components/partials.ts
++++ b/app/src/components/partials.ts
+@@ -17,25 +17,40 @@ export const typeLink = (type: TypeBadge) =>
+ 		>${type.label}</a
+ 	>`;
+ 
++const cardLink = (card: Card) => html`
++	<a class="card" href=${`/pokemon/${card.name}`}>
++		<img
++			class="card__sprite"
++			src=${spriteUrl(card.id)}
++			alt=""
++			width="96"
++			height="96"
++			loading="lazy"
++			decoding="async"
++		/>
++		<span class="card__dex">${dexNumber(card.id)}</span>
++		<span class="card__name">${card.label}</span>
++		${card.types
++			? html`<span class="card__types">${card.types.map(typeBadge)}</span>`
++			: null}
++		${card.hidden ? html`<span class="card__note">Hidden ability</span>` : null}
++	</a>
++`;
++
+ export const pokemonCard = (card: Card) => html`
+-	<li>
+-		<a class="card" href=${`/pokemon/${card.name}`}>
+-			<img
+-				class="card__sprite"
+-				src=${spriteUrl(card.id)}
+-				alt=""
+-				width="96"
+-				height="96"
+-				loading="lazy"
+-				decoding="async"
+-			/>
+-			<span class="card__dex">${dexNumber(card.id)}</span>
+-			<span class="card__name">${card.label}</span>
+-			${card.types
+-				? html`<span class="card__types">${card.types.map(typeBadge)}</span>`
+-				: null}
+-			${card.hidden ? html`<span class="card__note">Hidden ability</span>` : null}
+-		</a>
++	<li>${cardLink(card)}</li>
++`;
++
++export const teamCard = (card: Card) => html`
++	<li class="team-card">
++		${cardLink(card)}
++		<button
++			class="button"
++			type="button"
++			data-team-remove=${card.name}
++		>
++			Remove ${card.label}
++		</button>
+ 	</li>
+ `;
+ 
+@@ -44,6 +59,11 @@ export const cardList = (cards: Card[]) =>
+ 		${cards.map(pokemonCard)}
+ 	</ul>`;
+ 
++export const teamCardList = (cards: Card[]) =>
++	html`<ul class="card-grid team-grid">
++		${cards.map(teamCard)}
++	</ul>`;
++
+ export const section = (id: string, title: string, content: unknown) => html`
+ 	<section class="panel" id=${id} aria-labelledby=${`${id}-heading`}>
+ 		<h2 class="panel__title" id=${`${id}-heading`}>${title}</h2>
+diff --git a/app/src/document.client.ts b/app/src/document.client.ts
+index 5bbc5d9..e399ed6 100644
+--- a/app/src/document.client.ts
++++ b/app/src/document.client.ts
+@@ -1,3 +1,5 @@
+ import './client/pokemon-browser.js';
+ import './client/moves-panel.js';
+ import './client/sortable-table.js';
++import './client/team-toggle.js';
++import './client/team-page.js';
+diff --git a/app/src/document.ts b/app/src/document.ts
+index 9409e04..181c43e 100644
+--- a/app/src/document.ts
++++ b/app/src/document.ts
+@@ -26,6 +26,7 @@ export const document = (props: { title?: string | null | undefined }) => html`
+ 					<nav class="site-nav" aria-label="Main">
+ 						<a href="/">Pokémon</a>
+ 						<a href="/types">Types</a>
++						<a href="/team">Team</a>
+ 					</nav>
+ 				</div>
+ 			</header>
+diff --git a/app/src/lib/data.ts b/app/src/lib/data.ts
+index 9b89829..679d452 100644
+--- a/app/src/lib/data.ts
++++ b/app/src/lib/data.ts
+@@ -189,6 +189,71 @@ export async function cardsForPokemon<T>(
+ 	return [...cards.values()].sort((a, b) => a.id - b.id);
+ }
+ 
++/** Turns the ordered species names stored in the team cookie into cards. */
++export async function getTeamCards(names: string[]): Promise<Card[]> {
++	const typeLabels = await getTypeLabels();
++	const cards = await Promise.all(
++		names.map(async (name): Promise<Card | null> => {
++			const species = await getSpecies(name);
++			if (!species || species.name !== name) return null;
++			const pokemon = await getDefaultPokemon(species);
++			return {
++				id: species.id,
++				name: species.name,
++				label: humanize(species.name),
++				types: [...pokemon.types]
++					.sort((a, b) => a.slot - b.slot)
++					.map((t) => ({
++						name: t.type.name,
++						label: typeLabels.get(t.type.name) ?? humanize(t.type.name),
++					})),
++			};
++		}),
++	);
++	return cards.filter((card): card is Card => card !== null);
++}
++
++export type CoverageRow = {
++	name: string;
++	label: string;
++	weak: number;
++	resistant: number;
++};
++
++/**
++ * Counts, for each of the 18 attacking types, how many team members are weak
++ * to or resist it. Damage is the product of the multipliers against each of a
++ * member's types, so a double weakness and a resistance can cancel out.
++ */
++export async function getTypeCoverage(cards: Card[]): Promise<CoverageRow[]> {
++	const types = await getTypes();
++	const relations = (type: ApiType) => type.damage_relations;
++	const includes = (refs: Ref[], name: string) =>
++		refs.some((ref) => ref.name === name);
++
++	return types.map((attack) => {
++		let weak = 0;
++		let resistant = 0;
++		for (const card of cards) {
++			let multiplier = 1;
++			for (const defender of card.types ?? []) {
++				const rel = relations(attack.record);
++				if (includes(rel.double_damage_to, defender.name)) multiplier *= 2;
++				else if (includes(rel.half_damage_to, defender.name)) multiplier *= 0.5;
++				else if (includes(rel.no_damage_to, defender.name)) multiplier *= 0;
++			}
++			if (multiplier > 1) weak++;
++			else if (multiplier < 1) resistant++;
++		}
++		return {
++			name: attack.name,
++			label: attack.label,
++			weak,
++			resistant,
++		};
++	});
++}
++
+ // ── Home page index ─────────────────────────────────────────────────────
+ 
+ export type IndexEntry = Card & { types: TypeBadge[]; generation?: string | undefined };
+diff --git a/app/src/lib/team.ts b/app/src/lib/team.ts
+new file mode 100644
+index 0000000..a2d6ad0
+--- /dev/null
++++ b/app/src/lib/team.ts
+@@ -0,0 +1,40 @@
++// The team lives in a cookie so the server can render the correct team state
++// on the first paint; the browser updates the same cookie without a round trip.
++
++export const TEAM_COOKIE = 'team';
++export const TEAM_SIZE = 6;
++
++const NAME_PATTERN = /^[a-z0-9-]+$/;
++
++/** Normalizes a team: valid species names, no duplicates, at most six. */
++export function sanitizeTeam(value: unknown): string[] {
++	if (!Array.isArray(value)) return [];
++	const team: string[] = [];
++	for (const entry of value) {
++		if (typeof entry !== 'string') continue;
++		const name = entry.toLowerCase();
++		if (!NAME_PATTERN.test(name) || team.includes(name)) continue;
++		team.push(name);
++		if (team.length === TEAM_SIZE) break;
++	}
++	return team;
++}
++
++/** Reads the team from a request's `Cookie` header. */
++export function parseTeamCookie(header: string | null | undefined): string[] {
++	if (!header) return [];
++	const cookie = header
++		.split(/;\s*/)
++		.find((part) => part.startsWith(`${TEAM_COOKIE}=`));
++	if (!cookie) return [];
++	const raw = cookie.slice(TEAM_COOKIE.length + 1);
++	try {
++		return sanitizeTeam(JSON.parse(decodeURIComponent(raw)));
++	} catch {
++		return [];
++	}
++}
++
++/** Serializes a team into a `Set-Cookie`-plausible `document.cookie` value. */
++export const serializeTeamCookie = (team: string[]) =>
++	`${TEAM_COOKIE}=${encodeURIComponent(JSON.stringify(sanitizeTeam(team)))}; Path=/; Max-Age=31536000; SameSite=Lax`;
+diff --git a/app/src/routes/pokemon/[name].ts b/app/src/routes/pokemon/[name].ts
+index 466cc3c..7e12bd0 100644
+--- a/app/src/routes/pokemon/[name].ts
++++ b/app/src/routes/pokemon/[name].ts
+@@ -14,6 +14,7 @@ import {
+ 	getSpecies,
+ 	getTypeLabels,
+ } from '../../lib/data.js';
++import { parseTeamCookie, TEAM_SIZE } from '../../lib/team.js';
+ import {
+ 	DASH,
+ 	dexNumber,
+@@ -33,7 +34,7 @@ const STAT_LABELS: Record<string, string> = {
+ };
+ const MAX_STAT = 255;
+ 
+-async function load(name: string, url: URL) {
++async function load(name: string, url: URL, team: string[]) {
+ 	const species = await getSpecies(name);
+ 	if (!species || species.name !== name.toLowerCase()) return null;
+ 
+@@ -85,6 +86,8 @@ async function load(name: string, url: URL) {
+ 		games,
+ 		game: game?.name ?? null,
+ 		moveTables,
++		onTeam: team.includes(species.name),
++		teamFull: team.length >= TEAM_SIZE,
+ 	};
+ }
+ 
+@@ -161,9 +164,10 @@ export const moveTables = (tables: MoveTable[]) =>
+ 		: html`<p class="muted">No moves.</p>`;
+ 
+ export default defineRoute({
+-	handler: async ({ params, url, responseInit }) => {
++	handler: async ({ params, request, url, responseInit }) => {
+ 		if (isBuildRender(url)) return { data: null };
+-		const data = await load(params.name ?? '', url);
++		const team = parseTeamCookie(request.headers.get('cookie'));
++		const data = await load(params.name ?? '', url, team);
+ 		if (!data) responseInit.status = 404;
+ 		return { data };
+ 	},
+@@ -192,6 +196,19 @@ export default defineRoute({
+ 				</div>
+ 			</div>
+ 
++			<team-toggle class="team-toggle" data-species=${p.name}>
++				<button
++					class="button"
++					type="button"
++					?disabled=${!p.onTeam && p.teamFull}
++				>
++					${p.onTeam ? 'Remove from team' : 'Add to team'}
++				</button>
++				<span class="team-toggle__note"
++					>${!p.onTeam && p.teamFull ? 'Team is full' : ''}</span
++				>
++			</team-toggle>
++
+ 			${section(
+ 				'stats',
+ 				'Base stats',
+diff --git a/app/src/routes/team.ts b/app/src/routes/team.ts
+new file mode 100644
+index 0000000..1b32696
+--- /dev/null
++++ b/app/src/routes/team.ts
+@@ -0,0 +1,65 @@
++import { defineRoute } from '@gracile/gracile/route';
++import { html } from '@gracile/gracile/server-html';
++
++import { section, teamCardList } from '../components/partials.js';
++import { document } from '../document.js';
++import { isBuildRender } from '../lib/api.js';
++import { getTeamCards, getTypeCoverage } from '../lib/data.js';
++import { parseTeamCookie } from '../lib/team.js';
++
++export default defineRoute({
++	handler: async ({ request, url }) => {
++		if (isBuildRender(url)) return { names: [], cards: [], coverage: [] };
++
++		const names = parseTeamCookie(request.headers.get('cookie'));
++		const cards = await getTeamCards(names);
++		const coverage = cards.length ? await getTypeCoverage(cards) : [];
++		return { names, cards, coverage };
++	},
++
++	document: () => document({ title: 'Team' }),
++
++	template: ({ props }) => html`
++		<team-page>
++			<h1 class="page-title">Team</h1>
++			<p class="count">${props.names.length} of 6</p>
++
++			${props.names.length
++				? html`
++						${teamCardList(props.cards)}
++						${props.coverage.length
++							? section(
++									'type-coverage',
++									'Type coverage',
++									html`<div class="table-wrap">
++										<table class="data-table coverage-table">
++											<thead>
++												<tr>
++													<th scope="col">Type</th>
++													<th scope="col">Weak</th>
++													<th scope="col">Resistant</th>
++												</tr>
++											</thead>
++											<tbody>
++												${props.coverage.map(
++													(row) => html`
++														<tr>
++															<th scope="row">${row.label}</th>
++															<td>${row.weak}</td>
++															<td>${row.resistant}</td>
++														</tr>
++													`,
++												)}
++											</tbody>
++										</table>
++									</div>`,
++								)
++							: null}
++					`
++				: html`
++						<p class="empty">Your team is empty</p>
++						<p><a href="/">Browse Pokémon</a></p>
++					`}
++		</team-page>
++	`,
++});
+diff --git a/app/src/styles/app.css b/app/src/styles/app.css
+index 976a0cc..4f51ff3 100644
+--- a/app/src/styles/app.css
++++ b/app/src/styles/app.css
+@@ -227,6 +227,63 @@ a.type-badge:hover {
+ 	font-size: var(--text-xs);
+ }
+ 
++/* ── Team ──────────────────────────────────────────────────────────── */
++
++.button {
++	display: inline-flex;
++	align-items: center;
++	justify-content: center;
++	min-height: 2.25rem;
++	padding: 0 var(--space-3);
++	background: var(--color-surface);
++	border: 1px solid var(--color-border);
++	border-radius: var(--radius-md);
++	color: var(--color-text);
++	font-size: var(--text-sm);
++	cursor: pointer;
++}
++
++.button:hover:not(:disabled) {
++	border-color: var(--color-link);
++}
++
++.button:disabled {
++	color: var(--color-text-muted);
++	cursor: not-allowed;
++}
++
++.team-toggle {
++	display: flex;
++	align-items: center;
++	gap: var(--space-2);
++	margin-bottom: var(--space-5);
++}
++
++.team-toggle__note {
++	color: var(--color-text-muted);
++	font-size: var(--text-sm);
++}
++
++.team-card {
++	display: flex;
++	flex-direction: column;
++	gap: var(--space-2);
++}
++
++.team-card .card {
++	flex: 1;
++}
++
++.team-card .button {
++	width: 100%;
++}
++
++.coverage-table th[scope='row'] {
++	padding: var(--space-2) var(--space-3);
++	font-weight: var(--weight-normal);
++	white-space: nowrap;
++}
++
+ /* ── Home: filters and pagination ──────────────────────────────────── */
+ 
+ .filters {

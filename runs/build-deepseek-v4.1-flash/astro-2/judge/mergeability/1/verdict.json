@@ -1,0 +1,125 @@
+{
+  "dimension": "mergeability",
+  "criteria": {
+    "idiomatic": {
+      "score": 4,
+      "evidence": [
+        "app/astro.config.mjs:1-9 — current Astro 7 idiom: output 'server' + @astrojs/node standalone, nothing deprecated",
+        "app/src/pages/pokemon/[name].astro:34 — 404 via Astro.response.status, the documented SSR pattern; app/src/pages/404.astro:1-4 covers unmatched routes",
+        "app/src/pages/*/[name].astro — file-based dynamic routing used natively; no hand-rolled router",
+        "app/src/lib/pokeapi.ts:1 — API_BASE_URL read from process.env; Astro docs recommend import.meta.env / astro:env schema instead",
+        "app/tsconfig.json:4-5 — strict:false plus ~40 explicit `any` in a TS-first framework weakens what Astro gives you",
+        "app/src/styles/global.css:1 — one 770-line global stylesheet instead of Astro's scoped <style> blocks (allowed by spec, but not the framework's favored style)"
+      ],
+      "rationale": "Routing, data loading in frontmatter, 404 handling and client scripts all read like the docs. A few deviations from current recommendations (astro:env, scoped styles, strict typing) keep it off the top mark."
+    },
+    "correctness_risks": {
+      "score": 3,
+      "evidence": [
+        "app/src/pages/index.astro:120 — pushState on every filter change with no popstate handler: back/forward changes the URL but leaves the stale results DOM (home.spec.mjs never exercises it)",
+        "app/src/pages/index.astro:129 — each debounced keystroke pushes another history entry, so typing one name pollutes history ~n entries deep",
+        "app/src/pages/index.astro:110-118 — stale-response guard (requestId) is correct, but in-flight fetches are never aborted",
+        "app/src/pages/pokemon/[name].astro:27-37 — non-404 API errors propagate to a default 500 page; no custom error handling or retry",
+        "app/src/lib/pokeapi.ts:31-46 — unbounded module-level promise cache; spec-sanctioned, but never invalidated on success"
+      ],
+      "rationale": "No XSS, no SSR/CSR mismatch, race guard on the fetch swap is right, and 404s are handled everywhere. But the broken back-button behaviour on the primary page is a real, user-visible bug the tests don't catch, alongside a few smaller fragilities."
+    },
+    "global_abstractions": {
+      "score": 4,
+      "evidence": [
+        "app/src/lib/pokeapi.ts:31-46 — single cohesive API client with a hidden cache that correctly invalidates on error",
+        "app/src/lib/data.ts:24-45 — module-level promise caches are contained and reset on failure rather than poisoning the process",
+        "app/src/pages/pokemon/[name].astro:27-38, app/src/pages/moves/[name].astro:11-19, app/src/pages/abilities/[name].astro:11-19, app/src/pages/types/[name].astro:9-17 — the same ~10-line NotFoundError try/catch copy-pasted into all four dynamic routes",
+        "app/src/components/TypeBadge.astro:6 — component has an href branch never used, while pokemon/[name].astro:337, moves/[name].astro:72 and types/[name].astro:79 hand-roll the identical badge markup",
+        "app/src/lib/data.ts:128-130 — dead export getSpeciesById; app/src/styles/global.css:144 — dead .section-card rule"
+      ],
+      "rationale": "The two lib modules earn their keep with clear transport/domain boundaries. The problems are duplication, not structure: four copies of the 404 dance and a badge component half-used."
+    },
+    "readability": {
+      "score": 4,
+      "evidence": [
+        "app/src/lib/pokeapi.ts — small, well-named helpers (humanize, dexNumber, formatHeight) each doing one thing",
+        "app/src/pages/pokemon/[name].astro:1-190 — ~190-line frontmatter is linear and orderly but is the one place a new teammate will slow down; move-table enrichment belongs in lib/",
+        "app/src/pages/index.astro:126 — literally the only comment in the codebase; the caching strategy and compressHTML assumptions go unexplained",
+        "app/src/styles/global.css — consistently token-driven, sectioned with clear comments per group",
+        "app/src/components/*.astro — tiny, obvious components; EvolutionNode.astro:1-14 recursion is clean"
+      ],
+      "rationale": "A new teammate finds their way in minutes: naming is consistent, files are small except the pokemon page, CSS is tidy. Loose `any` typing and the near-total absence of comments are the rough spots."
+    },
+    "review_cost": {
+      "score": 3,
+      "evidence": [
+        "app/src/pages/index.astro:120 — must fix: popstate handler (or replaceState + full navigations) before merge",
+        "app/src/tsconfig.json:4 — must change: enable strict and type the lib's API surfaces",
+        "app/src/lib/data.ts:128, app/src/components/TypeBadge.astro:6, app/src/styles/global.css:144 — trivial dead-code deletions",
+        "app/src/pages/*/[name].astro — ask to extract the shared not-found catch into one helper",
+        "app/src/lib/pokeapi.ts:1 — ask to move API_BASE_URL to astro:env schema"
+      ],
+      "rationale": "Approve-shaped but not approve-as-is: one genuine bug fix plus a small round of consistency and typing changes I'd want to see before this lands."
+    }
+  },
+  "overall": 4,
+  "findings": [
+    {
+      "severity": "medium",
+      "location": "app/src/pages/index.astro:120",
+      "issue": "Client-side filter navigation uses history.pushState but no popstate handler, so pressing back/forward after filtering changes the URL while the DOM keeps showing the old results; each debounced keystroke also pushes a new history entry.",
+      "suggestion": "Add a popstate listener that re-renders for the new URL (or re-fetch on popstate), and prefer replaceState for search-as-you-type so history isn't polluted."
+    },
+    {
+      "severity": "medium",
+      "location": "app/tsconfig.json:4",
+      "issue": "strict is disabled and API payloads flow through the app as `any` (app/src/lib/pokeapi.ts, app/src/pages/pokemon/[name].astro:20-27), forfeiting the type safety Astro's TS-first toolchain provides.",
+      "suggestion": "Enable strict (the astro/tsconfigs base defaults to it) and add interfaces for the PokeAPI resources in lib/, typing page-level locals instead of `let species: any`."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/lib/pokeapi.ts:1",
+      "issue": "API_BASE_URL is read via process.env at module load; current Astro docs recommend import.meta.env / the astro:env schema for type-safe, validated environment variables (process.env is only the documented fallback for config files and scripts).",
+      "suggestion": "Define API_BASE_URL in astro.config.mjs via env.schema with envField.string({ context: 'server' }) and import it from astro:env/server."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/pages/pokemon/[name].astro:27",
+      "issue": "The NotFoundError try/catch + Astro.response.status = 404 + <NotFound /> block is copy-pasted into all four dynamic routes (moves/[name].astro:11, abilities/[name].astro:11, types/[name].astro:9).",
+      "suggestion": "Extract a helper such as `fetchOrNotFound(path)` returning a discriminated result, or render the not-found shell from a middleware-level catch."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/components/TypeBadge.astro:6",
+      "issue": "TypeBadge supports an href variant that is never used, while three pages (pokemon/[name].astro:337, moves/[name].astro:72, types/[name].astro:79) hand-write the identical `<a class=\"type-badge\" data-type=…>` markup.",
+      "suggestion": "Either use TypeBadge everywhere (passing href), or drop the unused href branch and keep the hand-rolled markup consistent."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/lib/data.ts:128",
+      "issue": "Dead code: getSpeciesById is never called, and .section-card (app/src/styles/global.css:144) has no matching markup.",
+      "suggestion": "Delete both."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/pages/index.astro:119",
+      "issue": "The filter swap replaces #results innerHTML wholesale with no focus management, no aria-live announcement of the new result count, and in-flight fetches are never aborted (only discarded via requestId).",
+      "suggestion": "Wrap the result count in an aria-live region, and abort superseded requests with an AbortController."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/pages/pokemon/[name].astro:367",
+      "issue": "Table sorting treats missing values as empty strings for text columns (Type, Category, Move), so they would sort first ascending rather than last in both directions as the spec requires; the numeric columns handle this correctly.",
+      "suggestion": "Apply the same missing-value check used for numericKeys to the string columns."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/pages/index.astro:70-86",
+      "issue": "With zero matches the page still renders \"Page 1 of 1\" inside the pagination nav below the empty-state message.",
+      "suggestion": "Hide the pagination nav when filtered.length === 0."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/pages/pokemon/[name].astro:1-190",
+      "issue": "The page component carries ~190 lines of data shaping (version-group resolution, move enrichment, method ordering) inline, duplicating domain logic that a future move/ability page change would have to touch separately; the codebase also contains a single comment in total.",
+      "suggestion": "Move move-table assembly into lib/ and add brief comments documenting the caching and ordering assumptions."
+    }
+  ],
+  "summary": "A genuinely idiomatic Astro 7 SSR app: native dynamic routing, correct 404s, a tidy two-module data layer with well-managed in-memory caching, and clean token-driven CSS. The main things I'd block on are the home page's popstate-less pushState navigation (back button shows stale results) and the disabled strict mode with pervasive `any`. Everything else is a small, mechanical round of deduplication and dead-code cleanup before approving."
+}

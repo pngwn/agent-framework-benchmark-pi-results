@@ -1,0 +1,116 @@
+{
+  "dimension": "mergeability",
+  "criteria": {
+    "idiomatic": {
+      "score": 5,
+      "evidence": [
+        "app/src/app/pages/home/home.ts:11-12 — control-flow templates, toSignal(queryParamMap), signal computeds for filtering/pagination",
+        "app/src/app/data/page-data.ts:39-43 — @Service() decorator per Angular v22 guidance (verified stable in v22)",
+        "app/src/app/app.routes.ts:8-9,31-32 — ResolveFn + withComponentInputBinding + default-export loadComponent, exactly the docs' 'via component inputs' pattern",
+        "app/src/app/app.config.server.ts:5-14 — mergeApplicationConfig, provideAppInitializer, provideServerRendering(withRoutes)",
+        "app/src/app/app.config.ts:12-19 — provideClientHydration(withEventReplay()), custom TitleStrategy, withComponentInputBinding",
+        "app/src/app/pages/not-found/not-found.ts:7-10 — RESPONSE_INIT status override, documented SSR 404 pattern",
+        "app/src/app/app.routes.server.ts:1-8 — ServerRoute + RenderMode.Server instead of deprecated approaches",
+        "app/package.json:12 — @angular/forms declared but never imported (unused dep)"
+      ],
+      "rationale": "Reads like current Angular 22 examples: signals everywhere, resolvers with input binding, per-request SSR, TransferState for hydration, and modern naming. Only deviations are justified (scroll logic) or trivial (unused forms dep)."
+    },
+    "correctness_risks": {
+      "score": 4,
+      "evidence": [
+        "app/src/app/data/page-data.ts:20-25 — fetchPageData rejects on non-404 errors; resolver (app.routes.ts:8) has no catchError and no withNavigationErrorHandler, so a transient /_data failure silently cancels client-side navigation",
+        "app/src/server/loaders.ts:247-259 — cold render of a Pokémon page fires one fetch per move (~100-200), per version group, plus 18 type docs; bounded only by the 60s cache",
+        "app/src/app/pages/home/home.ts:55-57 — out-of-range ?page=99 is clamped for display but the URL still says page=99, so URL and view disagree",
+        "app/src/app/data/page-data.ts:14-15 — module-level clientCache never evicts expired entries (TTL checked only on read); low cardinality so benign",
+        "app/src/server/api-client.ts:44-60 — server cache IS bounded (MAX_ENTRIES 4000 with trim) and rejects are cleaned up; fetch failures cancel bodies and 404s are mapped to null (apiFind)",
+        "app/src/app/pages/home/home.ts:29-32,70-78 — debounce + linkedSignal/pushedQ interplay handles the typing-vs-URL race correctly; timer cleared on destroy (home.ts:64)"
+      ],
+      "rationale": "No races found in the subtle spots (debounce, scroll, TransferState reuse); 404 handling is thorough at both layers. Remaining gaps are minor: unhandled resolver rejections and a heavy but cache-mitigated cold-start fan-out."
+    },
+    "global_abstractions": {
+      "score": 4,
+      "evidence": [
+        "app/src/app/data/page-data.ts:28-33 — PAGE_DATA_LOADER InjectionToken gives a clean, testable server/client boundary for the data layer",
+        "app/src/server/loaders.ts:393-413 — loadPageData re-parses a string path ('/pokemon/x?game=y') to dispatch loaders; route knowledge is duplicated between app.routes.ts:6-13 and this switch",
+        "app/src/server/loaders.ts:366-391 — shared helpers (typeLabels, speciesNames, toCards) are factored once and reused, not duplicated",
+        "app/src/app/shared/models.ts:1-2 — typed view models are the single contract between server loaders and components",
+        "app/src/server/api-client.ts:8-13 — module-level cache is hidden global state, but explicitly bounded and documented"
+      ],
+      "rationale": "The custom /_data view-model layer is unusual but earns its keep: it keeps payloads small, is typed at both ends, and is explained in the README. Cost is that each new page requires touching route + loader + dispatch + model, and the string-path contract is the one thing likely to drift."
+    },
+    "readability": {
+      "score": 5,
+      "evidence": [
+        "app/src/app/app.ts:17-19 — comment explains exactly why scroll behavior deviates from the router default",
+        "app/src/app/pages/home/home.ts:29-31 — linkedSignal trick for the search box is documented ('follows the URL, except while pending')",
+        "app/src/server/loaders.ts:55-146 — raw API interfaces kept narrowly typed ('only the fields we use'); STAT_LABELS/METHOD_ORDER as named constants",
+        "app/src/app/shared/pokemon-card.ts:35-42 — small focused components with host display:contents to stay markup-neutral",
+        "app/README.md:13-19 — concise architecture summary matching the code",
+        "app/src/app/pages/pokemon/move-table.ts:12-30 — sort columns as data tables, compare logic isolated"
+      ],
+      "rationale": "Consistent naming, short functions, and why-comments at every non-obvious decision. A new teammate can navigate this in minutes."
+    },
+    "review_cost": {
+      "score": 4,
+      "evidence": [
+        "app/src/app/data/page-data.ts:20-25 — would ask for withNavigationErrorHandler or resolver catchError before approving",
+        "app/package.json:12 — remove unused @angular/forms",
+        "app/src/app/pages/home/home.ts:55-57 — minor: normalize or accept the out-of-range page URL",
+        "app/src/server/loaders.ts:257-259 — a question about fan-out budget, not a demanded change (cache answers it)"
+      ],
+      "rationale": "Approve after a small round of nits: error handling for failed loads and dependency cleanup. Nothing structural needs rework."
+    }
+  },
+  "overall": 4,
+  "findings": [
+    {
+      "severity": "medium",
+      "location": "app/src/app/data/page-data.ts:20",
+      "issue": "Resolver errors are unhandled: a transient /_data 500 during client-side navigation rejects the resolver, silently cancelling navigation with no error UI; on SSR it falls to Express's default 500 handler.",
+      "suggestion": "Add withNavigationErrorHandler (or catchError in pageData()) to redirect to a friendly error page / show an error state."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/server/loaders.ts:257",
+      "issue": "Cold-cache Pokémon page render fans out ~150-250 parallel API fetches (one per move document, per version group, plus 18 type docs via typeLabels), repeating for every distinct Pokémon until the 60s cache warms.",
+      "suggestion": "Acceptable for this API, but consider a longer TTL for the slow-changing label/type/species data, or prefetching the type labels once at server startup."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/app/pages/home/home.ts:55",
+      "issue": "Out-of-range ?page is clamped for display only; URL (page=99) and rendered 'Page 3 of 3' disagree.",
+      "suggestion": "Either navigate to the clamped page or leave as-is deliberately; document the choice."
+    },
+    {
+      "severity": "low",
+      "location": "app/package.json:12",
+      "issue": "@angular/forms is declared as a dependency but never imported anywhere in src/.",
+      "suggestion": "Remove it (NgOptimizedImage, native form elements and URL-driven state make it unnecessary)."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/app/data/page-data.ts:14",
+      "issue": "Module-level clientCache never removes expired entries; growth is bounded by visited pages but TTL is only enforced lazily.",
+      "suggestion": "Delete entries on read-miss when expired, or cap size like the server cache does."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/server.ts:44",
+      "issue": "An API failure during SSR reaches Express's default error handler, which returns a bare 500 (and can leak stack traces when NODE_ENV isn't 'production').",
+      "suggestion": "Add a small error-handler middleware returning a 503/text or a rendered error page."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/app/app.ts:23",
+      "issue": "Hand-rolled scroll restoration diffing previous URL pathname/page param is subtle and coupled to Scroll event semantics.",
+      "suggestion": "Fine as-is given the comment, but a unit test around the page-change predicate would protect future router upgrades."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/app/page-title-strategy.ts:14",
+      "issue": "Manually walks the route tree to find the deepest data, partially duplicating TitleStrategy.buildTitle.",
+      "suggestion": "Harmless; could read resolved data via the snapshot passed in more directly, but the behavior is small and tested by the acceptance suite."
+    }
+  ],
+  "summary": "A confident, current-Angular-22 codebase: signal-first components, resolvers with input binding, per-request SSR with TransferState hydration, and a well-documented view-model data layer that keeps client payloads tiny. The main review asks are error handling for failed data loads, trimming an unused dependency, and acknowledging the cold-start fetch fan-out the 60s cache mitigates. I'd merge after one light round of nits."
+}

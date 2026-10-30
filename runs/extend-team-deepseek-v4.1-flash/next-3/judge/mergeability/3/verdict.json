@@ -1,0 +1,99 @@
+{
+  "dimension": "mergeability",
+  "criteria": {
+    "idiomatic": {
+      "score": 5,
+      "evidence": [
+        "app/src/app/pokemon/[name]/page.tsx:24 — params/searchParams as Promises, the Next 15+/16 async request API",
+        "app/src/app/page.tsx:36 — `await connection()` from next/server, the documented way to force request-time rendering so API_BASE_URL is never read at build time",
+        "app/src/lib/team-server.ts:6 — `await cookies()`, correct async headers API; server-only guard keeps client code out",
+        "app/src/lib/api.ts:1 — `import 'server-only'` on the data layer; type-only imports in client components (app/src/app/pokemon/[name]/moves-table.tsx:4) are erased so the boundary holds",
+        "app/src/app/layout.tsx:9 — `title: { default, template }` metadata, exactly the recommended pattern",
+        "app/next.config.ts:4 — `turbopack: { root: import.meta.dirname }`, the documented fix for apps nested in a repo root"
+      ],
+      "rationale": "This reads like the framework's own examples: server components for data, small client components for interaction, `notFound()`, `React.cache`, `router.refresh()` for cookie-driven updates, and the right async APIs everywhere. The hand-rolled fetch cache is a deliberate, documented substitution for Next's data cache to satisfy the spec's no-build-time-data rule."
+    },
+    "correctness_risks": {
+      "score": 4,
+      "evidence": [
+        "app/src/app/team/page.tsx:52 — a team member whose species 404s is silently dropped, so `<n> of 6` can undercount the cookie's team",
+        "app/src/lib/api.ts:75 — non-OK responses throw through render with no app-level error.tsx, leaving Next's default error page for a live-API app",
+        "app/src/lib/api.ts:52-58 — failed requests are evicted from the cache correctly (no error caching, no unhandled rejection)",
+        "app/src/app/filters.tsx:43-49 — URL/prop sync handles back/forward and external navigations; no stale-input race found",
+        "app/src/app/pokemon/[name]/moves-table.tsx:59-70 — missing values sort last in both directions, stable on top of default order"
+      ],
+      "rationale": "After a careful look I found only minor fragility: the team count edge case and the absence of an error boundary for API failures. The cache is bounded (1500 entries, 60s TTL), fan-out is capped by a semaphore, 404s are drained not leaked, and no SSR/CSR mismatches exist because team state is server-rendered from the cookie."
+    },
+    "global_abstractions": {
+      "score": 4,
+      "evidence": [
+        "app/src/lib/api.ts — one cohesive, guarded data layer (~285 lines): types + fetchers + caching, all API knowledge in one place",
+        "app/src/lib/format.ts — pure, single-purpose helpers, no utils grab-bag",
+        "app/src/app/pokemon/[name]/page.tsx:48-56 — default-variety resolution duplicated in app/src/app/team/page.tsx:47-50",
+        "app/src/lib/team.ts — clean client/server split: cookie codec shared, next/headers access isolated in team-server.ts",
+        "app/src/components/section.tsx — tiny, reused abstraction, no god components"
+      ],
+      "rationale": "Abstractions are few and earn their keep with clear server/client boundaries. Two small untangles will be needed later: extract the duplicated 'default variety → Pokémon' lookup into the data layer, and move types like CardData/TypeInfo out of the server-only module so client components don't type-import across the boundary."
+    },
+    "readability": {
+      "score": 5,
+      "evidence": [
+        "app/src/lib/api.ts:54-57 — comment explains *why* the 404 body is drained (Next's fetch tee) — framework knowledge a teammate would otherwise re-learn",
+        "app/src/app/pokemon/[name]/page.tsx:136-168 — movesFor is factored into readable steps with named helpers in the same file",
+        "app/src/lib/format.ts — every helper is 1-5 lines with a doc comment giving an example transformation",
+        "app/src/app/filters.tsx — named constants (SEARCH_DEBOUNCE_MS), small functions, obvious data flow"
+      ],
+      "rationale": "Naming, organization and file sizes are consistent throughout; comments explain why, not what. A new teammate can navigate this in minutes: routes mirror URLs, lib mirrors concerns, components are colocated per feature."
+    },
+    "review_cost": {
+      "score": 4,
+      "evidence": [
+        "app/src/app/team/page.tsx:47-50 — reviewer would ask for a shared getDefaultPokemon(species) helper",
+        "app/src/app/pokemon/[name]/moves-table.tsx:4 — `import type` from a server-only module; suggest a neutral types module",
+        "app/src/app/filters.tsx:43-49 — useEffect-based prop sync vs the render-time adjustment pattern used in game-select.tsx:15-18 and team-toggle.tsx:20-23; pick one",
+        "app/src/app/team/page.tsx:78 — count should come from the parsed cookie, not from members that survived loading"
+      ],
+      "rationale": "I'd approve with nits. Everything asked for is small and local; none of it blocks merging, and the feature change (CHANGES.diff) fits the existing conventions cleanly — same component patterns, same CSS organization, same cookie/server-only split."
+    }
+  },
+  "overall": 5,
+  "findings": [
+    {
+      "severity": "low",
+      "location": "app/src/app/team/page.tsx:52",
+      "issue": "Team members whose species 404s are silently dropped, so the '<n> of 6' count can disagree with the cookie and a stale name can never be removed via the UI",
+      "suggestion": "Count from the parsed cookie and either render the failed member as a placeholder with a Remove button, or prune it from the cookie"
+    },
+    {
+      "severity": "low",
+      "location": "app/src/lib/api.ts:75",
+      "issue": "A non-OK API response rejects through render with no app-level error boundary, so a flaky API shows Next's default error page",
+      "suggestion": "Add a root error.tsx (and optionally loading.tsx for the heavier pages) so failures degrade gracefully"
+    },
+    {
+      "severity": "low",
+      "location": "app/src/app/team/page.tsx:47-50",
+      "issue": "Default-variety resolution (species.varieties.find(is_default) → getPokemon(idFromUrl)) is duplicated from app/src/app/pokemon/[name]/page.tsx:48-56",
+      "suggestion": "Extract a getDefaultPokemon(species) helper into lib/api.ts and use it from both pages"
+    },
+    {
+      "severity": "low",
+      "location": "app/src/app/pokemon/[name]/moves-table.tsx:4",
+      "issue": "Client components type-import from lib/api.ts, a server-only module; it compiles because type imports are erased, but client code now depends on a module it can never value-import",
+      "suggestion": "Move shared types (CardData, TypeInfo) to a neutral types module so the server/client boundary is explicit in imports"
+    },
+    {
+      "severity": "low",
+      "location": "app/src/app/filters.tsx:43",
+      "issue": "Two different patterns for following server-driven prop changes: useEffect sync here vs render-time state adjustment in game-select.tsx:15-18 and team-toggle.tsx:20-23",
+      "suggestion": "Standardize on the React-documented render-time adjustment pattern across all three components"
+    },
+    {
+      "severity": "low",
+      "location": "app/src/lib/api.ts:44-77",
+      "issue": "Hand-rolled TTL/LRU fetch cache reimplements what Next's data cache with `next: { revalidate: 60 }` provides (justified by the spec's no-build-time-data rule, and well-bounded, but a reviewer will ask)",
+      "suggestion": "Keep it, but note in the comment why the framework's fetch cache was avoided (no-store + connection() + in-memory TTL), or migrate to `next: { revalidate: 60 }` under the already-forced dynamic rendering"
+    }
+  ],
+  "summary": "A genuinely well-crafted Next.js 16 App Router app: correct async request APIs, a guarded data layer with a bounded cache and concurrency limiter, and a feature change that fits the existing conventions without a seam. Idiom is current-release accurate, including the deliberate choice of `connection()` + `no-store` over ISR to satisfy the spec's request-time-data requirement. I'd merge as-is; the findings are nits suitable for follow-up."
+}

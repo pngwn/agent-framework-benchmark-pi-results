@@ -1,0 +1,94 @@
+I've read the whole app (`app/src` is 19 files: 6 components, 3 lib modules, 6 route files plus entries/root/CSS). Verified against current stable Qwik: the app pins `@builder.io/qwik@1.20.3` / `@builder.io/qwik-city@1.20.3`, which is the latest stable line as of 2026-10 (Qwik 2.0 is still RC, with packages renamed to `@qwik.dev/*` — not stable, so no fault). The APIs used (`routeLoader$`, `useTask$`, `useSignal`, `resolveValue` in `DocumentHead`, `status(404)` in a loader, `preventdefault:submit`, `containerAttributes.lang` in `entry.ssr.tsx`) are all the current, non-deprecated names in 1.20.
+
+# Review: editability
+
+## Scenarios worked through
+
+**1. Remove the Abilities pages.** Delete `app/src/routes/abilities/` — it's fully self-contained (no helper in `server-api.ts` is ability-specific; the only inbound link is `app/src/routes/pokemon/[name]/index.tsx:229`). Then remove the `Abilities` section (`index.tsx:225-235`) and the loader's `abilities` field (`index.tsx:139-142`). Residue if you clean up properly: `Card.hidden` (`types.ts:20`), the `Hidden ability` note (`components/cards.tsx:22-23`), the `hidden` propagation (`server-api.ts:119`), and `.card-note` CSS (`global.css:204`) exist only for ability cards. No nav link to touch (nav only has Pokémon/Types, per spec). Five files, but ~12 deleted lines total and grep for `hidden`/`abilit` finds them all.
+
+**2. Deoxys sprite fix.** This app already handles it correctly *and* centrally: `cardsFor` (`server-api.ts:112-124`) resolves every Pokémon reference to its species ID via `speciesNames()` and builds the sprite from that ID (`spriteUrl`, `server-api.ts:67-69`). One function covers the move, ability and type card lists; the home page builds cards from species IDs directly in `speciesIndex` (`server-api.ts:158-166`), so it's inherently right. A sprite-URL change is literally one function (`spriteUrl`). The only wart is that the *card construction* (id/name/label/sprite) is written twice — once in `cardsFor:120`, once in `speciesIndex:163` — so a non-URL card change would need two edits.
+
+**3. Sort every card list by name.** Two sort sites, both in `server-api.ts`: `cardsFor` (`:124`, `a.id - b.id`) for move/ability/type lists, and `speciesIndex` (`:158`, sorts by species id) which feeds the home page. The home page's pagination slices after the sort (`routes/index.tsx:74`), so you can't sort inside `CardList` — you must touch the loader-side ordering. Two small edits in one file; grep `sort(` finds them.
+
+**4. Items section shaped like Moves.** `Moves` is a single self-contained route (`routes/moves/[name]/index.tsx`, 100 lines) with no page-specific helpers leaked into `lib/`. Adding `/items` + `/items/:name` means two new route files; the genuinely shared machinery — `Section` (`components/section.tsx`), `CardList`/`PokemonCard`, `NotFound`, `api`/`slug`/`englishName`/`english`/`latestFlavorText` (`server-api.ts:39-69`), `orDash`/`pageTitle` — is all reusable as-is. You'd copy the loader/head/`<dl>` skeleton of the moves page (no "resource detail page" abstraction to extend), but no cross-cutting edits elsewhere.
+
+**5. Data source / caching rules.** `API_BASE_URL` is read in exactly one function, `apiBase()` (`server-api.ts:14-16`), used by `api()` (`:27`) and `spriteUrl()` (`:68`) — nothing else in `src` mentions the URL. The in-memory cache (TTL, promise-dedup, error eviction) is entirely `server-api.ts:8-36`. Page HTTP cache and static-asset cache are separate, single sites (`routes/layout.tsx:4-6`, `entry.node-server.tsx:24-28`).
+
+## Scores
+
+- **removability: 4.** Route directories are self-contained and grep-clean, but ability support leaves a small scattered trail (loader field, section, `Card.hidden`, `cardsFor`'s hidden plumbing, CSS).
+- **changeability: 4.** URL building (`homeHref`, `index.tsx:23`), sprite URLs (`spriteUrl`), reference→species mapping (`cardsFor`), and caching each have exactly one home. Deducted for the duplicated card construction/order and for pervasive `any`, which means the compiler can't catch data-shape regressions.
+- **coupling: 5.** Textbook seams: `lib/types.ts` DTOs are the only contract components see; `server-api` is imported exclusively by route loaders (`grep server-api` → 6 route files only); components never import server code; filter state lives in the URL, not shared client state; server/client split is crisp. I'd point to this layering as an example for a small Qwik City app.
+- **abstraction_design: 4.** Components are sized to real variation (optional `card.types`/`card.hidden`, `TypeBadge`'s `link` flag, `MovesTable`'s data-driven columns) with no over-generalization. Deducted for the `cardsFor`/`speciesIndex` duplication and the untyped PokeAPI shapes that make the data layer the weakest abstraction.
+
+**Overall: 4.** This is code a team can own: one obvious place per concern, narrow interfaces, current framework idioms, and no cleverness. The two recurring deductions are `any`-typed API responses and a doubled card-building path — both cheap to fix now, both the kind of thing that gets expensive after a year of accretion.
+
+```json
+{
+  "dimension": "editability",
+  "criteria": {
+    "removability": {
+      "score": 4,
+      "evidence": [
+        "app/src/routes/abilities/[name]/index.tsx:1-65 — the whole feature is one self-contained route file, deletable outright",
+        "app/src/routes/pokemon/[name]/index.tsx:229 — the only inbound /abilities/ link outside the route itself",
+        "app/src/lib/types.ts:20 — Card.hidden exists only for ability cards and would be orphaned",
+        "app/src/components/cards.tsx:22-23 — 'Hidden ability' note plus server-api.ts:119 hidden plumbing are ability-specific residue",
+        "app/src/global.css:204 — .card-note rule becomes dead CSS"
+      ],
+      "rationale": "Delete a route directory plus one section and one loader field; the feature leaks only ~4 tiny lines of card plumbing and one CSS rule that a grep for 'hidden' finds."
+    },
+    "changeability": {
+      "score": 4,
+      "evidence": [
+        "app/src/lib/server-api.ts:112-124 — cardsFor maps every Pokémon ref to its species ID, so the Deoxys sprite rule lives in one place and already covers move, ability and type lists",
+        "app/src/lib/server-api.ts:67-69 — spriteUrl is the single sprite-URL factory",
+        "app/src/routes/index.tsx:23-31 — homeHref is the single URL builder used by all four filter controls and the pagination links (index.tsx:96,117,131,153,181,187)",
+        "app/src/lib/server-api.ts:8-16 — CACHE_TTL_MS, cache map and apiBase() are all in one module; no other file mentions API_BASE_URL",
+        "app/src/lib/server-api.ts:120 and :163 — card fields (sprite/label) are constructed twice, in cardsFor and speciesIndex"
+      ],
+      "rationale": "Every high-risk concern (URL shape, sprites, caching, species mapping) has one obvious home; the deductions are the duplicated card construction and pervasive 'any', which removes compiler help when the data source changes."
+    },
+    "coupling": {
+      "score": 5,
+      "evidence": [
+        "app/src/lib/types.ts:1-40 — components receive typed DTOs (Card, MoveRow, MoveTableData, EvolutionNode), not API records",
+        "app/src/lib/server-api.ts — imported only by the six route files (grep), never by a component",
+        "app/src/components/cards.tsx:3-4 — components import only ~/lib/types and ~/lib/format",
+        "app/src/routes/index.tsx:23-31,96 — filter state lives entirely in the URL query; no shared client store",
+        "app/src/routes/layout.tsx:3-6 — server caching concerns sit in a RequestHandler, separate from data caching in server-api.ts"
+      ],
+      "rationale": "Clean seams throughout: loaders shape server data into plain serializable DTOs, components depend only on types.ts, and there is no shared mutable client state."
+    },
+    "abstraction_design": {
+      "score": 4,
+      "evidence": [
+        "app/src/components/section.tsx:6-9 — Section captures the spec's aria-labelledby pattern once and is used by every page",
+        "app/src/components/cards.tsx:5-20 — PokemonCard stretches to the two real card variants via optional fields, not flags",
+        "app/src/components/moves-table.tsx:8-15,56 — MovesTable's columns are data-driven (COLUMNS filtered by isLevelUp), so adding a column is one entry plus one cell",
+        "app/src/components/type-badge.tsx:5-6 — the only boolean flag in the codebase, justified by the linked/unlinked variants the spec demands",
+        "app/src/lib/server-api.ts:21,78,94 — api() defaults to any and allTypes/allGenerations return any[], so the abstraction is thinner than its consumers deserve"
+      ],
+      "rationale": "Abstractions are sized to the app's actual variation with no over-generalization; the costs are the duplicated card-building path in server-api and untyped API records, which is what a future Items/locations section would lean on."
+    }
+  },
+  "overall": 4,
+  "findings": [
+    { "severity": "medium", "location": "app/src/lib/server-api.ts:21,78,94; app/src/routes/pokemon/[name]/index.tsx:51,90,105-141", "issue": "PokeAPI responses are typed as any throughout (api() defaults to any, allTypes/allGenerations return any[], loaders cast fields like 'as string'), so the compiler cannot catch regressions when the data source or shape changes.", "suggestion": "Define interfaces for the used subset of PokeAPI records (Localized, NamedApiResource, TypeRecord, GenerationRecord, VersionGroup, PokemonRecord) in lib/types.ts and pass them as api<T>() type arguments." },
+    { "severity": "medium", "location": "app/src/lib/server-api.ts:112-124 and 156-166", "issue": "Card construction (id/name/label/sprite) and dex-number ordering are implemented twice: once in cardsFor and once in speciesIndex, so any change to what a card contains or how lists are ordered must be made in both.", "suggestion": "Extract a makeCard(species map, id, extras?) helper and a shared comparator (byDexNumber / byName) used by both functions." },
+    { "severity": "low", "location": "app/src/global.css:1-540", "issue": "One 540-line global stylesheet with per-page sections; deleting a route (e.g. abilities, or the moves tables) leaves dead rules scattered through the file.", "suggestion": "Use Qwik's co-located per-route or per-component styles (e.g. an import in the route file or useStyles$) for page-specific blocks, keeping only tokens and shared primitives global." },
+    { "severity": "low", "location": "app/src/lib/types.ts:20; app/src/components/cards.tsx:22-23; app/src/lib/server-api.ts:119", "issue": "The Card.hidden plumbing exists solely to serve the ability page's 'Hidden ability' label, coupling a shared component to one feature.", "suggestion": "Either document Card.hidden as ability-specific or let the ability route render the note (e.g. pass a per-item suffix into CardList) so removing abilities deletes no shared code." },
+    { "severity": "low", "location": "app/src/routes/index.tsx:96,117,131,153", "issue": "The four filter controls each repeat the nav(homeHref({...data.value.filters, ..., page: 1}), {...}) pattern with slightly different field spreads.", "suggestion": "Add one applyFilters(partial: Partial<Filters>) helper in this file that merges, resets page to 1 and navigates, so the debounce/scroll/replaceState policy is defined once." },
+    { "severity": "low", "location": "app/src/lib/server-api.ts:79-106", "issue": "The 'list endpoint then fetch each record by name' pattern is written three times (allTypes, allGenerations, versionGroupOrders).", "suggestion": "Extract a fetchRecords(path, ALL) helper that takes the list endpoint and returns the resolved records; it also gives one place to tune fan-out." },
+    { "severity": "low", "location": "app/src/routes/pokemon/[name]/index.tsx:88-146", "issue": "The pokemon loader returns a large ad-hoc object built with per-field casts ('as string', 'as number | null'), which is the least protected code in the app against upstream data changes.", "suggestion": "Type the underlying records (see the api<T> finding) and let inference do the rest; the casts then disappear and the returned shape stays compiler-checked for the component." }
+  ],
+  "summary": "A well-layered Qwik City app on the current stable release: every cross-cutting concern (URL building, sprite URLs, caching, species mapping) has exactly one home, and the components/DTO/server seams are clean enough to point at. The two real deductions are pervasive any-typed API responses and a card-building path duplicated between cardsFor and speciesIndex, both of which make the data layer the only place a future editor will have to read carefully. Everything else — removing abilities, changing the API source, adding an Items section — is a small, grep-findable change.",
+  "scenarios": [
+    { "change": "Remove the Abilities pages and every link to them", "files": ["app/src/routes/abilities/[name]/index.tsx", "app/src/routes/pokemon/[name]/index.tsx", "app/src/lib/types.ts", "app/src/components/cards.tsx", "app/src/lib/server-api.ts", "app/src/global.css"], "difficulty": 4, "notes": "The route directory is deletable and the only inbound link is the pokemon page's Abilities section; the cost is cleaning up the ability-only Card.hidden plumbing and .card-note CSS scattered across three other files." },
+    { "change": "Fix the card sprite for species whose default Pokémon has a different name (Deoxys)", "files": ["app/src/lib/server-api.ts"], "difficulty": 5, "notes": "cardsFor already maps every Pokémon reference to its species ID before building the card, so the fix (if ever needed) is one function covering move, ability and type lists; the home page builds cards from species IDs and spriteUrl is the single URL factory." },
+    { "change": "Add sorting by name to every list of Pokémon cards", "files": ["app/src/lib/server-api.ts", "app/src/routes/index.tsx"], "difficulty": 4, "notes": "Two sort sites, both in server-api.ts (cardsFor:124 and speciesIndex:158); home pagination slices after sorting, so the ordering must stay loader-side — easy but duplicated, and an extract-a-comparator cleanup would be natural here." },
+    { "change": "Add an Items section (/items, /items/:name) shaped like Moves", "files": ["app/src/routes/items/index.tsx", "app/src/routes/items/[name]/index.tsx"], "difficulty": 4, "notes": "Section, CardList, NotFound, api/slug/englishName/latestFlavorText and the format helpers are all reusable as-is; the moves page is a self-contained route, so you write two new route files following its pattern rather than extending an abstraction." },
+    { "change": "Change the API base URL and caching rules", "files": ["app/src/lib/server-api.ts", "app/src/routes/layout.tsx", "app/src/entry.node-server.tsx"], "difficulty": 5, "notes": "apiBase() is the only reader of API_BASE_URL and the memory cache (TTL, dedup, eviction) is confined to server-api.ts:8-36; page cache and static-asset cache are each a single line in layout.tsx and entry.node-server.tsx." }
+  ]
+}
+```

@@ -1,0 +1,90 @@
+I've now read the whole app (`app/src/**`, `app/server/server.mjs`, configs, tests) and checked the current Angular guidance and the v22 release notes. Here's my review.
+
+## Summary of what I found
+
+The app is a genuinely modern Angular 22 codebase: standalone components with signal `input()`, data loading through `resource({params, loader})` (the current, stable API — v22 promoted async reactivity to stable, and `params` is the correct option name), the `@Service()` decorator, `computed`/`effect`/`untracked`, native control flow (`@if/@for/@let/@empty`), `withComponentInputBinding()` with lazy `loadComponent` routes, and `provideBrowserGlobalErrorListeners()`. Data-shaping logic (`loadPokemonView`, `loadMoveTables`, `loadHomeData`, `filterSpecies`) is extracted into plain, unit-testable functions — the right call, and the two spec files cover exactly those pure parts.
+
+The layering is clean (`core` / `pages` / `shared`), errors are handled with a dedicated `NotFoundError` that drives both the in-app not-found page and real HTTP 404s from the custom static server (which does live HEAD checks against the API), and failed fetches are evicted from the TTL cache. Comments explain *why* (cache TTL, the search-debounce/URL-sync dance, the `#moves` fragment jump).
+
+The gaps I'd ask about before merging: no `abortSignal` plumbing anywhere in `PokeApi.get` (`app/src/app/core/poke-api.ts:64`) — the resource docs/skill say to always pass it, and the moves table can fan out to a hundred-plus move fetches that keep running after the user switches game; `shared/load-state.ts:2` imports `pages/not-found`, inverting the shared→pages boundary; the fragment-scroll effect is one-shot per component instance (`app/src/app/pages/pokemon/pokemon-page.ts:60-66`); `@angular/forms` is a dead dependency; all ~500 lines of CSS are global with selectors that reach into routed components; and the server's file stream has no error handler.
+
+```json
+{
+  "dimension": "mergeability",
+  "criteria": {
+    "idiomatic": {
+      "score": 4,
+      "evidence": [
+        "app/src/app/core/poke-api.ts:41 — @Service() decorator, the current Angular 21+/22 way to declare root-provided services",
+        "app/src/app/pages/pokemon/pokemon-page.ts:28 — resource({params, loader}) with input-bound route params; the stable, current data-loading primitive (params is the correct option name post-RFC)",
+        "app/src/app/app.routes.ts:4-10 — lazy loadComponent routes plus withComponentInputBinding (app.config.ts:5)",
+        "app/src/app/shared/type-badge.ts:19 — input(false, {transform: booleanAttribute}) and host bindings, current input API",
+        "app/src/app/pages/home/home.html:1-90 — @if/@else/@for/@let control flow and @empty (type-page.ts:37) used throughout",
+        "app/src/app/core/poke-api.ts:64 — fetch(url) with no AbortSignal: the resource guide says to always pass the loader's abortSignal",
+        "app/src/styles.css:137-149 — all styles global in one file; .site-main > :not(router-outlet) and .site-main app-not-found reach into routed components instead of scoped component styles",
+        "app/package.json:14 — @angular/forms is a dependency but never imported anywhere in src/"
+      ],
+      "rationale": "This reads like current Angular 22 documentation almost everywhere — signals-first reactivity, resource(), @Service(), modern file naming. The deductions are real but small: no abortSignal on fetches (explicitly recommended by the resource docs) and global rather than component-scoped CSS."
+    },
+    "correctness_risks": {
+      "score": 4,
+      "evidence": [
+        "app/src/app/core/poke-api.ts:25-31 — NotFoundError for 404 distinguishes 'Not found' from transient failures; server-side HEAD checks give real HTTP 404s (app/server/server.mjs:52-76)",
+        "app/src/app/core/poke-api.ts:70 — failed promises are evicted from the cache instead of poisoning it",
+        "app/src/app/pages/pokemon/pokemon-data.ts:29 — evolutionChain(...).catch(() => null) and per-type/per-move .catch fallbacks (poke-api.ts:130, moves-data.ts:47) mean one missing resource doesn't kill a page",
+        "app/src/app/pages/pokemon/pokemon-page.ts:58-66 — #fragment jump is one-shot per component instance (jumped flag, snapshot.fragment read once), so a later same-route navigation with a fragment won't scroll, and it never fires if moves error out",
+        "app/src/app/pages/pokemon/moves-data.ts:47 — Promise.all over every move a Pokémon learns in a game (100+ requests) with no cancellation when the user switches game",
+        "app/src/app/core/poke-api.ts:55-62 — cache Map never evicts expired entries (TTL only checked on read); growth is bounded by API size but unbounded in principle",
+        "app/server/server.mjs:96 — fs.createReadStream(file).pipe(res) has no 'error' handler; a stat-then-read race can throw an unhandled stream error and take down the server"
+      ],
+      "rationale": "Error handling is thoughtfully done (404 typing, cache cleanup, per-request fallbacks), and I found no race in the URL-synced search/filters. The remaining risks are minor and mostly about wasted work and edge navigation rather than visible bugs."
+    },
+    "global_abstractions": {
+      "score": 4,
+      "evidence": [
+        "app/src/app/core/poke-api.ts — one coherent, documented data module with a narrow surface (typed helpers, cardsFor, typeLabels) that all pages share; ~170 lines, not a god module",
+        "app/src/app/core/format.ts — small pure helpers, unit-tested (format.spec.ts)",
+        "app/src/app/pages/pokemon/pokemon-data.ts:34-74 — view-model shaping isolated from the component, same pattern as moves-data.ts and home-data.ts",
+        "app/src/app/shared/load-state.ts:2 — shared component imports pages/not-found, inverting the shared→pages boundary; NotFound belongs in shared",
+        "app/src/app/core/api-config.ts:6-14 — API origin via InjectionToken read from a <meta> tag at runtime, clean config boundary with a documented fallback"
+      ],
+      "rationale": "Abstractions are few, purposeful and well-bounded (one API client, one card component, one load-state). The only structural wart is the shared→pages dependency in load-state, which is a one-line move to fix."
+    },
+    "readability": {
+      "score": 5,
+      "evidence": [
+        "app/README.md:12-18 — a short, accurate architecture map (core/pages/shared) that matches the code exactly",
+        "app/src/app/pages/home/home.ts:33-41 — comments explain the debounce/URL-sync contract ('unless the URL is just catching up with typing') rather than restating code",
+        "app/src/app/pages/pokemon/moves-data.ts:15-27 — METHOD_ORDER and a short, single-purpose loader; every file under ~130 lines",
+        "app/src/app/pages/move-page.ts:8-27, ability-page.ts:10-16, type-page.ts:18-32 — four detail pages follow the identical load-shape → resource → @if hasValue pattern, so the fifth is predictable",
+        "app/src/app/core/models.ts — only the fields actually used are declared, kept honest by the comment on line 1"
+      ],
+      "rationale": "Consistent structure, modern naming, small functions, and why-comments in the right places. A new teammate can navigate this in minutes; the two spec files even show where the logic lives."
+    },
+    "review_cost": {
+      "score": 4,
+      "evidence": [
+        "app/src/app/core/poke-api.ts:64 — would ask for abortSignal plumbing through get() (small, mechanical)",
+        "app/package.json:14 — drop the unused @angular/forms dependency",
+        "app/src/app/shared/load-state.ts:2 — move NotFound into shared/ to fix the layering inversion",
+        "app/server/server.mjs:96 — add a stream 'error' handler",
+        "app/src/app/pages/pokemon/pokemon-page.ts:58-66 — reset the fragment state when route params change (or use withInMemoryScrolling({anchorScrolling: 'enabled'}))"
+      ],
+      "rationale": "I'd approve after one round of small, well-scoped changes: abortSignal, the dead dependency, the load-state boundary, and the fragment edge. Nothing requires rearchitecting."
+    }
+  },
+  "overall": 4,
+  "findings": [
+    { "severity": "medium", "location": "app/src/app/core/poke-api.ts:64", "issue": "PokeApi.get ignores the resource loader's abortSignal; resource() cancels loads via AbortSignal on param change/destroy, but the underlying fetches keep running.", "suggestion": "Accept an AbortSignal in get() and pass it to fetch; thread resource loaders' abortSignal through loadPokemonView/loadMoveTables/loadHomeData." },
+    { "severity": "medium", "location": "app/src/app/pages/pokemon/moves-data.ts:47", "issue": "Moves tables fan out one request per learned move (100+ for popular Pokémon) with no cancellation when the user switches game, only the 5-minute cache as protection.", "suggestion": "Plumb abortSignal through, and consider batching/deduplicating at the API layer or loading move details lazily per visible table." },
+    { "severity": "low", "location": "app/src/app/shared/load-state.ts:2", "issue": "A shared component imports pages/not-found, inverting the shared→pages boundary and creating a cycle risk.", "suggestion": "Move NotFound into shared/ (it is a presentational placeholder, not a routed page body)." },
+    { "severity": "low", "location": "app/src/app/pages/pokemon/pokemon-page.ts:60-66", "issue": "The #fragment scroll effect runs once per component instance: reading ActivatedRoute.snapshot.fragment at construction and a 'jumped' flag mean later same-route navigations with a fragment never scroll, and a moves error skips the jump entirely.", "suggestion": "Track the current fragment reactively (e.g. via router events or a query param input) and re-arm the jump per navigation, or enable withInMemoryScrolling({anchorScrolling: 'enabled'}) and handle the late-render case on top of it." },
+    { "severity": "low", "location": "app/package.json:14", "issue": "@angular/forms is declared but never imported; the app uses native form elements.", "suggestion": "Remove the dependency." },
+    { "severity": "low", "location": "app/src/app/core/poke-api.ts:55", "issue": "The promise cache checks TTL on read but never evicts expired entries, so a long session grows the Map toward one entry per API resource.", "suggestion": "Delete expired entries on read (cheap since the Map is scanned anyway) or cap its size." },
+    { "severity": "low", "location": "app/server/server.mjs:96", "issue": "fs.createReadStream(file).pipe(res) has no 'error' handler; a file disappearing between stat and read becomes an unhandled stream error that can crash the server.", "suggestion": "Attach stream.on('error', ...) that destroys the response, or read the file with fsp.readFile." },
+    { "severity": "low", "location": "app/src/styles.css:137-149", "issue": "All styling is global, with selectors like '.site-main > :not(router-outlet)' and '.site-main app-not-found' coupling global CSS to specific routed components — renaming a component selector silently breaks layout.", "suggestion": "Move per-component rules into the components' own scoped styles (styles/styleUrl), keeping only base/layout in the global sheet." },
+    { "severity": "low", "location": "app/src/app/shared/pokemon-card-list.ts:33-35", "issue": "The missing-sprite fallback mutates the DOM directly in the event handler (style.visibility), a small home-grown workaround.", "suggestion": "Track failed ids in a component Set and hide via a template binding/class so the change detection round-trip stays declarative." }
+  ],
+  "summary": "A current-idiom Angular 22 app: resource()-based loading, @Service(), signal inputs and native control flow, with clean core/pages/shared layering and unusually good error handling (typed 404s, per-request fallbacks, real HTTP 404s from the custom server). The issues I'd flag are all small: no abortSignal plumbing despite documented guidance, a shared→pages import inversion, a one-shot fragment-scroll effect, an unused dependency, and global CSS that reaches into routed components. I'd merge after one round of nits."
+}
+```

@@ -1,0 +1,155 @@
+All framework-version checks pass: the app targets SolidStart **2.1.0** (current stable, Oct 2026) on Vite 8 with config in `vite.config.ts` — the v2-recommended layout — and `APIEvent` from `@solidjs/start/server` is the documented current API-route signature. `ssr: false` is a supported, deliberate SPA mode. Nothing outdated; the questions for this dimension are all about internal structure.
+
+## Review notes
+
+**Structure.** Clean layering: `routes/` → `lib/data.ts` (fetch+transform) → `lib/api.ts` (single HTTP/cache seam) → `routes/api-proxy` + `routes/media` (server proxies). All client data goes through `/api-proxy/*`, so the API base URL never leaks into client code. Components (`PokemonCard`, `MoveTable`, `TypeBadge`) are narrow, prop-driven, with typed `CardData`/`MoveRow` interfaces.
+
+**Main editability drag.** The per-resource page-function pattern in `lib/data.ts` is copy-pasted three times with drift (the `seen` dedup exists in `getAbilityPage` and `getTypePage` but not `getMovePage`; `speciesById` is rebuilt from the same index at data.ts:298, 322, 353). The data layer is `any`-typed end to end, and routes reach into raw payloads (`data().pokemon.height`, `data().move.damage_class?.name`) alongside transformed fields, so no compiler catches shape changes. `data.ts` is a 430-line god module holding all five pages' logic.
+
+**Scenarios.**
+1. **Remove Abilities**: contained — delete `routes/abilities/`, `getAbilityPage` (data.ts:310–341), the Pokémon-page section (`routes/pokemon/[name].tsx:155–166`), and 3 CSS rules in `app.css`. No nav link exists to remove. Easy.
+2. **Sprite fix**: rendering is in exactly one place (`PokemonCard.tsx:17`), so one fix covers every list — but the card pipeline only carries the species `id`/`name` (index built at `data.ts:56–66`), so a real default-variety fix needs plumbing through two separate card builders (`cardForSpeciesId` and `getHomeData`'s `items`).
+3. **Name sorting**: the `.sort((a,b)=>a.id-b.id)` appears three times in `data.ts` (304, 335, 364) plus the home memo — four small edits, no shared helper.
+4. **Items section**: `PokemonCard`, `format.ts`, and the route skeleton reuse, but the ~20-line "fetch → english name → effect → card list" transform would be cloned from `getMovePage`.
+5. **Data source**: base URL duplicated in two proxy files (both read the same env var); caching rules split across `api.ts`'s TTL cache and `data.ts`'s permanent module-level promise memos — two layers with different invalidation semantics.
+
+```json
+{
+  "dimension": "editability",
+  "criteria": {
+    "removability": {
+      "score": 4,
+      "evidence": [
+        "app/src/routes/abilities/[name].tsx — whole feature is one route file",
+        "app/src/lib/data.ts:310-341 — getAbilityPage is a self-contained function; no other data function calls it",
+        "app/src/routes/pokemon/[name].tsx:155-166 — only cross-page link is the spec-mandated Abilities section",
+        "app/src/app.css:248,473,477 — three ability-specific CSS classes to delete from one global stylesheet",
+        "app/src/components/Header.tsx:11-15 — nav has only Pokémon/Types; no ability link to remove"
+      ],
+      "rationale": "Deleting the abilities route directory, its data function, one Pokémon-page section and three CSS rules removes the feature cleanly; the only extra file is the Pokémon page where the link is inherently part of that feature."
+    },
+    "changeability": {
+      "score": 3,
+      "evidence": [
+        "app/src/components/PokemonCard.tsx:17 — sprite URL built in exactly one place, so any URL fix covers every card list",
+        "app/src/lib/data.ts:56-66 — species index carries only {id, name}; default-variety sprite data is not in the card pipeline",
+        "app/src/lib/data.ts:173-184 — cardForSpeciesId builds cards for move/ability/type lists, while home items are built separately at data.ts:151-158",
+        "app/src/lib/data.ts:324-335 — getAbilityPage's dedup 'seen' logic; getMovePage at 298-304 lacks it (same job, drift between copies)"
+      ],
+      "rationale": "Rendering fixes land in one obvious component, but a data-shape fix touches two duplicated card builders and must first thread new data through the species index; pervasive 'any' typing means the compiler won't flag any of it."
+    },
+    "coupling": {
+      "score": 3,
+      "evidence": [
+        "app/src/routes/api-proxy/[...path].ts:3-5, app/src/routes/media/[...path].ts:3-5 — API base URL isolated behind server proxies; client code never knows it",
+        "app/src/lib/api.ts:26-45 — single client fetch/cache seam every data function goes through",
+        "app/src/routes/pokemon/[name].tsx:96,113 — route reaches into raw payload (species.id, pokemon.height) instead of transformed fields",
+        "app/src/routes/moves/[name].tsx:41-43 — route reads data().move.damage_class directly, bypassing getMovePage's transform layer",
+        "app/src/lib/data.ts — 430 lines holding all five pages' data logic in one module"
+      ],
+      "rationale": "Server/client and component/data seams are genuinely clean, but routes mix raw 'any' payloads with transformed fields (leaky boundary), and the single god-module data layer means every cross-page change funnels through one file."
+    },
+    "abstraction_design": {
+      "score": 3,
+      "evidence": [
+        "app/src/components/PokemonCard.tsx:9-13,27 — typed CardData with optional types/hidden stretches to home, move, ability and type lists without duplication",
+        "app/src/components/MoveTable.tsx:12-22 — MoveRow interface plus includeLevel flag; sorting logic (62-111) is self-contained and reusable",
+        "app/src/lib/data.ts:298-304,324-335,353-364 — the fetch→englishName→effect→card-list pattern is copy-pasted per resource rather than parameterized",
+        "app/src/lib/data.ts:124,298,322,353 — speciesById Map rebuilt identically in four places",
+        "app/src/components/PokemonCard.tsx:24,36 — showTypes prop and hidden flag are mild but justified flag creep around real variation"
+      ],
+      "rationale": "The shared components are well designed around real variation, but the resource-page data layer has no abstraction at all: an Items section would clone getMovePage's ~40 lines rather than reuse a parameterized resource helper."
+    }
+  },
+  "overall": 3,
+  "findings": [
+    {
+      "severity": "medium",
+      "location": "app/src/lib/data.ts:298-364",
+      "issue": "Card-list construction (fetch→dedup id≤10000→cardForSpeciesId→sort by id) is copy-pasted in getMovePage, getAbilityPage and getTypePage with drift: the 'seen' dedup exists in two copies but not the third, and speciesById is rebuilt at data.ts:298, 322 and 353.",
+      "suggestion": "Extract one helper, e.g. pokemonCardsFromRefs(refs: NamedRef[]): Promise<Card[]>, built on a shared cached species index, and call it from all three page functions."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/lib/data.ts:194,271,315",
+      "issue": "The entire data layer is typed 'any' (species, pokemon, move, ability are all any), and routes also reach into raw payloads (app/src/routes/moves/[name].tsx:41-43, app/src/routes/pokemon/[name].tsx:96,113), so API shape changes surface as runtime errors, not compile errors.",
+      "suggestion": "Define payload interfaces for the handful of API resources used, or at least type the returned page-data objects so routes consume transformed, typed fields only."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/lib/data.ts:1-435",
+      "issue": "One 430-line module owns data logic for all five pages; every cross-page change (sorting, card shape, cache rules) funnels through it and merge conflicts/concept load grow with each feature.",
+      "suggestion": "Split per resource (data/species.ts, data/moves.ts, …) sharing api.ts and format.ts; the existing module-level promise memos move with their owner."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/routes/api-proxy/[...path].ts:3 and app/src/routes/media/[...path].ts:3",
+      "issue": "The API_BASE env resolution is defined twice; changing the base-URL rule means editing both.",
+      "suggestion": "Move a single exported apiBaseUrl() into app/src/lib (shared server-side constant) and import it in both proxies."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/lib/api.ts:21-23 and app/src/lib/data.ts:33-37",
+      "issue": "Two independent caches with different rules: api.ts TTL cache (60s) plus permanent module-level promise memos in data.ts; changing caching policy means reasoning about both layers, and the memos never expire.",
+      "suggestion": "Have the data-layer memos delegate to apiGet's cache (or fold TTL policy into one place) so cache rules are stated once."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/routes/moves/[name].tsx:13-22",
+      "issue": "The loading-fallback + NotFound nested Show pattern is repeated almost verbatim in four route files.",
+      "suggestion": "Extract a small <DataPage> wrapper (resource → loading shell | NotFound | content) so page routes shrink to content."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/lib/data.ts:47-49,165-167",
+      "issue": "HomeData exposes speciesById, typesByPokemon and generationBySpecies maps that no route consumes — speculative surface a maintainer must keep working.",
+      "suggestion": "Keep them module-local and return only {items, generations, types}."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/routes/index.tsx:132",
+      "issue": "Home page maps over pageItems() with array .map instead of <For>, inconsistent with every other list in the app; Solid's For avoids re-creating DOM nodes on page/filter changes.",
+      "suggestion": "Use <For each={pageItems()}> for consistency and Solid-recommended keyed rendering."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/app.tsx:12",
+      "issue": "document.documentElement.lang is set in a client effect even though entry-server.tsx already emits <html lang=\"en\"> — redundant mutation on every boot.",
+      "suggestion": "Delete the effect and rely on the server shell's lang attribute."
+    }
+  ],
+  "summary": "A clean, idiomatic SolidStart v2 layout (proxy-isolated data source, typed presentational components, single fetch seam) that is pleasant to modify at the route/component level but weakly factored at the data layer: a 430-line any-typed module whose per-resource functions are copy-pasted with drift. Most fixes land in one rendering component; most data-shape changes land in three or four places with no compiler safety net. Solid mid-range editability.",
+  "scenarios": [
+    {
+      "change": "Remove the Abilities pages and every link to them",
+      "files": ["app/src/routes/abilities/[name].tsx", "app/src/lib/data.ts", "app/src/routes/pokemon/[name].tsx", "app/src/app.css"],
+      "difficulty": 4,
+      "notes": "Delete one route file, getAbilityPage (data.ts:310-341), the Abilities section on the Pokémon page (155-166) and three CSS classes; no nav link exists, no other code references abilities."
+    },
+    {
+      "change": "Fix the card sprite for species whose default Pokémon differs (e.g. Deoxys)",
+      "files": ["app/src/components/PokemonCard.tsx", "app/src/lib/data.ts"],
+      "difficulty": 3,
+      "notes": "Sprite rendering is centralized in PokemonCard.tsx:17 so one fix covers every list, but the correct sprite must be plumbed through two separate card builders (cardForSpeciesId and getHomeData's items), and the species index (data.ts:56-66) currently holds no default-variety data, so a new fetch or index extension is required first."
+    },
+    {
+      "change": "Add sorting by name to every list of Pokémon cards",
+      "files": ["app/src/lib/data.ts", "app/src/routes/index.tsx"],
+      "difficulty": 3,
+      "notes": "Three independent '.sort((a,b)=>a.id-b.id)' copies (data.ts:304, 335, 364) plus the home page's matches memo; no shared card-list helper exists, so it's four small, findable edits rather than one."
+    },
+    {
+      "change": "Add an Items section (/items, /items/:name) shaped like Moves",
+      "files": ["app/src/routes/items/[name].tsx", "app/src/lib/data.ts", "app/src/app.css"],
+      "difficulty": 3,
+      "notes": "PokemonCard, format.ts, the page route skeleton and the proxy routes reuse directly, but getMovePage's fetch→english-name→effect→card-list transform (~40 lines) has no parameterized form, so most of it gets cloned."
+    },
+    {
+      "change": "Change the API base URL and caching rules",
+      "files": ["app/src/routes/api-proxy/[...path].ts", "app/src/routes/media/[...path].ts", "app/src/lib/api.ts", "app/src/lib/data.ts"],
+      "difficulty": 4,
+      "notes": "The proxy design means zero client changes; base URL is one env var duplicated across the two proxy files, and caching rules live in two layers (api.ts TTL cache + data.ts permanent promise memos) that must be kept consistent."
+    }
+  ]
+}
+```

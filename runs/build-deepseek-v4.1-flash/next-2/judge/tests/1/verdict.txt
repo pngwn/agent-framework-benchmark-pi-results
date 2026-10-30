@@ -1,0 +1,169 @@
+## Review: test quality
+
+The agent wrote **no tests of its own** — confirmed by the facts (`testLoc: 0`, `devDependencies: []`) and by the code: `app/package.json` defines only `dev`/`build`/`start`, there is no test script, no runner, and not a single spec file anywhere under `app/`. All verification was delegated to the acceptance suite in `tests/`, which the agent doesn't own.
+
+That's a real loss here, because this app has an unusually testable shape: a cluster of pure functions in `app/lib/format.js` (`humanize`, `dexNumber`, `latestEnglishFlavor`, `formatDecimal`, `idFromUrl`, `isAlternateForm`), pure-ish data assembly in `app/lib/cards.js`, pagination math in `app/app/page.jsx`, and a client-side comparator in `app/components/MovesSection.jsx` — all unit-testable with no DOM and no API mocking beyond a stubbed `fetch`. None of it is guarded.
+
+The acceptance suite is good but has seams the agent's own tests should have closed. Reading `tests/specs/home.spec.mjs` and `pokemon.spec.mjs` against the code, the notable unprotected paths are:
+
+- **Pagination hrefs under active filters** — `app/app/page.jsx:108-116` rebuilds the query per page link, but no acceptance test ever navigates to page 2 *with* a filter or search active, so dropping `q`/`type` from pagination URLs would pass every current test.
+- **Page clamping** — `app/app/page.jsx:85-91` handles `?page=abc` (NaN → 1), `?page=0`, and over-range clamping via `Math.min`; the suite only hits pages 1, 2 and 22 exactly.
+- **Latest-English flavor selection** — `app/lib/format.js:20-26` must take the *last* `en` entry and collapse whitespace; a refactor to `.find()` (first entry) would likely still pass the Pikachu check.
+- **Negative caching in the API layer** — `app/lib/api.js:56-66` caches 404s as `null` forever (the `promiseCache.delete` only fires on thrown errors), directly at odds with the spec's "treat the API as a live service" and the live-data-overlay scenario; nothing would catch this once the overlay tests stop running.
+- **Non-404 API failures** — `app/lib/api.js:37-40` throws with no `error.jsx` anywhere, so any 5xx/timeout renders Next's default error page with none of the required landmarks; no test covers this.
+- **Filter URL races** — `app/components/Filters.jsx:7-14` builds URLs from `window.location.search` instead of `useSearchParams`, so a select change racing the 250 ms search debounce (`Filters.jsx:16-25`) can drop a just-set param; the suite tests each control in isolation.
+- **Move-table comparator edge cases** — `app/components/MovesSection.jsx:10-33` compares a stringified `level` (built as `String(...)` at `app/app/pokemon/[name]/page.jsx:101`) numerically and falls back to `localeCompare` for text columns; only `Power` asc/desc and one `Move` click are exercised.
+
+Per the rubric: no tests means `coverage_of_risk` and `regression_power` score on what would be caught (nothing beyond the acceptance suite), and `behaviour_not_implementation` scores 1. `signal_to_noise` is 3 by the stated convention for "no tests."
+
+```json
+{
+  "dimension": "tests",
+  "criteria": {
+    "coverage_of_risk": {
+      "score": 1,
+      "evidence": [
+        "app/package.json:6-9 — no test script, no devDependencies, no runner",
+        "app/lib/format.js:20-36 — latestEnglishFlavor/formatDecimal/dexNumber: pure, high-breakage logic, zero tests",
+        "app/app/page.jsx:82-91 — pagination clamping and slicing untested",
+        "app/lib/api.js:56-66 — cache behavior (permanent negative caching of 404s) untested"
+      ],
+      "rationale": "The agent wrote no tests at all; the riskiest logic (filtering, pagination, name/flavor selection, caching) is guarded only by the acceptance suite it doesn't own."
+    },
+    "behaviour_not_implementation": {
+      "score": 1,
+      "evidence": [
+        "app/lib/cards.js:4-38 — untested data assembly with index-aligned zipping of species and pokemon arrays",
+        "app/components/MovesSection.jsx:10-33 — untested comparator with stringified numeric columns"
+      ],
+      "rationale": "No tests exist, so there is nothing to judge as behavioural; per the anchored scale, no tests scores 1."
+    },
+    "regression_power": {
+      "score": 1,
+      "evidence": [
+        "app/app/page.jsx:108-116 — pagination hrefs with active filters: acceptance suite never combines page>1 with q/type, so a regression here passes everything",
+        "app/lib/format.js:20-26 — refactoring 'last en entry' to '.find()' (first entry) would not be caught",
+        "app/lib/api.js:37-40 — non-404 API failures throw with no error boundary; no test covers a failing API"
+      ],
+      "rationale": "With zero tests in app/, a refactor of the data layer or URL handling would be caught only by the external acceptance suite, and several of these seams aren't covered by that suite either."
+    },
+    "signal_to_noise": {
+      "score": 3,
+      "evidence": [
+        "app/package.json:1-12 — no test files of any kind, so no noise either"
+      ],
+      "rationale": "No tests means no low-value padding, which by convention scores 3; the absence is accounted for under the other criteria."
+    }
+  },
+  "overall": 1,
+  "findings": [
+    {
+      "severity": "high",
+      "location": "app/package.json:6-9",
+      "issue": "No test script, no test runner, and no test files anywhere in app/; all quality assurance was outsourced to the acceptance suite.",
+      "suggestion": "Add a lightweight runner (vitest or node:test) with unit tests for the pure helpers in lib/ and the pagination/filter logic; wire it into a script so CI can run it."
+    },
+    {
+      "severity": "high",
+      "location": "app/lib/format.js:20-26",
+      "issue": "latestEnglishFlavor must pick the LAST English entry and collapse whitespace; a subtle refactor (e.g. .find instead of filter+last) would regress every species page with interleaved languages.",
+      "suggestion": "Unit-test with entries in mixed language order, entries with \\n/\\f runs, and the empty case."
+    },
+    {
+      "severity": "high",
+      "location": "app/app/page.jsx:82-91",
+      "issue": "Pagination clamping (NaN, 0, negative, over-range) and the slice bounds are unguarded; the acceptance suite only requests pages 1, 2 and exactly 22.",
+      "suggestion": "Table-driven unit tests over the filter+page computation extracted from the page component."
+    },
+    {
+      "severity": "medium",
+      "location": "app/app/page.jsx:108-116",
+      "issue": "Pagination links rebuild the query string by hand; no test (including acceptance) navigates to page 2 with a search or type filter active, so dropped params would go unnoticed.",
+      "suggestion": "Test that Next/Previous hrefs preserve q/type/generation and omit defaults."
+    },
+    {
+      "severity": "medium",
+      "location": "app/lib/api.js:56-66",
+      "issue": "404 responses are cached as null permanently (promiseCache.delete only runs on throw), so a resource that was missing once stays 'Not found' for the process lifetime, contradicting the spec's live-data requirement; the cache is also unbounded.",
+      "suggestion": "Don't cache nulls (or add TTL/invalidation) and unit-test the cache semantics against a stubbed fetch."
+    },
+    {
+      "severity": "medium",
+      "location": "app/lib/api.js:37-40",
+      "issue": "Non-404 API errors throw inside server components with no error boundary (no error.jsx anywhere), producing an unbranded 500 page with none of the required landmarks.",
+      "suggestion": "Add an error boundary or retry logic and test the 5xx path with a stubbed API."
+    },
+    {
+      "severity": "medium",
+      "location": "app/components/Filters.jsx:7-14",
+      "issue": "Filter URLs are built from window.location.search rather than useSearchParams, so a select change racing the 250 ms search debounce can build a URL from stale state and drop a just-set parameter.",
+      "suggestion": "Derive params from the useSearchParams hook and test combined filter interactions (type while typing, generation while typing)."
+    },
+    {
+      "severity": "low",
+      "location": "app/components/MovesSection.jsx:10-33",
+      "issue": "compareRows numerically compares a stringified level and uses localeCompare for text columns; only Power asc/desc and a single Move click are exercised anywhere.",
+      "suggestion": "Unit-test the comparator: missing-values-last in both directions, numeric vs text columns, tie-breaking."
+    },
+    {
+      "severity": "low",
+      "location": "app/app/pokemon/[name]/page.jsx:69-76",
+      "issue": "Method ordering falls back to rank 100 + alphabetical for any method outside the four fixed ones; no test covers that fallback path.",
+      "suggestion": "Unit-test methodSort and buildMoveTables with a synthetic method set."
+    },
+    {
+      "severity": "low",
+      "location": "app/lib/cards.js:18-38",
+      "issue": "buildPokemonCards silently relies on index alignment between three parallel arrays (entries, species, pokemon); a refactor to a non-indexed approach could mismatch species and sprite without any test failing.",
+      "suggestion": "Unit-test against a stubbed API covering duplicate refs, alternate forms, and a missing species record."
+    }
+  ],
+  "summary": "The app contains no tests, no runner, and no test infrastructure; every guarantee rests on the externally-owned acceptance suite. That suite is solid but leaves seams — pagination under active filters, page clamping, latest-English flavor selection, negative caching, and API error rendering — where a refactor could regress silently. Given the large amount of pure, easily unit-testable logic in lib/ and the page components, the omission is hard to defend for a codebase meant to be owned for years.",
+  "wroteTests": false,
+  "testCount": 0,
+  "valuableTests": [],
+  "lowValueTests": [],
+  "untested": [
+    {
+      "area": "Pagination clamping and slicing (malformed or out-of-range ?page)",
+      "risk": "high",
+      "likelyBug": "An off-by-one or dropped clamp renders an empty page or a 'Page n of m' that disagrees with the list after a refactor of app/app/page.jsx."
+    },
+    {
+      "area": "Pagination hrefs preserving q/type/generation",
+      "risk": "high",
+      "likelyBug": "Next/Previous links silently drop active filters, stranding the user on an unfiltered page — no current test would fail."
+    },
+    {
+      "area": "Name/flavor formatting helpers (humanize, latestEnglishFlavor, dexNumber, formatDecimal)",
+      "risk": "high",
+      "likelyBug": "A subtle change (first-vs-last English entry, whitespace collapse, padding) corrupts headings and flavor text on all 1000+ pages."
+    },
+    {
+      "area": "API cache semantics (permanent negative caching, unbounded growth, no invalidation)",
+      "risk": "medium",
+      "likelyBug": "A resource that 404s once stays 'Not found' for the process lifetime even after the API gains it, violating the live-data requirement."
+    },
+    {
+      "area": "Non-404 API error handling (no error boundary, no retry)",
+      "risk": "medium",
+      "likelyBug": "A transient API 5xx renders an unbranded default 500 page with no banner/main/footer landmarks."
+    },
+    {
+      "area": "Client filter URL building and debounce races",
+      "risk": "medium",
+      "likelyBug": "Changing type or generation while the search debounce is pending builds URLs from stale window.location.search and drops a parameter."
+    },
+    {
+      "area": "Move table comparator and method-order fallback",
+      "risk": "medium",
+      "likelyBug": "String-vs-numeric comparison of the level column, or the alphabetical fallback for non-standard learn methods, misorders rows after a refactor."
+    },
+    {
+      "area": "Card building (dedupe, alternate-form exclusion, index-aligned zipping)",
+      "risk": "low",
+      "likelyBug": "A refactor desynchronizes species and pokemon arrays, showing the wrong sprite or linking to a non-existent species page."
+    }
+  ]
+}
+```

@@ -1,0 +1,125 @@
+I've reviewed the full app, the spec, and verified framework versions and idioms against current stable releases (hono 4.13.x is still the `latest` line — v5 is only at RC, so the app's `onError((err, c))` v4 signature is correct for what it pins; `@hono/node-server` 2.1.5 includes the serve-static path-decoding security fix GHSA-rmxm-3fg6-px4f; htmx 2.0.11 is the current 2.x stable). The htmx patterns used (`hx-sync="closest form:replace"`, `HX-Push-Url` response header, `HX-History-Restore-Request` handling, a `Vary: HX-Request` header on the partial route, and a no-JS `method="get"` form fallback) all match htmx 2.x documented guidance, and the `jsxRenderer` + `declare module 'hono'` ContextRenderer augmentation matches the Hono docs pattern.
+
+```json
+{
+  "dimension": "mergeability",
+  "criteria": {
+    "idiomatic": {
+      "score": 4,
+      "evidence": [
+        "app/src/views/layout.tsx:1-9 — jsxRenderer with typed ContextRenderer augmentation, exactly the documented layout pattern",
+        "app/src/index.tsx:5-6 — serveStatic imported from @hono/node-server/serve-static (correct for the current adapter)",
+        "app/src/index.tsx:11 — isPartial() distinguishes HX-Request from HX-History-Restore-Request; HX-Push-Url at index.tsx:23; Vary header at index.tsx:18 — all idiomatic htmx 2.x response handling",
+        "app/src/views/home.tsx:96-100 — hx-trigger='input changed delay:200ms, search' + hx-include='closest form' + hx-sync='closest form:replace' is the documented search-filter pattern, with a no-JS GET form fallback",
+        "app/src/index.tsx:13-17,78 — shared notFound handler wired to both null-data and app.notFound(); 404 status set",
+        "app/src/index.tsx:53 — SORT_KEYS re-declares the column keys that pokemon.tsx:23-31 already owns, instead of importing them",
+        "app/src/views/pokemon.tsx:97-104 — pokemon/chain/labels passed around as any; hono's first-class typing story is unused for API payloads"
+      ],
+      "rationale": "This reads like the framework's own examples: correct current-version imports, thoughtful htmx response-header/Vary handling, and real progressive enhancement. Docked one point for the duplicated sort-key table and the pervasive untyped API payloads."
+    },
+    "correctness_risks": {
+      "score": 4,
+      "evidence": [
+        "app/src/api.ts:24-32 — single-flight SWR cache: entry.pending ??= coalesces concurrent callers, .finally() clears it; no duplicate fetches",
+        "app/src/api.ts:14-17 — 404s cancel the body and resolve to null; app/src/api.ts:47 — stale revalidation errors are swallowed, not surfaced to the request",
+        "app/src/index.tsx:80-93 — onError renders a 500 page instead of an unhandled throw",
+        "app/src/views/home.tsx:56-58 — unknown type/generation query values silently fall back to 'no filter' (?type=garbage shows all 1025 Pokémon with no signal)",
+        "app/src/index.tsx:41-60 — /pokemon/:name/moves and /moves-table respond to direct navigation with layout-less fragments; the isPartial guard used on '/' is not applied here",
+        "app/src/views/pokemon.tsx:150-160 — sort header buttons have no hx-sync, so rapid clicks can race responses (benign here since requests are idempotent)",
+        "app/src/api.ts:7 — cache Map has no eviction; bounded in practice by the fixed dataset, but unbounded in principle"
+      ],
+      "rationale": "Careful work on the classic failure modes — single-flight caching, body cancellation on 404, swallowed revalidation errors, 404/500 pages, and hx-sync on the filter form. What remains are genuinely minor: unguarded fragment routes, silently ignored bad filter values, and unsynchronized sort buttons."
+    },
+    "global_abstractions": {
+      "score": 4,
+      "evidence": [
+        "app/src/api.ts:40-60 — small, well-bounded data layer (api/apiUrl/apiList/idFromUrl) with a documented contract; the one piece of module state (the cache, api.ts:6-7) is justified and commented",
+        "app/src/data.ts — cohesive PokeAPI domain helpers, not a god-utils module; humanize/englishName/latestFlavorText are single-purpose",
+        "app/src/views/details.tsx:7-107 — a grab-bag holding four unrelated pages (Move, Ability, Types list, Type) behind an uninformative name",
+        "app/src/views/pokemon.tsx:104 and details.tsx:8 — typeLabels()/mainTypes() are rebuilt from cached fetches on every request in several loaders; the derived Maps are recomputed per call (data.ts:55-58)",
+        "app/src/views/home.tsx / pokemon.tsx — loaders and views colocated per page with clear boundaries; no cross-page coupling"
+      ],
+      "rationale": "The two shared modules earn their keep and have crisp interfaces, and per-page colocation keeps boundaries clean. The dings are the four-page details.tsx misc file and derived maps that get rebuilt per request instead of memoized — untangling later, not restructuring."
+    },
+    "readability": {
+      "score": 4,
+      "evidence": [
+        "app/src/api.ts:1-2, index.tsx:10, home.tsx:24 — comments explain why (SWR policy, partial-vs-full rendering, canonical-URL rule), not what",
+        "app/src/views/home.tsx:31-48 — loadHome is a linear, self-describing pipeline; filters read as one boolean expression",
+        "app/src/views/pokemon.tsx:44-58 — sortRows' null-last and tie-break logic is dense but correct and localized",
+        "app/src/views/pokemon.tsx:117-119, 154-158, details.tsx:21-26 — inline (a: any, b: any) casts and untyped field access force readers to consult the API shapes themselves",
+        "app/src/views/details.tsx — filename gives no hint it contains Move/Ability/Types pages"
+      ],
+      "rationale": "A new teammate finds their way quickly: names match spec vocabulary, functions are short, and the few comments carry real intent. The rough spots are the any-heavy view code and the misnamed details.tsx."
+    },
+    "review_cost": {
+      "score": 4,
+      "evidence": [
+        "app/src/index.tsx:41-60 — the only structural ask: gate fragment routes with isPartial like '/' does",
+        "app/src/views/pokemon.tsx:97, data.ts:41-44 — the one substantial ask: type the API responses actually used (~a dozen interfaces)",
+        "app/src/index.tsx:53 vs pokemon.tsx:23 — dedupe SORT_KEYS; app/src/views/details.tsx — split by page; nits",
+        "app/src/api.ts:1-32 — the caching layer needs no changes; it's the part a reviewer would otherwise agonize over"
+      ],
+      "rationale": "I'd approve after one round of nits: guard the fragment endpoints, add API response types, and tidy the two duplicated tables. Nothing needs rework."
+    }
+  },
+  "overall": 4,
+  "findings": [
+    {
+      "severity": "medium",
+      "location": "app/src/index.tsx:41",
+      "issue": "The htmx fragment routes (/pokemon/:name/moves at index.tsx:41 and /moves-table at index.tsx:50) render bare tables to any direct GET — bookmarked or shared links yield layout-less HTML, and the isPartial guard used on '/' is not applied.",
+      "suggestion": "Reuse isPartial(c) and return notFound(c) (or a redirect to the full page) for non-HTMX requests, matching the '/' route."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/views/pokemon.tsx:97",
+      "issue": "No API response types anywhere: loadPokemon/loadMoves/loadType pass around any and views cast inline ((a: any, b: any) at pokemon.tsx:117-119, details.tsx:21-26), so field renames in the API break silently.",
+      "suggestion": "Add a small types module for the endpoints actually used (species, pokemon, move, ability, type, evolution-chain) and delete the anys."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/views/home.tsx:56",
+      "issue": "Unknown type= or generation= query values are silently treated as 'no filter' (?type=garbage shows all 1025 Pokémon with no indication).",
+      "suggestion": "Treat unknown filter values as no matches (or 404), so bad URLs don't masquerade as the default view."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/index.tsx:53",
+      "issue": "SORT_KEYS duplicates the column keys that COLUMNS already defines in pokemon.tsx:23-31 — two sources of truth for the sortable columns.",
+      "suggestion": "Export the key list (or a parseSortKey helper) from views/pokemon.tsx and import it in the route."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/views/details.tsx:7",
+      "issue": "One file holds four unrelated pages (Move, Ability, Types list, Type) under a name that reveals none of them.",
+      "suggestion": "Split into move.tsx, ability.tsx and type.tsx, mirroring pokemon.tsx/home.tsx."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/data.ts:55",
+      "issue": "typeLabels() and mainTypes() rebuild their Maps on every request (called in loadPokemon, loadMoves, loadMove, loadAbility, loadType, and loadHome per request).",
+      "suggestion": "Memoize the derived Maps (or fold label lookup into the cached records) so per-request cost is just the filter."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/views/pokemon.tsx:152",
+      "issue": "Sort header buttons have no hx-sync, so rapid clicks issue overlapping requests whose responses can arrive out of order.",
+      "suggestion": "Add hx-sync='this:replace' to the sort button, as the filter controls already do."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/index.tsx:6",
+      "issue": "serveStatic({ root: './dist' }) resolves against the process CWD; npm start from anywhere but app/ breaks asset serving.",
+      "suggestion": "Use an absolute path derived from import.meta.dirname, which the current adapter supports."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/api.ts:7",
+      "issue": "The response cache Map never evicts entries (bounded today only because the API serves a fixed snapshot).",
+      "suggestion": "Cap the cache (LRU or simple max-size with oldest-entry pruning); it is a two-line change now and a memory leak otherwise."
+    }
+  ],
+  "summary": "A clean, current-stack Hono + htmx implementation that leans on the frameworks the way their docs recommend — jsxRenderer with typed renderer props, current-version adapters, and careful htmx 2.x response-header, Vary, history-restore and hx-sync handling that most submissions get wrong. The remaining asks are one round of nits: guard the fragment routes from direct navigation, type the API payloads instead of passing any through every view, and split/dedupe a couple of modules. I'd merge after that round."
+}
+```

@@ -1,0 +1,99 @@
+# Forward-thinking review: Pokédex (vanilla TS + Vite)
+
+## Toolchain currency (verified)
+
+- **Vite 8.3.5** is the current stable (released 2026-10-21; only `vite@8.3` gets regular patches — vitejs/vite releases page). The app pins `^8.3.5` in `app/package.json:8` — exactly current.
+- **TypeScript 7.0.2** is the current stable native port (released 2026-08-20, per microsoft/TypeScript releases; `create-vite@9.3.2` switched its templates to TS 7). The app pins `^7.0.2` (`app/package.json:7`). Notably, Vite 8 is the Rolldown/Oxc-based major, so the whole stack is post-training-data current.
+- **Vite 8 default `build.target` is `'baseline-widely-available'`** (chrome111/edge111/firefox114/safari16.4 per the v8 migration guide). The app pins `chrome120` (`app/vite.config.ts:4`) — a valid, slightly conservative choice, not legacy.
+- `import.meta.env` (`app/src/api.ts:3`), `defineConfig`, `moduleResolution: "bundler"` + `isolatedModules` (`app/tsconfig.json`) are all current-generation APIs; nothing in the tsconfig is on TS 7's removed-options list.
+
+## What ages well
+
+- **Zero runtime dependencies.** Only two devDependencies, both current. Data access is entirely `fetch` (`app/src/api.ts:154`) behind one typed module; caching is a promise-map (`app/src/api.ts:152`).
+- **No hand-rolled server framework**: `app/server.mjs` is ~85 lines of `node:http` + `fs.createReadStream` with a correct path-traversal guard (`app/server.mjs:60`), instead of pulling in Express for a static file server. Correctly leaves compression/TLS to the proxy per spec.
+- **Platform-first client code**: native `fetch`, `URL`/`URLSearchParams` (`app/src/pages/home.ts:13`), native form controls with real `<label>`s, `loading="lazy"`, CSS custom properties throughout, `aspect-ratio` (`app/src/style.css:611`), `:focus-visible`, `object-fit`, `font-variant-numeric: tabular-nums`. No polyfills anywhere.
+- **Data-driven resilience**: the home page's type-by-species map is derived from the type catalog at runtime (`app/src/api.ts:376-396`), not hardcoded, so it survives the live-data-overlay test scenario; API base URL resolves in exactly one place (`app/src/api.ts:1-5`).
+- **Churn containment**: all API record shapes live in `app/src/api.ts:19-124`; the router is a single ~30-line pushState dispatcher (`app/src/main.ts:25-80`) with a central not-found path; the `isActive` render-token pattern (`app/src/main.ts:26-27`) guards against stale async renders on every page.
+
+## What will cause churn
+
+1. **The typed boundary is broken for moves.** `app/src/pages/pokemon.ts:144` uses `apiFetch<any>(url)` and `:150` maps `(record: any)` even though a complete `MoveRecord` interface exists at `app/src/api.ts:88-97` and is unused. This is the one place API shape changes would silently ripple.
+2. **TypeScript is installed but never run.** `build` is just `vite build` (`app/package.json:6`); there's no `tsc --noEmit`. The current `create-vite` vanilla-ts template convention is `tsc && vite build`, and TS 7 makes that nearly free (8–12x faster builds). Today the 170 lines of types are editor-only decoration and drift (see finding 1) goes uncaught in CI.
+3. **Inline event handler**: `app/src/components.ts:49` embeds `onerror="this.style.visibility='hidden'"` in an `innerHTML` string — a legacy pattern that's CSP-hostile and invisible to the typed code. An `'error'` listener attached after insertion (or a small `onError` helper) is the modern equivalent.
+4. **Title-setting is scattered**: `document.title` is assigned ad hoc in 8 places (`app/src/pages/details.ts:68,99,117,182,192`, `home.ts:83`, `pokemon.ts:356`) instead of one page-shell helper — a new page (or a title-rule change) must remember it.
+5. **Data/CSS coupling**: `.type-<api-name>` classes (`app/src/style.css:261-277`) require a CSS rule per type name; a token-to-color map setting a custom property would decouple data from stylesheet.
+
+```json
+{
+  "dimension": "forward-thinking",
+  "criteria": {
+    "latest_apis": {
+      "score": 4,
+      "evidence": [
+        "app/package.json:7-8 — typescript ^7.0.2 and vite ^8.3.5, both exactly current stable (verified: TS 7.0.2 released 2026-08-20, Vite 8.3.5 released 2026-10-21)",
+        "app/src/api.ts:3 — import.meta.env, the current Vite env API",
+        "app/tsconfig.json:6-19 — moduleResolution 'bundler', isolatedModules, strict; no options removed in TS 7",
+        "app/vite.config.ts:4 — build.target pinned to 'chrome120' instead of Vite 8's default 'baseline-widely-available' (chrome111) or 'esnext', though the spec only requires latest Chromium"
+      ],
+      "rationale": "Toolchain is fully current-generation (Vite 8 on Rolldown, native TS 7), and all framework/language APIs used are current. The only lag is a conservative chrome120 build target from 2023 where the current default or 'esnext' would be more idiomatic."
+    },
+    "platform": {
+      "score": 4,
+      "evidence": [
+        "app/src/api.ts:154-165 — native fetch with typed responses and a promise cache; no XHR or axios",
+        "app/src/pages/home.ts:13-14,24-26 — URLSearchParams for query state, native form controls with real labels",
+        "app/src/components.ts:49 — loading='lazy' on sprites; but an inline onerror attribute handler, a legacy CSP-hostile pattern",
+        "app/src/style.css:611 — aspect-ratio; plus :focus-visible, object-fit, grid, custom properties throughout",
+        "app/src/main.ts:86,91 — history.pushState/popstate routing, no router library"
+      ],
+      "rationale": "Reaches for the platform first almost everywhere — fetch, URL/URLSearchParams, native form semantics, modern CSS — with no polyfills or hand-rolled substitutes. Only blemishes are the inline onerror handler and hand-rolled HTML string escaping, which is nonetheless the standard vanilla-SPA approach."
+    },
+    "dependencies": {
+      "score": 5,
+      "evidence": [
+        "app/package.json:14-17 — zero runtime dependencies; only typescript and vite as devDependencies, both current majors",
+        "app/server.mjs:59-74 — ~85-line node:http static server with stream piping and traversal guard instead of pulling in express/serve-static",
+        "app/src/style.css:1 — hand-written CSS per spec, no CSS framework"
+      ],
+      "rationale": "Minimal and modern: the platform and Vite cover everything, and the production static server is a lean bespoke node:http module rather than a dependency. Nothing heavy, outdated, or redundant."
+    },
+    "churn_resistance": {
+      "score": 4,
+      "evidence": [
+        "app/src/api.ts:19-124 — all API record shapes typed in one module; single data-access layer",
+        "app/src/api.ts:1-5 — API base URL resolved in exactly one place (server-injected global with import.meta.env fallback)",
+        "app/src/pages/pokemon.ts:144,150 — apiFetch<any> and (record: any) bypass the typed boundary; the MoveRecord interface at api.ts:88 is unused",
+        "app/package.json:6 — build script runs only vite build; no tsc --noEmit, so types are never enforced (current create-vite vanilla-ts template uses 'tsc && vite build')",
+        "app/src/pages/details.ts:68,99,117,182,192 — document.title set ad hoc in 8 places instead of one helper",
+        "app/src/api.ts:376-396 — type-by-species map derived from live type catalog, resilient to data changes"
+      ],
+      "rationale": "Good boundaries: API shapes, URL building, and data derivation are each behind one module, and there is no reliance on framework internals or undocumented behavior. The move-table code breaks the typed boundary with 'any' and nothing runs the type checker, which is where future drift will start."
+    }
+  },
+  "overall": 4,
+  "findings": [
+    { "severity": "medium", "location": "app/src/pages/pokemon.ts:144", "issue": "apiFetch<any>(url) and the (record: any) map at line 150 discard type safety at the one boundary where a full MoveRecord interface already exists (app/src/api.ts:88, currently unused)", "suggestion": "Type the call as apiFetch<MoveRecord> and reuse the shared MoveRecord interface for recordsByName" },
+    { "severity": "medium", "location": "app/package.json:6", "issue": "\"build\": \"vite build\" never invokes the type checker; the 170 lines of type declarations are editor-only and drift (like the 'any' above) is uncaught", "suggestion": "Use \"build\": \"tsc -b --noEmit && vite build\" (the current create-vite vanilla-ts template convention); with TS 7 the check takes ~a second" },
+    { "severity": "low", "location": "app/src/components.ts:49", "issue": "Inline onerror=\"this.style.visibility='hidden'\" attribute inside an innerHTML string is a legacy pattern that conflicts with strict CSP and hides broken images from the typed code", "suggestion": "Attach an 'error' event listener after rendering the card list, or toggle a CSS-only fallback (img:not(:ok) is not available; a delegated 'error' capture listener on the list container works)" },
+    { "severity": "low", "location": "app/vite.config.ts:4", "issue": "build.target pinned to 'chrome120' (Dec 2023) while Vite 8's default is 'baseline-widely-available' and the spec only requires the latest Chromium", "suggestion": "Either drop the pin and accept the Vite 8 default, or use 'esnext' to skip unnecessary transpilation for a Chromium-only app" },
+    { "severity": "low", "location": "app/src/pages/details.ts:68", "issue": "document.title is assigned independently in 8 render functions (details.ts:68,99,117,182,192; home.ts:83; pokemon.ts:356), so the '– Pokédex' suffix rule is copy-pasted", "suggestion": "Centralize in a setPageTitle(title) helper or have each render function return its title to the router" },
+    { "severity": "low", "location": "app/src/style.css:261", "issue": "Per-type class names (.type-fire, .type-grass, …) couple API data to hand-maintained CSS rules; a new type name would render unstyled", "suggestion": "Set a --type-color custom property from a small token map (or data attribute) so a single rule covers any type name" },
+    { "severity": "low", "location": "app/src/main.ts:26", "issue": "Stale-async-render guarding uses a hand-rolled render token threaded as an isActive() callback into every page signature", "suggestion": "Optional: keep the token but hide it in the router (e.g. an AbortSignal per navigation) so page functions don't all carry the lifecycle parameter" }
+  ],
+  "summary": "This is a deliberately lean, current-generation vanilla app: Vite 8.3.5 and native TypeScript 7.0.2 are exactly today's stable releases, there are zero runtime dependencies, and the client consistently reaches for the platform (fetch, URL/URLSearchParams, native form semantics, modern CSS) instead of libraries. Data access is behind a single typed module with runtime-derived indexes that survive the live-data tests. The main thing that will age badly is that the type system is never enforced — the build doesn't run tsc and the move tables use 'any' against an existing interface — plus small copy-paste seams (title setting, per-type CSS rules).",
+  "apis": [
+    { "api": "import.meta.env", "location": "app/src/api.ts:3", "status": "current", "replacement": "" },
+    { "api": "defineConfig (vite)", "location": "app/vite.config.ts:1", "status": "current", "replacement": "" },
+    { "api": "moduleResolution: \"bundler\" / isolatedModules", "location": "app/tsconfig.json:8,15", "status": "current", "replacement": "" },
+    { "api": "build.target: \"chrome120\"", "location": "app/vite.config.ts:4", "status": "current", "replacement": "\"baseline-widely-available\" (Vite 8 default) or \"esnext\" for a Chromium-only app" },
+    { "api": "fetch", "location": "app/src/api.ts:155", "status": "current", "replacement": "" },
+    { "api": "URL / URLSearchParams", "location": "app/src/pages/home.ts:13", "status": "current", "replacement": "" },
+    { "api": "history.pushState/replaceState", "location": "app/src/main.ts:86", "status": "current", "replacement": "" },
+    { "api": "inline onerror attribute handler", "location": "app/src/components.ts:49", "status": "legacy", "replacement": "delegated 'error' event listener attached in JS" }
+  ],
+  "dependencies": [
+    { "name": "vite", "verdict": "modern", "note": "^8.3.5 — current stable (Rolldown/Oxc-based major), regular-patch line as of Oct 2026" },
+    { "name": "typescript", "verdict": "modern", "note": "^7.0.2 — current stable native compiler; caveat: no script ever runs it, so it's effectively editor-only" }
+  ]
+}
+```

@@ -1,0 +1,355 @@
+diff --git a/app/src/components/CardList.astro b/app/src/components/CardList.astro
+index 79e0679..9bf97f9 100644
+--- a/app/src/components/CardList.astro
++++ b/app/src/components/CardList.astro
+@@ -5,8 +5,9 @@ import TypeBadge from './TypeBadge.astro';
+ 
+ interface Props {
+   cards: Card[];
++  removable?: boolean;
+ }
+-const { cards } = Astro.props;
++const { cards, removable = false } = Astro.props;
+ ---
+ 
+ <ul class="card-grid">
+@@ -26,6 +27,13 @@ const { cards } = Astro.props;
+           </span>
+         )}
+         {card.note && <span class="card-note">{card.note}</span>}
++        {removable && (
++          <form class="card-remove" method="post" action="/team">
++            <input type="hidden" name="action" value="remove" />
++            <input type="hidden" name="species" value={card.name} />
++            <button type="submit">Remove {humanize(card.name)}</button>
++          </form>
++        )}
+       </li>
+     ))
+   }
+diff --git a/app/src/layouts/Base.astro b/app/src/layouts/Base.astro
+index a80c2f8..d0010bb 100644
+--- a/app/src/layouts/Base.astro
++++ b/app/src/layouts/Base.astro
+@@ -24,6 +24,7 @@ const docTitle = title ? `${title} – Pokédex` : 'Pokédex';
+           <ul>
+             <li><a href="/">Pokémon</a></li>
+             <li><a href="/types">Types</a></li>
++            <li><a href="/team">Team</a></li>
+           </ul>
+         </nav>
+       </div>
+diff --git a/app/src/lib/team.ts b/app/src/lib/team.ts
+new file mode 100644
+index 0000000..8d4fae8
+--- /dev/null
++++ b/app/src/lib/team.ts
+@@ -0,0 +1,61 @@
++import type { AstroCookies } from 'astro';
++
++// The team lives in a first-party cookie, so the server can render it on every request.
++// It is a list of species names in the order they were added.
++export const TEAM_COOKIE = 'team';
++export const MAX_TEAM = 6;
++
++const SPECIES_NAME = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
++const ONE_YEAR = 60 * 60 * 24 * 365;
++
++function normalize(value: unknown): string[] {
++  if (!Array.isArray(value)) return [];
++  const seen = new Set<string>();
++  const team: string[] = [];
++  for (const name of value) {
++    if (typeof name !== 'string' || !SPECIES_NAME.test(name) || seen.has(name)) continue;
++    seen.add(name);
++    team.push(name);
++    if (team.length === MAX_TEAM) break;
++  }
++  return team;
++}
++
++export function readTeam(cookies: AstroCookies): string[] {
++  const raw = cookies.get(TEAM_COOKIE)?.value;
++  if (!raw) return [];
++  try {
++    return normalize(JSON.parse(raw));
++  } catch {
++    return [];
++  }
++}
++
++function writeTeam(cookies: AstroCookies, team: string[]) {
++  if (team.length === 0) {
++    cookies.delete(TEAM_COOKIE, { path: '/' });
++    return;
++  }
++  cookies.set(TEAM_COOKIE, JSON.stringify(team), {
++    path: '/',
++    maxAge: ONE_YEAR,
++    sameSite: 'lax',
++    httpOnly: true,
++  });
++}
++
++export function addToTeam(cookies: AstroCookies, name: string): string[] {
++  const team = readTeam(cookies);
++  if (!SPECIES_NAME.test(name) || team.includes(name) || team.length >= MAX_TEAM) return team;
++  const next = [...team, name];
++  writeTeam(cookies, next);
++  return next;
++}
++
++export function removeFromTeam(cookies: AstroCookies, name: string): string[] {
++  const team = readTeam(cookies);
++  if (!team.includes(name)) return team;
++  const next = team.filter((entry) => entry !== name);
++  writeTeam(cookies, next);
++  return next;
++}
+diff --git a/app/src/pages/pokemon/[name].astro b/app/src/pages/pokemon/[name].astro
+index 400893e..41e3cac 100644
+--- a/app/src/pages/pokemon/[name].astro
++++ b/app/src/pages/pokemon/[name].astro
+@@ -6,6 +6,7 @@ import TypeBadge from '../../components/TypeBadge.astro';
+ import Evolution from '../../components/Evolution.astro';
+ import MovesSection from '../../components/MovesSection.astro';
+ import { api, apiPath } from '../../lib/api';
++import { MAX_TEAM, addToTeam, readTeam, removeFromTeam } from '../../lib/team';
+ import {
+   MAX_SPECIES_ID,
+   dexNumber,
+@@ -16,6 +17,16 @@ import {
+ } from '../../lib/pokedex';
+ 
+ const name = (Astro.params.name ?? '').toLowerCase();
++
++if (Astro.request.method === 'POST') {
++  const form = await Astro.request.formData();
++  const speciesName = String(form.get('species') ?? '');
++  if (form.get('action') === 'add') addToTeam(Astro.cookies, speciesName);
++  else if (form.get('action') === 'remove') removeFromTeam(Astro.cookies, speciesName);
++  return Astro.redirect(`${Astro.url.pathname}${Astro.url.search}`, 303);
++}
++
++const team = readTeam(Astro.cookies);
+ const species = await api(`pokemon-species/${encodeURIComponent(name)}`);
+ const variety = species?.varieties?.find((v: any) => v.is_default) ?? species?.varieties?.[0];
+ const [pokemon, chain, typeLabel] = species && species.id < MAX_SPECIES_ID
+@@ -51,6 +62,8 @@ const stats: { label: string; value: number }[] = (pokemon?.stats ?? []).map((s:
+ const total = stats.reduce((sum, s) => sum + s.value, 0);
+ const abilities = pokemon ? [...pokemon.abilities].sort((a: any, b: any) => a.slot - b.slot) : [];
+ const pct = (value: number, max: number) => `${Math.min(100, (value / max) * 100).toFixed(1)}%`;
++const onTeam = species ? team.includes(species.name) : false;
++const teamFull = team.length >= MAX_TEAM;
+ ---
+ 
+ {
+@@ -69,6 +82,16 @@ const pct = (value: number, max: number) => `${Math.min(100, (value / max) * 100
+         <div class="summary-info">
+           <p class="dex-number">{dexNumber(species.id)}</p>
+           <h1>{title}</h1>
++          <div class="team-actions">
++            <form method="post" action={`${Astro.url.pathname}${Astro.url.search}`}>
++              <input type="hidden" name="action" value={onTeam ? 'remove' : 'add'} />
++              <input type="hidden" name="species" value={species.name} />
++              <button type="submit" disabled={!onTeam && teamFull}>
++                {onTeam ? 'Remove from team' : 'Add to team'}
++              </button>
++            </form>
++            {!onTeam && teamFull && <span class="team-full">Team is full</span>}
++          </div>
+           {genus && <p class="genus">{genus}</p>}
+           <p class="types">
+             {types.map((t: any) => (
+diff --git a/app/src/pages/team.astro b/app/src/pages/team.astro
+new file mode 100644
+index 0000000..3c6afea
+--- /dev/null
++++ b/app/src/pages/team.astro
+@@ -0,0 +1,87 @@
++---
++import Base from '../layouts/Base.astro';
++import CardList from '../components/CardList.astro';
++import Section from '../components/Section.astro';
++import { getHomeEntries, getTypes } from '../lib/pokedex';
++import { MAX_TEAM, readTeam, removeFromTeam } from '../lib/team';
++
++if (Astro.request.method === 'POST') {
++  const form = await Astro.request.formData();
++  if (form.get('action') === 'remove') removeFromTeam(Astro.cookies, String(form.get('species') ?? ''));
++  return Astro.redirect('/team', 303);
++}
++
++const team = readTeam(Astro.cookies);
++const [entries, types] = await Promise.all([getHomeEntries(), getTypes()]);
++const entriesByName = new Map(entries.map((entry) => [entry.name, entry]));
++const members = team.map((name) => entriesByName.get(name)).filter((entry) => entry !== undefined);
++const cards = members.map(({ id, name, types: memberTypes }) => ({ id, name, types: memberTypes }));
++
++type DamageRelations = {
++  double_damage_to: { name: string }[];
++  half_damage_to: { name: string }[];
++  no_damage_to: { name: string }[];
++};
++
++const multiplier = (relations: DamageRelations, defender: string) => {
++  if (relations.no_damage_to.some((type) => type.name === defender)) return 0;
++  if (relations.double_damage_to.some((type) => type.name === defender)) return 2;
++  if (relations.half_damage_to.some((type) => type.name === defender)) return 0.5;
++  return 1;
++};
++
++// One row per attacking type, in API order.
++const coverage = types.map((attacking) => {
++  let weak = 0;
++  let resistant = 0;
++  for (const member of members) {
++    const damage = member.types.reduce(
++      (product, defender) => product * multiplier(attacking.record.damage_relations as DamageRelations, defender.name),
++      1,
++    );
++    if (damage > 1) weak++;
++    else if (damage < 1) resistant++;
++  }
++  return { label: attacking.label, weak, resistant };
++});
++---
++
++<Base title="Team">
++  <h1>Team</h1>
++  <p class="count">{team.length} of {MAX_TEAM}</p>
++
++  {
++    team.length === 0 ? (
++      <div class="empty-team">
++        <p>Your team is empty</p>
++        <a href="/">Browse Pokémon</a>
++      </div>
++    ) : (
++      <>
++        <CardList cards={cards} removable />
++        <Section title="Type coverage">
++          <div class="table-scroll">
++            <table class="coverage-table">
++              <thead>
++                <tr>
++                  <th scope="col">Type</th>
++                  <th scope="col">Weak</th>
++                  <th scope="col">Resistant</th>
++                </tr>
++              </thead>
++              <tbody>
++                {coverage.map((row) => (
++                  <tr>
++                    <th scope="row">{row.label}</th>
++                    <td>{row.weak}</td>
++                    <td>{row.resistant}</td>
++                  </tr>
++                ))}
++              </tbody>
++            </table>
++          </div>
++        </Section>
++      </>
++    )
++  }
++</Base>
+diff --git a/app/src/styles/global.css b/app/src/styles/global.css
+index a6893c3..a244f4f 100644
+--- a/app/src/styles/global.css
++++ b/app/src/styles/global.css
+@@ -61,6 +61,25 @@ select:focus-visible {
+   outline-offset: 2px;
+ }
+ 
++button {
++  font: inherit;
++  color: var(--color-on-accent);
++  background: var(--color-accent);
++  border: 1px solid transparent;
++  border-radius: var(--radius-md);
++  padding: var(--space-2) var(--space-3);
++  cursor: pointer;
++}
++
++button:hover:not(:disabled) {
++  border-color: var(--color-text);
++}
++
++button:disabled {
++  opacity: 0.5;
++  cursor: default;
++}
++
+ .container {
+   width: 100%;
+   max-width: var(--content-max-width);
+@@ -292,6 +311,68 @@ select {
+   font-size: var(--text-xs);
+ }
+ 
++.card-remove {
++  position: relative;
++  z-index: 1;
++  margin-top: var(--space-2);
++}
++
++.card-remove button {
++  background: var(--color-surface);
++  color: var(--color-link);
++  border-color: var(--color-border);
++  font-size: var(--text-xs);
++  padding: var(--space-1) var(--space-2);
++}
++
++/* Team -------------------------------------------------------------------------------- */
++
++.team-actions {
++  display: flex;
++  flex-wrap: wrap;
++  align-items: center;
++  gap: var(--space-3);
++  margin-top: var(--space-2);
++}
++
++.team-full {
++  color: var(--color-text-muted);
++  font-size: var(--text-sm);
++}
++
++.empty-team {
++  display: flex;
++  flex-direction: column;
++  align-items: flex-start;
++  gap: var(--space-2);
++}
++
++.coverage-table {
++  width: 100%;
++  border-collapse: collapse;
++  font-size: var(--text-sm);
++}
++
++.coverage-table th,
++.coverage-table td {
++  padding: var(--space-2) var(--space-3);
++  border-bottom: 1px solid var(--color-border);
++  text-align: left;
++}
++
++.coverage-table thead th {
++  color: var(--color-text-muted);
++  font-weight: var(--weight-normal);
++}
++
++.coverage-table tbody th {
++  font-weight: var(--weight-normal);
++}
++
++.coverage-table td {
++  width: 25%;
++}
++
+ /* Pokémon page ------------------------------------------------------------------------ */
+ 
+ .pokemon-summary {

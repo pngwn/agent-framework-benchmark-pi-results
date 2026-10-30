@@ -1,0 +1,167 @@
+I've reviewed the app end‑to‑end and verified the framework situation: `@gracile/gracile@^0.11.0` **is** the current stable release (npm, ~April 2026), and the app's usage — `defineRoute` with `handler`/`template`/`document`, `@gracile/gracile/server-html` (Lit SSR) with `?selected` boolean bindings, `route-template-outlet`, the Hono adapter from `@gracile/gracile/hono` matching the official "Minimal server (Hono)" starter — is idiomatic for that release. Nothing in the code relies on deprecated APIs.
+
+## Scenario walkthroughs
+
+1. **Remove Abilities**: delete `app/src/routes/abilities/[name].ts`, then remove the Abilities section (`app/src/routes/pokemon/[name].ts:92-103`), the abilities mapping (`app/src/lib/data.ts:89-95`), two data helpers (`app/src/lib/data.ts:139,168-186` — one of which is already dead), and `.ability-list` CSS (`app/src/document.css:427`). Nav (`document.ts`) is clean of abilities. Four files — a handful of scattered but findable edits.
+2. **Sprite bug (Deoxys)**: all four card lists (home, moves, abilities, types) go through the single `getPokemonCard` helper (`app/src/lib/data.ts:61-73`) via `getPokemonCards` (`:75-77`). One fix covers everything — a genuinely good choke point.
+3. **Sort cards by name**: all grids render through `pokemonGrid` (`app/src/lib/components.ts:32-35`), which already receives names; a sort (plus a flag so home can keep its spec-mandated dex order) lands in 1–2 files.
+4. **Items section**: new `routes/items/[name].ts` + `getItemPageData`; can reuse `pokemonGrid`, `typePill`, `displayValue`, `dexNumber` and the `.facts-panel` CSS — but the not-found block (inlined 5× already) and the "refs → ids → sorted → cards" pipeline (hand-rolled 3× already) invite a fourth/fifth copy.
+5. **API base URL / caching rules**: only `app/src/lib/api.ts` knows them (`:1-2` base URL, `:10` cache, `:17-28` fetch+cache). Excellent seam.
+
+## Key findings driving the scores
+
+- **Latent bug in the error path**: `app/src/lib/api.ts:22` throws using `res.status`/`res.statusText` — `res` doesn't exist (it's `response`); the purpose-built `ApiError` (`:4`) is never thrown. Every non-OK response becomes a swallowed `ReferenceError`, losing the status code and making API failures misleading to debug.
+- **Duplicated alternate-form exclusion**: `app/src/routes/(home).ts:60-62` re-implements ID extraction and the `< 10000` rule inline instead of using `idFromUrl`/`isSpeciesId` (`app/src/lib/api.ts:38-45`) used everywhere else in `data.ts`.
+- **Dead + duplicated helpers**: `notFound`/`sectionHeading` (`app/src/lib/components.ts:43-51`) are exported and never used, while identical Not-found markup is inlined in `404.ts:8-13`, `pokemon/[name].ts:54-59`, `moves/[name].ts:30-36`, `abilities/[name].ts:33-39`, `types/[name].ts:29-35`. `getAbility` (`data.ts:139`) is dead.
+- **Pervasive `any`**: `api<T = any>` (`api.ts:17`), `(entry: any)` casts throughout `data.ts` and templates — refactors get no compiler support.
+
+```json
+{
+  "dimension": "editability",
+  "criteria": {
+    "removability": {
+      "score": 3,
+      "evidence": [
+        "app/src/routes/abilities/[name].ts — self-contained route file; nothing else routes to /abilities",
+        "app/src/routes/pokemon/[name].ts:92-103 — Abilities section must be stripped from the Pokémon page",
+        "app/src/lib/data.ts:139,168-186 — getAbility (dead) and getAbilityPage left behind unless hunted down",
+        "app/src/document.css:427-436 — .ability-list styles orphaned by removal",
+        "app/src/document.ts:24-27 — nav only knows Pokémon and Types, so no nav edit needed"
+      ],
+      "rationale": "Deleting the route directory is trivial, but the feature leaks into the Pokémon page template, two data helpers and one CSS block — the textbook 'handful of scattered edits', with prior dead code (getAbility, unused helpers) showing removal discipline is already leaky."
+    },
+    "changeability": {
+      "score": 3,
+      "evidence": [
+        "app/src/lib/data.ts:61-77 — getPokemonCard/getPokemonCards is the single sprite choke point feeding home (routes/(home).ts:81), moves (data.ts:154), abilities (data.ts:181) and types (data.ts:210)",
+        "app/src/routes/(home).ts:60-62 — re-implements ID regex + id<10000 rule instead of idFromUrl/isSpeciesId from app/src/lib/api.ts:38-45",
+        "app/src/lib/api.ts:22 — error path references undefined `res`; intended ApiError (api.ts:4) is never thrown, so API failures lose their status and surface as ReferenceError",
+        "app/src/routes/(home).ts:18-26 vs app/src/client/interactions.ts:11-28 — filter param names known in both server and client code",
+        "app/src/lib/components.ts:43-48 — not-found markup fix means editing 5 inlined copies (404.ts:8-13, moves/[name].ts:30-36, abilities/[name].ts:33-39, types/[name].ts:29-35, pokemon/[name].ts:54-59)"
+      ],
+      "rationale": "The highest-value fix location (card data) is genuinely one obvious place, but the alternate-form exclusion rule and not-found markup are duplicated, and the broken error path would actively mislead the first person debugging an API issue."
+    },
+    "coupling": {
+      "score": 3,
+      "evidence": [
+        "app/src/lib/api.ts:17,10 — single fetch/cache seam; base URL (:1) known nowhere else",
+        "app/src/client/interactions.ts:52-58,102-120 — client script coupled to server templates only via data-* attributes (data-filter, data-game-select, data-sortable), a clean progressive-enhancement contract",
+        "app/src/lib/data.ts:100-101 — getPokemonPageData returns raw `species`/`pokemon` API objects alongside derived views, so app/src/routes/pokemon/[name].ts:30-32 and data.ts:264,271 depend on PokeAPI's internal shape",
+        "app/src/lib/data.ts:19 et seq. — pervasive `any` (api<any>, (entry: any)) gives the compiler no role in verifying the data contracts",
+        "app/src/document.ts:11-12 — assets via new URL(..., import.meta.url) rather than the documented root-relative paths, a small deviation from Gracile convention"
+      ],
+      "rationale": "Layering is clean (routes → data.ts → api.ts; components.ts shared; one vanilla client script) and the server/client boundary is explicit, but raw API objects leak through the data layer and the `any` typing means modules trust each other blindly."
+    },
+    "abstraction_design": {
+      "score": 3,
+      "evidence": [
+        "app/src/lib/components.ts:20-40 — pokemonCard/pokemonGrid stretch across four call sites with a small {types} option rather than per-page copies",
+        "app/src/lib/components.ts:95-135 — moveTable handles the level-up/no-level variation via hasLevel, plus a generic client sorter (client/interactions.ts:102-127)",
+        "app/src/lib/data.ts:145-153,168-186,189-201 — the 'refs → dedupe ids → filter species → sort → fetch cards' pipeline is hand-rolled three times (move, ability, type) instead of extracted",
+        "app/src/lib/format.ts:1-43 — the real display-name/value variations are properly modeled as reusable helpers",
+        "app/src/lib/components.ts:43-51 — notFound/sectionHeading helpers exist for the shared patterns but went unused while the patterns were inlined"
+      ],
+      "rationale": "The primitives (cards, grids, format helpers, move tables) stretch well and an Items page would reuse them, but the most-repeated server-side pattern (building a Pokémon-card list from refs) was copy-pasted rather than abstracted, and the flag-style options only just avoid becoming a problem."
+    }
+  },
+  "overall": 3,
+  "findings": [
+    {
+      "severity": "high",
+      "location": "app/src/lib/api.ts:22",
+      "issue": "Error path references undefined `res` (should be `response`); the ApiError class at api.ts:4 is never thrown, so every non-OK API response surfaces as a swallowed ReferenceError with no status info",
+      "suggestion": "Throw `new ApiError(response.status, url)` here and use it; add a type so ApiError isn't dead code"
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/routes/(home).ts:60-62",
+      "issue": "Inline regex + magic `id < 10000` duplicates the idFromUrl/isSpeciesId helpers (app/src/lib/api.ts:38-45) used everywhere else; changing the alternate-form rule requires two synchronized edits",
+      "suggestion": "Reuse idFromUrl/isSpeciesId here, or extract a shared `speciesIdsFromRefs()` helper"
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/lib/data.ts:145-153,168-186,189-201",
+      "issue": "The 'collect refs → dedupe species ids → sort → fetch cards' pipeline is implemented three times with only minor variations (hidden flag, exclusions)",
+      "suggestion": "Extract one helper, e.g. getCardsFromRefs(refs, { hidden?: Map<number, boolean> }), so a fourth consumer (items) extends rather than copies"
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/lib/components.ts:43-51",
+      "issue": "notFound/sectionHeading are exported but never used; identical Not-found markup is inlined in five routes (404.ts:8-13, pokemon/[name].ts:54-59, moves/[name].ts:30-36, abilities/[name].ts:33-39, types/[name].ts:29-35)",
+      "suggestion": "Use the existing helpers in all routes, and share the 'Not found – Pokédex' title logic"
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/lib/data.ts:19 (and throughout)",
+      "issue": "Pervasive `any` (api<any>, (entry: any) casts in every route template) means no compiler verification of PokeAPI shapes, so edits are unguided",
+      "suggestion": "Define minimal interfaces for the API resources actually consumed (Species, Pokemon, Move, Ability, Type) and type the handlers' return values"
+    },
+    {
+      "severity": "low",
+      "location": "app/src/lib/data.ts:139",
+      "issue": "getAbility is dead code — getAbilityPage (data.ts:168) fetches directly and no route calls it",
+      "suggestion": "Delete it, or make getAbilityPage use it so the fetch path is uniform"
+    },
+    {
+      "severity": "low",
+      "location": "app/src/client/interactions.ts:11-28",
+      "issue": "Filter query-param names ('q', 'type', 'generation', 'page') are duplicated between the client script and the server route ((home).ts:18-26, 41-44)",
+      "suggestion": "Emit the param names from the server template (e.g. as data attributes on the form fields, which mostly exists) or a shared constants module"
+    },
+    {
+      "severity": "low",
+      "location": "app/src/lib/data.ts:100-101",
+      "issue": "Data functions return raw API objects (species, pokemon) alongside derived views, letting routes/templates (pokemon/[name].ts:30-32, data.ts:264-271) depend on PokeAPI internals",
+      "suggestion": "Return only the derived, page-shaped data; pass the raw pokemon object only where it's genuinely needed (move tables) or re-shape there too"
+    }
+  ],
+  "summary": "A cleanly layered Gracile 0.11 app whose best trait is centralization: every API fetch, cache and Pokémon card goes through one seam (api.ts, getPokemonCard), so data-source changes and the sprite bug are one-file fixes. Weighed down by copy-paste where it matters most (alternate-form exclusion, the card-list pipeline, five inlined Not-found blocks), pervasive `any`, and a genuine latent bug in the API error path that throws an undefined `res` reference instead of the never-used ApiError. Solid, maintainable-average: easy to fix forward, but the first refactor should consolidate the duplicated patterns before an Items section copies them again.",
+  "scenarios": [
+    {
+      "change": "Remove the Abilities pages and all links to them",
+      "files": [
+        "app/src/routes/abilities/[name].ts",
+        "app/src/routes/pokemon/[name].ts",
+        "app/src/lib/data.ts",
+        "app/src/document.css"
+      ],
+      "difficulty": 3,
+      "notes": "Route deletion is clean, but the Abilities section on the Pokémon page, two data helpers (one already dead) and .ability-list CSS must be hunted down separately; grep finds them all"
+    },
+    {
+      "change": "Fix the sprite shown for species whose default Pokémon has a different name (e.g. Deoxys)",
+      "files": [
+        "app/src/lib/data.ts"
+      ],
+      "difficulty": 5,
+      "notes": "getPokemonCard (data.ts:61-73) is the single helper behind every card list on home, move, ability and type pages — one fix covers all of them"
+    },
+    {
+      "change": "Add sorting by name to every list of Pokémon cards",
+      "files": [
+        "app/src/lib/components.ts",
+        "app/src/routes/(home).ts"
+      ],
+      "difficulty": 4,
+      "notes": "All grids render through pokemonGrid (components.ts:32-35), so the sort lives there; home needs a small opt-out since spec mandates dex order — a flag-creep risk but contained"
+    },
+    {
+      "change": "Add an Items section (/items, /items/:name) shaped like Moves",
+      "files": [
+        "app/src/routes/items/[name].ts",
+        "app/src/lib/data.ts"
+      ],
+      "difficulty": 3,
+      "notes": "Reuses document wrapper, pokemonGrid, typePill, displayValue and the facts-panel CSS, but the not-found block (already inlined 5×) and the ids→cards pipeline (already copied 3×) would be copied again unless refactored first"
+    },
+    {
+      "change": "Change the API base URL and caching rules",
+      "files": [
+        "app/src/lib/api.ts"
+      ],
+      "difficulty": 5,
+      "notes": "API_BASE/API_ROOT (api.ts:1-2) and the promise cache (api.ts:10, 17-28) are known to exactly one module; all data functions and even absolute URLs from the API go through resolveApiUrl"
+    }
+  ]
+}
+```

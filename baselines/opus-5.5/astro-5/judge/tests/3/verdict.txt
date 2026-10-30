@@ -1,0 +1,175 @@
+I've reviewed the app thoroughly. There are no tests in `app/` — no test script in `package.json`, no test runner dependency, no spec files anywhere in the source tree (the measured facts confirm: `testLoc: 0`, `tests.files: 0`). The acceptance suite in `tests/` is the only safety net, and once someone refactors the data layer, nothing the agent wrote will catch regressions.
+
+What I read to ground this:
+
+- `app/package.json:6-9` — only `dev`/`build`/`start` scripts; no `test`, no test-framework dependency.
+- `app/src/lib/pokedex.ts` — the whole data-transform layer (`humanize`, `latestFlavorText`, `compareMethods`, `cardsForPokemon`, `getSpeciesIndex`) is pure and unit-testable, yet untested.
+- `app/src/pages/index.astro:15-33` — URL param parsing, validation, page clamping and `pageHref` default-omission logic, all untested.
+- `app/src/pages/index.astro:82-140` — progressive-enhancement script (debounce, push/replace, race guard, popstate) is the most fragile code in the app.
+- `app/src/scripts/sortable.ts:13-20` — client-side comparator with the "missing sorts last in both directions" subtlety.
+- `app/src/lib/api.ts:31-75` — in-memory stale-while-revalidate cache; exactly the code most likely to serve stale data against the spec's live-data overlay.
+- `app/src/pages/pokemon/[name].astro:70-100` — game-select default (`highest order`), `?game=` fallback, method grouping/ordering.
+- `app/src/pages/moves/[name].astro:26-36` — effect fallback chain (`short_effect` → flavor → `—`) and alternate-form exclusion via `cardsForPokemon`.
+
+The code itself is decent quality — that's precisely why the absence of tests is a real PR-review complaint: this is a dense set of spec-mandated edge behaviours (em dashes, dex padding, missing-value sorting, URL defaults) living in untested pure functions and DOM scripts.
+
+```json
+{
+  "dimension": "tests",
+  "criteria": {
+    "coverage_of_risk": {
+      "score": 1,
+      "evidence": [
+        "app/package.json:6-9 — no test script, no test runner in devDependencies",
+        "app/src/lib/pokedex.ts:10-29 — humanize/latestFlavorText/dexNumber, the riskiest pure transforms, have zero tests",
+        "app/src/pages/index.astro:15-33 — URL state, filter validation and pagination clamping untested",
+        "app/src/scripts/sortable.ts:13-20 — client-side sort comparator with missing-values-last rule untested"
+      ],
+      "rationale": "No tests exist, so none of the high-risk logic (data transformation, URL state, pagination, sorting, the SWR cache) is covered."
+    },
+    "behaviour_not_implementation": {
+      "score": 1,
+      "evidence": [
+        "app/src — no *.test.*, *.spec.* or __tests__ files anywhere in the app"
+      ],
+      "rationale": "There are no tests at all, so the criterion cannot be satisfied."
+    },
+    "regression_power": {
+      "score": 1,
+      "evidence": [
+        "app/src/lib/pokedex.ts:145-150 — compareMethods' non-standard-method ordering would break silently if refactored",
+        "app/src/pages/index.astro:28-32 — page clamping (NaN, 0, over-range) has no guard test",
+        "app/src/lib/api.ts:31-75 — cache eviction/retry logic regresses with no signal"
+      ],
+      "rationale": "With zero tests, any behaviour can be broken without a failing test; the acceptance suite is the only net and it is not the app's."
+    },
+    "signal_to_noise": {
+      "score": 3,
+      "evidence": [
+        "app/src — no low-value or duplicate tests exist because no tests exist"
+      ],
+      "rationale": "No tests means no noise; per the scale, the no-tests case scores 3."
+    }
+  },
+  "overall": 1,
+  "findings": [
+    {
+      "severity": "high",
+      "location": "app/package.json:6-9",
+      "issue": "The app ships no test script, no runner and zero test files; every spec-mandated edge behaviour is guarded only by the acceptance suite",
+      "suggestion": "Add a lightweight runner (vitest with the Astro/environment tooling, plus a few Playwright component or e2e tests) and start with the pure transforms in src/lib"
+    },
+    {
+      "severity": "high",
+      "location": "app/src/lib/pokedex.ts:10-29",
+      "issue": "humanize, latestFlavorText (last English entry, whitespace/\\f collapse), englishName and dexNumber (4-digit padding) are untested pure functions where subtle regressions would corrupt every page",
+      "suggestion": "Unit-test each against the spec's own examples (mr-mime → 'Mr Mime', #0025, whitespace collapsing, missing English name fallback)"
+    },
+    {
+      "severity": "high",
+      "location": "app/src/pages/index.astro:15-33",
+      "issue": "URL state logic is untested: param validation against known types/generations, page clamping (NaN, 0, huge), and pageHref's rule of omitting empty/default params",
+      "suggestion": "Extract parsing/serialisation into src/lib and unit-test round-trips like '?type=fire&generation=generation-i' and '?page=abc'"
+    },
+    {
+      "severity": "high",
+      "location": "app/src/lib/api.ts:31-75",
+      "issue": "The stale-while-revalidate cache (freshness window, MAX_ENTRIES eviction, failure cleanup, refreshing-flag reset) is untested; a bug here silently serves stale data, which is exactly what the spec's live-data-overlay test guards against",
+      "suggestion": "Test cache behaviour with a fake fetch: fresh hit does not refetch, stale hit revalidates in background, failed load is not cached forever"
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/scripts/sortable.ts:13-20",
+      "issue": "Client-side sorting is untested, including the subtle rule that missing values sort last in BOTH directions (the empty-key check runs before the direction sign) and numeric-vs-text columns via data-type",
+      "suggestion": "Add a DOM-level test (vitest + jsdom or Playwright) sorting a fixture table with missing power values in both directions and asserting aria-sort toggling"
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/pages/pokemon/[name].astro:70-100",
+      "issue": "Game selection (default = highest order, invalid ?game= falls back to default) and move-table ordering (level-up by level then name, others by name, method order via compareMethods) are untested",
+      "suggestion": "Unit-test the grouping/ordering against a small fixture of version_group_details, including a Pokémon with moves in multiple version groups"
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/pages/index.astro:82-140",
+      "issue": "The progressive-enhancement script (150 ms debounce, push vs replace on search vs select, the `latest` race guard, popstate re-sync) is the most refactor-fragile code in the app and has no tests",
+      "suggestion": "Cover with a Playwright e2e: type in search, assert URL updates without page 1 reset, click Next page, use browser back, assert results re-render"
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/lib/pokedex.ts:108-125",
+      "issue": "cardsForPokemon (alternate-form exclusion via id < 10000, dedupe, dex ordering) and getSpeciesIndex's type-slot mapping are untested; a refactor here breaks every card list at once",
+      "suggestion": "Unit-test with fixtures containing an alternate form (id > 10000), a duplicate reference and out-of-order slots"
+    },
+    {
+      "severity": "low",
+      "location": "app/src/pages/moves/[name].astro:26-36",
+      "issue": "The effect fallback chain (short_effect → latest flavor text → '—') and 404 path for unknown moves are untested",
+      "suggestion": "One unit test per branch of the fallback chain using small effect_entries fixtures"
+    },
+    {
+      "severity": "low",
+      "location": "app/src/pages/pokemon/[name].astro:51-52",
+      "issue": "Not-found handling (404 status + NotFound component when species or default Pokémon is missing) is untested across all four dynamic routes",
+      "suggestion": "A single e2e sweep hitting /pokemon/missingno, /moves/none, /abilities/none and /types/none would pin the contract"
+    }
+  ],
+  "summary": "The agent wrote no tests whatsoever — not even a test script or runner scaffold — leaving every spec-mandated edge behaviour guarded only by the acceptance suite. The worst exposure is in exactly the right places for tests: pure transforms in src/lib, URL/pagination state, client-side table sorting and the in-memory SWR cache. The acceptance suite will pass today, but the first refactor of the data layer or enhancement script will be done blind.",
+  "wroteTests": false,
+  "testCount": 0,
+  "valuableTests": [],
+  "lowValueTests": [],
+  "untested": [
+    {
+      "area": "Pure data transforms (humanize, latestFlavorText, englishName, dexNumber, display) in app/src/lib/pokedex.ts",
+      "risk": "high",
+      "likelyBug": "Whitespace-collapse or English-language selection regressing (e.g. last entry in any language instead of last English), dex padding off by one digit, humanized names losing capitalization — would corrupt every page's headings and labels"
+    },
+    {
+      "area": "Species index construction: type-slot mapping and generation assignment in getSpeciesIndex (app/src/lib/pokedex.ts:57-105)",
+      "risk": "high",
+      "likelyBug": "Type slots ordered wrong or missing after a refactor, breaking the home page's per-card types and the Type filter; generation tag silently dropped so the Generation filter returns nothing"
+    },
+    {
+      "area": "URL query state and pagination on the home page (app/src/pages/index.astro:15-33)",
+      "risk": "high",
+      "likelyBug": "Invalid page param producing NaN slices or empty results, default params leaking into URLs (?page=1), or filter changes forgetting to reset to page 1"
+    },
+    {
+      "area": "In-memory stale-while-revalidate cache and concurrency semaphore in app/src/lib/api.ts",
+      "risk": "high",
+      "likelyBug": "Stale entries served indefinitely after a failed revalidation, or eviction dropping the wrong entries — the app showing outdated data against the spec's live-data overlay, or a deadlock in withSlot under load"
+    },
+    {
+      "area": "Client-side table sorting in app/src/scripts/sortable.ts",
+      "risk": "high",
+      "likelyBug": "Missing values sorting first in one direction, numeric columns compared as strings (10 before 9), or aria-sort left stale on sibling headers — all invisible to server-side assertions"
+    },
+    {
+      "area": "Progressive enhancement on the home page: debounce, push/replace, race guard, popstate sync (app/src/pages/index.astro:82-140)",
+      "risk": "medium",
+      "likelyBug": "Out-of-order fetch responses clobbering newer results, back button rendering a stale view, or search keystrokes pushing a history entry per character"
+    },
+    {
+      "area": "Game selection and move-table construction on the Pokémon page (app/src/pages/pokemon/[name].astro:70-100)",
+      "risk": "medium",
+      "likelyBug": "Default game no longer the highest-order version group, invalid ?game= crashing instead of falling back, or level-up tables not sorted by level"
+    },
+    {
+      "area": "Method ordering compareMethods and alternate-form exclusion cardsForPokemon (app/src/lib/pokedex.ts:108-150)",
+      "risk": "medium",
+      "likelyBug": "Non-standard learn methods (e.g. 'form-change') ordering wrongly or alternate forms (id > 10000) reappearing in Learned by / ability / type lists"
+    },
+    {
+      "area": "Not-found paths and HTTP 404 status across /pokemon, /moves, /abilities and /types",
+      "risk": "medium",
+      "likelyBug": "A refactor dropping the Astro.response.status = 404 or the NotFound branch, so unknown names render an empty success page instead"
+    },
+    {
+      "area": "Effect fallback chain on move pages (short_effect → flavor text → em dash)",
+      "risk": "low",
+      "likelyBug": "A move with no English short_effect showing an empty section instead of falling back, or 'undefined' leaking into the DOM"
+    }
+  ]
+}
+```

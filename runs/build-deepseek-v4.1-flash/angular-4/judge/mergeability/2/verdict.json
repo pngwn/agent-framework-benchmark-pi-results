@@ -1,0 +1,124 @@
+{
+  "dimension": "mergeability",
+  "criteria": {
+    "idiomatic": {
+      "score": 3,
+      "evidence": [
+        "app/src/app/pages/pokemon-page.ts:200-308 — hand-rolled route-param data loading (paramMap.pipe(switchMap) chains + toSignal) where Angular v22's now-stable resource()/httpResource and withComponentInputBinding are the recommended primitives",
+        "app/src/app/core/api.service.ts:12 — @Injectable({providedIn:'root'}) instead of Angular v22's @Service() (official migration exists: ng generate @angular/core:service)",
+        "app/src/app/app.routes.ts:9-17 — all six routes eagerly imported; the framework's lazy-route migration (loadComponent) is recommended",
+        "app/src/app/pages/pokemon-page.html:1 — loading/error state encoded as undefined-vs-null signal sentinels in templates instead of resource status signals",
+        "app/src/app/core/catalog.service.ts:26-48 — RxJS shareReplay/combineLatest/forkJoin catalog pipeline instead of signal-based computed/resource state",
+        "app/src/app/app.config.ts:5-9 — provideBrowserGlobalErrorListeners, provideRouter, standalone OnPush throughout: recognisably current Angular"
+      ],
+      "rationale": "Standalone OnPush components, signal inputs, control-flow syntax, toSignal and inject() are all current and correct, but route-param fetching, async loading and per-page titles are built on pre-resource RxJS patterns that the v22 docs and official skill now steer away from — several framework features exist for exactly this code."
+    },
+    "correctness_risks": {
+      "score": 3,
+      "evidence": [
+        "app/src/app/pages/pokemon-page.ts:205 — shareReplay({bufferSize:1, refCount:false}) on component-scoped, route-derived streams (also lines 212, 249, 304): with refCount:false the source subscription is never torn down when PokemonPage is destroyed, so each visit retains its pipeline and cached result",
+        "app/src/app/core/api.service.ts:35 — catchError(() => of(null)) conflates 404 with network/server errors, so a down API renders 'Not found' instead of an error state",
+        "app/src/app/pages/pokemon-page.ts:372-379 — plain effect doing DOM scroll work with a bare setTimeout (no cleanup, re-fires on every tables change); docs recommend afterRenderEffect for post-render DOM manipulation",
+        "app/src/app/shared/pokemon-card.ts:36-45 — manual .subscribe() in the image-error handler with no takeUntilDestroyed; touches a possibly-detached img and never handles the error callback",
+        "app/src/app/pages/home-page.ts:52-57 — every keystroke triggers a router.navigate (replaceUrl) with no debounce; spec-allowed but adds history churn"
+      ],
+      "rationale": "No races found — switchMap is used consistently, fan-out is bounded and cached, 404 pages handled — but the leaked component-scoped subscriptions and the swallow-all error mapping are real fragility the acceptance tests won't catch."
+    },
+    "global_abstractions": {
+      "score": 4,
+      "evidence": [
+        "app/src/app/core/api.service.ts:18-30 — single small fetch+cache service with a clear contract (get/optional/mediaUrl/spriteFor/getAll)",
+        "app/src/app/core/catalog.service.ts:39-137 — CatalogService is a purposeful derived-catalog module, not a god 'utils' layer; pages consume it narrowly",
+        "app/src/app/core/api.service.ts:6-16 — API base URL hidden in a window.__POKEDEX_API_BASE_URL__ global, coupled to a string replace of </head> in app/server.mjs:16-19; config should flow through an InjectionToken/APP_INITIALIZER instead of a bare global",
+        "app/src/app/pages/move-page.ts:42, ability-page.ts:37, type-page.ts:42 — identical speciesById computed Map rebuilt in three components, duplicating what catalog.service.ts:119 already builds"
+      ],
+      "rationale": "The two core abstractions (ApiService, CatalogService) earn their keep with clean boundaries, but runtime config via a window global (server/client coupling) and the triplicated species-id map are the kind of cross-cutting seams a reviewer would ask to close before merge."
+    },
+    "readability": {
+      "score": 4,
+      "evidence": [
+        "app/src/app/core/format.ts:5-16 — small, pure, well-named helpers with doc comments (humanize, padDex, latestEnglishFlavor)",
+        "app/src/app/pages/pokemon-page.html:1 — 'species() === undefined || (species() && pokemon() === undefined)' sentinel dance is the hardest-to-read line in the app and is repeated in variants across move-page.html:1, ability-page.html:1, type-page.html:1",
+        "app/src/app/pages/home-page.ts:53 — 'params as unknown as Map<string, string>' cast where ParamMap already has .get()",
+        "app/src/app/pages/pokemon-page.ts:385-388 — dexNumber() re-implements padDex from format.ts:18 inline",
+        "app/src/app/pages/pokemon-page.html:119 — '@for (row of table.rows; track $index)' on a table whose rows re-sort on click; docs advise against index tracking for reordering lists",
+        "app/README.md:1-4 — untouched CLI boilerplate; nothing documents server.mjs, API_BASE_URL or the runtime-config contract"
+      ],
+      "rationale": "Consistent core/pages/shared layout, accurate naming, small functions and readable templates mean a new teammate finds their way quickly; rough spots are the tri-state loading sentinels, a few casts/duplicated helpers and a stock README."
+    },
+    "review_cost": {
+      "score": 3,
+      "evidence": [
+        "app/tsconfig.json:9-17 — strict mode not enabled; every Angular CLI app ships with strict:true since v14, so reviewers must ask why it's off",
+        "app/src — zero *.spec.ts files while package.json declares 'ng test' and vitest+jsdom are installed devDependencies (app/package.json:11,32,33)",
+        "app/package.json:10 — @angular/forms in dependencies but never imported anywhere in src",
+        "app/src/app/pages/pokemon-page.ts:205-304 — the leak/dedup/error-handling round: refCount flag, error conflation and the three duplicated speciesById maps would each be requested changes"
+      ],
+      "rationale": "Functionally it would ship, but I would not approve as-is: enable strict TypeScript, fix the subscription leak and error conflation, dedupe the species maps, drop the dead dependency, and either add unit tests or remove the test scaffolding — that's a genuine round of changes, not nits."
+    }
+  },
+  "overall": 3,
+  "findings": [
+    {
+      "severity": "medium",
+      "location": "app/src/app/pages/pokemon-page.ts:205",
+      "issue": "shareReplay({bufferSize:1, refCount:false}) on component-scoped streams derived from route.paramMap (also lines 212, 249, 304): after PokemonPage is destroyed the source subscriptions are never torn down, retaining the fetch pipeline and cached responses on every visit.",
+      "suggestion": "Drop shareReplay from component-scoped streams (toSignal already shares per subscription) or use refCount:true; keep refCount:false only for the intentional root-level caches in ApiService/CatalogService."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/app/core/api.service.ts:35",
+      "issue": "optional() maps every error — network failures, 500s, timeouts — to null, so a broken API renders 'Not found' pages indistinguishable from genuinely missing resources.",
+      "suggestion": "Catch only 404 (check HttpErrorResponse.status) and propagate other errors to a distinct error/loading state in the pages."
+    },
+    {
+      "severity": "medium",
+      "location": "app/tsconfig.json:9",
+      "issue": "TypeScript strict mode is disabled in a fresh Angular v22 app where strict is the CLI default; the hand-typed models and casts make this riskier.",
+      "suggestion": "Enable strict (and strictTemplates) and fix the resulting diagnostics, or document why it was turned off."
+    },
+    {
+      "severity": "medium",
+      "location": "app/package.json:11",
+      "issue": "No unit tests at all (0 *.spec.ts in src) while the project configures 'ng test' and installs vitest and jsdom.",
+      "suggestion": "Add Vitest specs for the pure logic with real payoff (format.ts helpers, home-page filtering/pagination, buildTables/sorting) — or remove the unused test scaffolding so it doesn't imply coverage that doesn't exist."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/app/pages/pokemon-page.ts:372",
+      "issue": "DOM scroll is done in a plain effect via setTimeout with no cleanup and a typeof window guard, and re-fires every time the moves tables change.",
+      "suggestion": "Use afterRenderEffect with a viewChild reference for post-render DOM work, and clear the timer in onCleanup."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/app/shared/pokemon-card.ts:36",
+      "issue": "The sprite-fallback handler subscribes manually to api.get with no takeUntilDestroyed, no error callback, and a mutable triedFallback flag.",
+      "suggestion": "Wrap in takeUntilDestroyed(this.destroyRef) (or toSignal) and handle the failure case; derive the flag from a signal if inputs can change."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/app/pages/move-page.ts:42",
+      "issue": "The speciesById Map-building computed is duplicated verbatim in ability-page.ts:37 and type-page.ts:42, and duplicates what CatalogService already builds in catalog$.",
+      "suggestion": "Expose a single speciesById signal/observable from CatalogService and inject it in all three pages."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/app/core/api.service.ts:6",
+      "issue": "Runtime API config travels through a window.__POKEDEX_API_BASE_URL__ global that server.mjs:16 injects by string-replacing '</head>' in the built index.html — a fragile server/client seam.",
+      "suggestion": "Have the server emit the value into a data attribute or meta tag and read it via an InjectionToken factory (or APP_INITIALIZER) so the contract is typed and discoverable."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/app/app.routes.ts:9",
+      "issue": "All six route components are eagerly imported; route params are read manually via paramMap instead of withComponentInputBinding, and async reactivity uses RxJS chains rather than the now-stable resource()/httpResource.",
+      "suggestion": "Use loadComponent per route, provideRouter(routes, withComponentInputBinding()) with input.required<string>() for :name, and resource/httpResource for the per-page fetches — this also deletes the undefined/null sentinel loading logic in the templates."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/app/pages/pokemon-page.html:119",
+      "issue": "Moves table rows are tracked with track $index while clicking headers re-sorts the same rows, causing avoidable DOM mutation on every sort.",
+      "suggestion": "Track by a stable row key such as row.moveName."
+    }
+  ],
+  "summary": "A well-structured, accessible Pokédex that passes its acceptance tests with clean core/pages/shared separation, OnPush standalone components and consistent naming. The main merge blockers are previous-generation data loading (RxJS chains plus sentinel-based loading instead of v22's resource/httpResource and input binding), a subscription leak on route-scoped shareReplay streams, error handling that conflates API failures with 404s, and no strict TypeScript or unit tests. I'd ask for one round of changes before approving."
+}

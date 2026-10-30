@@ -1,0 +1,112 @@
+{
+  "dimension": "mergeability",
+  "criteria": {
+    "idiomatic": {
+      "score": 4,
+      "evidence": [
+        "app/server.mjs:49-93 — idiomatic Hono: app.get with :name params, c.req.query/param/header, c.html responses",
+        "app/server.mjs:136-141 — app.notFound/app.onError exactly as current docs prescribe",
+        "app/src/views.mjs:110-114 — idiomatic htmx: hx-get/hx-trigger 'input changed delay:300ms, change', hx-target, hx-swap; 'changed' on a form-level trigger is correct in htmx≥1.9.4 semantics (checks event target, PR #1571)",
+        "app/server.mjs:56-63 — partial-vs-full rendering negotiated via HX-Request/HX-Target with HX-Push-Url header, the canonical htmx server pattern",
+        "app/server.mjs:27-47 — hand-rolled in-memory static serving (readPublicFile + c.body) instead of serveStatic from @hono/node-server/serve-static, which ships and is actively patched in the pinned v2.1.5",
+        "app/package.json:9-13 — deps are current stable: hono 4.13.14, @hono/node-server 2.1.5, htmx 2.0.11"
+      ],
+      "rationale": "Routing, handlers, error hooks and the htmx integration all match current framework docs; the only real deviation is replacing serveStatic with a home-grown file reader. Hand-rolled template-literal HTML instead of hono/jsx is a defensible choice for htmx, consistently escaped."
+    },
+    "correctness_risks": {
+      "score": 3,
+      "evidence": [
+        "app/src/api.mjs:181-186 — getVersionGroup caches the promise from apiGet; on rejection it is cached forever (contrast memoize at api.mjs:85 which resets on error), so one transient API error poisons a version group for the process lifetime",
+        "app/server.mjs:138-141 — onError returns the 'Not found' page with status 500; misleading for full loads, and for htmx partials a 5xx is never swapped (htmx default responseHandling), so the request silently does nothing with no user feedback",
+        "app/src/views.mjs:114 — 'input changed delay:300ms, change': a <select> change fires both input (debounced) and change (immediate), issuing two identical requests where one would do",
+        "app/server.mjs:55-63 — out-of-range ?page= is clamped server-side but the URL keeps the bad page; the pushed canonical URL only appears on htmx partials",
+        "app/src/render.mjs:3-9,75-77 — no unescaped HTML found: escapeHtml used on all text/attribute interpolation and encodeURIComponent on path params"
+      ],
+      "rationale": "No serious bugs and careful escaping throughout, but several minor fragilities: a sticky failure cache, a 500 rendered as 'Not found' with no htmx-visible error path, and redundant/duplicate request paths the acceptance tests (which use fill/change events) wouldn't surface."
+    },
+    "global_abstractions": {
+      "score": 3,
+      "evidence": [
+        "app/src/views.mjs:596-613 — dead code: renderMovePageByName/renderAbilityPageByName/renderTypePageByName duplicate the fetch+render logic server.mjs:81-93 already does inline; nothing imports them",
+        "app/src/views.mjs:37,534 — getHomeData and getPokemonPageData (data orchestration) live in 'views.mjs' while move/ability/type pages fetch in server.mjs:81-93; the controller boundary is split across two files and views.mjs is a 620-line god module",
+        "app/src/api.mjs:133, app/src/views.mjs:143,257 — the alternate-form ID threshold 10000 is repeated as a magic number in three places with no named constant",
+        "app/public/htmx.min.js committed, scripts/build.mjs:14 re-copies it, server.mjs:34-35 falls back to require.resolve at boot — three overlapping mechanisms for one asset",
+        "app/src/api.mjs:5-6,85 — module-level caches/pending map and memoize live in the data layer where they belong, with clear in-flight dedup"
+      ],
+      "rationale": "The three-module structure (api/render/views) is proportionate and the data layer has clean boundaries, but the dead duplicated loaders, the split controller responsibility, and repeated magic thresholds will need untangling as the app grows."
+    },
+    "readability": {
+      "score": 4,
+      "evidence": [
+        "app/src/api.mjs:10-26 — small, well-named helpers (humanize, formatDex, formatValue, englishName) reused everywhere instead of inline duplication",
+        "app/src/render.mjs:20-92 — layout, typeBadge, pokemonCard, section are small and composable; escapeHtml-first template style is consistent across all files",
+        "app/src/views.mjs:300-343 — sorting logic (sortRows, valueIsMissing, defaultCompare) reads clearly and handles missing-values-last per spec",
+        "app/src/views.mjs:114 — the HX-Target string coupling between markup ('pokemon-results'/'moves') and server.mjs:56,118 is implicit and undocumented; zero comment lines in the whole app",
+        "app/src/api.mjs:133 — the 10000 alternate-form rule is a bare comparison with no explanation of the domain convention"
+      ],
+      "rationale": "A new teammate would find their way quickly: consistent naming, short pure functions, obvious file roles. The rough spots are the total absence of comments on the two genuinely non-obvious conventions (alternate-form IDs, htmx target coupling) and the size of views.mjs."
+    },
+    "review_cost": {
+      "score": 4,
+      "evidence": [
+        "app/src/views.mjs:596-613 — delete dead loaders (small, mechanical)",
+        "app/server.mjs:138-141 — one-line fix to render a real error page instead of 'Not found' on 500",
+        "app/server.mjs:27-47 — swap hand-rolled statics for serveStatic (mechanical)",
+        "app/src/api.mjs:181-186 — evict rejected promise on error to match the memoize pattern (mechanical)"
+      ],
+      "rationale": "Approve with nits: everything a reviewer would ask for is mechanical cleanup — dead code, error-page content, static middleware, a named constant. No structural rework required."
+    }
+  },
+  "overall": 4,
+  "findings": [
+    {
+      "severity": "medium",
+      "location": "app/src/api.mjs:181",
+      "issue": "getVersionGroup caches rejected promises forever; unlike memoize (api.mjs:85) and fetchJson (api.mjs:48) it never evicts on failure, so one transient API error permanently breaks that version group's moves tables until restart.",
+      "suggestion": "On rejection, delete the cache entry before rethrowing, mirroring the existing memoize/fetchJson pattern."
+    },
+    {
+      "severity": "medium",
+      "location": "app/server.mjs:138",
+      "issue": "app.onError returns the 'Not found' page with a 500 status — semantically wrong for server errors, and because htmx never swaps 4xx/5xx responses, a failed htmx partial (filter/search/sort) silently does nothing with no user feedback.",
+      "suggestion": "Render a distinct error page for full loads; for htmx requests consider an htmx-config responseHandling override or a lightweight error UI (e.g. htmx:responseError handler)."
+    },
+    {
+      "severity": "low",
+      "location": "app/server.mjs:27",
+      "issue": "Static assets are hand-served by reading files into memory at boot with custom routes, reimplementing what @hono/node-server/serve-static provides (and which received security fixes in the pinned v2.1.3/v2.1.5, indicating active maintenance).",
+      "suggestion": "Use `serveStatic({ root: './public/' })` from @hono/node-server/serve-static, or keep the in-memory choice but document why it's deliberate."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/views.mjs:596",
+      "issue": "renderMovePageByName/renderAbilityPageByName/renderTypePageByName (views.mjs:596-613) are dead code that duplicates the fetch logic server.mjs:81-93 performs inline; they will drift from the live paths.",
+      "suggestion": "Delete them, or go the other way and route all pages through them so the controller layer lives in one place."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/views.mjs:37",
+      "issue": "Data orchestration is split between views.mjs (getHomeData at :37, getPokemonPageData at :534) and server.mjs route handlers (:81-93, :95-104), blurring the view/controller boundary and pushing views.mjs past 600 lines.",
+      "suggestion": "Move all per-route data loading into one place (either controller modules or the router) and keep views.mjs pure rendering."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/views.mjs:143",
+      "issue": "The alternate-form cutoff (ID > 10000) appears as a bare magic number in three places (api.mjs:133, views.mjs:143, views.mjs:257) with no comment explaining the convention.",
+      "suggestion": "Extract a named constant/hasOwnProperty predicate (e.g. isDefaultForm(id)) in api.mjs and reuse it, with one line explaining the >10000 rule."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/views.mjs:112",
+      "issue": "URL pushing is done twice for the same interaction: hx-push-url=\"true\" on the form/select (views.mjs:112, 491) and HX-Push-Url response headers (server.mjs:62, 126); also selects fire both the debounced 'input' and immediate 'change' triggers, issuing duplicate identical requests.",
+      "suggestion": "Pick one push mechanism (the header, since it canonicalizes page/game params), and drop 'input' from the trigger since change covers selects."
+    },
+    {
+      "severity": "low",
+      "location": "app/public/htmx.min.js",
+      "issue": "The htmx bundle is both committed to the repo and copied by the build script (scripts/build.mjs:14), with a third runtime fallback to require.resolve (server.mjs:34-35) — three overlapping mechanisms for one 51KB asset.",
+      "suggestion": "Commit it and drop the build copy, or build-copy it and gitignore it; keep the runtime fallback only if boot-time resilience is a goal."
+    }
+  ],
+  "summary": "This is a well-built, current-generation Hono + htmx app: idiomatic routing and partial-response negotiation, careful consistent escaping, a clean data layer with memoized loaders, and up-to-date dependencies. The issues a reviewer would raise are mechanical rather than structural: a sticky failure cache in getVersionGroup, a 500 rendered as 'Not found', dead duplicated loaders, and a blurred view/controller boundary. I'd approve after one small cleanup round."
+}

@@ -1,0 +1,115 @@
+{
+  "dimension": "mergeability",
+  "criteria": {
+    "idiomatic": {
+      "score": 5,
+      "evidence": [
+        "app/package.json:11 — `tsc --noEmit && vite build`, the official vanilla-ts template build script",
+        "app/package.json:6 — vite ^8.3.5 / typescript ^7.0.2, both current stable releases (Vite 8 GA 2026-03; TS 7 GA 2026-07)",
+        "app/tsconfig.json:10-11 — strict, moduleResolution bundler, vite/client types",
+        "app/src/main.ts:13-21,71-87 — routing on the History/popstate API with modifier-key-aware link interception, the right primitive for vanilla",
+        "app/src/dom.ts:5-27 — tiny hyperscript helper over document.createElement, no framework features re-implemented",
+        "app/index.html:6 + app/server.mjs:27 — runtime config injected at request time rather than build-time env"
+      ],
+      "rationale": "Reads like the vanilla-ts Vite template plus clean hand-rolled DOM code: no framework primitives are being fought, and the toolchain pins are the current stable releases."
+    },
+    "correctness_risks": {
+      "score": 4,
+      "evidence": [
+        "app/src/pages/home.ts:109-120 — debounce timer not cancelled on teardown; after SPA navigation it fires apply(), which calls updateUrl (nav.ts:4) and replaceState's the URL of the page the user just navigated to",
+        "app/src/api.ts:107-108 — in-memory cache grows unboundedly for the page lifetime (all 1025 species + their moves reachable by browsing)",
+        "app/src/main.ts:47 — decodeURIComponent can throw URIError on malformed sequences (/pokemon/%%), rendering 'Something went wrong' instead of 'Not found'",
+        "app/src/main.ts:40,60 — render token correctly discards stale async renders",
+        "app/src/pages/pokemon.ts:306-312 — token guard on the async moves-table rebuild prevents out-of-order UI updates",
+        "app/src/api.ts:121-122 — rejected fetch promises are evicted from the cache so a transient failure isn't cached forever",
+        "app/src/pages/pokemon.ts:32 — evolution chain fetch failure degrades to a single-species chain instead of an error page"
+      ],
+      "rationale": "Race handling, 404s and error paths are done noticeably well; the one real bug (the home-page debounce timer mutating history after navigation) is real but narrow, plus a couple of theoretical edges."
+    },
+    "global_abstractions": {
+      "score": 4,
+      "evidence": [
+        "app/src/api.ts:141-232 — mixes HTTP client, text helpers and domain aggregates in one module, but bounded (~230 lines) with clear section comments",
+        "app/server.mjs:31 — ROUTES regexes duplicate app/src/main.ts:13-21; a new route must be added in two files",
+        "app/src/api.ts:185 — 'stellar/unknown/shadow' exclusion list duplicated in app/src/pages/types.ts:29",
+        "app/src/dom.ts:39-46 — section() helper gives all pages the same aria-labelledby landmark pattern, a well-earned shared abstraction",
+        "app/src/api.ts:211-232 — toSpeciesCards() is the single home for the alternate-form/dedup rule, reused by move, ability and type pages"
+      ],
+      "rationale": "Abstractions are few and mostly earn their keep; the two duplicated lists (server/client routes, excluded types) and the slightly multi-purpose api.ts are the only things a maintainer would later untangle."
+    },
+    "readability": {
+      "score": 5,
+      "evidence": [
+        "app/src/main.ts:13-21 — routing is a declarative table; a new teammate adds a page in one obvious place",
+        "app/src/api.ts:1-2,110,152,211-215 — comments explain *why* (caching policy, ID>10000 alternate-form rule)",
+        "app/src/pages/home.ts:96-107 — filtering intent (name / type / generation) reads as one boolean expression",
+        "app/src/pages/pokemon.ts:169-186 — COLUMNS table makes the moves-table schema self-describing",
+        "app/src/pages/types.ts:19-26 — RELATIONS table maps spec terms to API keys verbatim",
+        "file layout — api/dom/components/nav/pages split is consistent across every page module"
+      ],
+      "rationale": "Small files, consistent conventions, names that mirror the spec's vocabulary, and why-comments where they matter; a new teammate finds their way in minutes."
+    },
+    "review_cost": {
+      "score": 4,
+      "evidence": [
+        "app/src/pages/home.ts:109-120 — one real fix to request (cancel the debounce on teardown)",
+        "app/server.mjs:31 — ask to share the route list with main.ts",
+        "app/src/api.ts:185 — ask to hoist the excluded-types constant",
+        "app/src/main.ts:60-63 — error path already distinguishes NotFound from genuine failures, so no review round needed there"
+      ],
+      "rationale": "Approve after one small round: the debounce/history fix plus deduplicating the two shared lists; nothing structural needs rework."
+    }
+  },
+  "overall": 4,
+  "findings": [
+    {
+      "severity": "medium",
+      "location": "app/src/pages/home.ts:109",
+      "issue": "The search debounce timer isn't cancelled when the page is navigated away from; if the user types and clicks a card within 150 ms, apply() fires afterwards and history.replaceState rewrites the URL of the newly-navigated page to '/?q=…' (via nav.ts:4 and api-free module state).",
+      "suggestion": "Cancel the timer on teardown — e.g. check `results.isConnected` in apply() and bail, or clear the timeout when the rendered page is replaced."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/api.ts:107",
+      "issue": "The in-memory cache is unbounded for the page lifetime; browsing many Pokémon/moves pages can accumulate a very large heap (the full dataset is ~1,025 species + ~900 moves plus per-Pokémon payloads).",
+      "suggestion": "Acceptable per spec ('caching API responses in memory at runtime is fine'), but consider a size-capped LRU so a long session can't balloon."
+    },
+    {
+      "severity": "low",
+      "location": "app/server.mjs:31",
+      "issue": "ROUTES duplicates the client route regexes in app/src/main.ts:13; adding a route requires touching both, and they can drift.",
+      "suggestion": "Generate both from one shared module (e.g. export the route patterns from a file the server imports), or have the server always fall back to 200/index.html and let the client render Not found."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/api.ts:185",
+      "issue": "The excluded-types list ('stellar', 'unknown', 'shadow') is duplicated in app/src/pages/types.ts:29.",
+      "suggestion": "Export a single EXCLUDED_TYPES constant from api.ts and use it in both places."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/main.ts:47",
+      "issue": "decodeURIComponent throws URIError for malformed percent-sequences in a route param, so '/pokemon/%%' shows the 'Something went wrong' page instead of 'Not found'.",
+      "suggestion": "Wrap the decode in a try/catch that falls through to notFound()."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/pages/pokemon.ts:286",
+      "issue": "Selecting a version group fans out one fetch per move entry (hundreds of parallel requests for the newer game groups); works, but is the heaviest thing the app does and relies entirely on browser connection limits and the cache.",
+      "suggestion": "Fine as-is given the cache dedupes; if the API ever rate-limits, batch or cap the concurrency."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/pages/home.ts:96",
+      "issue": "An out-of-range ?page= is clamped for display (page = Math.min(filters.page, totalPages)) but the stale page number stays in the URL, so the URL and the rendered 'Page n of m' disagree.",
+      "suggestion": "Replace the URL with the clamped page when filters.page > totalPages."
+    },
+    {
+      "severity": "low",
+      "location": "app/package.json",
+      "issue": "No lint/format config and no unit tests in app/ — the pure helpers (humanize, latestFlavorText, compareValues, idFromUrl, toSpeciesCards' dedup/alternate-form logic) are exactly the kind of thing that regresses silently, and the external acceptance tests don't pin them.",
+      "suggestion": "Not blocking: add a minimal test runner for the api.ts/dom.ts helpers plus ESLint when the team adopts the repo."
+    }
+  ],
+  "summary": "A clean, current-toolchain vanilla TS + Vite app that leans on native DOM/History primitives the way the framework intends, with unusually careful race and error handling (render tokens, cache rejection eviction, 404-to-Not-found mapping) for its size. Structure is easy to own, with only minor duplication between server and client route lists. The one fix I'd require before merging is cancelling the home page's debounce timer on navigation so it can't rewrite history after the page is gone; everything else is nits."
+}

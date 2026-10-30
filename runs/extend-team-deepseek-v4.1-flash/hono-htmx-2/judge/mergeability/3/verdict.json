@@ -1,0 +1,112 @@
+{
+  "dimension": "mergeability",
+  "criteria": {
+    "idiomatic": {
+      "score": 4,
+      "evidence": [
+        "app/src/views/layout.tsx:3-8 — ContextRenderer augmentation with a title prop, exactly the jsxRenderer pattern from the docs",
+        "app/src/index.tsx:20-28 — isPartial() distinguishes HX-Request from HX-History-Restore-Request and sets a correct Vary header; a subtle htmx/Hono integration done right",
+        "app/src/index.tsx:7 — serveStatic({ root: './dist' }) is CWD-relative, the exact pattern the Node adapter docs warn against (they recommend fileURLToPath(new URL('./', import.meta.url)))",
+        "app/package.json:12-14 — hono 4.13.14 / @hono/node-server 2.1.5 / htmx.org 2.0.11, all current stable lines (htmx 2.x remains npm latest even after the 4.0 release)",
+        "app/src/api.ts:1-48 — hand-rolled SWR fetch cache instead of a framework primitive; reasonable, but it's the one non-framework data layer"
+      ],
+      "rationale": "Reads like the framework's own examples: jsxRenderer layout, per-page loaders next to per-page views, htmx directives for exactly the interactive parts. The only doc-violating spot is the CWD-relative serveStatic root."
+    },
+    "correctness_risks": {
+      "score": 3,
+      "evidence": [
+        "app/src/api.ts:15 — fetch with no AbortSignal/timeout; a hung API call blocks the first render of that key forever (entry.pending dedupes, app/src/api.ts:29-32)",
+        "app/src/api.ts:9,37-40 — cache Map has no eviction and every unique /pokemon/:name miss (untrusted input) inserts a permanent entry keyed by user-supplied path; a slow unbounded memory leak under fuzzing",
+        "app/src/views/home.tsx:38-40 — page is silently clamped to totalPages but the URL keeps the bogus ?page= value; no redirect/canonicalization",
+        "app/src/views/pokemon.tsx:84-85 — invalid ?game falls back to the default silently; spec-consistent but the URL and page disagree",
+        "app/src/index.tsx:107-112 — /team/remove validates the `next` redirect against a strict whitelist — good defense against open redirect",
+        "app/src/index.tsx:96-99 — add-to-team revalidates capacity and duplicates server-side despite the disabled button — good"
+      ],
+      "rationale": "No serious bugs and the risky inputs (cookies, redirects, sort params) are validated; but no fetch timeout plus an unbounded cache keyed partly by request input are real fragility a reviewer should ask to fix."
+    },
+    "global_abstractions": {
+      "score": 4,
+      "evidence": [
+        "app/src/api.ts — a single, documented caching client with clear boundaries (api/apiUrl/apiList/idFromUrl); no other module reaches for fetch directly",
+        "app/src/data.ts — cohesive domain layer (names, types, generations, cards) used by all views; it's the closest thing to a god module but every function is Pokémon-domain-specific",
+        "app/src/views/components.tsx — small shared presentational pieces (Section, CardList, Count) reused without becoming a junk drawer",
+        "app/src/team.ts vs app/src/views/team.tsx — same module name in adjacent directories; imports of './team' from views/pokemon.tsx:9 resolve to the view, easy to trip on"
+      ],
+      "rationale": "Abstractions are few and earn their keep: one API client, one data layer, one components file. The only structural nit is the duplicated 'team' module name and the hidden global cache in api.ts (at least it's commented and single-purpose)."
+    },
+    "readability": {
+      "score": 4,
+      "evidence": [
+        "app/src/index.tsx — routes read top-to-bottom as a table of pages; loader/view pairs keep handlers thin",
+        "app/src/api.ts:2, app/src/team.ts:11, app/src/data.ts:70 — comments explain why (SWR policy, cookie shape, the <10000 alternate-form rule), not what",
+        "app/src/views/pokemon.tsx:130-260 — PokemonPage is the biggest component (~130 lines) but is sectioned and flat",
+        "app/src/views/home.tsx:95-142 — hx-get/hx-include/hx-sync repeated nearly identically on the form and all three filter controls; the repetition hides the actual wiring",
+        "app/src/api.ts:35, app/src/data.ts:57, app/src/views/pokemon.tsx:87 — pervasive `any`/casts despite strict tsconfig"
+      ],
+      "rationale": "A new teammate finds their way quickly: predictable file-per-page layout, honest names, why-comments where they matter. Rough spots are the `any` typing, the duplicated htmx attributes, and the team.ts naming collision."
+    },
+    "review_cost": {
+      "score": 3,
+      "evidence": [
+        "app/src/index.tsx:7 — one-line fix (import.meta.url root) but a correctness-critical one to require",
+        "app/src/api.ts:15-16 — needs an AbortSignal.timeout added to fetch",
+        "app/src/api.ts:37-46 — needs a size cap or a decision not to cache untrusted 404 paths",
+        "app/build.mjs:5-20 — build runs esbuild only; `tsc --noEmit` exists as a separate script and isn't wired into build/CI, so the `any`s never gate anything",
+        "app/src/views/home.tsx:140-142 — pagination links are full page loads while search/select are htmx swaps; inconsistent enough to prompt a question, not a change"
+      ],
+      "rationale": "The architecture and conventions need no rework — I'd ask for one round: the serveStatic root fix, a fetch timeout, cache bounding, and typecheck-in-build. Everything else is nits I'd wave through."
+    }
+  },
+  "overall": 4,
+  "findings": [
+    {
+      "severity": "medium",
+      "location": "app/src/index.tsx:7",
+      "issue": "serveStatic root './dist' resolves against process.cwd(); the Hono Node adapter docs explicitly warn this breaks when the server is started from another directory, and the official Dockerfile pattern runs node with an absolute path.",
+      "suggestion": "serveStatic({ root: fileURLToPath(new URL('./', import.meta.url)) }) — but note dist/ is one level up from src/, so resolve '../dist/' relative to the source file, or serve from a root derived from package.json's location."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/api.ts:9",
+      "issue": "The in-memory cache has no eviction and every 404 from a user-controlled path (/pokemon/:name, /moves/:name, …) stores a permanent Map entry keyed by untrusted input, so unique junk names grow memory without bound.",
+      "suggestion": "Cap the Map (simple LRU) or don't cache negative results for keys derived from request parameters."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/api.ts:15",
+      "issue": "fetch() has no AbortSignal/timeout; a hung API call blocks the first request for that key indefinitely, and entry.pending dedupes all concurrent requests onto the stuck promise.",
+      "suggestion": "Pass AbortSignal.timeout(5000) to fetch and let the rejection clear entry.pending (it already does via .finally)."
+    },
+    {
+      "severity": "low",
+      "location": "app/build.mjs:5",
+      "issue": "The production build only bundles with esbuild; `npm run typecheck` (tsc --noEmit) exists but nothing runs it, so the pervasive `any` (api.ts:35, data.ts:57, pokemon.tsx:87) never gates a build despite strict tsconfig.",
+      "suggestion": "Chain `tsc --noEmit && node build.mjs` in the build script, and type the API responses at the boundary (api<T>) instead of defaulting to any."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/views/home.tsx:100-128",
+      "issue": "hx-get/hx-include/hx-sync/hx-target are repeated nearly identically on the form and on each of the three filter controls; the wiring is duplicated and the form's own hx-get is redundant with the input's.",
+      "suggestion": "Hoist hx-get/hx-target/hx-swap/hx-sync to the form element once and let the controls only declare their trigger (hx-trigger), or use hx-include on the form alone."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/team.ts:1",
+      "issue": "Module name collision: src/team.ts (data/cookie logic) and src/views/team.tsx (views) — imports of './team' in index.tsx:5-9 refer to both, easy to mix up during review and refactors.",
+      "suggestion": "Rename src/team.ts to something like src/team-store.ts or src/team-data.ts."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/views/home.tsx:40",
+      "issue": "An out-of-range ?page is silently clamped for rendering while the URL keeps the bogus value; the fragment's pushed URL (index.tsx:31) can therefore disagree with what's displayed.",
+      "suggestion": "Redirect (or issue a canonical URL with the clamped page) when query.page exceeds totalPages."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/index.tsx:128-131",
+      "issue": "/team/remove filters the cookie team by the lowercased body name; if the cookie ever held mixed-case names the comparison would silently miss, and the route also does no 303-vs-cookie-consistency check on the /team page path.",
+      "suggestion": "Lowercase the team once at load (teamFromCookie) so all comparisons share one canonical form."
+    }
+  ],
+  "summary": "This is a clean, idiomatic Hono + htmx app I'd merge after one round of fixes: the jsxRenderer/htmx integration (Vary, HX-Push-Url, history-restore handling) is done more carefully than most production code, and the loader-per-view structure is easy to own. The blocking asks are small but real: the CWD-relative serveStatic root the docs warn about, an unbounded cache with no fetch timeout, and a typecheck that never runs in the build. Everything else is naming and repetition nits."
+}

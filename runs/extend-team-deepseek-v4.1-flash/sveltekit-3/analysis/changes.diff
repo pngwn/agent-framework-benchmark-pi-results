@@ -1,0 +1,487 @@
+diff --git a/app/src/lib/server/pokedex.ts b/app/src/lib/server/pokedex.ts
+index ac5cdbd..196a64f 100644
+--- a/app/src/lib/server/pokedex.ts
++++ b/app/src/lib/server/pokedex.ts
+@@ -92,6 +92,21 @@ const list = (resource: string) => getOrThrow<List>(`${resource}/?limit=100000&o
+ 
+ // --- Shared indexes -----------------------------------------------------------------------
+ 
++/** Default Pokémon ID (= species ID) → its types in slot order. */
++function typeSlotsById(types: ApiType[]): Map<number, { slot: number; type: TypeRef }[]> {
++	const slots = new Map<number, { slot: number; type: TypeRef }[]>();
++	for (const type of types) {
++		const ref = { name: type.name, label: englishName(type) };
++		for (const { slot, pokemon } of type.pokemon) {
++			const id = idFromUrl(pokemon.url);
++			if (!slots.has(id)) slots.set(id, []);
++			slots.get(id)!.push({ slot, type: ref });
++		}
++	}
++	for (const entries of slots.values()) entries.sort((a, b) => a.slot - b.slot);
++	return slots;
++}
++
+ /** Every species, ordered by dex number. */
+ export async function getSpecies(): Promise<{ id: number; name: string }[]> {
+ 	const { results } = await list('pokemon-species');
+@@ -150,26 +165,18 @@ export const PAGE_SIZE = 48;
+ export async function getPokemonList(filters: { q: string; type: string; generation: string; page: number }) {
+ 	const [species, types, generations] = await Promise.all([getSpecies(), getTypes(), getGenerations()]);
+ 
+-	// Default Pokémon ID (= species ID) → types in slot order.
+-	const typesById = new Map<number, { slot: number; type: TypeRef }[]>();
+-	for (const type of types) {
+-		const ref = { name: type.name, label: englishName(type) };
+-		for (const { slot, pokemon } of type.pokemon) {
+-			const id = idFromUrl(pokemon.url);
+-			if (!typesById.has(id)) typesById.set(id, []);
+-			typesById.get(id)!.push({ slot, type: ref });
+-		}
+-	}
++	const typesById = typeSlotsById(types);
+ 
+ 	const generation = generations.find((g) => g.name === filters.generation);
+ 	const generationIds = generation && new Set(generation.pokemon_species.map((s) => idFromUrl(s.url)));
+ 	const query = filters.q.trim().toLowerCase();
+ 
+ 	const matches = species
+-		.map((s) => {
+-			const slots = (typesById.get(s.id) ?? []).sort((a, b) => a.slot - b.slot);
+-			return { ...s, label: humanize(s.name), types: slots.map((t) => t.type) };
+-		})
++		.map((s) => ({
++			...s,
++			label: humanize(s.name),
++			types: (typesById.get(s.id) ?? []).map((t) => t.type)
++		}))
+ 		.filter(
+ 			(s) =>
+ 				(!query || s.label.toLowerCase().includes(query)) &&
+@@ -343,6 +350,56 @@ export async function getAbilityPage(name: string) {
+ 	};
+ }
+ 
++// --- Team ---------------------------------------------------------------------------------
++
++export type CoverageRow = { name: string; label: string; weak: number; resistant: number };
++
++export async function getTeamPage(team: string[]) {
++	const [species, types] = await Promise.all([getSpecies(), getTypes()]);
++	const speciesByName = new Map(species.map((s) => [s.name, s]));
++	const slots = typeSlotsById(types);
++
++	const members: Card[] = [];
++	for (const name of team) {
++		const member = speciesByName.get(name);
++		if (!member) continue;
++		members.push({
++			id: member.id,
++			name: member.name,
++			sprite: spriteUrl(member.id),
++			types: (slots.get(member.id) ?? []).map((entry) => entry.type)
++		});
++	}
++
++	// Treat each type as the attacking type and multiply its effectiveness against every
++	// type of every member's default Pokémon.
++	const coverage: CoverageRow[] = types.map((attacking) => {
++		const double = new Set(attacking.damage_relations.double_damage_to?.map((type) => type.name) ?? []);
++		const half = new Set(attacking.damage_relations.half_damage_to?.map((type) => type.name) ?? []);
++		const none = new Set(attacking.damage_relations.no_damage_to?.map((type) => type.name) ?? []);
++
++		let weak = 0;
++		let resistant = 0;
++		for (const member of members) {
++			let multiplier = 1;
++			for (const type of member.types ?? []) {
++				if (none.has(type.name)) {
++					multiplier = 0;
++					break;
++				}
++				if (half.has(type.name)) multiplier *= 0.5;
++				else if (double.has(type.name)) multiplier *= 2;
++			}
++			if (multiplier > 1) weak++;
++			else if (multiplier < 1) resistant++;
++		}
++
++		return { name: attacking.name, label: englishName(attacking), weak, resistant };
++	});
++
++	return { members, coverage };
++}
++
+ // --- Type pages ---------------------------------------------------------------------------
+ 
+ const RELATIONS = [
+diff --git a/app/src/lib/team.ts b/app/src/lib/team.ts
+new file mode 100644
+index 0000000..fe3244d
+--- /dev/null
++++ b/app/src/lib/team.ts
+@@ -0,0 +1,61 @@
++// The team is browser-owned state. It is stored in a cookie rather than localStorage so
++// the server can render the right label on the first response (no flash of the wrong
++// button after hydration), and it is small enough that the cookie size is a non-issue.
++
++export const TEAM_COOKIE = 'team';
++export const MAX_TEAM_SIZE = 6;
++const ONE_YEAR_SECONDS = 60 * 60 * 24 * 365;
++
++/** Turns a cookie value into a usable team: string names, no empty values or duplicates. */
++export function parseTeamCookie(value: string | undefined | null): string[] {
++	if (!value) return [];
++
++	const candidates = [value];
++	try {
++		candidates.push(decodeURIComponent(value));
++	} catch {
++		// Not percent-encoded; the raw value is still worth trying.
++	}
++
++	for (const candidate of candidates) {
++		try {
++			const parsed: unknown = JSON.parse(candidate);
++			if (!Array.isArray(parsed)) continue;
++			const names = parsed
++				.filter((name): name is string => typeof name === 'string')
++				.map((name) => name.trim().toLowerCase())
++				.filter(Boolean);
++			return [...new Set(names)].slice(0, MAX_TEAM_SIZE);
++		} catch {
++			// Try the next representation.
++		}
++	}
++
++	// Also tolerate the older/simpler comma-separated form.
++	return [
++		...new Set(
++			value
++				.split(',')
++				.map((name) => name.trim().toLowerCase())
++				.filter(Boolean)
++		)
++	].slice(0, MAX_TEAM_SIZE);
++}
++
++/** Persists the team in the browser. The cookie is readable by the SSR load functions. */
++export function writeTeamCookie(team: string[]): void {
++	document.cookie = `${TEAM_COOKIE}=${encodeURIComponent(JSON.stringify(team.slice(0, MAX_TEAM_SIZE)))}; Path=/; Max-Age=${ONE_YEAR_SECONDS}; SameSite=Lax`;
++}
++
++export function addTeamMember(team: string[], name: string): string[] {
++	const next = [...team];
++	if (!next.includes(name) && next.length < MAX_TEAM_SIZE) next.push(name);
++	writeTeamCookie(next);
++	return next;
++}
++
++export function removeTeamMember(team: string[], name: string): string[] {
++	const next = team.filter((member) => member !== name);
++	writeTeamCookie(next);
++	return next;
++}
+diff --git a/app/src/routes/+layout.server.ts b/app/src/routes/+layout.server.ts
+new file mode 100644
+index 0000000..142614e
+--- /dev/null
++++ b/app/src/routes/+layout.server.ts
+@@ -0,0 +1,6 @@
++import { parseTeamCookie, TEAM_COOKIE } from '#lib/team.ts';
++import type { LayoutServerLoad } from './$types';
++
++export const load: LayoutServerLoad = async ({ cookies }) => ({
++	team: parseTeamCookie(cookies.get(TEAM_COOKIE))
++});
+diff --git a/app/src/routes/+layout.svelte b/app/src/routes/+layout.svelte
+index 1f1d005..a6620a7 100644
+--- a/app/src/routes/+layout.svelte
++++ b/app/src/routes/+layout.svelte
+@@ -18,6 +18,7 @@
+ 			<ul>
+ 				<li><a href="/">Pokémon</a></li>
+ 				<li><a href="/types">Types</a></li>
++				<li><a href="/team">Team</a></li>
+ 			</ul>
+ 		</nav>
+ 	</div>
+diff --git a/app/src/routes/pokemon/[name]/+page.svelte b/app/src/routes/pokemon/[name]/+page.svelte
+index 2815388..a1da244 100644
+--- a/app/src/routes/pokemon/[name]/+page.svelte
++++ b/app/src/routes/pokemon/[name]/+page.svelte
+@@ -1,11 +1,12 @@
+ <script lang="ts">
+-	import { goto } from '$app/navigation';
++	import { goto, invalidateAll } from '$app/navigation';
+ 	import { page } from '$app/state';
+ 	import Section from '#lib/components/Section.svelte';
+ 	import TypeBadge from '#lib/components/TypeBadge.svelte';
+ 	import Evolution from '#lib/components/Evolution.svelte';
+ 	import MoveTable from '#lib/components/MoveTable.svelte';
+ 	import { dexNumber, humanize, pageTitle } from '#lib/format.ts';
++	import { addTeamMember, MAX_TEAM_SIZE, removeTeamMember } from '#lib/team.ts';
+ 	import type { PageProps } from './$types';
+ 
+ 	let { data }: PageProps = $props();
+@@ -14,6 +15,22 @@
+ 	const total = $derived(pokemon.stats.reduce((sum, s) => sum + s.value, 0));
+ 	const MAX_STAT = 255;
+ 
++	const inTeam = $derived(data.team.includes(pokemon.name));
++	const teamFull = $derived(data.team.length >= MAX_TEAM_SIZE);
++	let changingTeam = $state(false);
++
++	async function toggleTeam() {
++		if (changingTeam) return;
++		changingTeam = true;
++		try {
++			if (inTeam) removeTeamMember(data.team, pokemon.name);
++			else addTeamMember(data.team, pokemon.name);
++			await invalidateAll();
++		} finally {
++			changingTeam = false;
++		}
++	}
++
+ 	function selectGame(game: string) {
+ 		const url = new URL(page.url.href);
+ 		url.searchParams.set('game', game);
+@@ -59,6 +76,15 @@
+ 	</div>
+ </div>
+ 
++<div class="team-action">
++	<button type="button" onclick={toggleTeam} disabled={changingTeam || (!inTeam && teamFull)}>
++		{inTeam ? 'Remove from team' : 'Add to team'}
++	</button>
++	{#if !inTeam && teamFull}
++		<span class="team-full">Team is full</span>
++	{/if}
++</div>
++
+ <div class="stack">
+ 	<Section title="Base stats" id="stats">
+ 		<table class="stats">
+@@ -197,6 +223,37 @@
+ 		margin-top: var(--space-4);
+ 	}
+ 
++	.team-action {
++		display: flex;
++		align-items: center;
++		gap: var(--space-3);
++		margin-bottom: var(--space-5);
++	}
++
++	.team-action button {
++		min-height: 2.5rem;
++		padding: 0 var(--space-4);
++		background: var(--color-surface);
++		color: var(--color-link);
++		border: 1px solid var(--color-border);
++		border-radius: var(--radius-md);
++		cursor: pointer;
++	}
++
++	.team-action button:hover {
++		border-color: var(--color-link);
++	}
++
++	.team-action button:disabled {
++		color: var(--color-text-muted);
++		cursor: default;
++	}
++
++	.team-full {
++		color: var(--color-text-muted);
++		font-size: var(--text-sm);
++	}
++
+ 	.stats {
+ 		width: 100%;
+ 		border-collapse: collapse;
+diff --git a/app/src/routes/team/+page.server.ts b/app/src/routes/team/+page.server.ts
+new file mode 100644
+index 0000000..9823e8b
+--- /dev/null
++++ b/app/src/routes/team/+page.server.ts
+@@ -0,0 +1,7 @@
++import { getTeamPage } from '#lib/server/pokedex.ts';
++import type { PageServerLoad } from './$types';
++
++export const load: PageServerLoad = async ({ parent }) => {
++	const { team } = await parent();
++	return getTeamPage(team);
++};
+diff --git a/app/src/routes/team/+page.svelte b/app/src/routes/team/+page.svelte
+new file mode 100644
+index 0000000..eb41051
+--- /dev/null
++++ b/app/src/routes/team/+page.svelte
+@@ -0,0 +1,166 @@
++<script lang="ts">
++	import { invalidateAll } from '$app/navigation';
++	import PokemonCard from '#lib/components/PokemonCard.svelte';
++	import Section from '#lib/components/Section.svelte';
++	import { humanize, pageTitle } from '#lib/format.ts';
++	import { MAX_TEAM_SIZE, removeTeamMember } from '#lib/team.ts';
++	import type { PageProps } from './$types';
++
++	let { data }: PageProps = $props();
++
++	const members = $derived(data.members);
++	const count = $derived(members.length);
++	let removing = $state<string | null>(null);
++
++	async function remove(name: string) {
++		if (removing) return;
++		removing = name;
++		try {
++			removeTeamMember(data.team, name);
++			await invalidateAll();
++		} finally {
++			removing = null;
++		}
++	}
++</script>
++
++<svelte:head>
++	<title>{pageTitle('Team')}</title>
++</svelte:head>
++
++<h1 class="page-heading">Team</h1>
++
++<p class="muted count">{count} of {MAX_TEAM_SIZE}</p>
++
++{#if count === 0}
++	<div class="empty">
++		<p>Your team is empty</p>
++		<p><a href="/">Browse Pokémon</a></p>
++	</div>
++{:else}
++	<ul class="team">
++		{#each members as member (member.name)}
++			<li>
++				<PokemonCard card={member} showTypes />
++				<button
++					type="button"
++					onclick={() => remove(member.name)}
++					disabled={removing === member.name}
++				>
++					Remove {humanize(member.name)}
++				</button>
++			</li>
++		{/each}
++	</ul>
++
++	<Section title="Type coverage">
++		<div class="coverage">
++			<table>
++				<thead>
++					<tr>
++						<th scope="col">Type</th>
++						<th scope="col">Weak</th>
++						<th scope="col">Resistant</th>
++					</tr>
++				</thead>
++				<tbody>
++					{#each data.coverage as row (row.name)}
++						<tr>
++							<th scope="row">{row.label}</th>
++							<td>{row.weak}</td>
++							<td>{row.resistant}</td>
++						</tr>
++					{/each}
++				</tbody>
++			</table>
++		</div>
++	</Section>
++{/if}
++
++<style>
++	.count {
++		margin-bottom: var(--space-4);
++	}
++
++	.empty {
++		display: flex;
++		flex-direction: column;
++		gap: var(--space-2);
++		padding: var(--space-6) var(--space-4);
++		background: var(--color-surface);
++		border: 1px solid var(--color-border);
++		border-radius: var(--radius-md);
++		text-align: center;
++		color: var(--color-text-muted);
++	}
++
++	.empty a {
++		color: var(--color-link);
++	}
++
++	.team {
++		display: grid;
++		grid-template-columns: repeat(auto-fill, minmax(var(--card-min-width), 1fr));
++		gap: var(--space-3);
++		margin: 0 0 var(--space-5);
++		padding: 0;
++		list-style: none;
++	}
++
++	.team li {
++		display: flex;
++		flex-direction: column;
++		gap: var(--space-2);
++	}
++	.team button {
++		width: 100%;
++		min-height: 2.5rem;
++		padding: 0 var(--space-3);
++		background: var(--color-surface);
++		color: var(--color-link);
++		border: 1px solid var(--color-border);
++		border-radius: var(--radius-md);
++		cursor: pointer;
++	}
++
++	.team button:hover {
++		border-color: var(--color-link);
++	}
++
++	.team button:disabled {
++		color: var(--color-text-muted);
++		cursor: default;
++	}
++
++	.coverage {
++		overflow-x: auto;
++	}
++
++	table {
++		width: 100%;
++		border-collapse: collapse;
++		font-size: var(--text-sm);
++	}
++
++	th,
++	td {
++		padding: var(--space-2) var(--space-3);
++		border-bottom: 1px solid var(--color-border);
++		text-align: left;
++	}
++
++	thead th {
++		color: var(--color-text-muted);
++		font-weight: var(--weight-normal);
++	}
++
++	tbody th {
++		font-weight: var(--weight-normal);
++	}
++
++	th:not(:first-child),
++	td {
++		width: 8rem;
++		text-align: right;
++	}
++</style>

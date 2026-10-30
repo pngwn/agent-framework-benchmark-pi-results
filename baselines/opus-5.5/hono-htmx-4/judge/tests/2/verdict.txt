@@ -1,0 +1,154 @@
+The app contains no tests of its own: `app/package.json` has only `build`, `start` and `typecheck` scripts (no `test`, no runner devDependency), and the only JavaScript in `app/public/` is the hand-rolled table sorter. Static facts confirm: 0 test files, 0 cases, 0 assertions. All quality therefore rests on the acceptance suite, which exercises rendered pages end-to-end but leaves the pure logic — the parts most tempting to refactor — completely unguarded.
+
+What's untested, and what bugs that invites:
+
+- **`app/src/pages/home.tsx:62-79`** — `loadResults` does substring search, type/generation filtering, `Math.ceil` pagination and `slice((page-1)*48, page*48)` paging. An off-by-one in the slice, a flipped filter predicate, or page clamping (`Math.min(query.page, pages)`) breaking would slip through any data-layer refactor; the acceptance tests only pin a handful of filter combinations.
+- **`app/src/pages/home.tsx:26-43`** — `parseHomeQuery`/`homeUrl` are pure functions encoding the whole URL-state contract (omit empty/default params, `page>1` only, garbage `page=abc` → 1). Trivially unit-testable, currently guarded by nothing; a regression here silently breaks deep links and history.
+- **`app/src/api.ts:44-89`** — the stale-while-revalidate cache and `withSlot` semaphore are concurrency code: pending-promise dedup, error-path `pending` cleanup, LRU eviction via `cache.delete(cache.keys().next().value!)`. These are exactly the bugs (dropped wake-ups, double fetches, unhandled rejections crashing the server) that only deterministic tests catch.
+- **`app/src/api.ts:220-235`** — `speciesForPokemon` implements alternate-form exclusion (`id > 10000`), dedupe, and "first reference wins" for `extra`; the hidden-ability flag (`details.tsx:45-52`) is lost if the duplicate ordering assumption ever breaks.
+- **`app/src/index.tsx:56-66, 70-79`** — the htmx contract: `isHtmx` header sniffing, `HX-Push-Url` with a *clamped* page, `Vary: HX-Request`, and the `/pokemon/:name/moves` partial endpoint. No test asserts that a filter change returns a fragment vs. a full document or updates the address bar; a route refactor could return a fragment into a full page with no failing test until a human notices.
+- **`app/public/app.js:1-31`** — client-side sorting: missing-values-last in both directions, `aria-sort` flipping, event delegation surviving htmx swaps. The "missing last when descending" behavior is a classic regression spot (`cmp * sign` alone would put missing first on the second click).
+- **`app/src/pages/pokemon.tsx:143-176`** — moves-table assembly: method grouping, `(name, level)` dedupe, method ordering (`METHOD_ORDER` rank then `localeCompare`), default sort by level-then-name. Complex, spec-heavy, untested.
+
+On the positive side, the code is structured *for* testability: pure helpers (`humanize`, `latestEnglishFlavor`, `dexNumber`, `dash`, `docTitle`) are exported from `app/src/api.ts:132-158` and `app/src/components.tsx:35-90`, and page data loading is separated from JSX. Writing tests would have been cheap; the agent chose not to, and the cost lands on whoever refactors `api.ts` next.
+
+```json
+{
+  "dimension": "tests",
+  "criteria": {
+    "coverage_of_risk": {
+      "score": 1,
+      "evidence": [
+        "app/package.json:6-10 — no test script, no test runner dependency at all",
+        "app/src/pages/home.tsx:62-79 — filtering, pagination and page-clamping logic has no test",
+        "app/src/api.ts:44-89 — stale-while-revalidate cache and concurrency semaphore untested",
+        "app/public/app.js:1-31 — hand-written client-side sort with no test"
+      ],
+      "rationale": "No tests exist in app/, so none of the risky logic — URL state, filter/slice pagination, caching, sorting — is covered. The riskiest code is pure and trivially testable, making the gap worse, not better."
+    },
+    "behaviour_not_implementation": {
+      "score": 1,
+      "evidence": [
+        "app/src/pages/home.tsx:26-43 — parseHomeQuery/homeUrl behaviour (deep-link URL canonicalisation) asserted by nothing",
+        "app/src/api.ts:132-158 — exported pure helpers (humanize, latestEnglishFlavor, dexNumber) never exercised by any assertion"
+      ],
+      "rationale": "No tests at all, so there is no behavioural coverage; per the anchor this scores 1."
+    },
+    "regression_power": {
+      "score": 1,
+      "evidence": [
+        "app/src/pages/home.tsx:62-79 — breaking the filter predicate or the 48-per-page slice fails no test in app/",
+        "app/src/index.tsx:56-66 — htmx partial/full-document distinction and HX-Push-Url regressions would pass unnoticed",
+        "app/src/api.ts:220-235 — alternate-form exclusion (id > 10000) and dedupe logic unprotected against refactor"
+      ],
+      "rationale": "With zero tests, any behaviour regression passes; the acceptance suite is the only guard and it samples a narrow set of URLs, so data-layer bugs (page boundaries, cache errors, sort order) slip straight through."
+    },
+    "signal_to_noise": {
+      "score": 3,
+      "evidence": [
+        "app/src — no test files exist, so no noise either",
+        "app/package.json:6-10 — only build/start/typecheck scripts defined"
+      ],
+      "rationale": "No tests means no padding, which per the anchor scores 3 — but the absence of any signal is captured in the other criteria."
+    }
+  },
+  "overall": 1,
+  "findings": [
+    {
+      "severity": "high",
+      "location": "app/package.json:6-10",
+      "issue": "The app ships no test script, no runner, and zero tests, despite ~590 lines of source heavy in data transformation",
+      "suggestion": "Add a lightweight runner (e.g. node:test or vitest) with unit tests for the pure helpers and data loaders; wire a `test` script into package.json"
+    },
+    {
+      "severity": "high",
+      "location": "app/src/pages/home.tsx:62-79",
+      "issue": "loadResults (search, type/generation filter, 48-per-page slice, page clamping) is the highest-risk logic in the app and is untested",
+      "suggestion": "Table-driven unit tests over fixture DexEntry arrays: boundary pages (0/47/48/49 matches), page beyond total, filter combinations"
+    },
+    {
+      "severity": "high",
+      "location": "app/src/pages/home.tsx:26-43",
+      "issue": "parseHomeQuery/homeUrl implement the URL-state contract with no tests; garbage or default params silently regressing would break deep links and the address bar",
+      "suggestion": "Property-style round-trip tests: parse(homeUrl(q)) === canonical q, plus edge inputs page=abc, page=0, page=-1, empty q"
+    },
+    {
+      "severity": "high",
+      "location": "app/src/api.ts:44-89",
+      "issue": "Stale-while-revalidate cache plus concurrency semaphore is subtle async code (pending dedupe, error cleanup, LRU eviction) with no deterministic test",
+      "suggestion": "Unit tests with a stubbed fetch and fake timers covering: stale-entry background refresh, error during refresh, concurrent get() dedupe, eviction at MAX_ENTRIES"
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/index.tsx:56-66",
+      "issue": "htmx contract (isHtmx sniffing, HX-Push-Url with clamped page, Vary: HX-Request) untested; a refactor could serve a fragment as a full document or push a non-canonical URL",
+      "suggestion": "Route-level tests using app.request() asserting status, HX-Push-Url header and fragment-vs-document body for HX-Request: true/false"
+    },
+    {
+      "severity": "medium",
+      "location": "app/public/app.js:1-31",
+      "issue": "Client-side sort's missing-values-last-in-both-directions rule and aria-sort toggling have no coverage; `cmp * sign` alone would flip missing rows to first on descending",
+      "suggestion": "DOM-level tests (happy-dom or Playwright component test) for ascending/descending/missing-value ordering"
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/pages/pokemon.tsx:143-176",
+      "issue": "Moves-table grouping, (name, level) dedupe, method ordering and default sort are spec-critical and untested",
+      "suggestion": "Unit tests over fixture pokemon.moves covering method order (level-up/machine/egg/tutor then alphabetical), dedupe, and level-then-name sort"
+    },
+    {
+      "severity": "low",
+      "location": "app/src/api.ts:220-235",
+      "issue": "speciesForPokemon's alternate-form exclusion and first-reference-wins `extra` (used for the hidden-ability badge) is an implicit invariant no test pins",
+      "suggestion": "Unit test with refs including an id > 10000 form and duplicate species entries asserting exclusion and which extra survives"
+    }
+  ],
+  "summary": "The app contains no tests of its own — no test script, no runner, zero assertions — leaving ~590 lines of filter/pagination, URL-state, caching and sorting logic guarded only by the external acceptance suite. Most of the risky logic is exported, pure, and trivially testable, so the omission is a choice, not a constraint. Any future refactor of app/src/api.ts or the home-page query handling would land unverified.",
+  "wroteTests": false,
+  "testCount": 0,
+  "valuableTests": [],
+  "lowValueTests": [],
+  "untested": [
+    {
+      "area": "Home filtering, search and 48-per-page pagination (app/src/pages/home.tsx:62-79)",
+      "risk": "high",
+      "likelyBug": "Off-by-one in the page slice or a flipped filter predicate, producing duplicate/missing cards at page boundaries or wrong match counts"
+    },
+    {
+      "area": "URL query parsing and canonicalisation (parseHomeQuery/homeUrl, app/src/pages/home.tsx:26-43)",
+      "risk": "high",
+      "likelyBug": "Default params no longer omitted, page=abc/0 handled differently, deep links like /?type=fire&generation=generation-i breaking"
+    },
+    {
+      "area": "In-memory stale-while-revalidate cache and fetch semaphore (app/src/api.ts:24-89)",
+      "risk": "high",
+      "likelyBug": "Unhandled rejection on failed refresh, double-fetching under concurrency, or stuck semaphore queue hanging all requests"
+    },
+    {
+      "area": "htmx partial/full response contract and address-bar push (app/src/index.tsx:50-79)",
+      "risk": "medium",
+      "likelyBug": "Fragment swapped into a full document (or vice versa), HX-Push-Url pushing an unclamped or non-canonical URL"
+    },
+    {
+      "area": "Client-side sortable tables (app/public/app.js)",
+      "risk": "medium",
+      "likelyBug": "Missing values sorting first on descending click, or aria-sort not flipping/removing correctly across tables"
+    },
+    {
+      "area": "Moves-table grouping, dedupe and ordering (app/src/pages/pokemon.tsx:143-176)",
+      "risk": "medium",
+      "likelyBug": "Method order drifting from Level Up/Machine/Egg/Tutor-then-alphabetical, duplicate rows reappearing, level sort ignored"
+    },
+    {
+      "area": "Alternate-form exclusion and hidden-ability extra propagation (app/src/api.ts:220-235, app/src/pages/details.tsx:45)",
+      "risk": "low",
+      "likelyBug": "Forms with id > 10000 leaking into lists, or the 'Hidden ability' badge lost when a species appears twice in the source data"
+    },
+    {
+      "area": "404 vs 500 and not-found paths (app/src/index.tsx:92-121)",
+      "risk": "low",
+      "likelyBug": "An API 404 being rendered as a 500 error page instead of 'Not found'"
+    }
+  ]
+}
+```

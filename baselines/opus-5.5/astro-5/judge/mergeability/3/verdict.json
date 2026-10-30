@@ -1,0 +1,127 @@
+{
+  "dimension": "mergeability",
+  "criteria": {
+    "idiomatic": {
+      "score": 4,
+      "evidence": [
+        "app/astro.config.mjs:3-4 — output: 'server' + node({ mode: 'standalone' }) on current astro 7.4.2 / @astrojs/node 11.1.9",
+        "app/astro.config.mjs:8 — session: false, the documented opt-out for apps not using sessions",
+        "app/src/components/EvolutionNode.astro:20 — recursive Astro.self for nested lists, the documented pattern",
+        "app/src/pages/pokemon/[name].astro:219 — bundled-TS progressive enhancement via event delegation instead of a framework island",
+        "app/src/lib/api.ts:5-63 — hand-rolled SWR cache + semaphore + LRU eviction where Astro 7's stable route caching (cache.provider memoryCache(), routeRules, Astro.cache) now provides SWR natively",
+        "app/src/lib/api.ts:4 — process.env.API_BASE_URL read at module scope instead of astro:env"
+      ],
+      "rationale": "Recognisably current Astro on the right primitives (server output, adapter, params/url/response.status, scoped styles, recursive components); the notable gap is that it hand-rolls in-memory SWR plumbing that Astro 7 stabilized as a first-class feature, plus a couple of config nits (unnecessary checkOrigin:false, process.env rather than astro:env)."
+    },
+    "correctness_risks": {
+      "score": 3,
+      "evidence": [
+        "app/src/lib/api.ts:29 — fetch has no timeout/AbortSignal",
+        "app/src/lib/api.ts:17 — withSlot holds one of 32 slots for the full await; a hung upstream pins all slots and queues every later request indefinitely",
+        "app/src/lib/api.ts:34 — non-OK throws and no page catches it, so any API hiccup renders Astro's default error page (no 500.astro, no retry)",
+        "app/src/lib/api.ts:51 — background revalidation failure is swallowed; the entry serves stale data forever with no logging",
+        "app/src/pages/index.astro:90,102 — stale-response race correctly guarded with a latest counter (good)",
+        "app/src/pages/moves/[name].astro:22 — Astro.response.status = 404 plus app/src/pages/404.astro for unmatched routes (good)",
+        "app/src/lib/api.ts:63 — cache bounded with insertion-order eviction (good)"
+      ],
+      "rationale": "No bugs found in the happy paths (404s, filters, sorting, missing values, dedup of alternate forms all look right), but the transport layer has no timeout, no error boundary and silent revalidation failures, and the semaphore turns a hung upstream into a whole-server hang — a few minor risks, one of them systemic."
+    },
+    "global_abstractions": {
+      "score": 4,
+      "evidence": [
+        "app/src/lib/api.ts — transport/cache concerns isolated from app/src/lib/pokedex.ts domain logic; boundaries are clean",
+        "app/src/lib/pokedex.ts:87-135 — getSpeciesIndex() loads the species list, all 18 type records and all 9 generations, and is awaited by 5 of 6 routes (app/src/pages/index.astro:8, app/src/pages/moves/[name].astro:20, app/src/pages/abilities/[name].astro:11, app/src/pages/types/[name].astro:19, app/src/pages/pokemon/[name].astro:36)",
+        "app/src/lib/pokedex.ts:53 — typeLabels() helper exists, yet app/src/pages/index.astro:26 and app/src/pages/types/[name].astro:23 rebuild the identical Map inline",
+        "app/src/pages/index.astro:102-115 vs app/src/pages/pokemon/[name].astro:223-236 — near-identical fetch/DOMParser/replaceWith enhancement logic duplicated",
+        "app/src/lib/api.ts:10 — module-level cache Map is hidden global state, but documented, bounded (5000) and appropriate for a single-process standalone server"
+      ],
+      "rationale": "The layers are few and well-bounded; the only abstraction I'd untangle later is the load-everything species index coupled into five routes (mitigated by the cache), plus three small duplications."
+    },
+    "readability": {
+      "score": 4,
+      "evidence": [
+        "app/src/lib/api.ts:59 — 'Maps iterate in insertion order, so this drops the oldest entry' and app/src/lib/pokedex.ts:78 — comments explain why, not what",
+        "app/src/pages/pokemon/[name].astro:28-137 — ~110-line frontmatter mixing five concerns (identity, stats, version groups, moves, tables)",
+        "app/src/pages/pokemon/[name].astro:38 — let page: any, with ~10 `any` casts, so template accesses like page.artwork are unchecked",
+        "app/src/styles/global.css:101,129 — .plain-list and .visually-hidden are dead CSS",
+        "app/src/components/Section.astro, TypeBadge.astro, CardGrid.astro — consistent, well-named, single-purpose components"
+      ],
+      "rationale": "A new teammate can find their way quickly: consistent per-page structure (fetch → compute → render), good names and why-comments. Rough spots are the oversized pokemon frontmatter and pervasive any."
+    },
+    "review_cost": {
+      "score": 3,
+      "evidence": [
+        "app/src/lib/api.ts:29 — I would require a fetch timeout before merge",
+        "app/src/lib/api.ts:34 — I would require an error boundary / friendly 500 page",
+        "app/astro.config.mjs:9 — checkOrigin: false should be removed; the only form is method=\"get\" (app/src/pages/index.astro:35)",
+        "app/src/pages/pokemon/[name].astro:38 + app/tsconfig.json:2 — ask for typed records and astro/tsconfigs/strict",
+        "app/src/pages/index.astro:102, app/src/pages/pokemon/[name].astro:223 — ask to extract the shared swap helper"
+      ],
+      "rationale": "More than nits: a round of changes around the transport layer (timeout, error handling) and types before approving, but no rework of structure or rendering."
+    }
+  },
+  "overall": 4,
+  "findings": [
+    {
+      "severity": "medium",
+      "location": "app/src/lib/api.ts:29",
+      "issue": "Upstream fetch has no timeout/AbortSignal, and withSlot (line 17) holds one of 32 concurrency slots for the whole await, so a hanging API server queues every subsequent request indefinitely",
+      "suggestion": "Pass AbortSignal.timeout(10_000) to fetch so a slow upstream fails fast instead of deadlocking the server"
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/lib/api.ts:34",
+      "issue": "Any non-OK API response rejects into Astro's default error page; no page has a try/catch, no retry, no custom 500 page",
+      "suggestion": "Catch transport errors in the data layer (or add src/pages/500.astro) and surface a friendly error page with a retry link"
+    },
+    {
+      "severity": "medium",
+      "location": "app/astro.config.mjs:9",
+      "issue": "security.checkOrigin: false disables Astro's default CSRF protection although the only form is method=\"get\" and never triggers it",
+      "suggestion": "Remove the security override"
+    },
+    {
+      "severity": "low",
+      "location": "app/astro.config.mjs:3",
+      "issue": "Ignores Astro 7's stable route caching (cache: { provider: memoryCache() }, routeRules, Astro.cache, added astro@7.0.0), which would give the expensive on-demand pages (1025-card home, move tables) SWR semantics natively",
+      "suggestion": "Enable memoryCache() and set routeRules for the list routes; keep the data-layer cache or fold it in"
+    },
+    {
+      "severity": "low",
+      "location": "app/src/pages/pokemon/[name].astro:38",
+      "issue": "let page: any plus ~10 any casts; the api<T> generic (app/src/lib/api.ts:40) is never used and tsconfig extends astro/tsconfigs/base, so none of the template's property accesses are checked",
+      "suggestion": "Extend astro/tsconfigs/strict and give the hot paths (species, pokemon, move) minimal typed records"
+    },
+    {
+      "severity": "low",
+      "location": "app/src/pages/index.astro:102",
+      "issue": "Fetch → DOMParser → replaceWith enhancement with a latest-counter race guard is duplicated in app/src/pages/pokemon/[name].astro:223",
+      "suggestion": "Extract a shared swapRegion(url, selector) helper into src/scripts/"
+    },
+    {
+      "severity": "low",
+      "location": "app/src/pages/index.astro:26",
+      "issue": "Rebuilds the type-name→label Map inline although lib/pokedex.ts:53 exports typeLabels() for exactly this; app/src/pages/types/[name].astro:23 does the same",
+      "suggestion": "Use (or return from getSpeciesIndex) the existing helper instead of three divergent copies"
+    },
+    {
+      "severity": "low",
+      "location": "app/src/lib/api.ts:51",
+      "issue": "Failed background revalidation is silently swallowed, leaving the entry stale forever with no observability",
+      "suggestion": "Log the failure (or surface it via Astro's logger) so a broken upstream is visible"
+    },
+    {
+      "severity": "low",
+      "location": "app/src/styles/global.css:101",
+      "issue": ".plain-list (line 101) and .visually-hidden (line 129) are unused dead CSS",
+      "suggestion": "Delete them or use them where the markup currently inlines list-style: none"
+    },
+    {
+      "severity": "low",
+      "location": "app/src/lib/pokedex.ts:14",
+      "issue": "No unit tests for the pure helpers (humanize, dexNumber, compareMethods, latestFlavorText, cardsForPokemon) that carry the spec's trickiest edge cases (whitespace collapse, method ordering, missing-value sorting in src/scripts/sortable.ts)",
+      "suggestion": "Add a lightweight runner for these pure functions so future refactors of the cache don't need the Playwright suite to catch regressions"
+    }
+  ],
+  "summary": "A careful, current-Astro implementation: right architecture for the spec, correct 404/filter/sort/missing-value behaviour, clean transport-vs-domain layering and thoughtful progressive enhancement. The merge blockers are transport robustness — no fetch timeout behind a 32-slot semaphore and no error boundary — plus pervasive any typing. One round of changes and I'd merge it."
+}

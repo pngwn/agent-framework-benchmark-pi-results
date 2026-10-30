@@ -1,0 +1,87 @@
+I've now read all of `app/` (server.mjs, lib/api.mjs, lib/format.mjs, views/layout.mjs, scripts/build.mjs, package.json), the spec, the Hono skill, and verified current releases and htmx 2.0.11 source semantics. Here's my review.
+
+## Review
+
+**Framework currency (verified).** `hono` 4.13.14 and `@hono/node-server` 2.1.5 are the exact current stable releases (published Oct 2026; Hono v5 is still RC). `htmx.org` 2.0.11 is the npm `latest` — htmx 4.0.0 exists but its maintainers deliberately keep 2.x as `latest`. So the pinned versions are current, not stale.
+
+**Idiom.** This is genuinely idiomatic Hono + htmx: `hono/html` tagged templates with automatic escaping (the `${cond ? html\` selected\` : ''}` conditional-attribute idiom at `app/server.mjs:513` is straight from the hono/html docs), `app.notFound`/`app.onError` per the Hono skill's error-handling guidance, and htmx partial responses with `HX-Push-Url` (`app/server.mjs:492`, `:582`) plus `hx-target`/`hx-swap`/`hx-sync` (`:496`) in patterns matching the htmx docs (active-search debounce via `input changed delay:` — confirmed against 2.0.11 source that `changed` tracks the event target's value, so the form-level trigger works). The main departures are organizational, not framework-fighting: three hardcoded static routes instead of one middleware, and an 810-line `server.mjs` that ignores the skill's "organize large apps by feature with `app.route()`" best practice.
+
+**Correctness.** A careful look found no XSS paths (hono/html escapes all interpolations, including attribute contexts), no missing 404 handling (NotFoundError → 404 for every named-resource route plus `app.notFound`), and the promise-based cache at `lib/api.mjs:28-34` correctly evicts on rejection, eliminating stampede/race concerns. Remaining issues are minor: the filter form double-fires on `<select>` changes (`input` + `change` triggers), the search term is matched untrimmed, `fetch` has no timeout, and move-detail loading fans out unbounded (cached afterward).
+
+**Abstractions.** `lib/api.mjs` / `lib/format.mjs` have clean, earned boundaries and the one comment in the codebase explains the cache policy. But the species→card dedupe pipeline is written three times (`speciesCardsForRefs` plus hand-rolled loops in the abilities and types routes), and the shared helper carries an unused, speculative `hiddenBySpecies` option (including a function-value branch) — classic locally-fine/globally-messy drift.
+
+```json
+{
+  "dimension": "mergeability",
+  "criteria": {
+    "idiomatic": {
+      "score": 4,
+      "evidence": [
+        "app/package.json:13-15 — pins hono 4.13.14 / @hono/node-server 2.1.5, the exact current stable releases; htmx.org 2.0.11 is npm latest",
+        "app/views/layout.mjs:5-10 — hono/html full-document tagged template with DOCTYPE, the documented pattern",
+        "app/server.mjs:513 — `${cond ? html` selected` : ''}` conditional-attribute idiom straight from the hono/html docs",
+        "app/server.mjs:801-807 — app.notFound + app.onError matching the Hono skill's error-handling guidance",
+        "app/server.mjs:492-496 — htmx partial responses with HX-Push-Url, hx-target/hx-swap/hx-sync debounce pattern matching the htmx active-search example",
+        "app/server.mjs:51-53 — three hand-enumerated serveStatic routes instead of one static middleware; skill's app.route()-by-feature organization not followed anywhere"
+      ],
+      "rationale": "Uses Hono and htmx exactly as their current docs and skills recommend, on current stable versions; the only departures are file organization and a clunky static-asset setup, not framework fighting."
+    },
+    "correctness_risks": {
+      "score": 4,
+      "evidence": [
+        "lib/api.mjs:28-34 — promise cache evicts on rejection, dedupes concurrent identical fetches: no stampede or stale-error races",
+        "app/server.mjs:572,604,652,728 — every named-resource route maps NotFoundError to a 404 page; app.notFound at :801 covers the rest",
+        "app/server.mjs:496 — `input changed delay:200ms, change` fires twice per <select> interaction (selects emit both input and change), doubling requests; hx-sync only mitigates",
+        "app/server.mjs:427-447 — q is matched untrimmed, so ' pik' fails to match 'pikachu' despite the empty-trim check",
+        "lib/api.mjs:52 — fetch without AbortSignal/timeout; a hung API call pins a never-settling cached promise for that key",
+        "app/server.mjs:152,464 — unbounded Promise.all fan-out (all moves for a game, 48 pokemon per page) with no concurrency cap; mitigated by the cache"
+      ],
+      "rationale": "No injection, 404, or race-condition defects found; the remaining items are minor fragility nits (double-trigger, untrimmed query, no fetch timeout) rather than bugs a user would hit."
+    },
+    "global_abstractions": {
+      "score": 3,
+      "evidence": [
+        "app/server.mjs:87-110 — speciesCardsForRefs with an unused hiddenBySpecies option including a typeof-function branch; sole caller at :615 passes no options",
+        "app/server.mjs:662-681 — abilities route reimplements the same dedupe→sort→card loop rather than reusing the helper",
+        "app/server.mjs:745-755 — types route reimplements it a third time",
+        "lib/api.mjs:28 — module-level hidden cache, but documented (lib/api.mjs:1-2) and bounded by the fixed dataset",
+        "app/views/layout.mjs:3 — view module imports spriteUrl/API-URL construction from the server api module, blurring the view/data boundary",
+        "app/lib/format.mjs:63 — dead capitalize export"
+      ],
+      "rationale": "The lib split is healthy, but the species-listing pipeline exists three times with divergent copies and a speculative unused option — the kind of duplication that silently diverges when one copy is fixed. The view→api import also crosses the layer boundary."
+    },
+    "readability": {
+      "score": 3,
+      "evidence": [
+        "app/server.mjs:1-810 — single 810-line file mixing routing, data shaping, and five view functions (renderMoveTable, renderMovesSection, renderMovesSection select at :310, renderPokemonPage)",
+        "app/lib/format.mjs — small, pure, well-named functions with obvious roles",
+        "app/server.mjs:114-160 — getPokemonMoveInfo is dense but logically ordered",
+        "app/server.mjs:233-243 — sortRows missing-value/tie-break rules would benefit from a why-comment; codebase has 2 comment lines total"
+      ],
+      "rationale": "Naming and function granularity are good and style is consistent, but the monolithic server file and near-zero comments on subtle logic (sorting rules, the changed-on-form trigger) mean a new teammate needs orientation."
+    },
+    "review_cost": {
+      "score": 4,
+      "evidence": [
+        "app/server.mjs:87-110 — consolidate the three species-card loops and drop the unused option",
+        "app/server.mjs:51-53 — replace three static routes with one serveStatic middleware",
+        "app/lib/format.mjs:63 — delete dead export"
+      ],
+      "rationale": "All findings are nits a reviewer would list but none block approval; no rework of architecture or behavior is required before merge."
+    }
+  },
+  "overall": 4,
+  "findings": [
+    { "severity": "medium", "location": "app/server.mjs:87-110", "issue": "Species-list dedupe→sort→card pipeline is implemented three times: speciesCardsForRefs (with a speculative, never-used hiddenBySpecies option including a function-value branch) plus hand-rolled copies in the abilities (:662-681) and types (:745-755) routes", "suggestion": "Extract one species-cards helper covering the hidden-ability case and use it in all three routes; delete the function-value branch" },
+    { "severity": "medium", "location": "app/server.mjs:421-810", "issue": "Single 810-line server.mjs interleaves route handlers with five view-render functions (renderMoveTable, renderMovesSection, renderEvolutionNode, renderPokemonPage) while shared fragments live separately in views/layout.mjs", "suggestion": "Split into route modules per feature (home, pokemon, moves, abilities, types) with per-page view modules, per the Hono skill's app.route()/organization guidance" },
+    { "severity": "low", "location": "app/server.mjs:496", "issue": "Filter form trigger `input changed delay:200ms, change` causes two requests per <select> change since selects emit both input and change events", "suggestion": "Scope the debounced input trigger to the search field (hx-on the input element) and keep change on the selects" },
+    { "severity": "low", "location": "app/lib/api.mjs:52", "issue": "fetch has no timeout or AbortSignal; a hung API request leaves a never-settling cached promise for that key", "suggestion": "Pass AbortSignal.timeout(...) to fetch and delete the cache entry on abort" },
+    { "severity": "low", "location": "app/server.mjs:427-447", "issue": "Search query is checked for trim-emptiness but matched and pushed to the URL untrimmed, so ' pik' yields 'No Pokémon found'", "suggestion": "Match against q.trim() and push the trimmed value" },
+    { "severity": "low", "location": "app/server.mjs:51-53", "issue": "Three hardcoded serveStatic routes enumerate assets by name; adding a file means adding a route", "suggestion": "Serve the public directory with one serveStatic middleware or a patterned route" },
+    { "severity": "low", "location": "app/lib/format.mjs:63", "issue": "Dead code: capitalize is exported but never imported", "suggestion": "Delete it" },
+    { "severity": "low", "location": "app/views/layout.mjs:3", "issue": "View module imports spriteUrl (API-base-URL construction) from the server data layer, coupling markup helpers to API config", "suggestion": "Pass sprite URLs in as data, or move spriteUrl into a presentation-neutral helper module" },
+    { "severity": "low", "location": "app/server.mjs:152", "issue": "getPokemonMoveInfo fires all move-detail fetches concurrently with no cap (can exceed 100 in-flight requests on first view of a game)", "suggestion": "Batch with a small concurrency limiter; results are cached so a cap costs little" }
+  ],
+  "summary": "A tidy, current-stack Hono + htmx app that uses hono/html and htmx partial/response-header patterns exactly as the docs recommend, with real 404 handling, escaping, and stampede-safe caching throughout. The main merge frictions are an 810-line monolith mixing routes and views, and a species-carding pipeline duplicated three times with speculative dead options. I'd merge after one round of consolidation nits."
+}
+```

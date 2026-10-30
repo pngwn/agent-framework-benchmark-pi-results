@@ -1,0 +1,184 @@
+{
+  "dimension": "forward-thinking",
+  "criteria": {
+    "latest_apis": {
+      "score": 4,
+      "evidence": [
+        "app/vite.config.ts:1-6 — matches the SolidStart v2 reference config exactly: vite.config.ts entrypoint, solidStart() + nitro() from 'nitro/vite'",
+        "app/package.json:9-14 — @solidjs/start 2.1.0, @solidjs/router 1.0.0, vite 8.3.5, nitro 3.0.261029-rc, solid-js 1.9.17, Node >=24: the v2 migration guide's exact install set",
+        "app/src/routes/api-proxy/[...path].ts:1,8 — APIEvent from @solidjs/start/server, the documented current API-route type in v2",
+        "app/src/app.tsx:2-7 — MetaProvider/Title from @solidjs/meta, the library the v2 docs prescribe for head management",
+        "app/src/routes/index.tsx:5,76 — createResource instead of the router's current query()+createAsync data API; no route-level `route` config/preload usage"
+      ],
+      "rationale": "Consistently on the post-training-data v2 stack (Vite Environment API, nitro/vite plugin, router 1.0, documented ssr:false SPA mode) with zero legacy APIs found; the only gap is using raw createResource plus a hand-rolled cache where the router's query()/createAsync() data API is the current primitive."
+    },
+    "platform": {
+      "score": 4,
+      "evidence": [
+        "app/src/routes/api-proxy/[...path].ts:13-19 — fetch + new Response + new Headers, no node:http or axios",
+        "app/src/routes/index.tsx:10-16,26 — URLSearchParams to build query state; spec's URL-as-state done natively",
+        "app/src/lib/api.ts:60-63 — new URL() with pathname parsing instead of regex slicing of the origin",
+        "app/src/components/PokemonCard.tsx:17-18 — loading=\"lazy\" with width/height to avoid layout shift",
+        "app/src/routes/pokemon/[name].tsx:44 — groups.at(-1) and app/src/lib/format.ts:29 padStart(4,\"0\")",
+        "app/src/routes/api-proxy/[...path].ts:17-18 — cache-control: no-store and await res.arrayBuffer() buffers every body instead of streaming res.body through"
+      ],
+      "rationale": "Platform-first in the main (fetch/Response/URL/URLSearchParams, native form controls everywhere, lazy images, no polyfills or hand-rolled substitutes), but the proxies buffer bodies and disable HTTP caching, and no AbortController exists anywhere to cancel stale in-flight requests."
+    },
+    "dependencies": {
+      "score": 5,
+      "evidence": [
+        "app/package.json:4-13 — exactly six dependencies, all framework-mandated (meta, router, start, solid-js, vite, nitro) and none optional",
+        "app/package.json:11-12 — vite and nitro as direct deps matches the official v2 install command ('npm i ... vite@8' then 'npm i nitro')",
+        "app/src/lib/data.ts:77,109 — hand-rolled Promise.all/mapPool concurrency instead of pulling a p-limit-style package",
+        "app/src/app.css:1-665 — plain CSS with tokens.css custom properties; no CSS framework or UI kit, per spec and leaner for it"
+      ],
+      "rationale": "Minimal and modern: every package is required by SolidStart v2, versions are the latest published (nitro's latest release is an RC, which the ecosystem currently forces), and no utility/state/CSS libraries were added."
+    },
+    "churn_resistance": {
+      "score": 3,
+      "evidence": [
+        "app/src/lib/data.ts:1-6,186-199 — good centralization (all API access behind one module) but PokemonPageData passes raw payloads as `any`, so views read e.g. app/src/routes/pokemon/[name].tsx:99 data().pokemon.height untyped",
+        "app/src/lib/data.ts:344 — Promise<any | null> return type collapses to `any`, so the type page has no contract at all",
+        "app/src/lib/api.ts:21-44,63-78 — TTL cache, inflight dedupe and a concurrency pool hand-roll what @solidjs/router's query() provides; adopting the router data API later means reworking this layer",
+        "app/src/lib/data.ts:4-18 — SpeciesSummary/TypeSummary interfaces are dead code, never referenced",
+        "app/src/routes/index.tsx:132 and app/src/components/PokemonCard.tsx:29 — .map() in JSX while other routes use <For>; non-keyed re-render of the 48-card grid on every keystroke",
+        "app/src/routes/pokemon/[name].tsx:73, moves/[name].tsx:15, abilities/[name].tsx:14, types/[name].tsx:24, index.tsx:76 — the same loading-fallback + <Show when={data()} fallback={<NotFound/>}> scaffold copy-pasted across all five routes"
+      ],
+      "rationale": "Data access and config are genuinely centralized (a framework upgrade would mostly touch vite.config.ts and package.json), but the typed boundary is mostly `any`, two dead interfaces and a duplicated loading scaffold exist, and the hand-rolled cache/pool layer duplicates framework machinery a future migration would touch."
+    }
+  },
+  "overall": 4,
+  "findings": [
+    {
+      "severity": "medium",
+      "location": "app/src/lib/data.ts:186-199,344",
+      "issue": "The view-model boundary is largely `any`: PokemonPageData carries raw species/pokemon/moves payloads and getTypePage returns Promise<any | null>, so API shape changes surface at runtime in components (e.g. app/src/routes/pokemon/[name].tsx:99 reads data().pokemon.height).",
+      "suggestion": "Define interfaces for the PokeAPI payloads consumed (species, pokemon, type, move, ability) and return fully typed view-models from data.ts; delete or use the unused SpeciesSummary/TypeSummary types."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/lib/api.ts:21-44,63-78",
+      "issue": "A hand-rolled TTL cache, inflight-dedupe map and concurrency pool re-implement what @solidjs/router's query()/createAsync() data API now provides (dedupe, keyed cache, revalidation), and would need rework if the router data API is adopted.",
+      "suggestion": "Wrap the fetchers in query(name, ...) and consume them with createAsync, keeping only the proxy as server code; at minimum note that the cache duplicates the router's."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/routes/api-proxy/[...path].ts:17-18",
+      "issue": "The proxy buffers each upstream body via arrayBuffer() and forces cache-control: no-store, so nothing is streamable or HTTP-cacheable and every reload refetches the ~28 requests that build the home page.",
+      "suggestion": "Stream with new Response(res.body, ...) and set a short max-age (the live-data requirement tolerates a brief TTL, and the app already treats data as cacheable for 60s in memory at app/src/lib/api.ts:23)."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/routes/index.tsx:132",
+      "issue": "Card list and select options are rendered with .map() in JSX while other routes use <For>, so filtered results rebuild DOM nodes instead of reusing keyed ones.",
+      "suggestion": "Use <For each={pageItems()}> and <For each={data()!.types}> for keyed list reuse, matching the rest of the app."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/lib/api.ts:22",
+      "issue": "No AbortController anywhere: switching Pokémon or game selections quickly leaves stale in-flight requests running (the timer in app/src/routes/index.tsx:45 is cleared but HTTP requests never are).",
+      "suggestion": "Thread an AbortSignal through apiGet (and the debounced search) and abort superseded requests."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/routes/pokemon/[name].tsx:73",
+      "issue": "The loading-then-error/not-found double <Show> scaffold is duplicated across all five route files (also moves/[name].tsx:15, abilities/[name].tsx:14, types/[name].tsx:24, index.tsx:76).",
+      "suggestion": "Extract a small <RouteData> wrapper (resource -> loading | NotFound | content) so loading and 404 behavior changes once."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/app.tsx:11",
+      "issue": "A side-effecting document.documentElement.lang mutation in the component body with no comment (the file is the app's only comment line of code in the whole repo), redundant with the lang=\"en\" in app/src/entry-server.tsx:8 when ssr:false swaps entrypoints.",
+      "suggestion": "Verify whether the SPA entrypoint honors entry-server's lang; keep the mutation only if needed and comment why it exists."
+    },
+    {
+      "severity": "low",
+      "location": "app/package.json:12",
+      "issue": "nitro is pinned to an RC (3.0.261029-rc). It is currently the latest published version and required by SolidStart v2, but v3 is still pre-stable and its release notes list breaking changes between channels.",
+      "suggestion": "Track nitro releases and bump promptly when 3.0 stable lands; the app's only coupling is the nitro() plugin and two API routes, so the blast radius is small."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/lib/data.ts:4-18",
+      "issue": "SpeciesSummary and TypeSummary interfaces are declared but never used, suggesting an abandoned layer of typing that was never finished.",
+      "suggestion": "Delete them, or better, use them as the return types the page consumers actually read."
+    }
+  ],
+  "summary": "This app sits squarely on SolidStart's current stable stack — v2 with the Vite-8/nitro-vite configuration, router 1.0, Node 24 — and uses only its six mandated dependencies with no extra libraries, which is exactly where a long-lived codebase wants to be. The main forward-looking liabilities are a data layer that is centralized but mostly `any` at the boundary, a hand-rolled cache/pool that duplicates the router's query()/createAsync() machinery, and proxies that buffer and no-store every upstream response. Nothing here would block the PR; the fixes are contained to app/src/lib.",
+  "apis": [
+    {
+      "api": "solidStart({ ssr, devOverlay }) from @solidjs/start/config",
+      "location": "app/vite.config.ts:3-5",
+      "status": "current",
+      "replacement": ""
+    },
+    {
+      "api": "nitro() from nitro/vite",
+      "location": "app/vite.config.ts:4",
+      "status": "current",
+      "replacement": ""
+    },
+    {
+      "api": "FileRoutes / Router root layout",
+      "location": "app/src/app.tsx:2-7",
+      "status": "current",
+      "replacement": ""
+    },
+    {
+      "api": "APIEvent from @solidjs/start/server (API routes)",
+      "location": "app/src/routes/api-proxy/[...path].ts:1",
+      "status": "current",
+      "replacement": ""
+    },
+    {
+      "api": "MetaProvider / Title from @solidjs/meta",
+      "location": "app/src/app.tsx:1-2",
+      "status": "current",
+      "replacement": ""
+    },
+    {
+      "api": "useSearchParams / useParams / A from @solidjs/router",
+      "location": "app/src/routes/index.tsx:5-6",
+      "status": "current",
+      "replacement": ""
+    },
+    {
+      "api": "createResource (with hand-rolled cache instead of query()+createAsync)",
+      "location": "app/src/routes/pokemon/[name].tsx:32",
+      "status": "current",
+      "replacement": "query(name, fetcher) + createAsync — the router's current data API (cache is a deprecated alias for query)"
+    }
+  ],
+  "dependencies": [
+    {
+      "name": "@solidjs/start",
+      "verdict": "modern",
+      "note": "2.1.0 — current stable v2 line (v2 stable since Aug 2026); requires Node 24, Vite 8"
+    },
+    {
+      "name": "@solidjs/router",
+      "verdict": "modern",
+      "note": "1.0.0 — the stable release that pairs with SolidStart 2.0"
+    },
+    {
+      "name": "@solidjs/meta",
+      "verdict": "modern",
+      "note": "0.29.4 — the head-management library SolidStart v2 docs prescribe"
+    },
+    {
+      "name": "solid-js",
+      "verdict": "modern",
+      "note": "1.9.17 — current 1.x; Solid 2 is still pre-release"
+    },
+    {
+      "name": "vite",
+      "verdict": "modern",
+      "note": "8.3.5 — required by SolidStart v2, listed per the official install command"
+    },
+    {
+      "name": "nitro",
+      "verdict": "modern",
+      "note": "3.0.261029-rc — latest published nitro and the version v2 requires; v3 is still an RC, so expect minor churn"
+    }
+  ]
+}

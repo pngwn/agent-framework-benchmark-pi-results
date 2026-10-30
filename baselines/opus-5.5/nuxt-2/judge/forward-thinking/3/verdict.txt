@@ -1,0 +1,131 @@
+I've reviewed the app end-to-end and verified the framework surface against current docs/releases (Nuxt 4.6.x is current stable as of 2026-10-30; vue 3.5.44 is latest stable, vue-router 5.4.0 is latest, matching what Nuxt 4.4+ uses; h3 v2 migration notes and Nuxt 4.x docs for `defineEventHandler`/`setResponseStatus`).
+
+```json
+{
+  "dimension": "forward-thinking",
+  "criteria": {
+    "latest_apis": {
+      "score": 5,
+      "evidence": [
+        "app/nuxt.config.ts:2 — compatibilityDate '2026-10-01', current-flag behavior",
+        "app/package.json:12 — nuxt ^4.6.2, current stable line (4.6.x, Oct 2026)",
+        "app/app/components/PageSection.vue:3 — useId() for aria-labelledby ids (Vue 3.5 API)",
+        "app/shared/types/pokedex.ts:1 — #shared alias + shared/ types dir, Nuxt 4 layout",
+        "app/tsconfig.json:2 — project references into generated .nuxt tsconfigs, current Nuxt 4 TS setup",
+        "app/app/pages/pokemon/[name].vue:10-13 — useFetch with reactive URL factories and a reactive query ref",
+        "app/app/pages/index.vue:2,38 — typed query via vue-router 5 LocationQueryRaw",
+        "app/app/components/MovesTable.vue:7,59 — defineProps type-only API and dynamic aria-sort"
+      ],
+      "rationale": "Consistently current-generation: Nuxt 4 app/server/shared directory layout, vue-router v5 (what Nuxt 4.4+ ships), useId, reactive useFetch URLs, typed Nitro routes. The only era-flagged APIs I found (defineEventHandler, setResponseStatus) are still what the Nuxt 4.x docs document (nuxt.com/docs/4.x/directory-structure/server and /api/utils/set-response-status), so they are current, not legacy."
+    },
+    "platform": {
+      "score": 5,
+      "evidence": [
+        "app/server/utils/pokeapi.ts:24 — native fetch against the API, no axios",
+        "app/server/utils/pokeapi.ts:26 — res.body?.cancel() to release 404 bodies (web streams API)",
+        "app/server/api/moves/[name].get.ts:13 — String.replaceAll",
+        "app/shared/utils/format.ts:9 — String.padStart; format.ts:3 split/map locale-free humanize",
+        "app/app/assets/main.css:25,59-60,156 — :focus-visible, logical margin-inline/padding-inline, grid auto-fill",
+        "app/app/components/PokemonCard.vue:11 — width/height + loading=\"lazy\" decoding=\"async\" to avoid layout shift",
+        "app/app/pages/index.vue:45-53 — native form controls (search input, selects), no UI library"
+      ],
+      "rationale": "Reaches for the platform first throughout: native fetch with body cancellation, modern string methods, logical CSS properties, native controls. Only mild miss: app/server/utils/pokeapi.ts:68 hand-rolls URL parsing with a regex where new URL(url).pathname would be more robust."
+    },
+    "dependencies": {
+      "score": 5,
+      "evidence": [
+        "app/package.json:12-14 — exactly three runtime deps: nuxt, vue, vue-router; no devDependencies at all",
+        "app/package-lock.json:6124 — nuxt 4.6.2 locked",
+        "app/app/assets/main.css:1 — hand-written CSS with design tokens, no Tailwind/Bootstrap",
+        "app/server/utils/pokeapi.ts:53-65 — hand-rolled 20-line concurrency limiter instead of a p-limit/lodash dep"
+      ],
+      "rationale": "Minimal and modern: three current-stable framework packages, zero extraneous libraries, and even the concurrency limiter and debounce are 15-20 lines of hand-rolled code rather than a dependency. Two nits keep it from being flawless: vue-router is pinned as a direct dep only for one type import, and the lockfile pins nuxt 4.6.2 (Oct 16) rather than 4.6.3 (Oct 27), which carries security fixes for >=4.6.0."
+    },
+    "churn_resistance": {
+      "score": 4,
+      "evidence": [
+        "app/server/utils/pokeapi.ts:19 — single thin API client; every PokeAPI call in the app funnels through fetchApi/fetchList/fetchResource",
+        "app/server/api/species.get.ts:1 — upstream data is normalized into DTOs declared in app/shared/types/pokedex.ts before it reaches the client",
+        "app/shared/types/pokedex.ts:1-16 — boundary types shared by pages, components and server routes",
+        "app/nuxt.config.ts:9-13 — single runtimeConfig.apiBase, overridable by NUXT_PUBLIC_API_BASE (the documented pattern, used by npm start in app/package.json:7)",
+        "app/app/components/PokemonCard.vue:5 — client re-derives sprite URLs from the media-path convention, duplicating knowledge the server layer owns",
+        "app/server/utils/pokeapi.ts:19 — fetchApi<T = any>: upstream responses are untyped, so PokeAPI shape changes surface only at runtime",
+        "app/app/pages/NotFound.vue:4 vs app/app/error.vue:8-20 — two parallel 404 mechanisms and duplicated header/footer markup"
+      ],
+      "rationale": "Excellent layering: PokeAPI access is confined to two server utils, the client only ever consumes typed /api DTOs, and config lives in one place, so an upstream or framework change touches very few files. It loses a point for untyped upstream responses (changes detected only at runtime), the client-side sprite-URL derivation, and the absence of any typecheck tooling to actually verify the shared types."
+    }
+  },
+  "overall": 4,
+  "findings": [
+    {
+      "severity": "medium",
+      "location": "app/server/utils/pokeapi.ts:12",
+      "issue": "The module-level response cache never evicts: the TTL (TTL_MS at line 4) only gates reuse, entries are deleted only on rejection (lines 34-36), so a long-lived server accumulates every distinct API response (all ~1025 pokemon, ~900 moves, every evolution chain, every version group) permanently.",
+      "suggestion": "Add an LRU cap (evict oldest/oldest-expired entries on set) or a periodic sweep that deletes entries older than TTL_MS."
+    },
+    {
+      "severity": "low",
+      "location": "app/server/utils/pokeapi.ts:24",
+      "issue": "Upstream fetches have no timeout or AbortSignal; a hung PokeAPI connection holds SSR requests (and a pending cache entry) open indefinitely.",
+      "suggestion": "Pass { signal: AbortSignal.timeout(10_000) } to fetch, deleting the cache entry on abort so a transient hang isn't remembered."
+    },
+    {
+      "severity": "low",
+      "location": "app/package-lock.json:6124",
+      "issue": "Lockfile pins nuxt 4.6.2 (Oct 16); 4.6.3 (Oct 27, 2026) ships security fixes for versions >=4.6.0 (GHSA-9v7c-q64q-vv33 and others), so the built app runs a known-vulnerable patch line even though package.json's ^4.6.2 would allow it.",
+      "suggestion": "Refresh the lockfile to 4.6.3 before merge; with a caret range this is just `npm update nuxt`."
+    },
+    {
+      "severity": "low",
+      "location": "app/server/utils/pokeapi.ts:19",
+      "issue": "fetchApi defaults to `any` and every PokeAPI response is untyped (also `detail: any` at app/server/utils/data.ts:39), so an upstream shape change compiles cleanly and breaks at runtime only.",
+      "suggestion": "Declare minimal response interfaces for the endpoints actually read (species, pokemon, move, type, generation) next to the shared DTOs; the blast radius is already confined to this one module, so the cost is small."
+    },
+    {
+      "severity": "low",
+      "location": "app/package.json:16",
+      "issue": "No devDependencies at all (no typescript, no vue-tsc/nuxt typecheck, no lint), so the well-built shared type layer is never actually verified by the toolchain.",
+      "suggestion": "Add `typescript` and a `nuxt typecheck` step (or vue-tsc) to CI so boundary types are enforced rather than aspirational."
+    },
+    {
+      "severity": "low",
+      "location": "app/app/components/PokemonCard.vue:5",
+      "issue": "Sprite URLs are re-derived on the client from useRuntimeConfig().public.apiBase plus a hard-coded path pattern, duplicating media-URL knowledge that already exists in the server layer ([name].get.ts artwork handling).",
+      "suggestion": "Have the server DTO carry the sprite URL (it already carries artwork), so URL-scheme changes touch one place."
+    },
+    {
+      "severity": "low",
+      "location": "app/server/utils/pokeapi.ts:68",
+      "issue": "idFromUrl parses URLs with a regex (/\\/(\\d+)\\/?$/), which is fragile against trailing-slash or query variations the API might introduce.",
+      "suggestion": "Use new URL(url).pathname and read the last non-empty segment."
+    },
+    {
+      "severity": "low",
+      "location": "app/app/error.vue:8",
+      "issue": "error.vue duplicates app.vue's header/footer markup by hand; the two copies will drift (e.g. if nav or footer text changes).",
+      "suggestion": "Extract SiteHeader/SiteFooter components and use them from both app.vue and error.vue."
+    }
+  ],
+  "summary": "This is a current-generation Nuxt 4 app that will age well: Nuxt 4.6, vue-router v5, useId, reactive useFetch, and an exemplary boundary where all PokeAPI access sits behind two server utils that normalize responses into shared DTO types. Dependencies are minimal (three framework packages, no CSS or utility libraries), and platform features (native fetch with body cancellation, logical CSS properties, modern string methods) are used consistently. The main durability risks are small but real: an unbounded in-memory cache with no eviction, untyped upstream responses that a typecheck never sees (there is no typecheck tooling at all), and a lockfile one security patch behind.",
+  "apis": [
+    { "api": "useFetch", "location": "app/app/pages/index.vue:9", "status": "current", "replacement": "" },
+    { "api": "defineEventHandler", "location": "app/server/api/species.get.ts:5", "status": "current", "replacement": "h3 v2 deprecates it in favour of defineHandler / a plain function, but Nuxt 4.x docs still document defineEventHandler for server routes, so it is current here" },
+    { "api": "setResponseStatus", "location": "app/app/components/NotFound.vue:4", "status": "current", "replacement": "h3 v2 suggests event.res.status, but the event-first form used here is the one Nuxt 4.x documents as non-deprecated" },
+    { "api": "getRouterParam", "location": "app/server/api/pokemon/[name].get.ts:6", "status": "current", "replacement": "" },
+    { "api": "getQuery", "location": "app/server/api/pokemon/[name]/moves.get.ts:28", "status": "current", "replacement": "" },
+    { "api": "useRuntimeConfig", "location": "app/server/utils/pokeapi.ts:15", "status": "current", "replacement": "" },
+    { "api": "useHead", "location": "app/app/app.vue:2", "status": "current", "replacement": "" },
+    { "api": "useId", "location": "app/app/components/PageSection.vue:3", "status": "current", "replacement": "" },
+    { "api": "useRequestEvent", "location": "app/app/components/NotFound.vue:3", "status": "current", "replacement": "" },
+    { "api": "NuxtLink", "location": "app/app/app.vue:6", "status": "current", "replacement": "" },
+    { "api": "#shared alias / shared dir", "location": "app/shared/types/pokedex.ts:1", "status": "current", "replacement": "" },
+    { "api": "LocationQueryRaw (vue-router v5)", "location": "app/app/pages/index.vue:2", "status": "current", "replacement": "" },
+    { "api": "defineProps (type-only)", "location": "app/app/components/MovesTable.vue:7", "status": "current", "replacement": "" }
+  ],
+  "dependencies": [
+    { "name": "nuxt", "verdict": "modern", "note": "^4.6.2, current stable line (4.6.3, released 2026-10-27, is the very latest patch and includes security fixes; lockfile pins 4.6.2)" },
+    { "name": "vue", "verdict": "modern", "note": "^3.5.44 is the latest stable Vue release as of 2026-10-30 (3.6 is still RC)" },
+    { "name": "vue-router", "verdict": "established", "note": "^5.4.0 matches what Nuxt 4.4+ requires and is the latest release; as a direct dependency it is only needed for the LocationQueryRaw type import, so it's mildly redundant but harmless" }
+  ]
+}
+```

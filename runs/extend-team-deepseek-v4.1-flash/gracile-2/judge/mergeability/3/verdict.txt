@@ -1,0 +1,130 @@
+I've reviewed the app thoroughly, cross-checked it against Gracile's current source (`gracile-web/gracile` `main`, matching `@gracile/gracile@0.11.0`), the official starter projects, and Vite's asset/SSR behavior. Summary of the key verifications:
+
+- **Route conventions**: `(home).ts`, `types/(types).ts` (parenthesized group names are popped from the URL), `[name].ts` params, `defineRoute({handler, document, template})`, `responseInit.status = 404` — all match Gracile's `collect.ts` / `render.ts` and the annotated docs example.
+- **Server**: `app/server.js` is nearly verbatim the official "minimal-server-express" starter (`getClientBuildPath` + `nodeAdapter` + `printUrls`), plus immutable asset caching.
+- **`isBuildRender`** (`app/src/lib/api.ts:80`) keys on `gracile-static` — verified against `packages/engine/src/routes/render.ts`, which stubs handler requests with `new URL(path, 'http://gracile-static')`. Correct today, but it's an internal, undocumented constant.
+- **Asset URLs** (`app/src/document.ts:12,16`): `new URL('./styles/app.css', import.meta.url).pathname` is *not* the documented pattern (docs/starter use root-relative `/src/styles/global.scss`). Vite only rewrites that pattern for client environments (`assetImportMetaUrl.ts`: `applyToEnvironment → consumer === 'client'`), and SSR `import.meta.url` is a `file://` URL (Vite PR #5268), so in `npm run dev` the href/src become absolute filesystem paths — unstyled, script-less pages. It only works in production because Gracile's `injectServerAssets` strips all module-script/stylesheet tags and injects hashed assets (verified in `route-template-pipeline.ts` and in the built `dist/server/entrypoint.js` asset map).
+- The FEATURE change (`CHANGES.diff`) is a clean integration: `cardLink` was extracted and reused by the new `teamCard`, team state lives in a shared server/client `lib/team.ts` with SSR-from-cookie + client sync, no duplication.
+
+```json
+{
+  "dimension": "mergeability",
+  "criteria": {
+    "idiomatic": {
+      "score": 4,
+      "evidence": [
+        "app/server.js:13-20 — express.static(getClientBuildPath) + gracile.nodeAdapter(handler) + printUrls: matches the official minimal-server-express starter",
+        "app/src/routes/(home).ts:1-2 — defineRoute with handler/document/template trio and server-html html, the documented shape",
+        "app/src/routes/types/(types).ts:1 — parenthesized route-group filename, verified against engine's collect.ts pattern extraction",
+        "app/src/document.client.ts:1-5 — island entrypoint referenced from document.ts, exactly the docs' progressive-interactivity pattern",
+        "app/src/lib/api.ts:75-80 — isBuildRender(url.hostname === 'gracile-static') couples to an internal build-stub constant (engine render.ts), needed because Gracile invokes handlers at build time",
+        "app/src/document.ts:12,16 — new URL(..., import.meta.url).pathname for CSS/JS instead of the documented root-relative source path"
+      ],
+      "rationale": "Structurally textbook Gracile 0.11 (routes, groups, islands, express adapter), with two home-grown deviations: an asset-URL form that only survives because Gracile strips it in prod, and build-render detection pinned to an internal hostname."
+    },
+    "correctness_risks": {
+      "score": 3,
+      "evidence": [
+        "app/src/document.ts:12,16 — dev-mode asset hrefs resolve to absolute filesystem paths (Vite never rewrites new URL(...,import.meta.url) in SSR), so npm run dev renders unstyled, non-interactive pages",
+        "app/src/lib/api.ts:13,53 — cache entries are only overwritten, never evicted after the 60s TTL; the Map grows for the process lifetime",
+        "app/src/client/fragments.ts:4-8 — module-level singleton AbortController shared by all islands; two concurrent fragment fetches abort each other",
+        "app/src/client/pokemon-browser.ts:26 — window popstate listener and #timer are never cleaned up (no disconnectedCallback)",
+        "app/src/routes/team.ts:27-32 — invalid team members are silently dropped, silently changing the 'n of 6' count",
+        "app/src/routes/moves/[name].ts:30-33 — $effect_chance replaced with '' when effect_chance is null, leaving 'a % chance' text",
+        "app/src/routes/pokemon/[name].ts:171 plus moves/abilities/types routes — 404 status handled via responseInit.status on every dynamic route; good"
+      ],
+      "rationale": "No serious production bugs: escaping, 404s, pagination clamping, abort-races and fetch fan-out are all handled (with a concurrency limiter at api.ts:19-33). But there are several minor fragilities, the worst being that the dev server itself is broken by the asset-URL pattern."
+    },
+    "global_abstractions": {
+      "score": 4,
+      "evidence": [
+        "app/src/lib/data.ts:1-380 — one cohesive, well-typed data layer used by all routes; cardsForPokemon (data.ts:165) is a single generic that serves type/move/ability card lists",
+        "app/src/lib/team.ts:1-40 — team state shared server/client with an explicit comment on the boundary; server renders from cookie, client re-syncs from localStorage (team-toggle.ts:20-25)",
+        "app/src/components/partials.ts:19-54 — cardLink extracted and reused by pokemonCard/teamCard instead of duplicating markup",
+        "app/src/client/fragments.ts:4 — hidden module-level global state (single AbortController) shared across all islands",
+        "app/src/lib/data.ts:319, routes/pokemon/[name].ts:68, routes/types/[name].ts:38, routes/team.ts:44, routes/moves/[name].ts:32 — the same labels.get(x) ?? humanize(x) fallback repeated five times; slot-sorted type mapping duplicated in pokemon/[name].ts:65-70 and team.ts:41-48"
+      ],
+      "rationale": "Abstractions are few and earn their keep with clear server/client boundaries; the deductions are a singleton with cross-component effects and two small helper patterns copy-pasted across five call sites."
+    },
+    "readability": {
+      "score": 4,
+      "evidence": [
+        "app/src/lib/api.ts:1-6 — module header comment states the caching/dedup contract",
+        "app/src/routes/pokemon/[name].ts:200-330 — template is ~130 lines with nested ternaries; the longest and densest file in the app",
+        "app/src/styles/app.css:53 etc. — CSS organized into labelled sections, tokens from design/tokens.css, no animations/transitions",
+        "app/src/lib/format.ts — small, named helpers (humanize, dexNumber, orDash, collapse) with doc comments",
+        "app/src/lib/api.ts:75-79 — comment explains *why* isBuildRender exists (build-time prerender)"
+      ],
+      "rationale": "A new teammate finds their way quickly: routes/lib/client/components/styles mirror the framework's layout, naming is descriptive and consistent, comments explain intent. Only the pokemon route template's length and lib/data.ts's density keep it from a 5."
+    },
+    "review_cost": {
+      "score": 3,
+      "evidence": [
+        "app/src/document.ts:12,16 — must change before merge: the asset-URL pattern breaks npm run dev and only works in prod via framework tag-stripping",
+        "app/src/lib/api.ts:80 — needs a guard/comment pinning 'gracile-static' to the upstream source, or the build silently starts hitting the API",
+        "app/src/client/fragments.ts:4-8 and app/src/lib/api.ts:13 — small but reviewer-noticeable: singleton abort controller, unbounded cache",
+        "app/ — zero tests written by the app; parseTeam, multiplier, sorting and pagination (lib/team.ts:20, routes/team.ts:49, client/sortable-table.ts) are trivially unit-testable"
+      ],
+      "rationale": "Approve-after-one-round: the asset references, the internal-hostname coupling, listener/cache hygiene and a couple of extracted helpers need changing, but nothing structural would be requested."
+    }
+  },
+  "overall": 4,
+  "findings": [
+    {
+      "severity": "medium",
+      "location": "app/src/document.ts:12",
+      "issue": "Asset URLs use new URL('./styles/app.css', import.meta.url).pathname instead of the documented root-relative form (/src/styles/app.css). Vite only rewrites that pattern for client environments and SSR import.meta.url is a file:// URL, so npm run dev emits absolute filesystem paths and serves unstyled, script-less pages; the production build only works because Gracile strips module scripts and stylesheet links and injects hashed assets.",
+      "suggestion": "Use the documented root-relative source paths, e.g. href=\"/src/styles/app.css\" and src=\"/src/document.client.ts\", as in the Gracile starters."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/lib/api.ts:80",
+      "issue": "isBuildRender keys on url.hostname === 'gracile-static', an undocumented internal stub host from the engine's build-time route render. If the framework changes the stub, every build will start fetching the live API (which the spec forbids) and likely fail.",
+      "suggestion": "Keep it centralised here (good), but pin it with a comment referencing packages/engine/src/routes/render.ts and consider a defensive second signal (e.g. an env flag set for build renders)."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/client/fragments.ts:4",
+      "issue": "A single module-level AbortController is shared by all islands that call fetchFragment; two overlapping fetches (any future page with two fragments, or quick successive interactions) abort each other's requests.",
+      "suggestion": "Track a controller per element (or pass a signal per call) instead of one global."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/lib/api.ts:13",
+      "issue": "The response cache never evicts expired entries; entries are only replaced when the same URL is requested again, so the Map grows monotonically with every distinct API URL touched by the process.",
+      "suggestion": "Delete expired entries on read (cache.delete when hit.expires <= now) or add a small periodic sweep."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/client/pokemon-browser.ts:26",
+      "issue": "The window popstate listener is added in connectedCallback and never removed, and the debounce timer isn't cleared on disconnect. Harmless while navigation is full page loads, but it leaks if Gracile's client-side router is ever enabled.",
+      "suggestion": "Store the bound handler and add a disconnectedCallback that removes it and clears #timer."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/routes/pokemon/[name].ts:65",
+      "issue": "The 'sort Pokémon types by slot and map to {name,label} badges' block is duplicated in routes/team.ts:41-48, and the labels.get(x) ?? humanize(x) fallback appears in five places (data.ts:319, pokemon/[name].ts:68, types/[name].ts:38, team.ts:44, moves/[name].ts:32).",
+      "suggestion": "Extract a typeBadges(pokemon, labels) helper in lib/data.ts next to getTypeLabels()."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/routes/team.ts:27",
+      "issue": "Team members whose species fetch fails are silently dropped from the rendered team and the 'n of 6' count, with no trace.",
+      "suggestion": "Log the dropped name (or render a muted placeholder) so stale cookies are diagnosable."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/routes/moves/[name].ts:30",
+      "issue": "$effect_chance is substituted with '' when effect_chance is null, producing strings like 'a % chance to …'.",
+      "suggestion": "Only substitute when effect_chance is non-null, or fall back to the flavor text in that case."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/lib/team.ts:20",
+      "issue": "The app ships no tests of its own (tests/ are the harness's acceptance tests), while its trickiest logic — parseTeam normalization, damage multipliers (routes/team.ts:49), sortable-table ordering (client/sortable-table.ts:35) and pagination clamping — is pure and cheap to test.",
+      "suggestion": "Add a small vitest suite covering lib/team.ts, lib/format.ts and the pure helpers in lib/data.ts."
+    }
+  ],
+  "summary": "This is a well-structured, genuinely idiomatic Gracile 0.11 app: file-based routes with groups and params, the documented handler/document/template split, an express adapter that mirrors the official starter, and light-DOM islands that re-fetch server-rendered fragments instead of duplicating templates. The team-builder feature was integrated the way I'd want to see in a PR: one shared card partial, one shared server/client team module, minimal touch points. I'd ask for one round of changes before merging, mainly replacing the non-idiomatic new URL(import.meta.url) asset references (which break npm run dev and only survive production because Gracile strips those tags) and guarding the internal 'gracile-static' build-render detection."
+}
+```

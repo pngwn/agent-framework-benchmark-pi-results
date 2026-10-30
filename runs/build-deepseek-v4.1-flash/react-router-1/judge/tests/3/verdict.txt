@@ -1,0 +1,124 @@
+I've reviewed the app thoroughly. The facts are confirmed: `app/` contains **zero tests** — no test files, no runner dependency, no test script (`app/package.json:5-8` defines only `build` and `start`), and no test configuration anywhere under `app/`. All 878 script LOC — including the riskiest logic (filtering, pagination, URL-state sync, multi-column sorting with missing-value semantics, a 1025-species index build, and a promise-level HTTP cache) — are guarded only by the harness's acceptance suite, which the agent didn't write and which won't run when someone refactors the data layer later.
+
+The code is unusually testable, which makes the absence more notable: `app/app/lib/format.ts` is a file of pure spec-encoding functions (`humanize`, `dexNumber`, `englishFlavor`'s whitespace-collapse, `valueOrDash`) that would take minutes to unit test; the home page's filter/slice logic in `app/app/routes/home.tsx:78-100` is pure over `loaderData`; and `MovesTable`'s sort comparator (`app/app/routes/pokemon.tsx:200-226`) is a classic comparator-bug incubator. While reading it I found exactly the kind of latent bug a single unit test would have caught: after the tiebreak `if (comparison === 0) comparison = a.moveLabel.localeCompare(...)`, the return flips the *whole* comparison with `-comparison` for descending sort, so the name tiebreak reverses direction too (`app/app/routes/pokemon.tsx:224-225`) — rows that tie on the sorted column come out in descending-name order when sorting descending. Also, `cardSprite`'s hardcoded `id <= 1025` boundary (`app/app/lib/api.server.ts:99-106`) encodes a snapshot assumption about live data, and the loaders' not-found contract (`{ notFound: true }` sentinel, `app/app/routes/pokemon.tsx:16-20`) plus the cache-eviction-on-error logic (`app/app/lib/api.server.ts:36-41`) are invisible invariants no test protects.
+
+```json
+{
+  "dimension": "tests",
+  "criteria": {
+    "coverage_of_risk": {
+      "score": 1,
+      "evidence": [
+        "app/package.json:5-8 — scripts are only build/start; no test runner, no test deps, no test files anywhere in app/",
+        "app/app/routes/home.tsx:78-100 — filter/search/pagination/URL-omission logic (the app's riskiest code) has no tests",
+        "app/app/routes/pokemon.tsx:200-226 — multi-column sort with missing-values-last semantics and aria-sort toggle, untested",
+        "app/app/lib/format.ts:1-41 — pure spec-encoding helpers (humanize, dexNumber, flavor whitespace collapse) trivially unit-testable, but untested"
+      ],
+      "rationale": "No tests exist at all, so none of the risky logic — filtering, sorting, URL state, not-found paths — is covered by anything the team owns."
+    },
+    "behaviour_not_implementation": {
+      "score": 1,
+      "evidence": [
+        "app/ — zero test files, zero assertions (confirmed by static facts and by grep for test/vitest/jest/playwright in app/)"
+      ],
+      "rationale": "There are no tests, so the criterion bottoms out at 1 by the rubric."
+    },
+    "regression_power": {
+      "score": 1,
+      "evidence": [
+        "app/app/routes/pokemon.tsx:224-225 — descending sort negates the name tiebreak too; nothing would catch this or any other comparator regression",
+        "app/app/lib/api.server.ts:99-106 — hardcoded id <= 1025 sprite heuristic; a refactor or data change silently breaks extra-species sprites with no failing test",
+        "app/app/routes/pokemon.tsx:16-20 — not-found sentinel contract ({notFound:true}) is an implicit internal convention; refactoring to thrown responses breaks rendering with no guard"
+      ],
+      "rationale": "With no tests, every behaviour — including subtle ones already harboring latent bugs — would survive a breaking refactor unnoticed."
+    },
+    "signal_to_noise": {
+      "score": 3,
+      "evidence": [
+        "app/ — no tests, therefore also no trivial or duplicated tests to maintain"
+      ],
+      "rationale": "No tests means no noise; per the rubric this scores 3, though the silence is the problem, not the signal."
+    }
+  },
+  "overall": 1,
+  "findings": [
+    {
+      "severity": "high",
+      "location": "app/app/routes/pokemon.tsx:200-226",
+      "issue": "Move-table sort comparator is untested and already has a latent bug: for descending sorts, '-comparison' flips the move-name tiebreak as well, so tied rows come out in reversed name order.",
+      "suggestion": "Add unit tests for the comparator (ascending, descending, missing-values-last in both directions, tie on sorted column) and apply the direction flip only to the primary comparison, not the tiebreak."
+    },
+    {
+      "severity": "high",
+      "location": "app/app/routes/home.tsx:78-100",
+      "issue": "The list page's core logic — search/type/generation filtering, 48-per-page slicing, page clamping, and omitting default query params — has no tests; any refactor of filter state or pagination can silently break the spec.",
+      "suggestion": "Extract the filter/slice/pageHref computation into a pure function and unit-test it: empty params omitted, page reset on filter change, page=0/non-numeric/large values clamped, zero-match 'No Pokémon found'."
+    },
+    {
+      "severity": "high",
+      "location": "app/app/lib/api.server.ts:104-133",
+      "issue": "Alternate-form exclusion (>10000), pokemon-ID-to-species mapping (deoxys-normal → deoxys), dedup and dex-number ordering are untested data transformations; a refactor could re-introduce forms or drop species silently.",
+      "suggestion": "Unit-test cardFromPokemonRef/cardsFromRefs against small fixtures: ID 386 vs 10016, duplicate refs, ordering by dex number."
+    },
+    {
+      "severity": "medium",
+      "location": "app/app/lib/format.ts:20-28",
+      "issue": "englishFlavor's 'last en entry' rule and whitespace collapsing (\\n, \\f runs) encode two spec rules with no test; find()-vs-last confusion with englishName (line 12) is exactly the kind of mix-up that would slip through.",
+      "suggestion": "Add tiny unit tests for humanize, dexNumber, englishFlavor (multiple en entries, form-feed), valueOrDash — this file is pure and costs minutes to cover."
+    },
+    {
+      "severity": "medium",
+      "location": "app/app/routes/home.tsx:36-43",
+      "issue": "The two-way sync between the URL 'q' param and local input state (with the document.activeElement guard) is untested; back/forward navigation and deep links with ?q= while typing are classic regression spots.",
+      "suggestion": "Add browser-level tests: deep-link ?q=pika shows filtered results, browser back after typing restores the previous query."
+    },
+    {
+      "severity": "medium",
+      "location": "app/app/lib/api.server.ts:99-106",
+      "issue": "cardSprite hardcodes the 1025-species snapshot boundary as a sprite-URL heuristic; the spec explicitly warns data changes (live overlay adds a species), and this assumption is undocumented by any test.",
+      "suggestion": "Test the >1025 fallback path (front_default, then artwork, then pattern) and prefer deriving the boundary from the species index instead of a literal."
+    },
+    {
+      "severity": "medium",
+      "location": "app/app/routes/pokemon.tsx:16-20",
+      "issue": "All four resource loaders share an untested convention: 404s return a {notFound:true} sentinel instead of throwing a 404 Response; the sentinel contract with meta() and components is easy to break and yields no HTTP 404.",
+      "suggestion": "Either test the sentinel end-to-end (unknown name renders 'Not found' h1 and title) or migrate to throwing a 404 Response and test that; add a loader-level test for each resource type."
+    },
+    {
+      "severity": "medium",
+      "location": "app/app/lib/api.server.ts:36-41",
+      "issue": "The in-memory promise cache evicts entries on rejection so transient failures can retry, but this invariant is untested; a 'simplification' that caches failed promises would poison every later request for that resource until restart.",
+      "suggestion": "Unit-test the cache: 404 caches as null, a 500 rejects and is retried on the next call, success is fetched only once."
+    },
+    {
+      "severity": "medium",
+      "location": "app/app/lib/api.server.ts:448-452",
+      "issue": "Default game selection (highest-order version group) and the ?game= fallback for unknown names are untested; a refactor of the version-group sort could pick the wrong default game across every Pokémon page.",
+      "suggestion": "Unit-test getPokemonPage's group selection: ?game=scarlet-violet honoured, ?game=nonsense falls back to highest-order group."
+    },
+    {
+      "severity": "low",
+      "location": "app/app/root.tsx:24-55",
+      "issue": "No ErrorBoundary anywhere: a non-404 API failure thrown from a loader surfaces React Router's default error screen; this outage path is untested and unowned.",
+      "suggestion": "Add an ErrorBoundary to root.tsx and one test that a 500 from the API renders a friendly error page."
+    }
+  ],
+  "summary": "The app ships zero tests of its own — no runner, no script, no files — leaving ~880 LOC of filtering, pagination, URL-state, and sorting logic guarded only by the harness's acceptance suite. The most testable modules (pure formatters, list-page slicing, the move-table comparator) are exactly where latent bugs already sit, such as the descending-sort tiebreak being reversed with the primary comparison. For a codebase owned for years, the first follow-up should be unit tests around the data layer and the sort/filter logic, plus a loader-level not-found/error contract test.",
+  "wroteTests": false,
+  "testCount": 0,
+  "valuableTests": [],
+  "lowValueTests": [],
+  "untested": [
+    { "area": "Move-table sorting (missing-values-last in both directions, aria-sort toggle, tiebreaks)", "location": "app/app/routes/pokemon.tsx:200-226", "risk": "high", "likelyBug": "Descending sort already reverses the name tiebreak; future comparator edits could put nulls first or break aria-sort with nothing failing" },
+    { "area": "Home filtering, 48-per-page pagination, page clamping and default-param omission", "location": "app/app/routes/home.tsx:78-100", "risk": "high", "likelyBug": "Off-by-one in slice bounds, page not reset when a filter changes, or 'page=1' left in the URL after a refactor" },
+    { "area": "Alternate-form exclusion and Pokémon-ID→species mapping (deoxys-normal → deoxys)", "location": "app/app/lib/api.server.ts:104-133", "risk": "high", "likelyBug": "Mega forms (ID >10000) reappearing in lists, or deoxys cards disappearing, after a refactor of the ID boundary or byId lookup" },
+    { "area": "URL query ↔ search-input two-way sync (deep link ?q=, back/forward while typing)", "location": "app/app/routes/home.tsx:36-43", "risk": "medium", "likelyBug": "Typing then hitting back leaves stale results, or deep-linked ?q= is ignored on first render" },
+    { "area": "Pure spec formatters: humanize, dexNumber, latest-English flavor with whitespace collapse, valueOrDash", "location": "app/app/lib/format.ts:20-28", "risk": "medium", "likelyBug": "First-vs-last English entry confusion (englishName vs englishFlavor) or losing the \\f collapse in a cleanup" },
+    { "area": "cardSprite's hardcoded 1025 boundary against live-data changes", "location": "app/app/lib/api.server.ts:99-106", "risk": "medium", "likelyBug": "Newly added species show broken sprite URLs or an extra API call per species after a boundary tweak" },
+    { "area": "Not-found sentinel contract across all four loaders and meta()", "location": "app/app/routes/pokemon.tsx:16-20", "risk": "medium", "likelyBug": "Unknown names rendering an empty page or 'undefined – Pokédex' title after a loader refactor" },
+    { "area": "In-memory promise cache semantics (404→null caching, eviction on rejection, single fetch)", "location": "app/app/lib/api.server.ts:36-41", "risk": "medium", "likelyBug": "A transient API failure cached forever, or N+1 refetches per request introduced by a 'simplification'" },
+    { "area": "Default game selection (highest-order version group) and invalid ?game= fallback", "location": "app/app/lib/api.server.ts:448-452", "risk": "medium", "likelyBug": "Wrong default game on every Pokémon page if the version-group sort changes" },
+    { "area": "Non-404 API failure handling — no ErrorBoundary exists", "location": "app/app/root.tsx:24-55", "risk": "low", "likelyBug": "During an API outage users see a raw framework stack/error screen instead of a friendly page" }
+  ]
+}
+```

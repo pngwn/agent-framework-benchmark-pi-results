@@ -1,0 +1,154 @@
+I've reviewed the whole app. There is no test infrastructure in `app/` at all: no test script in `app/package.json`, no runner, no spec files, and no assertions anywhere in `app/src` — the only guard beyond the acceptance suite is `tsc --noEmit` wired into `build` (`app/package.json:7`). So this review focuses on what the acceptance suite currently holds up, and what will be unprotected the moment someone refactors the data layer or URL state machine.
+
+```json
+{
+  "dimension": "tests",
+  "criteria": {
+    "coverage_of_risk": {
+      "score": 1,
+      "evidence": [
+        "app/package.json:6-9 — no test script, no test runner in devDependencies",
+        "app/src/api.ts:152-156 — latestFlavorText whitespace-collapse rule (spec definition) untested",
+        "app/src/api.ts:206-231 — toSpeciesCards: alternate-form exclusion, pokemon→species mapping, dedup, dex sort, all untested",
+        "app/src/pages/home.ts:96-133 — filter combination, 48/page slicing, page clamping and URL serialization untested",
+        "app/src/pages/pokemon.ts:186-216 — table sort with nulls-last both directions and aria-sort toggling untested"
+      ],
+      "rationale": "The app contains 974 lines of script with dense, spec-critical transformation logic (species mapping, filtering, pagination, multi-column sorting) and zero tests of its own; nothing outside the acceptance suite would catch a regression."
+    },
+    "behaviour_not_implementation": {
+      "score": 1,
+      "evidence": [
+        "app/src — grep for test/spec/assert/expect finds no matches outside server.mjs:62's ROUTES regex"
+      ],
+      "rationale": "There are no tests at all, so there is nothing behavioural or implementation-focused to evaluate."
+    },
+    "regression_power": {
+      "score": 1,
+      "evidence": [
+        "app/src/api.ts:127-131 — idFromUrl/isAlternateForm: a refactor of the ID regex (>10000 cutoff) would change every card list silently",
+        "app/src/pages/home.ts:101-105 — Math.min(filters.page, totalPages) clamp and slice bounds: off-by-one here shows an empty page with no failing test",
+        "app/src/pages/pokemon.ts:262-266 — default game = highest order, invalid ?game= fallback: a reordering bug ships invisibly",
+        "app/src/main.ts:38-53 — NotFoundError vs generic-error fallback: untestable today, and a broken catch would render the wrong page for every bad URL"
+      ],
+      "rationale": "With no in-repo tests, every covered-by-acceptance behaviour becomes uncovered the day the acceptance suite stops running; refactors of the data layer would land green."
+    },
+    "signal_to_noise": {
+      "score": 3,
+      "evidence": [
+        "app/ — no test files exist, so there is no noise, but also no signal"
+      ],
+      "rationale": "Per the anchor, no tests scores neutral: there is nothing low-value to maintain, but the maintenance budget is being spent on nothing."
+    }
+  },
+  "overall": 1,
+  "findings": [
+    {
+      "severity": "high",
+      "location": "app/package.json:6-9",
+      "issue": "No test script, runner, or test files anywhere in the app; 974 script LOC are guarded only by tsc --noEmit and the external acceptance suite.",
+      "suggestion": "Add vitest for the pure helpers and data shaping (they are pure functions over fixtures, trivially testable), plus a handful of Playwright smoke tests for routing and the moves table."
+    },
+    {
+      "severity": "high",
+      "location": "app/src/api.ts:206-231",
+      "issue": "toSpeciesCards is the single most reused transformation (move, ability and type pages all depend on it) and encodes four rules at once: drop forms >10000, map pokemon→species ID, dedup, sort by dex. None is pinned by an app test.",
+      "suggestion": "Unit-test with a fixture list containing a Mega form, a duplicate species, and an out-of-order IDs; assert the output IDs, names and hrefs."
+    },
+    {
+      "severity": "high",
+      "location": "app/src/pages/home.ts:96-139",
+      "issue": "The URL filter state machine (param omission at filtersUrl:29-36, page reset on filter change, parseInt fallback in readFilters:17-24, page clamp at :101) is exactly the code that breaks in refactors and is only covered indirectly by acceptance tests for a few URLs.",
+      "suggestion": "Extract readFilters/filtersUrl/render-matching into pure functions and test round-trips: parse URL → filters → URL, including page=0, page=999, empty q, defaults omitted."
+    },
+    {
+      "severity": "high",
+      "location": "app/src/pages/pokemon.ts:186-216",
+      "issue": "Sorting semantics are subtle and untested: nulls last in BOTH directions, mixed number/string compareValues, aria-sort set only on the active header, ascending-first then flip. A one-line change to the null handling (e.g. `if (va == null) return -sign`) makes nulls first when descending and nothing fails in-app.",
+      "suggestion": "Table-driven unit tests over a small rows array: sort by power ascending/descending with a null power row, assert order and aria-sort state."
+    },
+    {
+      "severity": "medium",
+      "location": "app/server.mjs:29-72",
+      "issue": "The production server's security- and correctness-critical logic is untested: path traversal guard (file.startsWith(DIST + path.sep)), ROUTES-based 404 status, and the JSON-escaped API_BASE_URL injection into index.html.",
+      "suggestion": "A few node:test cases against a temp dist dir: request /../package.json, /pokemon/missingno (expect 404 + HTML), and an API_BASE_URL containing '</script>' to confirm escaping."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/main.ts:38-53",
+      "issue": "Error paths (NotFoundError → Not found page vs other errors → 'Something went wrong' page) have no tests; a refactor that catches too broadly would turn every bad URL into a crash page, or vice versa.",
+      "suggestion": "Test the router with a stubbed get that rejects NotFoundError vs TypeError and assert the rendered h1 in each case."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/api.ts:114-126",
+      "issue": "The in-memory promise cache has non-obvious semantics (successful responses cached forever, rejected promises evicted on catch); a well-meaning change to cache errors would permanently poison the page after one network blip, with no test to catch it.",
+      "suggestion": "Unit-test get against a fetch stub: second call for the same path must not re-fetch; a rejected first call must not poison the cache for a retry."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/pages/pokemon.ts:246-266",
+      "issue": "Game selection logic (available-set computation, ordering by version-group order with Infinity fallback, ?game= validation, default = highest order) is untested; a bug here shows the wrong move tables for the default view on every Pokémon page.",
+      "suggestion": "Extract the available-games computation as a pure function over version_group_details plus a groups map, and test ordering, default and invalid-?game fallback."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/api.ts:141-156",
+      "issue": "The spec's definitional helpers — humanize ('mr-mime' → 'Mr Mime'), dexNumber padding, latestFlavorText whitespace collapse — are pure and cheap to test but aren't.",
+      "suggestion": "Three one-line vitest cases each; these are the definitions most likely to be 'simplified' by a future contributor."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/pages/home.ts:121-139",
+      "issue": "The 150 ms debounce and the early-return-when-unchanged guard in onFilterChange interact subtly (typing the same value after paging does not reset page); regressions here are timing-flaky and hard to reproduce manually.",
+      "suggestion": "Extract the filter-comparison/next-state computation as a pure function and test it; leave only the setTimeout wiring untested."
+    }
+  ],
+  "summary": "The app shipped with zero tests of its own: no runner, no script, no assertions — the external acceptance suite is the only safety net. That suite is behavioural and broad, but the riskiest logic (toSpeciesCards mapping, URL filter state, multi-column sort with nulls-last, server routing) has no in-repo protection and will be unguarded the moment someone refactors it. The pure-function architecture (api.ts helpers, filter/sort computations) would make adding vitest coverage cheap, so the omission is a choice, not a constraint.",
+  "wroteTests": false,
+  "testCount": 0,
+  "valuableTests": [],
+  "lowValueTests": [],
+  "untested": [
+    {
+      "area": "toSpeciesCards: alternate-form exclusion, pokemon→species ID mapping, dedup, dex-number sort (app/src/api.ts:206-231)",
+      "risk": "high",
+      "likelyBug": "A refactor of idFromUrl or the >10000 cutoff drops or duplicates species in every card list on move/ability/type pages, changing counts and links with no failing signal."
+    },
+    {
+      "area": "Home URL filter state: readFilters/filtersUrl round-trip, default omission, page reset and clamp (app/src/pages/home.ts:17-36, 96-133)",
+      "risk": "high",
+      "likelyBug": "Off-by-one in page slicing shows an empty page for ?page=<totalPages>, or a filter change keeps a stale page param, deep-linking users to a wrong view."
+    },
+    {
+      "area": "Moves table sorting: nulls-last in both directions, aria-sort toggling, mixed-type compare (app/src/pages/pokemon.ts:186-216)",
+      "risk": "high",
+      "likelyBug": "Missing power/accuracy sorts first when descending, or aria-sort stays on a previously clicked header after switching columns — both silent for anyone not using a screen reader."
+    },
+    {
+      "area": "Game select: available version groups, ordering by order, ?game= validation, default = highest order (app/src/pages/pokemon.ts:246-266)",
+      "risk": "medium",
+      "likelyBug": "Default selects an older game or an invalid ?game= value 500s/blank-renders the moves section instead of falling back."
+    },
+    {
+      "area": "Production server: path traversal guard, 404 status for unknown routes, API_BASE_URL injection escaping (app/server.mjs:29-72)",
+      "risk": "medium",
+      "likelyBug": "A refactor serves /etc-style paths from dist's parent, returns 200 for every unknown URL (breaking not-found semantics), or breaks the config script tag when API_BASE_URL contains quotes."
+    },
+    {
+      "area": "Router error paths: NotFoundError vs generic failure fallback (app/src/main.ts:38-53)",
+      "risk": "medium",
+      "likelyBug": "An over-broad catch renders 'Something went wrong' for every bad Pokémon name instead of 'Not found', or a missing one swallows render errors and leaves a blank main."
+    },
+    {
+      "area": "In-memory fetch cache: success caching forever vs rejected-promise eviction (app/src/api.ts:114-126)",
+      "risk": "medium",
+      "likelyBug": "Caching rejected promises permanently poisons the page after one transient network failure until reload."
+    },
+    {
+      "area": "Definitional text helpers: humanize, dexNumber padding, latestFlavorText whitespace collapse (app/src/api.ts:141-156)",
+      "risk": "low",
+      "likelyBug": "'Simplifying' the whitespace regex drops the \\f case or the padding width changes #0025 to #25 across every card."
+    }
+  ]
+}
+```

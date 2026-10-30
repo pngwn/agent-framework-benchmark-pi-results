@@ -1,0 +1,115 @@
+{
+  "dimension": "mergeability",
+  "criteria": {
+    "idiomatic": {
+      "score": 5,
+      "evidence": [
+        "app/src/views/layout.tsx:3 — ContextRenderer declaration for jsxRenderer, the documented pattern",
+        "app/src/index.tsx:20,28 — partial/full split on HX-Request + HX-History-Restore-Request with Vary header; most apps miss this",
+        "app/src/views/home.tsx:78,87 — hx-trigger input changed delay + hx-sync dedupe, per current htmx docs",
+        "app/src/team.ts:14-16,55 — hono/cookie getCookie/setCookie for state, correct sameSite/maxAge options",
+        "app/src/index.tsx:16 — serveStatic root option (verified against @hono/node-server current API)"
+      ],
+      "rationale": "Reads like the framework's own examples: renderer, cookie helpers, error/notFound handlers, and htmx attributes all used exactly as documented, including the history-restore and Vary subtleties."
+    },
+    "correctness_risks": {
+      "score": 4,
+      "evidence": [
+        "app/src/api.ts:9,35 — unbounded Map cache; keys derive from unvalidated c.req.param('name') (app/src/index.tsx:38,56), so junk URLs grow memory indefinitely",
+        "app/src/views/pokemon.tsx:74,94 — 25 version-group + ~100 move fetches fired in parallel on cold cache, no concurrency cap",
+        "app/src/index.tsx:57,61 — fragment routes reuse the full-document notFound handler; a crafted fragment request swaps an entire HTML page into #moves-<method>",
+        "app/src/views/home.tsx:31-36 — ?type=bogus silently ignored (shows all Pokémon) while URL and select state disagree",
+        "app/src/index.tsx:101-107 — onError renders a friendly 500 page and logs; 404s handled on every loader route"
+      ],
+      "rationale": "Careful look found only minor issues: unbounded cache keyed by user input, a cold-cache fetch stampede, and a fragment-route 404 edge case. No XSS, races, leaks, or unhandled rejections."
+    },
+    "global_abstractions": {
+      "score": 4,
+      "evidence": [
+        "app/src/api.ts:9-51 — one cross-cutting concern (HTTP + SWR cache) with a clear boundary and why-comments",
+        "app/src/data.ts:1-130 — domain module: humanize/englishName/type maps/cardsForPokemon; cohesive but a magnet for future growth",
+        "app/src/views/components.tsx:24 — CardList extended with an action prop instead of forking for the team feature; good boundary design",
+        "app/src/team.ts — feature domain module mirrors data.ts conventions rather than inventing a new layer"
+      ],
+      "rationale": "Abstractions are few and earn their keep; the only watch item is data.ts accreting every derived loader as features are added, and derived maps (typesByPokemonId, mainTypes) being rebuilt per request."
+    },
+    "readability": {
+      "score": 4,
+      "evidence": [
+        "app/src/api.ts:1-2 — comment states the caching policy and why",
+        "app/src/views/pokemon.tsx:224,227,230 — pervasive `any` for API payloads defeats the strict tsconfig",
+        "app/src/views/pokemon.tsx:163-180 — sortRows/MoveTable sorting logic is dense but centralized and commented via structure",
+        "app/src/index.tsx:20 — isPartial helper names the htmx contract precisely"
+      ],
+      "rationale": "Consistent naming and file organisation; a new teammate finds their way quickly. The main rough spot is that the central API contract (species/pokemon/move records) is untyped, so deep property access escapes type checking."
+    },
+    "review_cost": {
+      "score": 4,
+      "evidence": [
+        "app/src/index.tsx:104 — open-redirect guard on the remove route's `next` param; reviewer doesn't have to ask",
+        "app/src/team.ts:18-27 — cookie payload validated (array of non-empty strings, deduped, clamped) rather than trusted",
+        "app/src/api.ts:35 — `api<T = any>` default-any plus `any` casts in views is the main thing I'd ask to change",
+        "app/package.json:6-9 — no app-owned tests despite a typecheck script; coverage math in team.ts:64 is untested"
+      ],
+      "rationale": "Approve with nits: bound the cache, add interfaces for the handful of API payload shapes, and optionally a unit test for the coverage multiplier. Nothing needs rework."
+    }
+  },
+  "overall": 4,
+  "findings": [
+    {
+      "severity": "medium",
+      "location": "app/src/api.ts:9",
+      "issue": "Unbounded in-memory Map cache whose keys include unvalidated URL path params (via c.req.param('name') in index.tsx routes), allowing unbounded memory growth from junk URLs",
+      "suggestion": "Cap the cache (simple LRU) and/or only cache paths once the resource is confirmed valid"
+    },
+    {
+      "severity": "low",
+      "location": "app/src/views/pokemon.tsx:94",
+      "issue": "Cold-cache first render of a Pokémon moves page fires 100+ parallel upstream fetches with no concurrency limit",
+      "suggestion": "Batch or limit concurrency (e.g. chunked Promise.all); the 30s SWR cache makes it a first-hit cost only, but a stampede under concurrent visitors is real"
+    },
+    {
+      "severity": "low",
+      "location": "app/src/index.tsx:57",
+      "issue": "Fragment routes (/pokemon/:name/moves, /moves-table) return the full-document 404 page, so a fragment request for a deleted/unknown Pokémon or bogus method swaps a whole HTML document into the table div",
+      "suggestion": "Return a fragment-sized 404 (e.g. c.text or a small partial) when isPartial(c), or don't reuse notFound on fragment routes"
+    },
+    {
+      "severity": "low",
+      "location": "app/src/views/home.tsx:31",
+      "issue": "Unknown ?type=/?generation= values are silently ignored (all results shown) while the URL keeps the bogus param and the select shows 'All types'",
+      "suggestion": "Either normalise the URL (redirect to the canonical form) or mark the filter as invalid in the UI"
+    },
+    {
+      "severity": "low",
+      "location": "app/src/views/pokemon.tsx:78",
+      "issue": "API payload records flow as `any` throughout views (also details.tsx:57,107, data.ts:49,80), neutralising the strict tsconfig for the app's most-touched data",
+      "suggestion": "Define interfaces for the ~6 entities actually used (species, pokemon, move, ability, type, generation) and type api<T> at call sites"
+    },
+    {
+      "severity": "low",
+      "location": "app/src/index.tsx:16",
+      "issue": "serveStatic root './dist' resolves against the process CWD, so starting the server from another directory silently breaks static assets (only a console warning)",
+      "suggestion": "Derive the root from import.meta.dirname or __dirname so it's independent of CWD"
+    },
+    {
+      "severity": "low",
+      "location": "app/src/views/home.tsx:78",
+      "issue": "hx-include=\"closest form\" on the search input and selects is redundant — htmx already includes the enclosing form's values for form-input triggers",
+      "suggestion": "Drop the redundant attributes (harmless, but they add noise and suggest uncertainty about htmx's parameter defaults)"
+    },
+    {
+      "severity": "low",
+      "location": "app/src/data.ts:48",
+      "issue": "Derived maps (mainTypes, typesByPokemonId, generations) are rebuilt from cached JSON on every request; fine at 1k species but a growing per-request cost as data.ts accretes loaders",
+      "suggestion": "Memoise derived structures alongside the HTTP cache (or key them off entry.at) so repeated requests skip the recompute"
+    },
+    {
+      "severity": "low",
+      "location": "app/src/team.ts:64",
+      "issue": "Team coverage math (multiplierFor, weak/resistant counting) has no test of its own; it's pure and easily unit-testable",
+      "suggestion": "Add a small test script (the app has a typecheck script but zero tests) covering at least the 2×½=1 Fire/Flying-vs-Ice case from the spec"
+    }
+  ],
+  "summary": "An unusually careful Hono + htmx implementation: renderer, cookies, error handling and the htmx partial/history/Vary semantics all follow current docs, and the team feature slots into the existing structure without forking anything. The defects I found are minor and mostly about robustness at the edges — an unbounded cache keyed by user input, a cold-cache fetch fan-out, and a fragment route that can return a full 404 document. I'd merge after a short round of nits: bound the cache, type the API payloads, and fix the fragment 404."
+}

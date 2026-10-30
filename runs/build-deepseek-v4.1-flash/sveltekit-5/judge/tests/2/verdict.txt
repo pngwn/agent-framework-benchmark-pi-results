@@ -1,0 +1,157 @@
+## Review: test quality
+
+The app contains **zero tests of its own** — confirmed by static analysis (`tests: { files: 0, cases: 0 }`) and by inspection: `app/package.json` has no test script, no `vitest`/`playwright`/`@testing-library` in devDependencies, and no `*.test.*`/`*.spec.*` files anywhere under `app/src/`. Everything passing in CI today comes from the harness-owned acceptance suite in `tests/`, which the agent did not write and cannot credit for.
+
+The acceptance suite itself is browser-level and behavioural (roles, accessible names, URLs — see `tests/specs/home.spec.mjs`, `pokemon.spec.mjs`), so it *currently* guards a lot. But the review question is what happens when someone refactors the data layer and that suite is no longer the only guard. Almost all of this app's real logic lives in pure, easily-testable functions and load functions — `app/src/lib/server/pokeapi.js` (memoized fetch + three big data-shaping transforms), `app/src/routes/pokemon/[name]/+page.server.js` (moves-table assembly), `app/src/lib/components/MoveTable.svelte` (sorting), `app/src/routes/+page.svelte` (filter/pagination/URL state) — and none of it has a single regression net the team owns.
+
+Notable specifics that would break silently without tests:
+
+- `app/src/routes/+page.svelte:79-92` — URL sync only happens on `popstate` navigations; the derived clamp at `:46-47` (silently coercing out-of-range `page`) and the param-omission rules in `queryUrl` (`:41-49`) are classic refactor traps.
+- `app/src/lib/server/pokeapi.js:204-211` — `cardsFromPokemonRefs` silently drops any Pokémon whose species isn't in the index and filters `id >= 10000`; a species-resolution regression would just make cards vanish from move/ability/type pages with no error.
+- `app/src/lib/components/MoveTable.svelte:54-80` — the missing-values-last-in-both-directions rule is subtle (handled *before* the direction flip at `:58-62`, while the both-missing tie-break at `:60` is *not* direction-flipped) and entirely unguarded.
+- `app/src/routes/+error.svelte:6` — the error page renders `Not found` for **every** error, so an API outage (`pokeapi.js:23-26` throws a plain `Error` → SvelteKit 500) is indistinguishable from a 404; nothing would catch that masking.
+- `app/src/lib/server/pokeapi.js:14-19` — the promise memo caches `null` (404) responses forever; with the "live API" premise in the spec, a stale-404 bug would be invisible.
+- `app/src/routes/pokemon/[name]/+page.server.js:167-170` — fallback evolution chain fabricates a node when `evolution_chain.url` is missing; untested.
+- `app/src/lib/server/pokeapi.js:52` — `latestEnglishFlavorText` exists but is unused: the same logic is inlined twice (`pokemon/[name]/+page.server.js:51-53`, `moves/[name]/+page.server.js:24-27`), a duplication that tests would have forced into one place.
+
+On the positive side, the app's structure makes adding tests cheap: `humanize`, `cardsFromPokemonRefs`, the memo, and every `+page.server.js` load function are pure/async functions with obvious inputs and outputs, and the load functions are the kind SvelteKit unit-tests routinely with mocked `fetch`. The agent simply didn't invest any of the effort there.
+
+```json
+{
+  "dimension": "tests",
+  "criteria": {
+    "coverage_of_risk": {
+      "score": 1,
+      "evidence": [
+        "app/package.json:6-11 — no test script, no test runner in devDependencies",
+        "app/src/lib/server/pokeapi.js:181-216 — cardsFromPokemonRefs transform (dedupe, id>=10000 exclusion, silent species drops) has no tests",
+        "app/src/routes/+page.svelte:31-107 — filter/pagination/URL-state logic has no tests",
+        "app/src/lib/components/MoveTable.svelte:54-89 — column sorting and missing-value handling has no tests"
+      ],
+      "rationale": "No tests exist at all, so the riskiest logic (data shaping, filtering, sorting, URL state, error paths) is entirely uncovered by anything the team owns."
+    },
+    "behaviour_not_implementation": {
+      "score": 1,
+      "evidence": [
+        "app/src/ — zero *.test.* or *.spec.* files; static analysis reports tests.files = 0"
+      ],
+      "rationale": "There are no tests to judge; the criterion cannot be met by an empty suite."
+    },
+    "regression_power": {
+      "score": 1,
+      "evidence": [
+        "app/src/lib/server/pokeapi.js:11-19 — unbounded promise memo (caches 404 nulls forever) with no regression net",
+        "app/src/routes/pokemon/[name]/+page.server.js:143-148 — method-order sort and default-game logic (92-93) untested",
+        "app/src/routes/+error.svelte:6 — all errors render as 'Not found', so a thrown fetch error (pokeapi.js:23-26) would mask a 500 as a 404 with nothing to catch it"
+      ],
+      "rationale": "With no app-owned tests, any refactor of the data layer or URL-state logic can break behaviour with zero failures outside the external acceptance suite."
+    },
+    "signal_to_noise": {
+      "score": 3,
+      "evidence": [
+        "app/src/ — no low-value tests because there are no tests (rubric: no tests = 3)"
+      ],
+      "rationale": "Nothing to maintain, nothing padding the suite; scored 3 per the rubric for an empty suite."
+    }
+  },
+  "overall": 1,
+  "findings": [
+    {
+      "severity": "high",
+      "location": "app/package.json:6-11",
+      "issue": "The app ships zero tests: no test script, no runner dependency, no spec files anywhere in app/src.",
+      "suggestion": "Add vitest plus @testing-library/svelte or a small Playwright component suite; start by unit-testing pokeapi.js transforms and the +page.server.js load functions with a mocked fetch."
+    },
+    {
+      "severity": "high",
+      "location": "app/src/routes/+page.svelte:79-92",
+      "issue": "URL-state sync only runs on popstate; the page-clamp (46-47), param-omission (41-49) and filter-reset logic are untested, and a refactor here easily desynchronizes state and URL.",
+      "suggestion": "Extract filter/pagination/query-URL logic into pure functions and unit-test them (e.g. clamping, omitting defaults, back/forward round-trips)."
+    },
+    {
+      "severity": "high",
+      "location": "app/src/lib/server/pokeapi.js:204-211",
+      "issue": "cardsFromPokemonRefs silently drops unresolved species and excludes ids >= 10000; regressions here make cards disappear from move/ability/type pages without any error.",
+      "suggestion": "Unit-test with fixture refs covering alternate forms, duplicates, and out-of-index ids; assert the exact sorted card list."
+    },
+    {
+      "severity": "high",
+      "location": "app/src/lib/components/MoveTable.svelte:54-80",
+      "issue": "Sorting logic (missing-last in both directions, tie-breaks, aria-sort) is subtle and untested; the both-missing tie-break at line 60 is not direction-flipped while other tie-breaks are.",
+      "suggestion": "Unit-test the comparator with rows containing null power/accuracy/level in both directions, and assert aria-sort behaviour."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/routes/+error.svelte:6",
+      "issue": "+error.svelte renders 'Not found' for every error status, masking API outages (pokeapi.js:23-26 throws plain Error → 500) as 404s.",
+      "suggestion": "Branch on page.status; render 'Not found' only for 404 and something else for 5xx, and add a test that a failing API yields a distinguishable page."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/lib/server/pokeapi.js:14-19",
+      "issue": "The memo caches null (404) results forever and has no eviction; under the spec's live-API premise, stale 404s or renamed resources would be served indefinitely with nothing to catch it.",
+      "suggestion": "Add a TTL or 404-negative-cache timeout, and unit-test the cache (hit, miss, rejection clears entry)."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/routes/pokemon/[name]/+page.server.js:104-148",
+      "issue": "Moves-table assembly (per-method grouping, method ordering, default game at 92-93) is untested, and the spec's default row order actually depends on MoveTable's initial sortKey (MoveTable.svelte:30-31) rather than server-side ordering — a fragile cross-file coupling.",
+      "suggestion": "Sort rows server-side for the default order and unit-test the load function with a fixture pokemon payload."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/lib/server/pokeapi.js:52",
+      "issue": "latestEnglishFlavorText exists but is unused; the same whitespace-collapsing logic is duplicated inline at pokemon/[name]/+page.server.js:51-53 and moves/[name]/+page.server.js:24-27.",
+      "suggestion": "Use the shared helper everywhere and unit-test it (whitespace collapse, no-English-entry case)."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/lib/format.js:1-4",
+      "issue": "humanize drives display names everywhere but is untested for edge cases (empty segments, digits, unicode).",
+      "suggestion": "A three-line unit test pins the 'mr-mime' → 'Mr Mime' contract the spec depends on."
+    }
+  ],
+  "summary": "The app contains no tests of its own; every safety net is the external acceptance suite. The most refactor-hostile logic — the pokeapi.js data transforms, moves-table assembly, MoveTable sorting, and home-page filter/URL-state code — is pure and easily testable but entirely unguarded, so a data-layer refactor could break card lists, ordering, and URL sync with no failing test. Error handling also masks 5xx as 'Not found', a bug a single test would expose.",
+  "wroteTests": false,
+  "testCount": 0,
+  "valuableTests": [],
+  "lowValueTests": [],
+  "untested": [
+    {
+      "area": "cardsFromPokemonRefs / getDexData data shaping (app/src/lib/server/pokeapi.js:134-216)",
+      "risk": "high",
+      "likelyBug": "Cards silently vanish from move/ability/type pages after a refactor (dedupe, id>=10000 exclusion, species-index resolution); wrong type-slot or generation attribution would render correct-looking but wrong filters."
+    },
+    {
+      "area": "Home filtering, pagination and URL query state (app/src/routes/+page.svelte:31-107)",
+      "risk": "high",
+      "likelyBug": "State/URL desync: popstate-only sync missing other navigation types, page clamp diverging from the URL, or default params (empty q, page=1) reappearing in the URL."
+    },
+    {
+      "area": "MoveTable column sorting, missing-value ordering and aria-sort (app/src/lib/components/MoveTable.svelte:54-104)",
+      "risk": "high",
+      "likelyBug": "Missing power/accuracy/level rows jumping to the top in descending order, tie-breaks flipping inconsistently, or aria-sort leaking to non-sorted headers."
+    },
+    {
+      "area": "Pokémon page load function: default game selection, per-method move grouping, method order, stat total (app/src/routes/pokemon/[name]/+page.server.js:60-148)",
+      "risk": "medium",
+      "likelyBug": "Default game ceasing to be the highest-order version group, or methods losing the Level Up/Machine/Egg/Tutor ordering when METHOD_ORDER indexing changes."
+    },
+    {
+      "area": "Server-side memoized cache incl. cached 404s and failure eviction (app/src/lib/server/pokeapi.js:11-19)",
+      "risk": "medium",
+      "likelyBug": "Stale data or permanently cached 404s after the API's data changes; the spec explicitly treats the API as live."
+    },
+    {
+      "area": "Error and not-found paths (app/src/routes/+error.svelte:6, pokeapi.js:23-26)",
+      "risk": "medium",
+      "likelyBug": "API 500s rendered as 'Not found' pages, hiding outages; a missing evolution_chain fallback (pokemon/[name]/+page.server.js:167-170) silently fabricating data."
+    },
+    {
+      "area": "Display formatting: humanize, dex-number padding, height/weight conversion (app/src/lib/format.js:1-4, pokemon/[name]/+page.server.js:156-159)",
+      "risk": "low",
+      "likelyBug": "Off-by-ten in height/weight or lost zero-padding producing '#25' instead of '#0025' — visible, cosmetic, but only caught by eyeballing."
+    }
+  ]
+}
+```

@@ -1,0 +1,112 @@
+{
+  "dimension": "mergeability",
+  "criteria": {
+    "idiomatic": {
+      "score": 5,
+      "evidence": [
+        "app/nuxt.config.ts:1 — Nuxt 4 config with runtimeConfig.public.apiBase read at start time from API_BASE_URL",
+        "app/server/utils/data.ts:78 — speciesWithPokemon + fetchResource via createError 404, standard Nitro data-layer pattern",
+        "app/shared/utils/format.ts:1 — pure helpers in shared/utils, auto-imported per Nuxt 4 shared-directory docs",
+        "app/app/pages/pokemon/[name].vue:10-13 — useFetch with reactive computed URL keys, the recommended pattern",
+        "app/app/components/PageSection.vue:2-4 — useId for aria-labelledby, current recommended approach",
+        "app/app/pages/[...slug].vue:1 — catch-all route for the Not found page",
+        "app/app/components/NotFound.vue:2-4 — useRequestEvent + setResponseStatus to emit HTTP 404 during SSR"
+      ],
+      "rationale": "Structure, data loading, routing, error handling and head management all read like the framework's own docs for the current stable Nuxt 4.6 line; the only deviations are trivial (explicit useFetch key, useRuntimeConfig inside a computed getter)."
+    },
+    "correctness_risks": {
+      "score": 4,
+      "evidence": [
+        "app/server/utils/pokeapi.ts:29 — fetch with no timeout/abort; a hung upstream request blocks SSR indefinitely and the shared pending Promise spreads to concurrent requests for the same URL",
+        "app/server/utils/pokeapi.ts:15-21 — cache entries are only deleted on rejection; expired entries are never evicted, so the Map grows for the process lifetime (bounded only by distinct URL count)",
+        "app/app/components/PokemonCard.vue:5 — sprite URL constructed as apiBase/media/sprites/pokemon/<id>.png assuming every species ships a front sprite; a null sprite in the API would render a broken image",
+        "app/app/pages/index.vue:31-35 — page clamp handles out-of-range page params, avoiding empty results",
+        "app/app/pages/index.vue:58-66 — debounce timer cleared via watch reset and onBeforeUnmount, no leaked timer"
+      ],
+      "rationale": "A careful look turns up only minor fragility (no upstream timeout, unevicted cache entries, assumed sprite availability); the risky-by-spec areas — fan-out, 404s, hydration-deterministic sorting, filter/page URL state — are all handled deliberately."
+    },
+    "global_abstractions": {
+      "score": 4,
+      "evidence": [
+        "app/server/utils/data.ts — single data module all six server routes depend on; cohesive, but MAX_SPECIES_ID and domain helpers (speciesCards, speciesWithPokemon) sit next to generic helpers",
+        "app/server/utils/pokeapi.ts:15 — module-level cache is hidden global state, though documented and TTL'd (spec explicitly permits runtime caching)",
+        "app/server/utils/data.ts:60-67 — speciesCards dedupes and hides alternate forms in one place, so the MAX_SPECIES_ID rule isn't duplicated across routes",
+        "app/server/utils/data.ts:73-81 — speciesWithPokemon returns { species: any; pokemon: any }, and allTypes carries detail: any, weakening the otherwise typed boundary with shared/types/pokedex.ts"
+      ],
+      "rationale": "Abstractions are few and mostly earn their keep with clear shared/server/app boundaries, but data.ts is on its way to being the god data module and its any-typed PokeAPI surfaces leak through the otherwise clean DTO layer."
+    },
+    "readability": {
+      "score": 5,
+      "evidence": [
+        "app/server/utils/pokeapi.ts:1-3 — file-header comment explains caching and request-sharing intent",
+        "app/app/pages/index.vue:48 — buildQuery doc comment; helpers named for intent (matches, visible, pageLink)",
+        "app/app/components/ — seven small single-purpose components; PagesSection/EvolutionTree/MovesTable each under 120 lines",
+        "app/shared/types/pokedex.ts — named DTOs give every server route and page a shared vocabulary",
+        "app/app/assets/main.css — single well-organised stylesheet using design tokens"
+      ],
+      "rationale": "Naming, organisation and why-comments are consistent across all 27 files; a new teammate can navigate this in minutes."
+    },
+    "review_cost": {
+      "score": 4,
+      "evidence": [
+        "app/server/utils/pokeapi.ts:29 — one-line fix: pass AbortSignal.timeout() to fetch",
+        "app/app/pages/index.vue:19 — new Map(...map(t => [t.name, t.label])) would fail vue-tsc, and package.json has no typecheck script (app/package.json:6-9)",
+        "app/app/error.vue:8-17 — duplicates app.vue's header/footer markup instead of extracting a shared component",
+        "app/app/components/PokemonCard.vue:5 — useRuntimeConfig called inside a computed getter rather than hoisted to setup"
+      ],
+      "rationale": "I'd approve after a round of comment-level asks (fetch timeout, cache eviction, a typecheck step, the duplicated error-page chrome); nothing requires structural rework."
+    }
+  },
+  "overall": 4,
+  "findings": [
+    {
+      "severity": "medium",
+      "location": "app/server/utils/pokeapi.ts:29",
+      "issue": "Upstream fetches have no timeout or abort; a hung PokeAPI request stalls the SSR response, and because the pending promise is cached, every concurrent request for the same URL shares the hang.",
+      "suggestion": "Pass AbortSignal.timeout(10_000) (or equivalent) to fetch, and evict the cache entry on abort."
+    },
+    {
+      "severity": "low",
+      "location": "app/server/utils/pokeapi.ts:15-21",
+      "issue": "Expired cache entries are never removed (only rejected promises are evicted), so the Map grows unboundedly over the process lifetime and stale responses sit in memory.",
+      "suggestion": "Delete the entry on resolution if expired, or sweep entries older than TTL_MS on insert."
+    },
+    {
+      "severity": "low",
+      "location": "app/app/pages/index.vue:19",
+      "issue": "new Map(data.value?.types.map((t) => [t.name, t.label])) infers string[][] and would fail vue-tsc; the project has no type-check script at all (app/package.json:6-9), so this class of error ships silently.",
+      "suggestion": "Type the tuple (t): [string, string] => ... and add a `typecheck` script (nuxt typecheck) plus a typescript/vue-tsc devDependency."
+    },
+    {
+      "severity": "low",
+      "location": "app/server/utils/data.ts:73-81",
+      "issue": "The data layer is any-typed against PokeAPI (species: any, pokemon: any, TypeInfo.detail: any), weakening the otherwise well-typed boundary with shared/types/pokedex.ts.",
+      "suggestion": "Define minimal interfaces for the PokeAPI response shapes used (names, genera, varieties, types, abilities) instead of any."
+    },
+    {
+      "severity": "low",
+      "location": "app/app/error.vue:8-17",
+      "issue": "error.vue hand-duplicates app.vue's header/footer markup (and uses plain <a> tags); the two copies will drift.",
+      "suggestion": "Extract SiteHeader/SiteFooter components (or a layout) used by both app.vue and error.vue."
+    },
+    {
+      "severity": "low",
+      "location": "app/app/components/PokemonCard.vue:5",
+      "issue": "useRuntimeConfig() is invoked inside a computed getter rather than once in setup; it works today but composables outside setup context are exactly what the docs warn about.",
+      "suggestion": "const apiBase = useRuntimeConfig().public.apiBase in setup, then reference it in the computed."
+    },
+    {
+      "severity": "low",
+      "location": "app/app/components/PokemonCard.vue:5",
+      "issue": "The sprite URL is constructed by pattern (<id>.png) instead of taken from API data, so a species whose front sprite is null would render a broken image.",
+      "suggestion": "Have the server card DTO carry the sprite URL (or a fallback flag) from the pokemon data."
+    },
+    {
+      "severity": "low",
+      "location": "app/app/components/MovesTable.vue:42-60",
+      "issue": "Tricky pure logic (missing-values-sort-last in both directions, dedupe keys, hidden-ability card flags, humanize) has zero unit coverage; all validation is end-to-end.",
+      "suggestion": "Add a few unit tests (e.g. @nuxt/test-utils or plain vitest) for sorting, humanize/display and speciesCards dedupe."
+    }
+  ],
+  "summary": "An idiomatic, current-stable Nuxt 4 app with exemplary layering (Nitro data routes, shared pure helpers, typed DTOs, small components) and deliberate handling of the spec's risk areas like fan-out, 404s and URL state. Remaining issues are comment-level: no upstream fetch timeout, unevicted cache entries, any-typed PokeAPI surfaces, no typecheck step, and no self-written tests. I'd approve with a short list of nits."
+}

@@ -1,0 +1,121 @@
+{
+  "dimension": "mergeability",
+  "criteria": {
+    "idiomatic": {
+      "score": 4,
+      "evidence": [
+        "app/vite.config.ts:10 — adapter and compilerOptions as Kit 3 plugin options, matching the current migration guide",
+        "app/package.json:13 — #lib subpath imports, Kit 3 replacement for $lib",
+        "app/src/routes/+page.svelte:35 — goto with Kit 3 option names (replace, reset)",
+        "app/src/routes/pokemon/[name]/+page.svelte:35 — copies readonly page.url with new URL(page.url.href)",
+        "app/src/routes/+error.svelte:5 — error(404) surfaces as 'Not found' heading via page.status",
+        "app/src/lib/components/Evolution.svelte:2 — self-import recursion, the recommended svelte:self replacement",
+        "app/src/lib/server/api.ts:5 — process.env.API_BASE_URL read directly instead of src/env.ts + $app/env/private",
+        "app/src/routes/team/+page.svelte:13 — $effect writes state; official guidance is to avoid this"
+      ],
+      "rationale": "Reads like current Kit 3 documentation: plugin-based config, #lib imports, $app/state, new goto options, runes everywhere, keyed each blocks, snippets. Two small deviations: raw process.env for API_BASE_URL and page-local state copies synced by state-writing effects."
+    },
+    "correctness_risks": {
+      "score": 4,
+      "evidence": [
+        "app/src/lib/server/api.ts:7 — cache is bounded (MAX_ENTRIES=5000) with TTL and failed-entry eviction",
+        "app/src/lib/server/api.ts:29-36 — 404 → null, non-ok → thrown ApiError; every load maps null to error(404)",
+        "app/src/lib/server/pokedex.ts:182 — ?page= clamped to [1, totalPages]",
+        "app/src/lib/server/pokedex.ts:323 — encodeURIComponent on all user-supplied resource names",
+        "app/src/routes/+page.svelte:40 — debounce timer never cleared on unmount; a click within 200ms lets a late goto hijack navigation",
+        "app/src/lib/server/pokedex.ts:370 — stale cookie entries silently dropped, so '<n> of 6' can disagree with the stored team",
+        "app/src/routes/pokemon/[name]/+page.svelte:37 — sets url.hash='moves' with reset:false: never scrolls on change but jumps on reload"
+      ],
+      "rationale": "Careful defensive work (bounded cache, 404 handling, page clamping, encoding). A few minor fragilities survived the acceptance tests — an uncleaned debounce timer, silent team-entry drops, and a hash side-effect — but nothing serious."
+    },
+    "global_abstractions": {
+      "score": 4,
+      "evidence": [
+        "app/src/lib/server/pokedex.ts:1-400 — single data module per route with section banners; cohesive, not a utils grab-bag",
+        "app/src/lib/types.ts:1-22 — shared view-model shapes keep server/client boundary explicit",
+        "app/src/lib/server/api.ts:20-27 — hidden module-level cache, but bounded and documented",
+        "app/src/routes/team/+page.svelte:13 — team state duplicated per page (copy + $effect sync) rather than one team.svelte.ts class",
+        "app/src/lib/components/TypeBadge.svelte:11 — var(--type-<api name>) token mapping duplicated in app/src/routes/types/+page.svelte:9"
+      ],
+      "rationale": "Boundaries are clean: server code confined to lib/server, small focused components, per-page loaders over shared indexes. The one thing that will need untangling is team state, which lives as duplicated local copies in two pages instead of a shared $state module; the token-name-to-CSS-variable trick is also duplicated."
+    },
+    "readability": {
+      "score": 4,
+      "evidence": [
+        "app/src/routes/+page.svelte:12-13 — comment explains why q is local state (race against earlier keystrokes)",
+        "app/src/lib/team.ts:1-2 — comment explains the cookie-as-single-source design",
+        "app/src/lib/server/pokedex.ts:8 — API shapes declared with only the fields used",
+        "app/src/lib/components/MoveTable.svelte:59-73 — sorting logic with missing-values-last and stable tiebreak, commented",
+        "app/src/lib/server/pokedex.ts:130-158 — getPokemonList filter chain is dense and needs a second read"
+      ],
+      "rationale": "Consistent naming (get*Page per route, Card/TypeRef view models), comments that explain why, small components, colocated styles. A few dense mapping chains and non-null assertions keep it from being effortless."
+    },
+    "review_cost": {
+      "score": 4,
+      "evidence": [
+        "app/src/lib/team.ts:36 — saveTeam writes document.cookie with a 'browser only' comment rather than a type-level guard",
+        "app/src/routes/+page.svelte:39-41 — hand-rolled debounce where an $effect cleanup or attachment would be idiomatic",
+        "app/src/lib/server/pokedex.ts:90 — spriteUrl hardcodes /media/sprites/pokemon/<id>.png instead of the record's front_default"
+      ],
+      "rationale": "I'd approve after one round of nits: centralize team state, use the framework env module, clean up the debounce timer, and drop the stray #moves hash. No rework required."
+    }
+  },
+  "overall": 4,
+  "findings": [
+    {
+      "severity": "medium",
+      "location": "app/src/routes/team/+page.svelte:13",
+      "issue": "Team state is duplicated as a page-local $state copy kept in step with server data by an $effect that writes state (same pattern in app/src/routes/pokemon/[name]/+page.svelte:24) — the official Svelte guidance says to avoid updating state inside effects and to share cross-component state via a $state class module.",
+      "suggestion": "Create #lib/team.svelte.ts exporting a Team class (members, add, remove, isFull, isOnTeam) hydrated from the cookie/server data once; both pages consume it instead of copying data into local state."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/lib/server/api.ts:5",
+      "issue": "API_BASE_URL is read from process.env at module scope instead of Kit 3's typed/validated environment modules ($app/env/private backed by src/env.ts), so a misconfigured URL fails at request time rather than startup and the value is baked in at first import.",
+      "suggestion": "Add src/env.ts with defineEnvVars({ API_BASE_URL: { schema: v.pipe(v.string(), v.url()) } }) and import { API_BASE_URL } from '$app/env/private' in the server module."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/routes/+page.svelte:40",
+      "issue": "The 200ms search debounce timer is never cleared when the page unmounts, so clicking a result within the window lets the pending update() call goto back to the filtered home list, hijacking the navigation.",
+      "suggestion": "Clear the timer on destroy (e.g. wrap the timer in an $effect that returns a cleanup, or use an {@attach}), or check page.url.pathname before firing the late goto."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/lib/server/pokedex.ts:370",
+      "issue": "getTeamPage silently drops cookie entries whose species the API no longer returns, so the page can render '5 of 6' while the cookie still holds six names, and the stale entry is never pruned.",
+      "suggestion": "Echo the parsed team length (or reconcile the cookie) in the load result so the count always reflects the stored team."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/routes/pokemon/[name]/+page.svelte:37",
+      "issue": "selectGame appends #moves to the URL while passing reset:false, so the hash never causes a scroll on selection but a later reload jumps the user to the section unexpectedly.",
+      "suggestion": "Drop url.hash = 'moves' from selectGame; the spec only requires ?game= in the URL and the #moves anchor on direct loads."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/lib/components/TypeBadge.svelte:11",
+      "issue": "The 'API type name → --type-<name> CSS token' mapping is duplicated (also app/src/routes/types/+page.svelte:9), burying knowledge of token naming in two places.",
+      "suggestion": "Route the types page links through TypeBadge (or export one styleForType(type) helper) so the fallback chain lives in a single component."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/lib/server/pokedex.ts:90",
+      "issue": "spriteUrl constructs /media/sprites/pokemon/<id>.png by pattern rather than using the front_default the API returns, coupling the app to an assumed media layout.",
+      "suggestion": "Use the record's sprites.front_default where a Pokemon record is available, keeping the constructed URL only where only refs exist (and note why)."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/app.html:6",
+      "issue": "<meta name=\"text-scale\" content=\"scale\"> is not a standard meta tag; the effect it targets is already handled by text-size-adjust in app.css.",
+      "suggestion": "Remove the meta tag and rely on the CSS in app/src/app.css:9-13."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/lib/team.ts:8",
+      "issue": "No unit tests for the pure logic most worth locking down (parseTeam round-tripping, humanize/dexNumber, MoveTable sort with missing values, type-coverage multipliers) — the repo has zero app-owned tests.",
+      "suggestion": "Add a few vitest cases for team.ts, format.ts and the coverage math; they're all pure functions and trivially testable."
+    }
+  ],
+  "summary": "A genuinely current SvelteKit 3 codebase — plugin-based config, #lib imports, $app/state, Kit 3 goto options — with a clean server/client split, a well-bounded cache and defensive 404/page-clamping handling. The main debts are the page-local team state synced by state-writing effects (an official anti-pattern) and raw process.env instead of the framework's env modules. I'd merge it after one round of nits."
+}

@@ -1,0 +1,177 @@
+I've reviewed the app thoroughly — SPEC, FEATURE, routes, loaders, shared components, pages, and server entry. Here's my assessment.
+
+## How the code is shaped
+
+The architecture is a consistent "page → view model" pipeline: a route resolver (`app/src/app/app.routes.ts:8`) asks `PageData` for a path like `/pokemon/pikachu?game=...`; on the server `loadPageData` (`app/src/server/loaders.ts:434`) builds a typed VM from the PokeAPI, on the client the same VM is fetched from the app's own `/_data` endpoint (`app/src/server.ts:22`, `app/src/app/data/page-data.ts:18`), with TransferState bridging the two so hydration doesn't refetch. Pages are thin templates bound to `input.required<VM>()`, and `PokemonCard`/`TypeBadge`/`CardList`/`orDash` are single-sourced. This makes most bug fixes land in one obvious place, but a few real seams leak: the card-grid markup is hand-rolled in three templates because `CardList` never grew `types`/per-item-content support, and the team's query-string contract is built in two places.
+
+## Scenario walkthrough
+
+1. **Remove Abilities** — `app.routes.ts:48-51` (route), `pages/ability/` (delete), `loaders.ts:380-393` + `:455` (loader + switch case), `models.ts` (`AbilityVM`, `AbilityRef`, `PokemonVM.abilities`), `pokemon-page.html:67-79` (Abilities section links), `loaders.ts:350-353` (abilities mapping), `index.html:8` (meta description). ~7 files, every spot greppable — a handful of scattered edits, difficulty 3.
+2. **Sprite fix (Deoxys)** — one place: the computed sprite URL in `shared/pokemon-card.ts:47`. Every card list (home `home.html:39`, `card-list.ts:14`, team `team-page.ts:27`) renders `app-pokemon-card`, so one fix covers all. Difficulty 5.
+3. **Sort by name** — three places: inside `CardList` (covers move/ability/type), the `results` computed in `home.ts:77-82`, and team (either `team-page.ts` or `loadTeam` in `loaders.ts:233`). Or all three sorts in `loaders.ts`. Difficulty 3.
+4. **Items section** — the Moves pattern (route via the `pageData` factory, `loadItem` + switch case in `loaders.ts`, `ItemVM` in `models.ts`, new page reusing `TypeBadge`/`CardList`/`orDash`/`NotFound`/panel CSS) is uniform and thin; mostly reuse, ~50 lines of new template. Difficulty 4.
+5. **Data source change** — API base URL is built in one spot (`server/api-client.ts:12-14`, published via `app.config.server.ts:13` → token in `page-data.ts:39-42`); caching rules live in two caches (server `api-client.ts:16-19`, client `page-data.ts:13-28`) plus per-page TransferState. Difficulty 3.
+
+## Scores
+
+**removability: 3** — Each feature (abilities, team) has a predictable footprint — page dir, route, loader+switch case, VM model — but "delete and the links to it" means editing shared registries (`loaders.ts`, `models.ts`) and the pokemon page (`pokemon-page.html:67-79`, team button in `pokemon-page.html:17-25`), which is exactly "a handful of scattered edits".
+
+**changeability: 4** — The highest-leverage fix (card sprite URL, `pokemon-card.ts:47`) is genuinely single-sourced and covers every list; `humanize`/`dexNumber`/`orDash` (`shared/format.ts`) and `toCards`/`typeRef` (`loaders.ts:133-148`) are shared helpers. Docks: team query built twice (`app.routes.ts:18`, `team-page.ts:97`), and home re-derives type labels client-side (`home.ts:93-99`) that loaders already compute.
+
+**coupling: 4** — Components depend only on typed VM inputs and narrow tokens (`API_BASE_URL` in `pokemon-card.ts:36`); server and client code are cleanly split (`src/server/` vs `src/app/`) with a single seam (`PAGE_DATA_LOADER` swap in `app.config.server.ts:8`). Docks: the `page:<path>` string contract is defined implicitly by both the route resolvers (`app.routes.ts:28-35`) and the loaders switch (`loaders.ts:434-459`), and the root `App` embeds scroll policy via manual URL parsing (`app.ts:22-44`).
+
+**abstraction_design: 3** — `CardList` (`card-list.ts`) exists for the move/ability/type card lists, but it never grew the variations the app actually has — `types` on cards (home, team) and per-item extra content (team remove buttons) — so home (`home.html:36-40`) and team (`team-page.ts:25-35`) duplicate the card-grid markup instead. `TypeBadge` handles its one flag (`link`) well, and `toCards`/`typeRef`/`MoveTable` stretch fine; the gap is contained but it's the one place copy-paste crept in.
+
+**overall: 4** — Consistent VM-loader seams, single-sourced card component, and a clean server/client boundary make most changes easy; the duplicated card-grid/team-query and the implicit path contract are real but small drags.
+
+```json
+{
+  "dimension": "editability",
+  "criteria": {
+    "removability": {
+      "score": 3,
+      "evidence": [
+        "app/src/app/app.routes.ts:48 — abilities route entry must be deleted",
+        "app/src/server/loaders.ts:380 — loadAbility plus its case at loaders.ts:455 in the shared switch",
+        "app/src/app/shared/models.ts:86 — PokemonVM.abilities and AbilityVM/AbilityRef tie the feature into shared models",
+        "app/src/app/pages/pokemon/pokemon-page.html:67 — Abilities section links to /abilities must be edited too"
+      ],
+      "rationale": "Deleting a feature is a predictable handful of scattered edits (route, page dir, loader switch, shared models, cross-links on the Pokémon page) — findable via grep, but not a self-contained directory drop."
+    },
+    "changeability": {
+      "score": 4,
+      "evidence": [
+        "app/src/app/shared/pokemon-card.ts:47 — sprite URL computed in one place, covering every card list (home.html:39, card-list.ts:14, team-page.ts:27)",
+        "app/src/app/shared/format.ts:9 — humanize/dexNumber/orDash single-sourced and unit-tested (format.spec.ts)",
+        "app/src/server/loaders.ts:133 — toCards is the one helper behind move/ability/type card lists",
+        "app/src/app/app.routes.ts:18 — team query string duplicated at team-page.ts:97, so contract changes need two edits"
+      ],
+      "rationale": "The most likely bug fixes (sprite, formatting, card building) land in one obvious place; a few contracts (team query, type labels in home.ts:93-99) are duplicated and need two edits."
+    },
+    "coupling": {
+      "score": 4,
+      "evidence": [
+        "app/src/app/data/page-data.ts:39 — API_BASE_URL and PAGE_DATA_LOADER are narrow injection tokens",
+        "app/src/app/app.config.server.ts:8 — server/client seam is a single provider swap",
+        "app/src/server/loaders.ts:434 — page-data path string contract defined implicitly by both resolvers (app.routes.ts:28) and this switch",
+        "app/src/app/app.ts:22 — root App embeds scroll policy with manual URL parsing of router events"
+      ],
+      "rationale": "Components depend on typed VM inputs and tokens, and server/client code is cleanly separated; the main tangle is the implicit `page:<path>` string contract shared between routes and loaders."
+    },
+    "abstraction_design": {
+      "score": 3,
+      "evidence": [
+        "app/src/app/shared/card-list.ts:14 — CardList drops types from cards and takes no per-item content",
+        "app/src/app/pages/home/home.html:36 — home hand-rolls its own card-grid because CardList can't show types/pagination",
+        "app/src/app/pages/team/team-page.ts:25 — team hand-rolls another card-grid for remove buttons",
+        "app/src/app/pages/types/types-page.ts:15 — types page re-implements the type color convention instead of using TypeBadge (type-badge.ts:16)"
+      ],
+      "rationale": "CardList stopped one step short of the real variation (types on cards, per-item extras), so two pages copy its markup; the rest of the abstractions (MoveTable, toCards, TypeBadge, resolver factory) stretch without flags."
+    }
+  },
+  "overall": 4,
+  "findings": [
+    {
+      "severity": "medium",
+      "location": "app/src/app/shared/card-list.ts:14",
+      "issue": "CardList omits card types and per-item extras, so home (home.html:36-40) and team (team-page.ts:25-35) duplicate the card-grid loop; any card markup or ordering change touches three templates.",
+      "suggestion": "Extend CardList with a `types` input and projected per-item content (ng-content slot), then use it on home and team."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/app/app.routes.ts:18",
+      "issue": "The team data query string is built identically in the route resolver and in TeamPage.load (team-page.ts:97); the two can drift.",
+      "suggestion": "Extract a single helper (e.g. `teamPath(names)` in PageData or TeamStore) used by both."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/server/loaders.ts:434",
+      "issue": "The page-data path format is an implicit string contract shared between route resolvers (app.routes.ts:28-35) and the loadPageData switch; renaming a path key means editing two files with no compile-time check.",
+      "suggestion": "Introduce typed path builders next to the VM models so both sides reference the same constants."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/app/data/page-data.ts:42",
+      "issue": "The default API base URL 'http://localhost:9000' is duplicated here and in server/api-client.ts:13.",
+      "suggestion": "Keep the default in one module and import it into both."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/server/api-client.ts:16",
+      "issue": "Caching policy (TTL, eviction) is split across the server cache here and the client cache in page-data.ts:13-28, plus per-page TransferState; a caching-rule change touches all three.",
+      "suggestion": "Extract a shared TTL/cache option constant (or a small cache helper) both caches read from."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/app/pages/types/types-page.ts:15",
+      "issue": "The type color convention (`var(--type-<name>)`) is re-implemented inline instead of reusing TypeBadge (type-badge.ts:16).",
+      "suggestion": "Use TypeBadge with link=true (maybe with a `tile` styling input) for the type list."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/app/pages/home/home.ts:93",
+      "issue": "Home re-derives type labels client-side (typeRef at home.ts:97-99), duplicating label logic the loaders already own (loaders.ts:135-139), because HomeEntry carries raw type names.",
+      "suggestion": "Have loadHome emit NamedRefs for types so label resolution stays in the data layer."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/app/app.ts:22",
+      "issue": "Scroll policy is embedded in the root App constructor via a manual router-events subscription and URL diffing; it's the app component's most fragile logic.",
+      "suggestion": "Move it to a dedicated scrolling service or router feature so the root component stays purely layout."
+    }
+  ],
+  "summary": "A consistent page→VM architecture (route resolver → server loader or /_data fetch → typed input) makes most fixes land in one obvious place, and the shared PokemonCard/formatting helpers are genuinely single-sourced. The main editability drag is that CardList never absorbed the app's real card variations, so home and team duplicate the card-grid markup, and a couple of string contracts (team query, page-data paths) live on both sides of the server/client seam. Overall this is easy code to change, with a few known spots to tidy before they compound.",
+  "scenarios": [
+    {
+      "change": "Remove the Abilities pages and every link to them",
+      "files": [
+        "app/src/app/app.routes.ts",
+        "app/src/app/pages/ability/ability-page.ts",
+        "app/src/server/loaders.ts",
+        "app/src/app/shared/models.ts",
+        "app/src/app/pages/pokemon/pokemon-page.html",
+        "app/src/index.html"
+      ],
+      "difficulty": 3,
+      "notes": "Route + page dir delete cleanly, but you must also strip the loader + switch case, two VM interfaces plus PokemonVM.abilities, the Abilities section on the Pokémon page, and its mapping in loadPokemon — all findable by grep, none hidden."
+    },
+    {
+      "change": "Fix the card sprite for species whose default Pokémon has a different name",
+      "files": ["app/src/app/shared/pokemon-card.ts"],
+      "difficulty": 5,
+      "notes": "The sprite URL is one computed in PokemonCard (pokemon-card.ts:47); every list of cards renders that component, so a single fix covers home, moves, abilities, types and team."
+    },
+    {
+      "change": "Add sorting by name to every list of Pokémon cards",
+      "files": [
+        "app/src/app/shared/card-list.ts",
+        "app/src/app/pages/home/home.ts",
+        "app/src/app/pages/team/team-page.ts"
+      ],
+      "difficulty": 3,
+      "notes": "Sorting inside CardList covers move/ability/type pages, but home and team render their own card-grid loops (because CardList lacks types/per-item content), so two more edits — or a CardList refactor first."
+    },
+    {
+      "change": "Add an Items section (/items, /items/:name) shaped like Moves",
+      "files": [
+        "app/src/app/app.routes.ts",
+        "app/src/server/loaders.ts",
+        "app/src/app/shared/models.ts",
+        "app/src/app/pages/item/item-page.ts"
+      ],
+      "difficulty": 4,
+      "notes": "The pattern is uniform: one route via the pageData factory, one loadItem + switch case, one VM interface, one thin page reusing TypeBadge/CardList/orDash/NotFound and existing panel CSS. Mostly reuse, little copy."
+    },
+    {
+      "change": "Change the API base URL and caching rules",
+      "files": [
+        "app/src/server/api-client.ts",
+        "app/src/app/data/page-data.ts",
+        "app/src/app/app.config.server.ts"
+      ],
+      "difficulty": 3,
+      "notes": "Base URL has one construction point (api-client.ts:12) but a duplicated literal default in page-data.ts:42; caching rules live in two separate caches (server api-client.ts:16, client page-data.ts:13) plus per-page TransferState, so a policy change touches three spots."
+    }
+  ]
+}
+```

@@ -1,0 +1,193 @@
+I have everything I need. Here's my review of the test-quality dimension.
+
+## Review: test quality
+
+**Bottom line: the app contains no tests of its own.** Confirmed three ways:
+
+- `app/package.json:7-10` — scripts are only `dev`, `build`, `start`; no `test` script, and devDependencies contain no runner (only `@types/*`, `@vitejs/plugin-react`, `typescript`, `vite`).
+- Repo-wide grep for `test|spec|vitest|jest|playwright|assert` in `app/` matches only false positives (`latestEnglish`, `// noinspection`, lockfile paths).
+- Static facts agree: `tests.files: 0`, `testLoc: 0`.
+
+The only guard on behavior is the harness-provided Playwright acceptance suite (`tests/specs/`, 46 cases — `home.spec.mjs`, `pokemon.spec.mjs`, `details.spec.mjs`, `layout.spec.mjs`), which the agent didn't write and doesn't ship with the app. Per TanStack's own guidance, Vitest + Testing Library is the recommended, well-supported path, and the codebase has an unusually large amount of *pure, cheaply testable* logic — so the cost of doing this was low and the omission matters.
+
+### What isn't tested, and what bugs that will let through
+
+**The cache layer is the single riskiest untested unit.** `app/src/server/pokeapi.ts:17-32` — `memo` caches promises for 60s and evicts on failure only via `value.catch(...)` at line 24. Delete that three-line catch during a refactor and one transient API 500 poisons the cache: every subsequent request for that key fails for a full minute. Nothing would fail. A 20-line Vitest with fake timers pins TTL expiry, failure eviction, and concurrent-caller sharing — none of it is covered.
+
+**The home page is a three-way state machine with zero tests.** `app/src/routes/index.tsx:42-61` (two `useEffect`s + a `lastPushed` ref distinguishing user typing from URL-driven navigation) and `:64-77` (filter/paginate). Concrete latent issues a test would have surfaced:
+- Line 75: `requestedPage = query === (search.q ?? '') ? ... : 1` compares the *untrimmed* local query against the *trimmed* URL value — typing `"pikachu "` silently forces page 1 mid-session even when the URL says `page=3`.
+- Browser back/forward: if the ref-sync effect regresses, the input desyncs from the URL. The acceptance suite never presses back.
+- `?page=999` is silently clamped (line 76) so the page says "Page 22 of 22" while the URL still reads 999 — untested URL-state edge.
+- Mixing `replace: true` for search (line 56) with pushed history for filters (line 80) — history semantics unverified.
+
+**A real latent bug the tests would have caught:** `app/src/server/functions.ts:56` calls `getPokemonById(species.id)` *without* `orNull`, unlike every sibling lookup. A species whose default Pokémon 404s throws the internal `NotFoundError` straight past the `notFound()` flow at `app/src/routes/pokemon.$name.tsx:24`, landing in the framework's default error boundary instead of the spec-required Not-found page.
+
+**Data derivation that silently degrades.** `app/src/server/pokeapi.ts:172-193` builds the home index by cross-joining type lists and generation lists. A species absent from every type's `pokemon` list gets `types: []` and becomes invisible to the type filter; one missing from generation lists gets `generation: null` and disappears from generation filtering. This is exactly the code someone "refactoring the data layer" will touch, and it fails *quietly*.
+
+**The sort comparator.** `app/src/components/MoveTable.tsx:45-62` — nulls-last-in-both-directions with a stable index tie-break (line 58) is easy to break and the acceptance suite only clicks through one sort path on one Pokémon; null-power moves in descending order are unchecked.
+
+**Pure helpers, zero tests.** `app/src/lib/format.ts:3-24` (`humanize`, `dexNumber`, `display`, `collapse`) and `app/src/server/pokeapi.ts:69-75` (`englishName`, `latestEnglish`). `latestEnglish` must be the *last* English entry; a refactor to `.find()` changes flavor text and genus site-wide. `humanize` directly powers search matching (`routes/index.tsx:69`). All trivially unit-testable.
+
+**Error paths.** `app/src/server/pokeapi.ts:36-41` rethrows non-404 errors and no route defines an `errorComponent` — an API outage yields the framework default error page with no landmarks, wrong title. Untested and unspecified even by the acceptance suite.
+
+```json
+{
+  "dimension": "tests",
+  "criteria": {
+    "coverage_of_risk": {
+      "score": 1,
+      "evidence": [
+        "app/package.json:7-10 — no test script, no test runner in devDependencies",
+        "app/src/server/pokeapi.ts:17-32 — TTL cache with load-bearing failure eviction, untested",
+        "app/src/routes/index.tsx:42-77 — search/filter/pagination/debounce state machine, untested",
+        "app/src/components/MoveTable.tsx:45-62 — nulls-last comparator and aria-sort toggling, untested",
+        "app/src/lib/format.ts:3-24 — pure helpers (humanize, dexNumber, display) used site-wide, untested"
+      ],
+      "rationale": "No tests exist at all, so none of the app's riskiest logic — caching, URL state, data derivation, sorting — is covered by anything the team will own."
+    },
+    "behaviour_not_implementation": {
+      "score": 1,
+      "evidence": [
+        "app/package.json:7-10 — scripts dev/build/start only; zero test files in app/"
+      ],
+      "rationale": "There are no tests, so nothing is asserted at either the behaviour or implementation level."
+    },
+    "regression_power": {
+      "score": 1,
+      "evidence": [
+        "app/src/server/pokeapi.ts:24-26 — removing the value.catch eviction would poison the cache for 60s and no test would fail",
+        "app/src/server/functions.ts:56 — getPokemonById lacks orNull, so a missing default Pokémon bypasses the not-found flow; nothing would catch it",
+        "app/src/routes/index.tsx:75-76 — untrimmed-query page reset and out-of-range page clamping are unguarded"
+      ],
+      "rationale": "Any refactor of the data layer, cache, or home-page state machine ships unverified; only the external acceptance suite holds anything in place, and it doesn't cover back/forward, error paths, or edge data."
+    },
+    "signal_to_noise": {
+      "score": 3,
+      "evidence": [
+        "app/ — no test files, so no maintenance cost is being paid"
+      ],
+      "rationale": "No tests means no noise, but also no signal; per the anchor this is a neutral 3."
+    }
+  },
+  "overall": 1,
+  "findings": [
+    {
+      "severity": "high",
+      "location": "app/package.json:7-10",
+      "issue": "The app ships zero tests: no test script, no runner dependency, no spec files anywhere in app/.",
+      "suggestion": "Add Vitest + @testing-library/react (TanStack's recommended stack) with a `test` script, and start with the pure helpers and the cache layer, which need no DOM at all."
+    },
+    {
+      "severity": "high",
+      "location": "app/src/server/pokeapi.ts:17-32",
+      "issue": "The TTL cache's failure eviction (line 24-26) is load-bearing but untested; a refactor that drops it caches rejected promises for 60s, turning one transient API error into a minute of hard failures.",
+      "suggestion": "Unit test `memo` with fake timers: TTL expiry, failure eviction, concurrent callers sharing one promise."
+    },
+    {
+      "severity": "high",
+      "location": "app/src/routes/index.tsx:42-77",
+      "issue": "Search input, debounced URL sync (lastPushed ref) and filter/pagination interact through three pieces of state with no coverage; line 75 compares untrimmed local query to trimmed URL q, silently forcing page 1 when the user types a trailing space, and back/forward navigation is untested.",
+      "suggestion": "Add component tests for: typing updates results then URL; browser back restores input state; ?page out of range clamps; whitespace-only q is omitted from the URL."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/server/functions.ts:56",
+      "issue": "getPokemonById(species.id) is not wrapped in orNull, so a species whose default Pokémon is missing throws the internal NotFoundError past the notFound() flow, rendering the framework error boundary instead of the spec's Not-found page.",
+      "suggestion": "Wrap in orNull and throw notFound() when either lookup fails; add a test for the species-without-default-Pokémon case."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/server/pokeapi.ts:172-193",
+      "issue": "The home index is derived by cross-joining type and generation lists; species missing from those lists silently get types:[] / generation:null and vanish from the filters — exactly the failure mode a data-layer refactor would introduce.",
+      "suggestion": "Unit test speciesIndex against a small fixture with a two-type species, a typeless species, and a generation-less species, asserting the degradation is at least explicit."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/components/MoveTable.tsx:45-62",
+      "issue": "The sort comparator's nulls-last-in-both-directions logic and stable index tie-break (line 58) are subtle and untested; the acceptance suite only exercises one column on one Pokémon.",
+      "suggestion": "Extract the comparator or test the component with rows containing null power/accuracy, asserting ascending and descending order and aria-sort state."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/server/pokeapi.ts:94-108",
+      "issue": "toCards (alternate-form exclusion via id > 10000, dedupe by species id, fallback name when the species map is stale) is untested; the stale-TTL fallback at line 105 is a genuine edge the acceptance suite only partially covers.",
+      "suggestion": "Unit test with refs including IDs above 10000, duplicate species refs, and an ID absent from the species map."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/server/pokeapi.ts:36-41",
+      "issue": "Non-404 API failures (500s, connection refused) propagate unhandled; no route defines an errorComponent, so an API outage yields the framework default error page without the required layout or title.",
+      "suggestion": "Add an errorComponent (at least on the root) and a test that an API 500 renders something reasonable rather than an unhandled rejection."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/server/functions.ts:64",
+      "issue": "Default game selection relies on sorting by version-group order with a name tie-break and a MAX_SAFE_INTEGER fallback; the `.at(-1)` highest-order pick is easy to invert in a refactor.",
+      "suggestion": "Unit test the game-ordering logic with a fixture of version groups with known and missing orders."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/lib/format.ts:3-24",
+      "issue": "humanize, collapse, latestEnglish (pokeapi.ts:73-75) and display are pure and used site-wide (latestEnglish must take the last English entry, collapse must handle \\f), yet have no tests.",
+      "suggestion": "A single spec file covering humanize ('mr-mime' → 'Mr Mime', 'ho-oh' → 'Ho Oh'), collapse of \\n\\f runs, and latestEnglish taking the last entry would be ~15 minutes of work with high regression value."
+    }
+  ],
+  "summary": "The app contains no tests of its own — no runner, no script, no spec files — so every behaviour beyond the harness's acceptance suite is unguarded. That unguarded surface is large and genuinely risky: a TTL cache whose failure eviction is load-bearing, a three-way search/URL/debounce state machine with a trailing-space page-reset quirk, data derivation that silently drops type/generation for edge data, and one real latent bug (getPokemonById without orNull bypasses the not-found flow). Given Vitest is TanStack's recommended runner and much of this logic is pure and cheaply testable, this is the app's biggest gap as a long-term codebase.",
+  "wroteTests": false,
+  "testCount": 0,
+  "valuableTests": [],
+  "lowValueTests": [],
+  "untested": [
+    {
+      "area": "Runtime cache (memo, TTL, failure eviction, concurrent sharing) — app/src/server/pokeapi.ts:17-32",
+      "risk": "high",
+      "likelyBug": "Removing the value.catch eviction caches rejected promises for 60s: one transient API 500 makes every subsequent request for that key fail; TTL semantics regress against the live-data-overlay requirement"
+    },
+    {
+      "area": "Home page search/filter/pagination/URL state machine — app/src/routes/index.tsx:42-77",
+      "risk": "high",
+      "likelyBug": "Back/forward desync between input and URL; untrimmed query silently forcing page 1 (line 75); out-of-range ?page clamped while URL keeps the wrong value; filters or page size regressing invisibly"
+    },
+    {
+      "area": "Not-found flow for a species with a missing default Pokémon — app/src/server/functions.ts:56",
+      "risk": "high",
+      "likelyBug": "Raw NotFoundError bypasses notFound(), rendering the default error boundary instead of the spec-required Not-found page with the shared layout"
+    },
+    {
+      "area": "speciesIndex derivation (type slots, generation membership) — app/src/server/pokeapi.ts:172-193",
+      "risk": "medium",
+      "likelyBug": "A refactor of the cross-join silently produces empty types or null generation for edge species, which then disappear from filter results with no error anywhere"
+    },
+    {
+      "area": "Move table sorting (nulls last in both directions, stable tie-break, aria-sort) — app/src/components/MoveTable.tsx:45-62",
+      "risk": "medium",
+      "likelyBug": "Null power/accuracy move to the top when sorting descending, or aria-sort not flipping on second click"
+    },
+    {
+      "area": "toCards species mapping (alternate forms > 10000, dedupe, stale-map name fallback) — app/src/server/pokeapi.ts:94-108",
+      "risk": "medium",
+      "likelyBug": "Alternate forms leaking into lists, duplicate cards for one species, or raw API names displayed when the species map is a second out of date"
+    },
+    {
+      "area": "Error handling for non-404 API failures — app/src/server/pokeapi.ts:36-41 and route tree (no errorComponent anywhere)",
+      "risk": "medium",
+      "likelyBug": "API outage or 500 renders the framework default error page with no landmarks, breaking the required layout and title"
+    },
+    {
+      "area": "Pure helpers: humanize, dexNumber, display, collapse, latestEnglish, englishName — app/src/lib/format.ts:3-24, app/src/server/pokeapi.ts:69-75",
+      "risk": "medium",
+      "likelyBug": "latestEnglish regressing to the first English entry (changes flavor text and genus site-wide); collapse dropping the \\f case; humanize changes breaking search matching"
+    },
+    {
+      "area": "Game/version-group selection (default = highest order, tie-break, unknown ?game=) — app/src/server/functions.ts:56-64",
+      "risk": "low",
+      "likelyBug": "Default game flipping to the earliest version group or an invalid ?game= value throwing instead of falling back"
+    },
+    {
+      "area": "Search validation edge cases (page=0/negative/fractional, whitespace-only q) — app/src/routes/index.tsx:20-28",
+      "risk": "low",
+      "likelyBug": "Malformed query params crashing validateSearch or producing non-canonical URLs with default values left in"
+    }
+  ]
+}
+```

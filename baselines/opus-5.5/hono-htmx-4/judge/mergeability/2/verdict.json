@@ -1,0 +1,99 @@
+{
+  "dimension": "mergeability",
+  "criteria": {
+    "idiomatic": {
+      "score": 5,
+      "evidence": [
+        "app/src/index.tsx:39-50 — htmx fragment vs full-page split on the same route, with HX-Push-Url to keep the canonical filtered URL and Vary: HX-Request for caches",
+        "app/src/index.tsx:18 — isHtmx() checks HX-History-Restore-Request so history restores get a full document, a subtle htmx behavior handled correctly",
+        "app/src/pages/home.tsx:95-101 — idiomatic htmx trigger (input changed delay:200ms from:#search) plus hx-sync this:replace to debounce races, with a noscript GET fallback",
+        "app/src/components.tsx:4-10 and app/src/index.tsx:22-26 — hono/jsx FC layout with raw('<!DOCTYPE html>'), the pattern the framework's own docs show",
+        "app/src/pages/details.tsx:11, app/src/pages/pokemon.tsx:58 — async server components fetching data, the documented hono/jsx pattern",
+        "app/src/index.tsx:28-37 — serveStatic from the node-server adapter (current v2 path) with a Cache-Control onFound hook"
+      ],
+      "rationale": "Current stable versions throughout (hono 4.13.14, node-server 2.1.5, htmx 2.0.11) and every framework feature used the way its docs describe; the htmx integration is above the level of the framework's own examples. Only nit: data loading is sometimes in route handlers (index.tsx:39, 60) and sometimes inside components, but both are documented styles."
+    },
+    "correctness_risks": {
+      "score": 4,
+      "evidence": [
+        "app/src/api.ts:31 — upstream fetch has no timeout/AbortSignal; a hung request permanently holds one of the 16 semaphore slots (api.ts:20-26) and can eventually stall every page render",
+        "app/src/index.tsx:60-67 — the /pokemon/:name/moves fragment route omits Vary: HX-Request (set on '/' at index.tsx:45,48), so a shared proxy cache could serve the bare fragment to a non-htmx client",
+        "app/src/api.ts:40-60 — cache is bounded (MAX_ENTRIES 5000, oldest-eviction), stale-while-revalidate with error cleanup handled correctly; no unbounded growth",
+        "app/src/index.tsx:92-105 — 404 via app.notFound and a 500 page via app.onError; API misses (null) map to 404 at index.tsx:54,57,64,80",
+        "app/src/pages/pokemon.tsx:193 — noscript form action carries a '#moves' fragment that browsers strip on GET submit, so the fallback lands without the anchor",
+        "app/public/app.js:1-32 — single delegated click listener (no leak across htmx swaps); missing-value sort-last and aria-sort handling match the spec"
+      ],
+      "rationale": "No escaping issues (all rendering through hono/jsx), deduped concurrent fetches, race-safe htmx swaps, and proper 404/500 paths; the remaining fragility is the missing upstream fetch timeout, which is real but low-probability in this deployment."
+    },
+    "global_abstractions": {
+      "score": 4,
+      "evidence": [
+        "app/src/api.ts:1-60 — one well-bounded data module: transport, cache policy and API types, with no hidden state leaking elsewhere",
+        "app/src/api.ts:154-170 — presentation helpers (humanize, dexNumber, englishName, spriteUrl) live in the data module, slightly blurring the data/presentation boundary",
+        "app/src/components.tsx:34-84 — small, genuinely shared UI primitives (Section, TypeBadge, PokemonCard, CardList, Count) with clear props",
+        "app/src/api.ts:7 — the one piece of config (API_BASE_URL) is env-driven with a sane default, not buried"
+      ],
+      "rationale": "Abstractions earn their keep: api.ts is a proper data layer and components.tsx a small shared kit; the only untangling needed later is moving display-formatting helpers out of api.ts."
+    },
+    "readability": {
+      "score": 4,
+      "evidence": [
+        "app/src/api.ts:1-5 — a header comment explaining the cache policy (stale-while-revalidate) rather than the mechanics",
+        "app/src/public/app.js:1-2 — comment explains why event delegation is used (survives htmx swaps)",
+        "app/src/pages/pokemon.tsx:139-235 — MovesBody is a dense ~95-line component mixing data assembly, dedupe and rendering; the only place a new teammate will slow down",
+        "app/src/pages/home.tsx:69, app/src/pages/details.tsx:78 — extra={(_, i) => items[i]...} index plumbing is awkward versus passing the item itself",
+        "app/src/pages/home.tsx:25-37 — parseHomeQuery/homeUrl give the URL canonicalization a single, named home"
+      ],
+      "rationale": "Consistent naming, why-not-what comments, and obvious file layout; MovesBody and the index-based extra callbacks are the rough spots."
+    },
+    "review_cost": {
+      "score": 4,
+      "evidence": [
+        "app/src/api.ts:31 — one-line fix: add AbortSignal.timeout to the fetch",
+        "app/src/index.tsx:66 — one-line fix: add c.header('Vary', 'HX-Request')",
+        "app/src/pages/pokemon.tsx:193 — trivial: drop the fragment from the noscript action or use a hidden anchor"
+      ],
+      "rationale": "Nits and two small robustness hardenings; nothing structural would block approval."
+    }
+  },
+  "overall": 4,
+  "findings": [
+    {
+      "severity": "medium",
+      "location": "app/src/api.ts:31",
+      "issue": "Upstream fetch has no timeout; a hung API response holds a semaphore slot (of 16, api.ts:20-26) forever, which can eventually wedge every page render behind the queue.",
+      "suggestion": "Pass AbortSignal.timeout(10_000) (or similar) to fetch and treat the abort like a failed load so stale cache entries and error paths behave as they already do."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/index.tsx:60-67",
+      "issue": "The /pokemon/:name/moves fragment route doesn't set Vary: HX-Request, unlike the '/' route (index.tsx:45,48), so a shared proxy cache could serve the bare #moves-body fragment to a non-htmx request.",
+      "suggestion": "Add c.header('Vary', 'HX-Request') to the htmx branch, or factor the htmx response headers into the shared helper used for both fragment routes."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/pages/pokemon.tsx:193",
+      "issue": "The noscript fallback form action includes a '#moves' URL fragment, which browsers discard when submitting a GET form, so the no-JS path reloads at the top of the page.",
+      "suggestion": "Drop the fragment from the action (the redirect at index.tsx:63 already appends #moves) or add a hidden field and handle it in the redirect logic."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/index.tsx:70-90",
+      "issue": "Data loading is split across layers: route handlers fetch the primary resource (index.tsx:52-54, 70-72) while components fetch their dependencies (details.tsx:11-15, pokemon.tsx:139-145), so a reader can't predict where a given fetch lives.",
+      "suggestion": "Pick one convention — either load everything in handlers and pass plain data props, or consistently let async components own their fetching."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/api.ts:154-170",
+      "issue": "Presentation helpers (humanize, dexNumber, englishName, spriteUrl) live in the data-access module, so the data layer now has UI concerns and every component imports it for formatting.",
+      "suggestion": "Move the pure formatting helpers into a small format.ts (or components.tsx) and keep api.ts to transport, cache and API types."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/pages/home.tsx:69",
+      "issue": "extra={(_, i) => ...items[i]...} re-derives the row through its index in both home.tsx:69 and details.tsx:78, which is easy to break when the list changes.",
+      "suggestion": "Have CardList's extra callback receive the item itself (it already receives the index) and drop the index plumbing."
+    }
+  ],
+  "summary": "A polished, current-stable Hono 4 + htmx 2 app that reads like framework documentation: correct htmx fragment/history handling with Vary headers, a bounded stale-while-revalidate data layer, proper 404/500 paths, and safe JSX escaping everywhere. The structural critiques are minor — presentation helpers in the data module, one dense component, and slightly inconsistent data-loading placement. I'd merge after adding an upstream fetch timeout and the missing Vary header."
+}

@@ -1,0 +1,116 @@
+{
+  "dimension": "mergeability",
+  "criteria": {
+    "idiomatic": {
+      "score": 5,
+      "evidence": [
+        "app/app/routes.ts:3-11 — manual route config with typed index/route entries, the documented pattern",
+        "app/app/routes/home.tsx:38-88 — loader parses q/type/generation/page from request URL so filter state is shareable, exactly the documented search/filter pattern",
+        "app/app/lib/api.server.ts:39-41 — 404 via `throw data(null, { status: 404 })`, the recommended missing-record pattern",
+        "app/app/root.tsx:27-58 — root `Layout` export wrapping html/head/body with Meta/Links/Scripts/ScrollRestoration, current root-route convention",
+        "app/app/routes/pokemon.tsx:7,22 — typed `Route.MetaFunction` / `Route.LoaderArgs` / `Route.ComponentProps` from generated +types",
+        "app/app/routes/home.tsx:122-130 — controlled input with a 150 ms debounce pushing to the URL; the only homegrown piece, and it's the right shape for the spec",
+        "app/app/root.tsx:16-18 — meta handles `error` for boundary titles, matching the documented meta error arg"
+      ],
+      "rationale": "Reads like the framework's own examples; routing, data loading, 404s, URL state and metadata all use the current recommended primitives, with correct `.server.ts` separation. The only dated note is that current docs suggest React 19 `<title>` over the `meta` export, but `meta` is still fully supported and used consistently."
+    },
+    "correctness_risks": {
+      "score": 4,
+      "evidence": [
+        "app/app/routes/home.tsx:115-133 — `update` closes over `filters` from the render of the last keystroke; selecting a type/generation within the 150 ms debounce window navigates with the stale filters and drops the just-chosen filter (typing then quick-clicking a select loses it)",
+        "app/app/lib/api.server.ts:16,31-35 — expired cache entries are never evicted, only overwritten on refetch; growth is bounded by the API surface (~2k URLs) so it won't leak, but a sweep on access would be tidier",
+        "app/app/routes/pokemon.tsx:53-66 — cold request for a popular Pokémon fans out to every version-group record plus every move record (100+ parallel fetches); bounded and cached for 60 s, but a slow first hit",
+        "app/app/routes/home.tsx:80 — out-of-range ?page is clamped for display but the URL keeps the bad value; harmless",
+        "app/app/routes/home.tsx:112 — debounce timer is cleared on unmount; no leaked timers",
+        "app/app/root.tsx:62-70 — non-404 loader errors render a real error page with correct 500 status; failures aren't swallowed",
+        "app/app/lib/api.server.ts:33-37 — rejected promises are removed from the cache so a transient API failure isn't sticky"
+      ],
+      "rationale": "Careful look found one real but narrow race (stale closure in the debounce path) and a couple of bounded inefficiencies; error paths, 404s, cleanup and SSR/hydration are handled correctly."
+    },
+    "global_abstractions": {
+      "score": 4,
+      "evidence": [
+        "app/app/lib/api.server.ts:1-255 — single data module holding fetch+cache, API types, localization helpers and the Card view model; cohesive and server-only, but it's becoming the module everything touches",
+        "app/app/lib/api.server.ts:232-255 — `cardsFromPokemon` dedupes alternate forms once for move/ability/type routes; good factoring of the trickiest spec rule",
+        "app/app/routes/pokemon.tsx:39, move.tsx:21, type.tsx:21 — `typeNames[name] ?? humanize(name)` re-implemented in three loaders; small near-duplicate",
+        "app/app/lib/format.ts:1-35 — tiny, pure, dependency-free helper module with clear boundaries",
+        "app/app/components/ui.tsx:1-80 — small presentational components with no hidden state; no god component"
+      ],
+      "rationation": "Abstractions are few and earn their keep, with one clear server/data boundary (`api.server.ts`) that is starting to wear three hats (transport, domain types, view shaping) and a triplicated label helper. Untangling later is cheap, not structural."
+    },
+    "readability": {
+      "score": 5,
+      "evidence": [
+        "app/app/lib/api.server.ts:1-4 — comment states why the cache exists, not what it does",
+        "app/app/routes/home.tsx:99-101 — comment explains the controlled-input/debounce trade-off (responsiveness vs URL as source of truth)",
+        "app/app/components/move-tables.tsx:52 — comment flags the missing-values-last invariant",
+        "app/app/lib/format.ts:5-6,10-11,18-19 — doc comments with concrete input/output examples",
+        "app/app/routes/type.tsx:9-16 — RELATIONS as a declarative table next to its consumer; intent is obvious",
+        "app/app/routes/pokemon.tsx:44-50 — loader is long but proceeds in clearly named stages (groups → learned → moves → tables)"
+      ],
+      "rationale": "Consistent structure, good names, and the few comments present explain *why* — a new teammate could add a route here in minutes without reading the spec."
+    },
+    "review_cost": {
+      "score": 4,
+      "evidence": [
+        "app/app/routes/home.tsx:115-133 — one real change request (derive `update` from current searchParams via `useSearchParams` setter or a ref-held latest filters)",
+        "app/app/routes/not-found.tsx:7-14 — splat route renders null and leans on the root boundary; framework mode already 404s unmatched URLs to the root ErrorBoundary, so this file is redundant (nit)",
+        "app/app/root.tsx:16-18 plus routes/pokemon.tsx:27-28 — error title logic lives in two places (root meta's errorHeading and each route's `loaderData ? ... : \"Not found – Pokédex\"`); works, but two sources of truth (nit)",
+        "app/app/react-router.config.ts:3 — leftover template comment \"// Config options...\" (nit)"
+      ],
+      "rationale": "I'd ask for one focused fix to the debounce race plus a few nits; everything else is mergeable as-is."
+    }
+  },
+  "overall": 4,
+  "findings": [
+    {
+      "severity": "medium",
+      "location": "app/app/routes/home.tsx:115",
+      "issue": "`update()` closes over `filters` from the render that scheduled the debounce, so changing the type or generation select within the 150 ms debounce window navigates using stale query params and silently drops the filter the user just picked.",
+      "suggestion": "Read current params inside `update` (e.g. `setSearchParams` from `useSearchParams`, or keep filters in a ref updated each render) instead of capturing them per-render."
+    },
+    {
+      "severity": "low",
+      "location": "app/app/lib/api.server.ts:16",
+      "issue": "Module-level cache map never evicts expired entries; stale entries linger until the same URL is requested again. Bounded by the API's own surface, so it won't grow unboundedly, but it's easy to tighten.",
+      "suggestion": "Delete expired entries on read (or periodically) in `getJson`."
+    },
+    {
+      "severity": "low",
+      "location": "app/app/routes/not-found.tsx:7",
+      "issue": "The splat route's loader just throws a 404 and its component renders null; framework mode already renders the root ErrorBoundary with a 404 for unmatched URLs, so the route duplicates built-in behavior.",
+      "suggestion": "Drop the route (and rely on the root boundary), or render the not-found UI in this route's own component instead of relying on the root boundary."
+    },
+    {
+      "severity": "low",
+      "location": "app/app/routes/pokemon.tsx:53",
+      "issue": "Cold request for a Pokémon page fans out to every version-group record plus every move record in the selected game — 100+ parallel fetches before the first paint, only mitigated by the 60 s cache.",
+      "suggestion": "Consider narrowing the fan-out (e.g. only fetch version-group metadata when the select is used, or raise the shared cache TTL for these slow-changing endpoints) and measure."
+    },
+    {
+      "severity": "low",
+      "location": "app/app/root.tsx:16",
+      "issue": "The 404/error title logic exists in two places: root `meta`'s `errorHeading` and each route's `loaderData ? pageTitle(...) : \"Not found – Pokédex\"` fallback.",
+      "suggestion": "Pick one source of truth — e.g. only handle `error` in root meta and let routes define the happy-path title only."
+    },
+    {
+      "severity": "low",
+      "location": "app/app/routes/move.tsx:21",
+      "issue": "The label fallback `typeNames[name] ?? humanize(name)` is re-implemented in pokemon.tsx:39 and type.tsx:21.",
+      "suggestion": "Export a `typeLabel(typeNames, name)` helper from lib/api.server.ts (or return precomputed labels from getTypeNames)."
+    },
+    {
+      "severity": "low",
+      "location": "app/app/routes/home.tsx:80",
+      "issue": "An out-of-range `?page=999` is clamped for rendering but the URL keeps the invalid value, so links and reloads disagree with the displayed page.",
+      "suggestion": "Redirect (or navigate) to the clamped page when `requested` differs from the effective page."
+    },
+    {
+      "severity": "low",
+      "location": "app/app/react-router.config.ts:3",
+      "issue": "Leftover template comment.",
+      "suggestion": "Delete the placeholder comment."
+    }
+  ],
+  "summary": "A genuinely idiomatic React Router v8 framework-mode app: typed route modules, URL-as-state filtering in loaders, data()-thrown 404s and correct .server module boundaries, with comments that explain intent. The one change I'd require before merge is the stale-closure race in the home page's debounced search; everything else is a nit. I'd merge after that one round of small fixes."
+}

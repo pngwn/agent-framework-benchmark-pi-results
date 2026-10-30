@@ -1,0 +1,123 @@
+```json
+{
+  "dimension": "mergeability",
+  "criteria": {
+    "idiomatic": {
+      "score": 3,
+      "evidence": [
+        "app/vite.config.ts:6 — correctly on current SolidStart v2 (Vite 8 + solidStart() + nitro() from nitro/vite, per the v2 migration guide)",
+        "app/src/lib/data.ts:67-118 — hand-rolled module-level `promise ??=` memoization replaces the framework's `cache()`/`createAsync` from @solidjs/router, the recommended request-dedup/revalidate primitives",
+        "app/vite.config.ts:6 — `ssr: false` is a documented option, but for a content-heavy encyclopedia the v2 default SSR (or 2.1's `ssr: \"data-only\"`) would serve it better; the choice is unexplained anywhere",
+        "app/src/routes/index.tsx:105-132 and app/src/components/PokemonCard.tsx:21-23 — `.map()` in JSX where `<For>` is used elsewhere in the same app; loses keyed reconciliation and is inconsistent",
+        "app/src/app.tsx:12 — `document.documentElement.lang = \"en\"` side effect duplicates what app/src/entry-server.tsx:10 already guarantees in the document"
+      ],
+      "rationale": "Solidly on the current stable framework (v2 on Vite 8, correct entry points, FileRoutes, useSearchParams, MetaProvider), but data loading bypasses `cache()` with home-grown memoization, rendering is SPA-only by unexplained choice, and JSX iteration idioms are inconsistent."
+    },
+    "correctness_risks": {
+      "score": 3,
+      "evidence": [
+        "app/src/lib/data.ts:67-118 — `speciesPromise ??=` etc. cache the *promise*, so one transient API failure (e.g. a 502 from the proxy) permanently poisons the index/generations/home data for the whole session with no retry",
+        "app/src/routes/index.tsx:18 and app/src/routes/moves/[name].tsx:19-24 — resource failures render bare `<h1>` fallbacks with no error UI; API outages are indistinguishable from 'Not found' since data.ts getPokemonPage/getMovePage return null on any fetch error",
+        "app/src/lib/data.ts:401-415 — a Pokémon page + one game selection fires ~25 version-group fetches plus one move-detail fetch per move (~100 for scarlet-violet), all through the app's own proxy",
+        "app/src/routes/api-proxy/[...path].ts:13 — `cache-control: no-store` on every proxied response, so the browser can never cache either; the 60 s client-side Map (app/src/lib/api.ts:24-27) is the only cache and never evicts stale entries",
+        "app/src/routes/pokemon/[name].tsx:66-80 — scroll effect re-runs on every moveData change, re-scrolling to the hash whenever the user changes the game select"
+      ],
+      "rationale": "No races in the main flows (latest-wins resources, clamped page numbers, debounced search with onCleanup are all done right), but the promise-memo caching plus total absence of error states means a single transient upstream failure bricks the session, and the moves fan-out is a lot of chatty, uncacheable traffic."
+    },
+    "global_abstractions": {
+      "score": 4,
+      "evidence": [
+        "app/src/lib/api.ts — clean low layer (typed-ish fetch + cache + concurrency pool); app/src/lib/format.ts — pure formatting; app/src/lib/data.ts — per-page data builders; app/src/components/* — presentational; boundaries are legible",
+        "app/src/lib/data.ts:298, 322, 353 — `new Map(species.map(...))` and the 'build card list, drop forms >10000, dedupe, sort by id' pipeline duplicated nearly identically across getMovePage/getAbilityPage/getTypePage",
+        "app/src/lib/data.ts:329 — `.filter(... && (seen.add(id), true))` comma-operator dedupe trick, a third variant of the same pattern",
+        "app/src/lib/data.ts:366-370 — `typeLabel()` (a type-name lookup table) reused to label *moves*, a semantic misuse of a shared helper that happens to work because TYPE_NAMES misses"
+      ],
+      "rationale": "The layering is genuinely good and each module earns its keep; the one thing that will need untangling is the triple-duplicated card-list pipeline, which is contained inside data.ts and cheap to extract."
+    },
+    "readability": {
+      "score": 3,
+      "evidence": [
+        "app/src/routes/abilities/[name].tsx, moves/[name].tsx, types/[name].tsx — every route page follows the identical createResource/Show/Title/section shape; very easy to follow",
+        "app/src/lib/data.ts — ~30 uses of `any` for API payloads despite tsconfig strict:true; the domain shape only exists in spot interfaces (SpeciesSummary, PokemonPageData)",
+        "app/src/lib/data.ts:82 — `mapPool(..., 9, ...)` and data.ts:405 `mapPool(..., 12, ...)` unexplained magic concurrency numbers",
+        "app/README.md — untouched `npm init solid` template; the app's own decisions (ssr:false, why a proxy, media path rewriting) are documented nowhere; the whole app has 1 comment line"
+      ],
+      "rationale": "Consistent, well-named, small components — a new teammate finds their way quickly — but the `any`-typed data layer, zero explanatory comments and boilerplate README mean the *why* behind several load-bearing decisions is invisible."
+    },
+    "review_cost": {
+      "score": 3,
+      "evidence": [
+        "app/package.json:6-10 — no `typecheck`/`lint`/`format` scripts and no devDependencies; `tsc --noEmit` never runs, so the strict tsconfig enforces nothing",
+        "app/src/lib/api.ts:24-27 — 60 s TTL constant and unevicted cache: reviewer must ask for a policy decision",
+        "app/src/lib/data.ts:298-360 — three copies of the card pipeline to consolidate before merge",
+        "app/src/routes/pokemon/[name].tsx:59-63 — `Show when={!page.loading}` outer wrapper makes the h1 flash 'Pokémon' during route-to-route refetches; needs a loading design pass"
+      ],
+      "rationale": "Approvable structure with one real round of changes: add error/retry states, extract the shared card builder, add a typecheck script, and either adopt `cache()` or justify the memo. Nothing needs architectural rework."
+    }
+  },
+  "overall": 3,
+  "findings": [
+    {
+      "severity": "high",
+      "location": "app/src/lib/data.ts:67-118",
+      "issue": "Module-level `promise ??=` memoization caches rejected promises: one transient API failure permanently breaks the species index, generations, type list or home data for the session, with no retry or error surface (routes render bare <h1> fallbacks).",
+      "suggestion": "Use `cache()` from @solidjs/router (or clear the memoized promise on rejection) and render an explicit error state with a retry in each route's resource."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/lib/data.ts:401-415",
+      "issue": "Pokémon moves section fans out one proxied fetch per move detail (~100 requests for a modern game), with no server-side aggregation and `cache-control: no-store` on the proxy (app/src/routes/api-proxy/[...path].ts:13), so every visitor and every game change re-downloads it all.",
+      "suggestion": "Let the proxy set a public max-age (data is a fixed snapshot per run) and/or aggregate move details server-side per request; at minimum raise the client TTL for immutable resources."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/lib/data.ts:220-240",
+      "issue": "All fetch errors (502/500/timeout included) are swallowed into `return null`, which the routes render as 'Not found'; API downtime is indistinguishable from a missing resource.",
+      "suggestion": "Distinguish 404 from other statuses in ApiError and render a dedicated error view for non-404 failures."
+    },
+    {
+      "severity": "medium",
+      "location": "app/package.json:6-10",
+      "issue": "No typecheck/lint scripts and no devDependencies; `strict: true` in app/tsconfig.json is never enforced because `tsc` never runs, and the data layer is ~30 `any`s deep.",
+      "suggestion": "Add a `typecheck: tsc --noEmit` script wired into CI, and type the main API payloads (pokemon, species, move) instead of `any`."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/lib/data.ts:298-360",
+      "issue": "The 'build cards, exclude forms >10000, dedupe by id, sort' pipeline is duplicated three times (getMovePage, getAbilityPage, getTypePage), each rebuilding `speciesById`, with three different dedupe idioms including the `(seen.add(id), true)` comma trick.",
+      "suggestion": "Extract one `pokemonCards(refs)` helper in data.ts and share the speciesById map."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/lib/data.ts:366-370",
+      "issue": "`typeLabel` — a type-name lookup — is used to label and sort *moves* on the type page, which only works by coincidence and diverges from the spec's 'sorted alphabetically by name'.",
+      "suggestion": "Use `humanize(move.name)` and sort by the API name."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/routes/index.tsx:105-132",
+      "issue": "`.map()` in JSX for options and card lists while `<For>` is used everywhere else; cards lose keying across page changes.",
+      "suggestion": "Use `<For>` consistently for list rendering."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/routes/pokemon/[name].tsx:66-80",
+      "issue": "The hash-scroll effect re-fires on every moveData change, so changing the game select scrolls the user back to #moves.",
+      "suggestion": "Only scroll once per route navigation (key the effect on params.name), not on move-data refetches."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/app.tsx:12",
+      "issue": "`document.documentElement.lang = \"en\"` as a top-level side effect duplicates the `lang=\"en\"` already set in app/src/entry-server.tsx:10.",
+      "suggestion": "Delete the side effect; keep the lang attribute in the server document."
+    },
+    {
+      "severity": "low",
+      "location": "app/vite.config.ts:6",
+      "issue": "`ssr: false` (and the whole proxy-through-server data design) is a significant architecture choice left undocumented; the README is still the `npm init solid` template.",
+      "suggestion": "Either adopt SSR/`ssr: \"data-only\"` for a content site or record the rationale in the README."
+    }
+  ],
+  "summary": "This is a competent, current-generation SolidStart v2 app — correct Vite 8 + nitro setup, file routing, sensible lib/component/route layering, and careful filter/pagination/sorting logic — that I'd merge after one round of changes. The main reservations are reliability, not structure: promise-level memoization that never retries, no error states (API failures masquerade as 'Not found'), and a chatty ~100-request fan-out for move tables through a no-store proxy. Consolidating the triplicated card pipeline, adding a typecheck script, and documenting the ssr:false/proxy decisions would make it a comfortable approve."
+}
+```

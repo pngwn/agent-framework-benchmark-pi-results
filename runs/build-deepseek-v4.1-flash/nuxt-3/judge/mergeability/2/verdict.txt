@@ -1,0 +1,132 @@
+I have a complete picture. Final review:
+
+## Review notes
+
+**Framework fit (verified against current stable docs):** The app pins `nuxt 4.6.3` (`app/package.json:4`), which is the current stable release (Oct 27, 2026). Data loading uses `useFetch` with reactive getter URLs + `watch`, exactly the documented pattern for param-driven pages; server routes use `defineEventHandler` + `getRouterParam`; head/lang/title live in `nuxt.config.ts` `app.head` + per-page `useHead`. No framework fighting.
+
+**The two things I'd actually ask to change:** (1) `server/utils/pokeapi.ts` is a 489-line god module owning the HTTP cache, the whole pokédex index build, and the DTO assembly for all four detail pages; (2) `getPokemonPageData` fetches *every* version group's details and *every* move detail for the Pokémon and ships the entire `moveGroups` blob to the client, even though only one game is displayed — heavy fan-out per first render and a bloated Nuxt payload.
+
+**Idiom nits:** `useFetch<any>` everywhere discards Nuxt's typed server-route inference despite the server module defining rich types; the flat v3-style layout (`pages/`, `components/` at root) relies on Nuxt 4's fallback instead of the documented `app/` srcDir; not-found pages respond HTTP 200 with `{notFound:true}` instead of `createError({statusCode: 404})` + `error.vue` (spec explicitly permits this, but Nitro supports it cleanly); dead `definePageMeta({})`.
+
+**Correctness:** Clean. Debounce timer is cleared on unmount, error cache entries are evicted, filter state is URL-synced bidirectionally without hydration mismatches, sorting/missing-value/`aria-sort` rules are implemented correctly. Minor: stale `data` shows briefly on same-record param navigation, and an API failure on the home page renders "No Pokémon found" instead of an error.
+
+```json
+{
+  "dimension": "mergeability",
+  "criteria": {
+    "idiomatic": {
+      "score": 4,
+      "evidence": [
+        "app/package.json:4 — nuxt 4.6.3, the current stable release",
+        "app/pages/pokemon/[name].vue:116 — useFetch with reactive getter URL + watch, matching the documented param-page pattern",
+        "app/server/api/pokemon/[name].get.ts:3-4 — defineEventHandler + getRouterParam for a typed server route",
+        "app/nuxt.config.ts:5-10 — app.head htmlAttrs lang, default title, node-server preset in nuxt.config (no error.vue, but 404 status is untested/optional)",
+        "app/server/utils/pokeapi.ts:390-396 — non-en paths hand-built with trim/collapse instead of ufo/ofetch, but URL building is hand-rolled and correct"
+      ],
+      "rationale": "Uses current-stable Nuxt 4 the way the docs show for reactive-URL fetching, server routes, useHead and Nitro server utils. Minor deviations: useFetch<any> everywhere throws away Nuxt's typed route inference (server/utils/pokeapi.ts:10-27 defines types that go unused), the flat v3-style layout relies on the Nuxt 4 fallback instead of the documented app/ srcDir, definePageMeta({}) at app/pages/index.vue:57 is dead code, and hand-rolled query-string building at app/pages/index.vue:104-109 instead of router.resolve/useFetch query option."
+    },
+    "correctness_risks": {
+      "score": 4,
+      "evidence": [
+        "app/pages/index.vue:113-118,156-158 — debounce timer is cleared on unmount and on each input, so no leaked timers or stale commits",
+        "app/server/utils/pokeapi.ts:60-72 — failed promises are evicted from the cache and indexPromise is reset on error, so no poisoned-cache bug",
+        "app/pages/index.vue:44 — if /api/pokedex fails, data is undefined and the page renders 'No Pokémon found', masking an API error as an empty result",
+        "app/pages/pokemon/[name].vue:116 — on same-route param navigation (evolution links) the previous Pokémon's data stays rendered until the refetch resolves; status/error are never destructured",
+        "app/server/api/pokemon/[name].get.ts:4 — decodeURIComponent(getRouterParam(...)) double-decodes if h3 already returns decoded params (harmless for hyphenated ASCII names)",
+        "app/server/utils/pokeapi.ts:302-329 — per-request fan-out fetching every version group and every move detail even though one game is shown; cached so bounded, but a slow first hit per Pokémon"
+      ],
+      "rationale": "Careful look found no serious bug: URL-state sync, debouncing, sorting, missing-value handling and not-found fallbacks are all implemented correctly. The remaining risks are minor — error-state masking on the home page, briefly stale data on param navigation, and a large upstream fetch fan-out that is bounded by the in-memory cache."
+    },
+    "global_abstractions": {
+      "score": 3,
+      "evidence": [
+        "app/server/utils/pokeapi.ts:1-489 — one module owns the HTTP cache, the whole pokédex index build, and DTO assembly for all four detail pages (getPokemonPageData/getMovePageData/getAbilityPageData/getTypePageData)",
+        "app/server/utils/pokeapi.ts:30-31 — module-level Map cache and API_BASE read once at import; process-lifetime global state shared by every route",
+        "app/server/utils/pokeapi.ts:384 — the whole moveGroups blob for every version group is shipped to the client, so the payload for a Pokémon page carries far more than one game needs",
+        "app/pages/moves/[name].vue:64-66 and app/components/MoveMethodTable.vue:104-109 — duplicate formatValue helpers",
+        "app/components/PokemonCard.vue:1-30 — small, single-purpose, props-only component with no hidden state: a good boundary"
+      ],
+      "rationale": "The server-prepares-DTOs / client-renders-props split is clean and components are well-factored, but pokeapi.ts has grown into the one file every route depends on, mixing cache, index building and four page builders. Splitting it (cache / index / per-resource modules) and moving move-table data to a per-game query-param endpoint would keep payloads and blast radius small as the app grows."
+    },
+    "readability": {
+      "score": 4,
+      "evidence": [
+        "app/pages/*/[name].vue:53-60,31-38,116-135 — four detail pages are structurally uniform: fetch, not-found guard, sections with aria-labelledby",
+        "app/components/MoveMethodTable.vue:57-106 — sorting logic named and split (isMissing, fallbackCompare, sortedRows) rather than one inline blob",
+        "app/server/utils/pokeapi.ts:13-27 — exported types document the DTO shapes precisely",
+        "app/pages/pokemon/[name].vue:50,62 — magic 255/720 stat-bar scales inlined in template style bindings",
+        "app/server/utils/pokeapi.ts:1-2 and app/assets/css/tokens.css:1-2 — only two comments in the app; the fan-out rationale in getPokemonPageData deserves one"
+      ],
+      "rationale": "Consistent naming and structure across pages and components make navigation easy; a new teammate can find their way quickly. Rough spots: pervasive `any` in pages erases the type documentation the server module carefully defines, a few magic numbers live in templates, and the deliberate trade-offs (cache-everything, fetch-all-games) are undocumented."
+    },
+    "review_cost": {
+      "score": 3,
+      "evidence": [
+        "app/server/utils/pokeapi.ts:296-384 — the all-games/all-moves fetch-and-ship design is the one change a reviewer would insist on before merge",
+        "app/server/utils/pokeapi.ts:247-470 — one 489-line module to review for every page's data logic",
+        "app/pages/index.vue:57, app/pages/moves/[name].vue:64-66, app/pages/*/[name].vue:7-13 — small deletions/dedup nits, no rework",
+        "app/server/utils/pokeapi.ts:252,256,400,427,453 — not-found handled as data instead of createError(404); a one-line change per handler plus error.vue"
+      ],
+      "rationale": "Nothing here blocks correctness or requires a rewrite; the ask list is one round: split/slim the server util, drop the redundant per-game payload, use typed returns and a real 404, and delete the dead definePageMeta. Everything else is nits."
+    }
+  },
+  "overall": 4,
+  "findings": [
+    {
+      "severity": "medium",
+      "location": "app/server/utils/pokeapi.ts:296",
+      "issue": "getPokemonPageData fetches details for every version group and every move the Pokémon can learn, then ships the entire moveGroups blob to the client even though only one game's tables are rendered — large fan-out per first render and a bloated Nuxt payload.",
+      "suggestion": "Add a query-param (e.g. /api/pokemon/:name/moves?game=...) or compute the selected game server-side from the route query, so the client refetches when the Game select changes."
+    },
+    {
+      "severity": "medium",
+      "location": "app/server/utils/pokeapi.ts:1",
+      "issue": "A single 489-line module owns the HTTP cache, the process-global API base and pokedex index, and the DTO builders for all four page types — the highest-change-rate file every server route depends on.",
+      "suggestion": "Split into pokeapi/client (fetch + cache), pokeapi/index (index build) and one small module per resource; keep the exported DTO types shared so pages can consume them."
+    },
+    {
+      "severity": "low",
+      "location": "app/server/utils/pokeapi.ts:252",
+      "issue": "Not-found is returned as data ({notFound:true}), so missing resources render a 'Not found' page with HTTP 200; no error.vue and no createError is used anywhere.",
+      "suggestion": "Throw createError({ statusCode: 404 }) in the Nitro handlers and render error.vue, keeping the per-page useHead title via route meta or a shared error page."
+    },
+    {
+      "severity": "low",
+      "location": "app/pages/moves/[name].vue:53",
+      "issue": "useFetch<any> on every page discards Nuxt's typed server-route inference, even though the server module already defines the DTO shapes.",
+      "suggestion": "Give the Nitro handlers explicit return types and drop <any> so useFetch infers them; at minimum import the exported types from server/utils/pokeapi."
+    },
+    {
+      "severity": "low",
+      "location": "app/pages/index.vue:44",
+      "issue": "If /api/pokedex fails (500/network), data is undefined and the page shows 'No Pokémon found', presenting an outage as an empty result set; status/error are never inspected anywhere.",
+      "suggestion": "Destructure error/status from useFetch and render an explicit error message for failed fetches; keep 'No Pokémon found' for genuine zero-match states."
+    },
+    {
+      "severity": "low",
+      "location": "app/pages/moves/[name].vue:64",
+      "issue": "formatValue is duplicated between the move page and MoveMethodTable, and the not-found guard plus useHead title triple is copy-pasted across four pages.",
+      "suggestion": "Move formatValue to a shared composable/util (Nuxt 4's shared/ directory is designed for this) and wrap the fetch + not-found + title logic in one useResourcePage composable."
+    },
+    {
+      "severity": "low",
+      "location": "app/pages/pokemon/[name].vue:50",
+      "issue": "Stat-bar scale factors 255 and 720 are magic numbers inlined in template style bindings (also 622 total), undocumented.",
+      "suggestion": "Hoist named constants (MAX_STAT = 255, MAX_TOTAL = 720) into the script or compute bar widths server-side in the stats DTO."
+    },
+    {
+      "severity": "low",
+      "location": "app/pages/index.vue:57",
+      "issue": "Empty definePageMeta({}) is dead code left in the home page.",
+      "suggestion": "Delete the call."
+    },
+    {
+      "severity": "low",
+      "location": "app/server/api/pokemon/[name].get.ts:4",
+      "issue": "decodeURIComponent(getRouterParam(...)) risks double-decoding params if the router already returns decoded values; harmless for this API's hyphenated ASCII names but fragile as a pattern copied into all four handlers.",
+      "suggestion": "Rely on getRouterParam alone, or centralise param decoding in the shared pokeapi client so the choice is made once."
+    }
+  ],
+  "summary": "A spec-complete, framework-current Nuxt 4.6.3 app that follows the documented patterns for reactive-URL data fetching, Nitro routes and useHead, with clean prop-only components and tokenised CSS. The merge-blocking-adjacent asks are concentrated in one file: server/utils/pokeapi.ts is a 489-line god module that also fetches and ships every game's move tables to the client. Everything else is nits — typed returns, a real 404, and a couple of duplicated helpers — so I'd merge after one contained round of changes."
+}
+```

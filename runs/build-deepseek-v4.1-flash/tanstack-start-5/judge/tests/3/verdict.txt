@@ -1,0 +1,166 @@
+## Review: test quality
+
+**The agent wrote no tests at all.** `app/package.json` has no `test` script and no test runner in `devDependencies` (only `@types/*`, vite plugins, `typescript`, `nitro`); `grep` for `test|expect|describe|vitest|playwright` across `app/src` returns only incidental `tests/` path strings in the lockfile. The measured facts agree: `tests.files: 0`. Everything below is therefore about **what a refactor of this app could break with nothing to catch it** — and there is a lot, because the app concentrates real logic (filtering, pagination, sorting, URL state, error mapping) in a few files.
+
+### What's at risk and unguarded
+
+- **Pagination/filter math** — `app/src/lib/data.server.ts:297-300` clamps page (`Math.trunc(filters.page || 1)`), computes `totalPages = Math.max(1, Math.ceil(count / 48))` and slices `(page-1)*48 … page*48`. An off-by-one or a changed `PAGE_SIZE` boundary is invisible without tests.
+- **Alternate-form exclusion is a duplicated magic predicate** — `id <= 10000` at `data.server.ts:289` (type filter), `id > 10000` skips at `data.server.ts:657` and `~713` (move/ability/type card lists). Three copies, no shared helper, no tests; editing one and not the others silently leaks Mega forms into some lists only.
+- **URL search state** — `app/src/routes/index.tsx:19-33` (`validateSearch`'s `Number()` coercion, dropping empty/default params) and `index.tsx:56-74` (`update` resets to page 1, omits defaults). A regression here breaks deep links like `/?type=fire&generation=generation-i`, which are only guarded by the acceptance suite.
+- **Client-side table sorting** — `app/src/components/MoveTable.tsx:36-62`: nulls-last in both directions, ascending-first flip, single `aria-sort`. Subtle logic embedded in the component; a flipped comparison for descending nulls would ship unnoticed.
+- **Move-method ordering and default game** — `data.server.ts:374-377` (`methodSortKey`'s hardcoded `['level-up','machine','egg','tutor']`) and `data.server.ts:493-501`, where the default game is "last after ascending sort by order". Changing the sort silently flips the default game with no failure anywhere.
+- **Error/not-found plumbing** — `isNotFound` at `data.server.ts:109-112` depends on `status` being attached to the thrown error in `apiGet` (`data.server.ts:96-107`) and on cache eviction of failed promises (`promise.catch(() => cache.delete(url))`). If a refactor swallows the status or caches failures, every unknown-name page becomes a 500 instead of the Not Found page.
+- **Pure helpers are factored out but dead** — `formatHeight`/`formatWeight`/`trackable`/`compareText` at `app/src/lib/format.ts:41-59` are unused; the same math is inlined at `data.server.ts:592-593` and em-dash handling at `data.server.ts:646-648`. Divergence between the two copies is exactly what a one-line unit test would have pinned down.
+- **Flavor-text/whitespace collapse** — `format.ts:12-22` (`replace(/\s+/g, ' ')`, last English entry). A subtle regression (e.g. `trim()` removed, or first entry instead of last) only shows up as broken prose on every Pokémon page.
+
+The acceptance tests in `tests/` are reasonably thorough for these behaviours today (sorting both directions, pagination, live-data overlay), but once the app is under the team's ownership, any refactor of `data.server.ts` would be flying blind. The `createServerFn` handlers in `app/src/lib/queries.ts:9-30` are plain functions over `data.server.ts` exports — trivially unit-testable with a stubbed `fetch`, and nothing was done to enable that.
+
+```json
+{
+  "dimension": "tests",
+  "criteria": {
+    "coverage_of_risk": {
+      "score": 1,
+      "evidence": [
+        "app/package.json:6-10 — no test script, no test runner in devDependencies",
+        "app/src/lib/data.server.ts:297-300 — pagination clamp/slice math, entirely untested",
+        "app/src/components/MoveTable.tsx:36-62 — nulls-last comparator and direction flip, untested",
+        "app/src/lib/format.ts:12-22 — whitespace-collapse flavor text logic, untested"
+      ],
+      "rationale": "No tests exist; the riskiest logic (pagination, filtering, sorting, URL state, error mapping) has zero coverage beyond the externally-owned acceptance suite."
+    },
+    "behaviour_not_implementation": {
+      "score": 1,
+      "evidence": [
+        "app/src/lib/queries.ts:9-30 — server fns are plain testable functions over data.server.ts, yet no tests target them"
+      ],
+      "rationale": "There are no tests of any kind, behavioural or otherwise."
+    },
+    "regression_power": {
+      "score": 1,
+      "evidence": [
+        "app/src/lib/data.server.ts:289 — id<=10000 alternate-form guard, one of three duplicated untested copies (also :657, :713)",
+        "app/src/lib/data.server.ts:493-501 — default game = last item after ascending sort; a sort refactor flips it with no failing check"
+      ],
+      "rationale": "No test would fail if any covered behaviour were broken, because none exist."
+    },
+    "signal_to_noise": {
+      "score": 3,
+      "evidence": [
+        "app/src/lib/format.ts:41-59 — dead helpers (formatHeight/formatWeight/trackable/compareText) suggest factoring-for-tests that never materialized"
+      ],
+      "rationale": "No tests means no noise, but also no signal; the dead helper functions hint at abandoned intent."
+    }
+  },
+  "overall": 1,
+  "findings": [
+    {
+      "severity": "high",
+      "location": "app/package.json:6-10",
+      "issue": "The app ships with zero tests: no test script, no runner dependency, no spec files anywhere under app/.",
+      "suggestion": "Add a runner (Vitest) and at minimum unit-test data.server.ts and format.ts with a stubbed fetch."
+    },
+    {
+      "severity": "high",
+      "location": "app/src/lib/data.server.ts:289",
+      "issue": "Alternate-form exclusion (id <= 10000 / > 10000) is duplicated across three call sites (:289, :657, :713) with no shared predicate and no tests.",
+      "suggestion": "Extract one isAlternateForm(id) helper and test it; use it in all three places."
+    },
+    {
+      "severity": "high",
+      "location": "app/src/lib/data.server.ts:297-300",
+      "issue": "Pagination math (page clamp, totalPages, 48-row slice) is untested; an off-by-one here reshuffles every list page.",
+      "suggestion": "Table-driven tests over getHomeData filters: page 1, last page, page beyond range, empty results."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/lib/format.ts:41-59",
+      "issue": "formatHeight/formatWeight/trackable/compareText are dead code; the same math is inlined at data.server.ts:592-593 and 646-648, so the copies can diverge silently.",
+      "suggestion": "Delete the dead helpers or use them, and unit-test the one true implementation."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/components/MoveTable.tsx:36-62",
+      "issue": "Sort logic (nulls last in both directions, ascending-first toggle, single aria-sort) lives inside the component and is untestable without a browser.",
+      "suggestion": "Extract a compareRows(rows, key, direction) pure function and test nulls-last plus direction flip directly."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/lib/data.server.ts:493-501",
+      "issue": "Default game selection relies on 'last item after ascending sort by order'; refactoring the sort silently changes the default version group.",
+      "suggestion": "Select explicitly via Math.max on order and add a test asserting the highest-order game is default."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/lib/data.server.ts:96-112",
+      "issue": "NotFound detection depends on status being attached to thrown errors and on failed promises being evicted from the cache; a refactor here turns all 404 pages into 500s.",
+      "suggestion": "Test apiGet error propagation and cache eviction with a stubbed fetch returning 404/500."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/routes/index.tsx:19-33",
+      "issue": "validateSearch coercion and default-omission rules are untested; regressions break deep-linkable filter URLs.",
+      "suggestion": "Unit-test validateSearch directly (it's already a pure function): strings, missing page, page=0/NaN/decimal."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/routes/index.tsx:80-86",
+      "issue": "Debounce effect carries an eslint-disable for exhaustive-deps and closes over search values; race behaviour on rapid filter+typing is untested.",
+      "suggestion": "Cover with a Playwright interaction test or restructure the debounce to use functional state updates."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/lib/data.server.ts:374-377",
+      "issue": "methodSortKey's hardcoded ['level-up','machine','egg','tutor'] ordering has no test; a typo reorders move tables with no failure.",
+      "suggestion": "One-line unit test over the table ordering produced for a Pokémon with mixed methods."
+    }
+  ],
+  "summary": "The app contains no tests of its own: no runner, no script, no spec files. All of its riskiest logic — pagination, filtering, move-table sorting, URL search handling, alternate-form exclusion, and 404 mapping — sits in a few server-side files guarded only by the externally-owned acceptance suite. A refactor of data.server.ts or the search validation would ship regressions unnoticed; the data layer is plain-function enough that a small Vitest suite with stubbed fetch would cover most of it cheaply.",
+  "wroteTests": false,
+  "testCount": 0,
+  "valuableTests": [],
+  "lowValueTests": [],
+  "untested": [
+    {
+      "area": "Home list filtering and pagination (data.server.ts getHomeData)",
+      "risk": "high",
+      "likelyBug": "Off-by-one in the 48-per-page slice or a broken page clamp showing duplicated/missing species between pages; type/generation filters drifting from the URL params."
+    },
+    {
+      "area": "Alternate-form exclusion predicate, duplicated in three card lists",
+      "risk": "high",
+      "likelyBug": "Mega/form Pokémon (id > 10000) leaking into move, ability, or type pages after only one copy of the predicate is edited."
+    },
+    {
+      "area": "Not-found and API error handling (apiGet status propagation, cache eviction of failed requests)",
+      "risk": "high",
+      "likelyBug": "Unknown names returning a 500 crash instead of the Not Found page, or failed responses being cached and served stale."
+    },
+    {
+      "area": "URL search state on / (validateSearch, update/linkSearch, debounce)",
+      "risk": "medium",
+      "likelyBug": "Filter changes keeping a stale page param, or empty/default params failing to be omitted, breaking deep links and browser refresh."
+    },
+    {
+      "area": "MoveTable client-side sorting (nulls last, direction flip, aria-sort)",
+      "risk": "medium",
+      "likelyBug": "Descending sort putting null power/accuracy first, or two headers simultaneously carrying aria-sort."
+    },
+    {
+      "area": "Version-group ordering and default game selection on the Pokémon page",
+      "risk": "medium",
+      "likelyBug": "Default game flipping to the earliest version group, or move tables appearing in the wrong method order."
+    },
+    {
+      "area": "Pure formatters (humanize, latestEnglishFlavorText, dexNumber, idFromUrl)",
+      "risk": "medium",
+      "likelyBug": "Whitespace collapse regressing so \\n/\\f appear in flavor text, or idFromUrl failing on trailing-slashless URLs and dropping list entries."
+    },
+    {
+      "area": "Evolution chain recursion (buildEvolutionNode)",
+      "risk": "low",
+      "likelyBug": "Branching chains like Eevee collapsing to a single branch after a refactor of the recursive mapping."
+    }
+  ]
+}
+```

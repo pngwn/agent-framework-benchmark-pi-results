@@ -1,0 +1,161 @@
+I've read the spec, the whole `app/` source (all 24 files' relevant paths), the acceptance tests' layout, and confirmed via static facts and direct inspection that `app/` contains **zero tests**: no test files, no test script in `app/package.json` (`app/package.json:7-16` — only `dev`/`build`/`preview`/`check`/`start`), and no test-runner dependency in devDependencies. So this review concentrates on where the untested code is most likely to hide bugs.
+
+The app does have substantial logic that would normally demand unit tests: URL-state filtering/pagination, a client-side sortable table, alternate-form exclusion, a request cache, and lots of name/flavor-text normalization.
+
+```json
+{
+  "dimension": "tests",
+  "criteria": {
+    "coverage_of_risk": {
+      "score": 1,
+      "evidence": [
+        "app/src/lib/components/MoveTable.svelte:48-70 — pure sorting comparator with null-last-in-both-directions and direction sign logic; completely untested",
+        "app/src/routes/+page.server.ts:15-33 — multi-filter, pagination clamping and URL-param validation; untested",
+        "app/src/lib/server/api.ts:163-180 — pokemonCards alternate-form exclusion (id <= 10000), dedupe and sort; untested",
+        "app/src/routes/pokemon/[name]/+page.server.ts:96-140 — version-group ordering, game defaulting and per-method move dedup; untested",
+        "app/src/lib/server/api.ts:31-55 — 60s TTL promise cache with error eviction; untested"
+      ],
+      "rationale": "No tests exist, and the riskiest logic (sorting, filtering, pagination, alternate-form exclusion, caching) is exactly where regressions would hide. This scores 1 by definition."
+    },
+    "behaviour_not_implementation": {
+      "score": 1,
+      "evidence": ["app/package.json:7-16 — no test script; grep for test/spec/vitest/playwright across app/ returns nothing"],
+      "rationale": "There are no tests at all, so nothing asserts behaviour or implementation; the rubric puts 'no tests' at 1."
+    },
+    "regression_power": {
+      "score": 1,
+      "evidence": [
+        "app/src/lib/util.ts:6-21 — humanize/dexNumber/display are pure spec-critical helpers a broken refactor would silently pass",
+        "app/src/lib/components/MoveTable.svelte:63-66 — null-last handling is easy to break (e.g. nulls sorting first on descending) with nothing to catch it",
+        "app/src/routes/pokemon/[name]/+page.server.ts:109-114 — game selection defaults to highest-order group; an off-by-one or wrong-default change would go unnoticed"
+      ],
+      "rationale": "With zero tests, breaking any behaviour fails nothing in the app's own suite. Scores 1 by definition."
+    },
+    "signal_to_noise": {
+      "score": 3,
+      "evidence": ["app/src/ — zero test files, zero testLoc per measured facts; nothing padding the numbers either"],
+      "rationale": "No tests means no noise; the rubric assigns 3 when there are no tests."
+    }
+  },
+  "overall": 2,
+  "findings": [
+    {
+      "severity": "high",
+      "location": "app/src/lib/components/MoveTable.svelte:48-70",
+      "issue": "Client-side multi-column sorting with direction toggle, numeric/string compare, and missing-values-last-in-both-directions is untested; this is the most intricate comparator in the app.",
+      "suggestion": "Add unit tests for the sort (extract it to a .svelte.ts module): nulls last ascending and descending, direction flip, tie-break by name, aria-sort state per column."
+    },
+    {
+      "severity": "high",
+      "location": "app/src/routes/+page.server.ts:15-40",
+      "issue": "URL state (q/type/generation/page) with validation, 48-per-page slicing, page clamping to pageCount, and default-omission is untested; a refactor of the data layer could silently break edge pages or invalid params.",
+      "suggestion": "Unit-test the load against a stubbed api module: empty/garbage page param, page beyond last, invalid type/generation names, combined filters, count text."
+    },
+    {
+      "severity": "high",
+      "location": "app/src/lib/server/api.ts:163-180",
+      "issue": "pokemonCards' alternate-form exclusion (`id <= MAX_DEFAULT_ID`) and dedupe are untested; flipping the comparison or mishandling NaN from idFromUrl (app/src/lib/server/api.ts:57-59) would leak Mega forms into every list or drop valid Pokémon.",
+      "suggestion": "Test pokemonCards with mixed IDs including >10000, duplicates, and a non-matching URL; assert ordering and species-name resolution."
+    },
+    {
+      "severity": "high",
+      "location": "app/src/routes/pokemon/[name]/+page.server.ts:96-140",
+      "issue": "Moves pipeline is untested: version-group ordering by `order`, default game selection (highest order), method table ordering (level-up/machine/egg/tutor then alphabetical), and the dedup key `${method}|${move}|${level}` that intentionally keeps same move at different levels but must not duplicate machine moves.",
+      "suggestion": "Unit-test with a synthetic pokemon payload covering a move learned at two levels and via two methods; assert table membership, order, and row keys."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/lib/server/api.ts:31-55",
+      "issue": "The 60s promise cache is untested: 404-null caching, eviction of rejected promises only while still current, and unbounded growth of successful entries (no eviction besides TTL expiry checks) are all easy to break in a refactor.",
+      "suggestion": "Test get() with a mocked fetch: 404 → null, shared promise for concurrent calls, failed request not cached, expired entry refetched."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/routes/+page.svelte:14-21",
+      "issue": "The search box's race handling (150ms debounce, `replace` navigation, `afterNavigate` only syncing q on non-goto navigations) is subtle client state-vs-URL logic with no tests; stale keystrokes overwriting results or lost state on back/forward would slip through.",
+      "suggestion": "Add a component/E2E test: type two characters quickly and assert the final URL and rendered list reflect the last query; test back/forward restores the input value."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/lib/server/api.ts:100-150",
+      "issue": "Type index construction (slot ordering per Pokémon, filtering stellar/unknown/shadow) and generation species sets are untested; mis-sorted slots would render wrong type badges everywhere with nothing failing.",
+      "suggestion": "Unit-test getTypes/getGenerations against fixture payloads with out-of-order slots and the excluded type names."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/routes/pokemon/[name]/+page.server.ts:70-72",
+      "issue": "Recursive evolutionTree and the fallback when a species has no evolution_chain URL are untested; malformed chains (null evolves_to) would throw a 500.",
+      "suggestion": "Test evolutionTree with branching (Eevee-like) and empty chains."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/routes/+error.svelte:6-12",
+      "issue": "404-vs-500 branching and title formatting are untested; a regression would show 'Something went wrong' for missing Pokémon.",
+      "suggestion": "Cover with a routing test hitting /pokemon/missingno and an erroring route."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/lib/util.ts:6-21",
+      "issue": "Pure spec-critical helpers (humanize, dexNumber padding, display em-dash) are trivial to test and easy to accidentally regress (e.g. '#25' vs '#0025'); they're free wins the author left on the table.",
+      "suggestion": "A five-line vitest file covering humanize('mr-mime'), dexNumber(25), display(null) would cost nothing and guard the most-reused code."
+    }
+  ],
+  "summary": "The app contains no tests of its own — no runner, no script, no test files — while carrying a meaningful amount of high-risk logic: client-side table sorting, URL-driven filtering and pagination, alternate-form exclusion, and a TTL request cache. A refactor of the data layer would be entirely unguarded once the acceptance suite stops being the safety net. The code is reasonably factored (pure helpers, thin loads), so adding tests would be cheap; it just wasn't done.",
+  "wroteTests": false,
+  "testCount": 0,
+  "valuableTests": [],
+  "lowValueTests": [],
+  "untested": [
+    {
+      "area": "MoveTable column sorting (app/src/lib/components/MoveTable.svelte)",
+      "risk": "high",
+      "likelyBug": "Missing values sorting first on descending, numeric columns compared as strings (e.g. power 9 > 100), or aria-sort left stale on the wrong header"
+    },
+    {
+      "area": "Home page URL state and pagination (app/src/routes/+page.server.ts)",
+      "risk": "high",
+      "likelyBug": "Out-of-range/garbage page param rendering an empty list, filters not resetting to page 1, or default params being serialized into the URL"
+    },
+    {
+      "area": "Alternate-form exclusion and dedup in pokemonCards (app/src/lib/server/api.ts)",
+      "risk": "high",
+      "likelyBug": "Mega/regional forms reappearing in 'Learned by'/'Pokémon' lists, duplicates, or valid species dropped by a NaN id"
+    },
+    {
+      "area": "Moves pipeline: game selection, method table order, row dedup (app/src/routes/pokemon/[name]/+page.server.ts)",
+      "risk": "high",
+      "likelyBug": "Wrong default game, tables in wrong order, duplicate machine moves, or level-up rows missing multi-level entries"
+    },
+    {
+      "area": "Search debounce and navigation sync (app/src/routes/+page.svelte)",
+      "risk": "medium",
+      "likelyBug": "Stale results overwriting newer keystrokes or the input desyncing from the URL on back/forward"
+    },
+    {
+      "area": "API request cache: 404 handling, error eviction, TTL (app/src/lib/server/api.ts)",
+      "risk": "medium",
+      "likelyBug": "Failed or 404 responses cached indefinitely, or concurrent callers receiving a rejected cached promise after a transient error"
+    },
+    {
+      "area": "Type index slot ordering and generation membership (app/src/lib/server/api.ts)",
+      "risk": "medium",
+      "likelyBug": "Type badges rendered in API order instead of slot order, or generation filter missing species"
+    },
+    {
+      "area": "Evolution chain recursion and no-chain fallback",
+      "risk": "medium",
+      "likelyBug": "500 error on species with malformed evolution data, or missing self-reference for chainless species"
+    },
+    {
+      "area": "Not-found vs server-error rendering (app/src/routes/+error.svelte)",
+      "risk": "low",
+      "likelyBug": "'Something went wrong' shown for missing resources, breaking the spec's Not found page"
+    },
+    {
+      "area": "Formatting helpers humanize/dexNumber/display (app/src/lib/util.ts)",
+      "risk": "low",
+      "likelyBug": "Zero-padding regression (#25 instead of #0025) or em-dash fallback lost for missing power/accuracy"
+    }
+  ]
+}
+```

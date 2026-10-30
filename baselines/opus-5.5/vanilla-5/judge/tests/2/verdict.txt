@@ -1,0 +1,83 @@
+I have a complete picture. The app has no tests of its own — `app/package.json:7-10` defines only `dev`, `build` (which runs `tsc --noEmit`, giving type-checking but not behavioural verification) and `start`; the measured facts confirm 0 test files, 0 cases, 0 assertions. All behavioural safety net currently comes from the acceptance suite in `tests/`, which the team will not run on every refactor of the data layer.
+
+The codebase has substantial pure, cheaply-testable logic that carries the spec's trickiest rules, and none of it is guarded:
+
+- **Filtering/pagination** — `app/src/pages/home.ts:66-80` (three-way filter conjunction, `Math.min` page clamp, `slice((page-1)*48, page*48)` off-by-one territory)
+- **Species↔Pokémon mapping** — `app/src/components.ts:84-96` (`speciesCards` drops IDs > 10000, dedupes, maps `deoxys-normal` → `Deoxys`; a silent regression here renders every type/move/ability page wrong)
+- **Moves tables** — `app/src/pages/pokemon.ts:157-181` (grouping by version group, dedup by URL+level, level-then-name ordering) and `pokemon.ts:150-152` (default game = highest `order`, an invariant that dies if the sort direction flips)
+- **Sorting** — `app/src/table.ts:18-36` (nulls-last in *both* directions, direction toggling, `aria-sort`) — classic off-by-one/flip territory
+- **Localization rules** — `app/src/format.ts:14,16-42` (`findLast` for latest English flavor text vs `find` for first English name; a swap passes type checks and breaks pages silently)
+- **Caching/routing** — `app/src/api.ts:124-140` (failed-request eviction — without it a single transient failure poisons the page forever) and `app/src/main.ts:52-66` (navigation race guard, popstate/hash handling at `main.ts:83-91`)
+- **URL state** — `app/src/url-state.ts:15-20` plus the debounce timer in `home.ts:110-113` that is never cancelled and can `history.replaceState` a stale URL after navigating away.
+
+```json
+{
+  "dimension": "tests",
+  "criteria": {
+    "coverage_of_risk": {
+      "score": 1,
+      "evidence": [
+        "app/package.json:7-10 — no test script, no test runner dependency, 0 test files anywhere in app/",
+        "app/src/pages/home.ts:66-80 — untested: three-filter conjunction, page clamping, 48-per-page slicing",
+        "app/src/components.ts:84-96 — untested: alternate-form exclusion (>10000), dedup, Pokémon→species name mapping",
+        "app/src/table.ts:18-36 — untested: nulls-last bidirectional sort and aria-sort toggling"
+      ],
+      "rationale": "No tests exist; none of the app's riskiest logic is covered by anything except the throwaway acceptance suite."
+    },
+    "behaviour_not_implementation": {
+      "score": 1,
+      "evidence": [
+        "app/src/format.ts:1-45 — pure humanize/latestFlavorText/orMissing helpers with zero assertions on any observable output",
+        "app/src/api.ts:169-177 — speciesList id parsing/filtering with no tests at all"
+      ],
+      "rationale": "There are no tests to judge; the anchor for 'no tests' is 1."
+    },
+    "regression_power": {
+      "score": 1,
+      "evidence": [
+        "app/src/pages/pokemon.ts:150-152 — default game = last entry after ascending order sort; flipping the comparator breaks the default silently",
+        "app/src/format.ts:23 — findLast for latest English flavor text vs find for first; swapping them passes tsc",
+        "app/src/api.ts:133 — request.catch evicting failed requests; removing it makes a transient 500 poison the cache forever",
+        "app/src/pages/home.ts:111 — debounce timer never cancelled on navigation; a stale updateUrl can rewrite history after leaving the page"
+      ],
+      "rationale": "With zero tests, any regression in filtering, sorting, URL state, caching or localization ships unnoticed."
+    },
+    "signal_to_noise": {
+      "score": 3,
+      "evidence": [
+        "app/package.json:9 — 'build' includes tsc --noEmit, the only automated safety net present"
+      ],
+      "rationale": "No tests means no noise; per the anchor this is a neutral 3."
+    }
+  },
+  "overall": 1,
+  "findings": [
+    { "severity": "high", "location": "app/package.json:7-10", "issue": "No test infrastructure whatsoever: no test script, no runner (vitest/node:test) despite devDependencies already including vite/typescript", "suggestion": "Add node:test (zero extra deps for pure modules) or vitest, and wire a 'test' script into the build" },
+    { "severity": "high", "location": "app/src/pages/home.ts:66-80", "issue": "Filtering, matching-count text and pagination slicing are untested; a slice off-by-one or a wrong conjunction operand would shift every list page", "suggestion": "Extract filterMatches/species data assembly into a pure function and test empty query, single filters, combined filters, page clamping, and the 'No Pokémon found' path" },
+    { "severity": "high", "location": "app/src/components.ts:84-96", "issue": "speciesCards encodes the spec's subtlest rule (exclude IDs >10000, dedup, map pokemon refs to species names like deoxys-normal→Deoxys); untested", "suggestion": "Unit test with fixtures containing alternate forms, duplicates and a pokemon whose name differs from its species name" },
+    { "severity": "high", "location": "app/src/table.ts:18-36", "issue": "Bidirectional nulls-last sorting, direction toggling and aria-sort updates are untested; each is a classic flip/off-by-one regression", "suggestion": "Table-driven tests: sort asc/desc on a column with missing values, click twice, assert order and aria-sort attributes" },
+    { "severity": "medium", "location": "app/src/format.ts:14-38", "issue": "Localization rules (findLast vs find, collapseWhitespace, humanize, dexNumber padding) are pure and trivially testable but have no assertions", "suggestion": "Direct unit tests for humanize, dexNumber, latestFlavorText ordering and englishName fallback" },
+    { "severity": "medium", "location": "app/src/pages/pokemon.ts:157-181", "issue": "Moves grouping, dedup by (url, level), method ordering and level-then-name sorting are untested", "suggestion": "Extract grouping into a pure function taking pokemon.moves and a version group; test mixed methods, duplicate entries and missing power/accuracy" },
+    { "severity": "medium", "location": "app/src/api.ts:124-140", "issue": "Promise cache (dedup + failed-request eviction) and NotFoundError mapping are untested", "suggestion": "Test with a stubbed fetch: 404 throws NotFoundError, failed requests are evicted so a retry re-fetches, same URL reuses the in-flight promise" },
+    { "severity": "medium", "location": "app/src/pages/home.ts:110-113", "issue": "Debounce timer is never cancelled when the page is left, so updateUrl can push a stale query after navigation (and triggers a render of a dead view)", "suggestion": "Cancel the timer in the page teardown/mounted lifecycle and add a test that navigates away mid-debounce then asserts location/history length" },
+    { "severity": "low", "location": "app/src/main.ts:52-66", "issue": "Navigation race guard and popstate/hash handling are untested; a broken token check would render stale pages under slow API responses", "suggestion": "An integration-style test rendering two routes back-to-back with a delayed first response would catch a removed guard" }
+  ],
+  "summary": "The app contains no tests of its own — no runner, no script, no test files — so every risky behaviour (filtering, pagination, species mapping, sorting, URL state, caching, localization) is guarded only by the acceptance suite the team will eventually stop running per-change. Most of this logic is pure and could be tested with node:test at zero dependency cost. Until tests exist, any refactor of api.ts, format.ts, table.ts or home.ts is a blind landing.",
+  "wroteTests": false,
+  "testCount": 0,
+  "valuableTests": [],
+  "lowValueTests": [],
+  "untested": [
+    { "area": "Home filtering, matching count and 48-per-page pagination (app/src/pages/home.ts:66-80)", "risk": "high", "likelyBug": "Off-by-one in the slice, a dropped filter operand, or unclamped page number making ?page=999 show an empty list instead of the last page" },
+    { "area": "Alternate-form exclusion, dedup and Pokémon→species name mapping (app/src/components.ts:84-96)", "risk": "high", "likelyBug": "Type/move/ability pages linking to /pokemon/deoxys-normal with name 'Deoxys Normal' instead of the species — exactly the spec's most-called-out subtlety" },
+    { "area": "Sortable tables: nulls-last both directions, toggle, aria-sort (app/src/table.ts:18-36)", "risk": "high", "likelyBug": "Missing Power/Accuracy sorting first on descending, or descending order reusing the ascending comparator" },
+    { "area": "Moves grouping, per-method table split, level-then-name ordering, default game selection (app/src/pages/pokemon.ts:150-181)", "risk": "high", "likelyBug": "Duplicate rows after dedup removal, default game flipping to the oldest version group when the sort direction changes" },
+    { "area": "URL/filter state: query serialization, page reset on filter change, history replace vs push (app/src/pages/home.ts:37-48,89-93; app/src/url-state.ts:15-20)", "risk": "high", "likelyBug": "Empty/default params no longer omitted, page not reset to 1 on filter change, or back button showing stale results" },
+    { "area": "API promise cache and error mapping (app/src/api.ts:124-140)", "risk": "medium", "likelyBug": "Rejected promises cached forever after removing the eviction line, so one transient 500 permanently breaks a page; 404 no longer mapping to the Not-found page" },
+    { "area": "Localization helpers: findLast vs find, whitespace collapse, humanize, dex padding (app/src/format.ts:14-38)", "risk": "medium", "likelyBug": "Swapping find/findLast shows the first instead of latest flavor text — type-checks fine, silently wrong on every species page" },
+    { "area": "Search debounce lifecycle (app/src/pages/home.ts:110-113)", "risk": "medium", "likelyBug": "Navigating away within 150 ms triggers updateUrl on the old page, corrupting history with a stale ?q=" },
+    { "area": "Client-side routing: race guard, popstate/hash handling, scroll behaviour (app/src/main.ts:52-91)", "risk": "medium", "likelyBug": "Slow first page overwriting a faster second page after the token check is dropped" },
+    { "area": "Evolution tree recursion and aria-current (app/src/pages/pokemon.ts:100-113)", "risk": "low", "likelyBug": "Branching chains (Eevee) collapsing to a flat list, or infinite recursion on cyclic data" }
+  ]
+}
+```

@@ -1,0 +1,129 @@
+I've now read the whole app (all pages, components, composables, server handlers, config, CSS). Verified against current Nuxt 4 practice: `app/` srcDir layout, project-reference `tsconfig.json` (`app/tsconfig.json:1`), `runtimeConfig` + `NUXT_PUBLIC_API_BASE` env override (`app/nuxt.config.ts:13`, `app/package.json:9`), page remount on param change (so `usePageData`'s per-mount key is safe), `useCookie` for SSR-consistent browser state, `createError` + `error.vue`. The BFF pattern (Nitro routes under `app/server/api/` normalizing PokeAPI data) is a genuinely good fit for this spec.
+
+```json
+{
+  "dimension": "mergeability",
+  "criteria": {
+    "idiomatic": {
+      "score": 4,
+      "evidence": [
+        "app/nuxt.config.ts:13 — runtimeConfig.public.apiBase overridden via NUXT_PUBLIC_API_BASE in app/package.json:9, the documented convention",
+        "app/app/composables/format.ts:26 — usePageData wraps useFetch with key + createError fatal; standard data-loading pattern used uniformly by all 7 pages",
+        "app/app/composables/team.ts:4 — useCookie for browser state gives SSR-consistent render, satisfying the 'no flash' requirement idiomatically",
+        "app/server/utils/pokeapi.ts:26 — withNotFound + createError 404 in Nitro handlers; error.vue + [...slug].vue catch-all follow the docs",
+        "app/app/composables/format.ts:1 — humanize duplicated verbatim from app/server/utils/pokeapi.ts:63; Nuxt 4's shared/ (#shared) directory exists exactly for this",
+        "app/app/pages/index.vue:102-110 — selects bind both :value on <select> and :selected on <option>, a redundant double-binding style"
+      ],
+      "rationale": "Recognisably reads like Nuxt 4's own examples (structure, composables, nitro routes, cookie state); docked for the app/server humanize duplication where shared/ is the intended mechanism and minor binding-style inconsistencies."
+    },
+    "correctness_risks": {
+      "score": 4,
+      "evidence": [
+        "app/server/utils/pokeapi.ts:9-24 — cache stores the Promise and deletes it on rejection, so a failed fetch can't poison the cache for later requests",
+        "app/app/pages/index.vue:48-52 — page param clamped with NaN guard; query params omitted at defaults; timer cleared in onBeforeUnmount (index.vue:83)",
+        "app/app/pages/team.vue:15-33 — after Remove, shownMembers is refiltered but the coverage table still reflects server-side names until useAsyncData's watch refetch resolves — a transient mismatch",
+        "app/app/pages/team.vue:31 — if /api/team fails client-side, the page silently renders an empty grid and no coverage with no error UI",
+        "app/server/api/pokemon/[name].get.ts:33 — unbounded Promise.all fan-out over every move URL (~150 fetches) per cold-cache request, acceptable only because of the 60s cache and local API",
+        "app/app/pages/index.vue:85-92 — pre-hydration typing hack with an Event cast; fragile but guarded and commented"
+      ],
+      "rationale": "Careful look turned up only minor, transient issues (stale coverage mid-refetch, silent team-fetch failure); no leaks, mismatches, unhandled rejections, or 404 gaps found."
+    },
+    "global_abstractions": {
+      "score": 4,
+      "evidence": [
+        "app/server/utils/pokeapi.ts:1-110 — single server module mixes HTTP cache, formatters, domain shaping and error wrapper; cohesive now but will need splitting as it grows",
+        "app/composables/format.ts:22 — usePageData is a clean, single data-loading seam every page shares; good boundary between server and client",
+        "app/server/api/team.get.ts:20 — .slice(0, 6) hardcodes team size already defined as MAX_TEAM_SIZE in app/app/composables/team.ts:1; 'of 6' is also literal in app/app/pages/team.vue:31",
+        "app/app/pages/index.vue:19-20 — mediaBase parsing + inline sprite URL re-derive what server/utils/pokeapi.ts:70 (apiBase, spriteUrl) already do",
+        "app/server/api/species.get.ts:35-48 — home page gets one pre-shaped payload, keeping 1025-species filtering client-side with no fetch fan-out"
+      ],
+      "rationale": "Abstractions are few and mostly earn their keep with clear app/server boundaries; the duplicated formatters and the team-size constant in three places are the pieces that will need untangling."
+    },
+    "readability": {
+      "score": 4,
+      "evidence": [
+        "app/app/components/PageSection.vue:3-12 — section+aria-labelledby derived from the title in one place; every page composes it",
+        "app/server/utils/pokeapi.ts:88-96 — cardsFor documents the alternate-form/dedup/order rules in its doc comment",
+        "app/app/composables/format.ts:1-34 — 'format.ts' is a grab-bag: formatting helpers plus usePageTitle plus a data-fetching composable",
+        "app/app/pages/index.vue:1-92 — 92-line script is the densest file; the search/URL sync needs a careful read",
+        "app/app/assets/main.css — 600 lines of global CSS with clear section comments; component styles live far from their components"
+      ],
+      "rationale": "Small files, consistent naming, comments explain why; a new teammate finds their way quickly, with a few rough spots (mixed-purpose format.ts, one dense page script)."
+    },
+    "review_cost": {
+      "score": 4,
+      "evidence": [
+        "app/app/pages/pokemon/[name].vue:40 — teamFull computed wrapping of team.isFull.value is a needless double-unwrap",
+        "app/app/error.vue:17 — @click.prevent on a NuxtLink plus clearError({redirect}) fights the link's own navigation; docs pattern is the plain handler",
+        "app/app/composables/team.ts:1, app/server/api/team.get.ts:20 — team size in three places needs one shared constant",
+        "app/app/pages/index.vue:19-20 vs app/server/utils/pokeapi.ts:70 — sprite/base-URL derivation should be one helper"
+      ],
+      "rationale": "I'd approve after a nits round: reorganize format.ts, dedupe humanize/team-size via shared/, drop the redundant selected bindings and computed unwrap; nothing structural."
+    }
+  },
+  "overall": 4,
+  "findings": [
+    {
+      "severity": "medium",
+      "location": "app/app/composables/format.ts:1",
+      "issue": "humanize is duplicated verbatim in server/utils/pokeapi.ts:63; the two copies can drift (e.g. a display-name fix applied on one side only)",
+      "suggestion": "Move humanize (and any other shared pure helpers) into Nuxt 4's shared/utils directory and import via #shared in both app and server"
+    },
+    {
+      "severity": "medium",
+      "location": "app/server/api/team.get.ts:20",
+      "issue": "Team size 6 is hardcoded here, as MAX_TEAM_SIZE in app/composables/team.ts:1, and as the literal 'of 6' in app/pages/team.vue:31 — a future size change requires three edits across the server/client boundary",
+      "suggestion": "Put MAX_TEAM_SIZE in shared/ and use it in the composable, the server handler, and the page text"
+    },
+    {
+      "severity": "low",
+      "location": "app/app/pages/team.vue:31",
+      "issue": "After clicking Remove, the Type coverage table transiently counts the removed member (coverage is computed server-side from the requested names and only updates after the watched useAsyncData refetch)",
+      "suggestion": "Compute coverage from the same shownMembers set the cards use, or hide/disable the table while data is refetching (useAsyncData's status)"
+    },
+    {
+      "severity": "low",
+      "location": "app/app/composables/format.ts:22",
+      "issue": "usePageData — the app's central data-loading composable — lives in a file named format.ts alongside string helpers, and error.vue:7 depends on it from the error context",
+      "suggestion": "Split into composables/usePageData.ts (and usePageTitle.ts) so auto-imports map to one composable per file"
+    },
+    {
+      "severity": "low",
+      "location": "app/app/pages/index.vue:102-110",
+      "issue": "Selects bind both :value on <select> and :selected on each <option> (same pattern in pokemon/[name].vue:73 and index.vue:113-123); the two mechanisms can disagree during hydration and are redundant",
+      "suggestion": "Pick one — either :value on the select or :selected on options — and use it consistently"
+    },
+    {
+      "severity": "low",
+      "location": "app/app/pages/index.vue:19-20",
+      "issue": "The API-base trailing-slash strip and sprite URL construction are re-implemented inline, duplicating apiBase()/spriteUrl() in server/utils/pokeapi.ts:13,70",
+      "suggestion": "Expose a small client-side helper (or have /api/species return ready-made sprite URLs) instead of rebuilding the URL in the page"
+    },
+    {
+      "severity": "low",
+      "location": "app/server/api/pokemon/[name].get.ts:33",
+      "issue": "Every cold-cache pokemon page request fires a Promise.all over all of the Pokémon's move URLs (~150 concurrent fetches) even though most games only surface a subset",
+      "suggestion": "Fine given the 60s cache and local API, but consider fetching moves lazily per version group or batching if the API grows"
+    },
+    {
+      "severity": "low",
+      "location": "app/app/pages/pokemon/[name].vue:40",
+      "issue": "teamFull = computed(() => team.isFull.value) needlessly re-wraps an existing computed",
+      "suggestion": "Use team.isFull directly"
+    },
+    {
+      "severity": "low",
+      "location": "app/app/error.vue:17",
+      "issue": "@click.prevent on a NuxtLink suppresses the router's own navigation so only clearError's redirect runs — subtle and easy to break",
+      "suggestion": "Follow the documented pattern: a plain NuxtLink with @click=\"clearError({ redirect: '/' })\", or just clearError() and let the link navigate"
+    },
+    {
+      "severity": "low",
+      "location": "app/server/api/species.get.ts:13-31",
+      "issue": "The Generation select order relies on the API's implicit list ordering (no explicit sort), so a reordering upstream would silently shuffle the dropdown",
+      "suggestion": "Sort generations explicitly by id next to the existing species sort"
+    }
+  ],
+  "summary": "A well-built Nuxt 4 app: correct srcDir layout, a clean nitro BFF layer that shapes PokeAPI data once per request, uniform useFetch/createError/404 handling, and SSR-consistent cookie-based team state that fits the feature spec exactly. The abstractions are few and the code is easy to follow, with a readable global stylesheet backed by tokens. Remaining work is a nits round — dedupe the humanize helper and team-size constant via Nuxt's shared/ directory, split the grab-bag format.ts, and tidy a few redundant bindings — after which I'd merge it as-is."
+}
+```

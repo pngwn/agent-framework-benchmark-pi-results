@@ -1,0 +1,491 @@
+diff --git a/app/src/app/app.routes.ts b/app/src/app/app.routes.ts
+index 39f4f2f..696a4be 100644
+--- a/app/src/app/app.routes.ts
++++ b/app/src/app/app.routes.ts
+@@ -1,6 +1,8 @@
+ import { inject } from '@angular/core';
+ import { ActivatedRouteSnapshot, ResolveFn, Routes } from '@angular/router';
+ import { PageData } from './data/page-data';
++import { TeamStore } from './data/team-store';
++import { TeamVM } from './shared/models';
+ 
+ /** Resolves the view model for a page from its page data path. */
+ function pageData(path: (route: ActivatedRouteSnapshot) => string): ResolveFn<unknown> {
+@@ -10,6 +12,13 @@ function pageData(path: (route: ActivatedRouteSnapshot) => string): ResolveFn<un
+ const param = (route: ActivatedRouteSnapshot, name: string) =>
+   encodeURIComponent(route.paramMap.get(name) ?? '');
+ 
++/** The team lives in the browser, so its resolver reads the names from the browser (or its cookie). */
++const teamData: ResolveFn<TeamVM | null> = () => {
++  const names = inject(TeamStore).names();
++  const query = names.map((name) => `names=${encodeURIComponent(name)}`).join('&');
++  return inject(PageData).load<TeamVM>(`/team${query ? `?${query}` : ''}`);
++};
++
+ export const routes: Routes = [
+   {
+     path: '',
+@@ -46,6 +55,12 @@ export const routes: Routes = [
+     loadComponent: () => import('./pages/types/types-page'),
+     resolve: { vm: pageData(() => '/types') },
+   },
++  {
++    path: 'team',
++    title: 'Team',
++    loadComponent: () => import('./pages/team/team-page'),
++    resolve: { vm: teamData },
++  },
+   {
+     path: 'types/:name',
+     loadComponent: () => import('./pages/type/type-page'),
+diff --git a/app/src/app/app.ts b/app/src/app/app.ts
+index abb97e4..4e83665 100644
+--- a/app/src/app/app.ts
++++ b/app/src/app/app.ts
+@@ -12,6 +12,7 @@ import { Router, RouterLink, RouterOutlet, Scroll } from '@angular/router';
+         <nav class="site-header__nav" aria-label="Main">
+           <a routerLink="/">Pokémon</a>
+           <a routerLink="/types">Types</a>
++          <a routerLink="/team">Team</a>
+         </nav>
+       </div>
+     </header>
+diff --git a/app/src/app/data/team-store.ts b/app/src/app/data/team-store.ts
+new file mode 100644
+index 0000000..b37af2d
+--- /dev/null
++++ b/app/src/app/data/team-store.ts
+@@ -0,0 +1,89 @@
++import { PLATFORM_ID, REQUEST, Service, computed, inject, signal } from '@angular/core';
++import { isPlatformBrowser } from '@angular/common';
++
++const STORAGE_KEY = 'pokedex.team';
++const COOKIE_NAME = 'pokedex_team';
++export const TEAM_SIZE = 6;
++
++function normalize(names: unknown): string[] {
++  if (!Array.isArray(names)) return [];
++  return [...new Set(names.filter((name): name is string => typeof name === 'string'))].slice(0, TEAM_SIZE);
++}
++
++function parseCookieHeader(header: string | null): string[] {
++  if (!header) return [];
++  for (const entry of header.split(';')) {
++    const [name, ...value] = entry.trim().split('=');
++    if (name !== COOKIE_NAME) continue;
++    try {
++      return normalize(JSON.parse(decodeURIComponent(value.join('='))));
++    } catch {
++      return [];
++    }
++  }
++  return [];
++}
++
++function readCookie(): string[] {
++  return parseCookieHeader(typeof document === 'undefined' ? null : document.cookie);
++}
++
++/** The user's team: at most six species API names, in the order they were added. */
++@Service()
++export class TeamStore {
++  private readonly isBrowser = isPlatformBrowser(inject(PLATFORM_ID));
++  private readonly request = inject(REQUEST, { optional: true });
++  private readonly members = signal<string[]>(this.readInitial());
++
++  readonly names = this.members.asReadonly();
++  readonly size = computed(() => this.members().length);
++  readonly full = computed(() => this.size() >= TEAM_SIZE);
++
++  constructor() {
++    // Keep the cookie the server reads in sync with a team saved before it existed.
++    if (this.isBrowser && this.members().length) this.writeCookie(this.members());
++  }
++
++  has(name: string): boolean {
++    return this.members().includes(name);
++  }
++
++  add(name: string): void {
++    if (this.has(name) || this.full()) return;
++    this.update([...this.members(), name]);
++  }
++
++  remove(name: string): void {
++    if (!this.has(name)) return;
++    this.update(this.members().filter((member) => member !== name));
++  }
++
++  toggle(name: string): void {
++    if (this.has(name)) this.remove(name);
++    else this.add(name);
++  }
++
++  private readInitial(): string[] {
++    if (!this.isBrowser) return parseCookieHeader(this.request?.headers.get('cookie') ?? null);
++    try {
++      return normalize(JSON.parse(localStorage.getItem(STORAGE_KEY) ?? '[]'));
++    } catch {
++      return readCookie();
++    }
++  }
++
++  private update(names: string[]): void {
++    this.members.set(names);
++    if (!this.isBrowser) return;
++    try {
++      localStorage.setItem(STORAGE_KEY, JSON.stringify(names));
++    } catch {
++      // Storage can be unavailable (for example in private browsing); keep the in-memory team.
++    }
++    this.writeCookie(names);
++  }
++
++  private writeCookie(names: string[]): void {
++    document.cookie = `${COOKIE_NAME}=${encodeURIComponent(JSON.stringify(names))}; path=/; max-age=31536000; SameSite=Lax`;
++  }
++}
+diff --git a/app/src/app/pages/pokemon/pokemon-page.html b/app/src/app/pages/pokemon/pokemon-page.html
+index 946a559..f8a08c1 100644
+--- a/app/src/app/pages/pokemon/pokemon-page.html
++++ b/app/src/app/pages/pokemon/pokemon-page.html
+@@ -11,6 +11,14 @@
+       @if (vm.genus) {
+         <p class="muted pokemon-summary__genus">{{ vm.genus }}</p>
+       }
++      <div class="team-toggle">
++        <button type="button" class="button" [disabled]="teamFull()" (click)="toggleTeam()">
++          {{ onTeam() ? 'Remove from team' : 'Add to team' }}
++        </button>
++        @if (teamFull()) {
++          <span class="muted">Team is full</span>
++        }
++      </div>
+       <p class="badges">
+         @for (type of vm.types; track type.name) {
+           <app-type-badge [type]="type" />
+diff --git a/app/src/app/pages/pokemon/pokemon-page.ts b/app/src/app/pages/pokemon/pokemon-page.ts
+index ed6a606..d3fb792 100644
+--- a/app/src/app/pages/pokemon/pokemon-page.ts
++++ b/app/src/app/pages/pokemon/pokemon-page.ts
+@@ -1,6 +1,7 @@
+ import { Component, computed, inject, input } from '@angular/core';
+ import { NgOptimizedImage } from '@angular/common';
+ import { ActivatedRoute, Router, RouterLink } from '@angular/router';
++import { TeamStore } from '../../data/team-store';
+ import { dexNumber } from '../../shared/format';
+ import { PokemonVM } from '../../shared/models';
+ import { TypeBadge } from '../../shared/type-badge';
+@@ -19,10 +20,16 @@ const STAT_MAX = 255;
+ export default class PokemonPage {
+   private readonly router = inject(Router);
+   private readonly route = inject(ActivatedRoute);
++  private readonly team = inject(TeamStore);
+ 
+   readonly vm = input.required<PokemonVM | null>();
+ 
+   protected readonly number = computed(() => dexNumber(this.vm()?.id ?? 0));
++  protected readonly onTeam = computed(() => {
++    const name = this.vm()?.name;
++    return name ? this.team.has(name) : false;
++  });
++  protected readonly teamFull = computed(() => this.team.full() && !this.onTeam());
+   protected readonly height = computed(() => `${((this.vm()?.height ?? 0) / 10).toFixed(1)} m`);
+   protected readonly weight = computed(() => `${((this.vm()?.weight ?? 0) / 10).toFixed(1)} kg`);
+   protected readonly total = computed(() => (this.vm()?.stats ?? []).reduce((sum, s) => sum + s.value, 0));
+@@ -31,6 +38,11 @@ export default class PokemonPage {
+     return `${Math.min(100, (value / max) * 100)}%`;
+   }
+ 
++  protected toggleTeam(): void {
++    const name = this.vm()?.name;
++    if (name) this.team.toggle(name);
++  }
++
+   protected selectGame(game: string): void {
+     void this.router.navigate([], {
+       relativeTo: this.route,
+diff --git a/app/src/app/pages/team/team-page.ts b/app/src/app/pages/team/team-page.ts
+new file mode 100644
+index 0000000..f1facf9
+--- /dev/null
++++ b/app/src/app/pages/team/team-page.ts
+@@ -0,0 +1,101 @@
++import { PLATFORM_ID, Component, effect, inject, input, linkedSignal } from '@angular/core';
++import { isPlatformBrowser } from '@angular/common';
++import { RouterLink } from '@angular/router';
++import { PageData } from '../../data/page-data';
++import { TeamStore } from '../../data/team-store';
++import { humanize } from '../../shared/format';
++import { TeamVM } from '../../shared/models';
++import { PokemonCard } from '../../shared/pokemon-card';
++
++const EMPTY_TEAM: TeamVM = { members: [], coverage: [] };
++
++@Component({
++  selector: 'app-team-page',
++  imports: [RouterLink, PokemonCard],
++  template: `
++    <h1 class="page-title">Team</h1>
++    <p class="count">{{ team.size() }} of 6</p>
++
++    @if (!team.size()) {
++      <div class="panel team-empty">
++        <p>Your team is empty</p>
++        <p><a routerLink="/">Browse Pokémon</a></p>
++      </div>
++    } @else {
++      <ul class="card-grid team-list">
++        @for (member of vm().members; track member.id) {
++          <li>
++            <app-pokemon-card [id]="member.id" [name]="member.name" [types]="member.types" />
++            <button type="button" class="button team-list__remove" (click)="remove(member.name)">
++              Remove {{ name(member.name) }}
++            </button>
++          </li>
++        }
++      </ul>
++
++      @if (vm().coverage.length) {
++        <section class="panel" aria-labelledby="coverage-heading">
++          <h2 id="coverage-heading">Type coverage</h2>
++          <div class="table-scroll">
++            <table class="data-table coverage-table">
++              <thead>
++                <tr>
++                  <th scope="col">Type</th>
++                  <th scope="col">Weak</th>
++                  <th scope="col">Resistant</th>
++                </tr>
++              </thead>
++              <tbody>
++                @for (row of vm().coverage; track row.type.name) {
++                  <tr>
++                    <th scope="row">{{ row.type.label }}</th>
++                    <td>{{ row.weak }}</td>
++                    <td>{{ row.resistant }}</td>
++                  </tr>
++                }
++              </tbody>
++            </table>
++          </div>
++        </section>
++      }
++    }
++  `,
++})
++export default class TeamPage {
++  private readonly pageData = inject(PageData);
++  private readonly isBrowser = isPlatformBrowser(inject(PLATFORM_ID));
++
++  protected readonly team = inject(TeamStore);
++  protected readonly initialVm = input.required<TeamVM>({ alias: 'vm' });
++  protected readonly vm = linkedSignal(() => this.initialVm());
++  protected readonly name = humanize;
++
++  private loadId = 0;
++
++  constructor() {
++    if (!this.isBrowser) return;
++    effect(() => {
++      const names = this.team.names();
++      if (!this.matches(names, this.vm())) void this.load(names);
++    });
++  }
++
++  protected remove(name: string): void {
++    this.team.remove(name);
++  }
++
++  private matches(names: string[], vm: TeamVM): boolean {
++    return names.length === vm.members.length && names.every((name, i) => vm.members[i]?.name === name);
++  }
++
++  private async load(names: string[]): Promise<void> {
++    const id = ++this.loadId;
++    if (!names.length) {
++      this.vm.set(EMPTY_TEAM);
++      return;
++    }
++    const query = names.map((name) => `names=${encodeURIComponent(name)}`).join('&');
++    const data = await this.pageData.load<TeamVM>(`/team?${query}`);
++    if (id === this.loadId) this.vm.set(data ?? EMPTY_TEAM);
++  }
++}
+diff --git a/app/src/app/shared/models.ts b/app/src/app/shared/models.ts
+index f99bfb0..dc53da2 100644
+--- a/app/src/app/shared/models.ts
++++ b/app/src/app/shared/models.ts
+@@ -21,6 +21,21 @@ export interface HomeEntry {
+   generation: string;
+ }
+ 
++export interface TeamMember extends Card {
++  types: NamedRef[];
++}
++
++export interface TeamCoverage {
++  type: NamedRef;
++  weak: number;
++  resistant: number;
++}
++
++export interface TeamVM {
++  members: TeamMember[];
++  coverage: TeamCoverage[];
++}
++
+ export interface HomeVM {
+   types: NamedRef[];
+   generations: NamedRef[];
+diff --git a/app/src/server/loaders.ts b/app/src/server/loaders.ts
+index 47c0e03..ca2f84b 100644
+--- a/app/src/server/loaders.ts
++++ b/app/src/server/loaders.ts
+@@ -13,6 +13,7 @@ import type {
+   MoveVM,
+   NamedRef,
+   PokemonVM,
++  TeamVM,
+   TypesVM,
+   TypeVM,
+ } from '../app/shared/models';
+@@ -179,6 +180,14 @@ const STAT_LABELS: Record<string, string> = {
+ 
+ const METHOD_ORDER = ['level-up', 'machine', 'egg', 'tutor'];
+ 
++function attackMultiplier(attacking: ApiType, defending: string): number {
++  const relations = attacking.damage_relations;
++  if ((relations['no_damage_to'] ?? []).some((relation) => relation.name === defending)) return 0;
++  if ((relations['double_damage_to'] ?? []).some((relation) => relation.name === defending)) return 2;
++  if ((relations['half_damage_to'] ?? []).some((relation) => relation.name === defending)) return 0.5;
++  return 1;
++}
++
+ // --- Pages ---
+ 
+ export async function loadHome(): Promise<HomeVM> {
+@@ -221,6 +230,40 @@ export async function loadHome(): Promise<HomeVM> {
+   };
+ }
+ 
++export async function loadTeam(names: string[]): Promise<TeamVM> {
++  const selected = [...new Set(names.filter(Boolean))].slice(0, 6);
++  const [types, species] = await Promise.all([
++    allTypes(),
++    Promise.all(selected.map((name) => apiFind<ApiSpecies>(`pokemon-species/${encodeURIComponent(name.toLowerCase())}`))),
++  ]);
++  const found = species.filter((entry): entry is ApiSpecies => entry !== null);
++  const pokemon = await Promise.all(found.map((entry) => apiGet<ApiPokemon>(`pokemon/${entry.id}`)));
++  const labels = new Map(types.map((type) => [type.name, englishName(type.names, type.name)]));
++
++  return {
++    members: found.map((entry, index) => ({
++      id: entry.id,
++      name: entry.name,
++      types: [...pokemon[index].types]
++        .sort((a, b) => a.slot - b.slot)
++        .map((slot) => typeRef(slot.type.name, labels)),
++    })),
++    coverage: types.map((attacking) => {
++      let weak = 0;
++      let resistant = 0;
++      for (const member of pokemon) {
++        const multiplier = member.types.reduce(
++          (product, slot) => product * attackMultiplier(attacking, slot.type.name),
++          1,
++        );
++        if (multiplier > 1) weak += 1;
++        else if (multiplier < 1) resistant += 1;
++      }
++      return { type: typeRef(attacking.name, labels), weak, resistant };
++    }),
++  };
++}
++
+ function toEvolutionNode(link: ApiChainLink): EvolutionNode {
+   return {
+     name: link.species.name,
+@@ -403,6 +446,8 @@ export async function loadPageData(path: string): Promise<unknown> {
+       return name === undefined ? loadHome() : null;
+     case 'types':
+       return name === undefined ? loadTypes() : null;
++    case 'team':
++      return name === undefined ? loadTeam(url.searchParams.getAll('names')) : null;
+     case 'pokemon':
+       return name ? loadPokemon(name, url.searchParams.get('game')) : null;
+     case 'moves':
+diff --git a/app/src/styles.css b/app/src/styles.css
+index 13b93cd..13dc029 100644
+--- a/app/src/styles.css
++++ b/app/src/styles.css
+@@ -209,8 +209,69 @@ a.type-badge:hover {
+   margin-bottom: var(--space-4);
+ }
+ 
++/* ---------- Team ---------- */
++
++.team-toggle {
++  display: flex;
++  align-items: center;
++  gap: var(--space-3);
++  margin-bottom: var(--space-4);
++}
++
++.team-empty {
++  padding: var(--space-5) var(--space-4);
++}
++
++.team-empty p + p {
++  margin-top: var(--space-2);
++}
++
++.team-list > li {
++  flex-direction: column;
++  gap: var(--space-2);
++}
++
++.team-list__remove {
++  min-height: 2rem;
++  padding: var(--space-1) var(--space-3);
++  background: var(--color-surface);
++  color: var(--color-link);
++  font-size: var(--text-sm);
++}
++
++.coverage-table th[scope='row'] {
++  color: var(--color-text);
++}
++
++.coverage-table td {
++  width: 6rem;
++}
++
+ /* ---------- Forms ---------- */
+ 
++.button {
++  min-height: 2.5rem;
++  padding: var(--space-2) var(--space-4);
++  border: 1px solid var(--color-link);
++  border-radius: var(--radius-md);
++  background: var(--color-link);
++  color: var(--color-surface);
++  font: inherit;
++  line-height: var(--leading-normal);
++  cursor: pointer;
++}
++
++.button:hover:not(:disabled) {
++  text-decoration: underline;
++}
++
++.button:disabled {
++  border-color: var(--color-border);
++  background: var(--color-stat-track);
++  color: var(--color-text-muted);
++  cursor: default;
++}
++
+ .field {
+   display: flex;
+   flex-direction: column;

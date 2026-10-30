@@ -1,0 +1,151 @@
+{
+  "dimension": "editability",
+  "criteria": {
+    "removability": {
+      "score": 3,
+      "evidence": [
+        "server.mjs:88-93 — abilities route isolated in a 5-line handler",
+        "views.mjs:250-276 — renderAbilityPage a single function, but lives in a 620-line monolith",
+        "views.mjs:563 — abilities links from the Pokémon page require editing an unrelated renderer",
+        "views.mjs:602-606 — dead renderAbilityPageByName survives a route-only deletion",
+        "render.mjs:74 — ability-specific 'hidden' flag on the generic pokemonCard; styles.css:257 its orphaned CSS class"
+      ],
+      "rationale": "The route is a clean delete, but the feature leaks into the Pokémon page renderer, the shared card component, the API layer and CSS, and pre-existing dead exports mean a lazy removal leaves code behind. Textbook 'handful of scattered edits'."
+    },
+    "changeability": {
+      "score": 4,
+      "evidence": [
+        "render.mjs:65-74 — pokemonCard is the single card implementation; every list goes through it",
+        "api.mjs:46 — spriteUrl is the one sprite-URL seam (used at render.mjs:69 and views.mjs:557)",
+        "render.mjs:100-115 — homeUrl canonicalizes query params once, shared by pagination links (render.mjs:108-110) and HX-Push-Url (server.mjs:61)",
+        "views.mjs:153-158, 223-237, 254-265 — the pokemon-references→species-cards pipeline is triplicated with variations, so a change to it needs three edits"
+      ],
+      "rationale": "The highest-traffic bug surface (cards, sprites, filter URLs) lands in one obvious place thanks to pokemonCard/spriteUrl/homeUrl. Below a 5 because the card-list construction and the type/move/ability 'resolve species, build cards' logic is duplicated rather than shared."
+    },
+    "coupling": {
+      "score": 3,
+      "evidence": [
+        "server.mjs:37-113 — routes contain no rendering logic; htmx partial negotiation is explicit header checks",
+        "views.mjs:1-33 — imports 18 symbols from api.mjs; views both fetch (getHomeData views.mjs:37, getPokemonPageData views.mjs:534) and render",
+        "server.mjs:57-64 — server also fetches for other routes, so fetch responsibility is split inconsistently with views.mjs:596-612 which duplicates it (dead)",
+        "api.mjs:15-33,175-189 — data layer also owns humanize/formatDex/statLabel; render.mjs:1 imports display helpers from it",
+        "views.mjs:596-612, api.mjs:42, api.mjs:192 — five exported symbols are never used anywhere"
+      ],
+      "rationale": "Module roles are real and interfaces are mostly narrow (views take plain data objects; renderers return strings), and server/client boundaries are clean. But api.mjs is a grab-bag, views.mjs mixes data prep with rendering for every page, and dead duplicates of server logic erode the seam between them."
+    },
+    "abstraction_design": {
+      "score": 3,
+      "evidence": [
+        "render.mjs:86-91, 95-98, 77-90 — cardGrid, section and typeBadges stretch across every page without flag creep",
+        "api.mjs:96-107 — memoize is a genuine small abstraction, but versionGroupCache (api.mjs:135-142) reimplements the same idea separately",
+        "views.mjs:196-211, 234-247, 269-275 — the three card-page bodies (h1 + count + section + cardGrid) are copy-paste variations, not a shared shape",
+        "views.mjs:254-263 — ability page reimplements id extraction/hidden-map instead of reusing dedupeSortedPokemonEntries (views.mjs:139)",
+        "views.mjs:214 — moveFact dl pattern is a local const; an Items page would have to copy it"
+      ],
+      "rationale": "The low-level primitives are well-chosen and cover real variation, but the mid-level abstractions stop short: no shared 'list of Pokémon cards' or 'facts dl' composition, so similar-but-different pages are assembled by copy-paste. Some flag creep (partial at views.mjs:87, hidden at render.mjs:65) but nothing egregious."
+    }
+  },
+  "overall": 3,
+  "findings": [
+    {
+      "severity": "medium",
+      "location": "app/src/views.mjs:596",
+      "issue": "renderMovePageByName / renderAbilityPageByName / renderTypePageByName are exported but never called; server.mjs:57-98 re-implements the same fetch-and-render inline. Anyone editing one path won't find the other.",
+      "suggestion": "Delete the dead wrappers (or route through them in server.mjs so the logic lives in one place)."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/views.mjs:254",
+      "issue": "The pokemon-references→species-cards pipeline is written three times with variations (type page views.mjs:153-158, move page views.mjs:223-237, ability page views.mjs:254-265 including its own id extraction).",
+      "suggestion": "Extract one helper (on top of dedupeSortedPokemonEntries) that takes pokemon entries plus the species catalog and returns sorted card objects, with an optional hidden-ability map."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/api.mjs:15",
+      "issue": "The 'data layer' is a grab-bag: base URL, caching, resource getters, humanize/formatDex/statLabel display helpers and English-text extraction all live together, and render.mjs:1 imports display helpers from it.",
+      "suggestion": "Split display formatting (humanize, formatDex, formatValue, statLabel, spriteUrl) into its own module so the fetching layer has one reason to change."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/api.mjs:135",
+      "issue": "Three separate caching mechanisms exist in one file: fetchJson's cache/pending maps (api.mjs:30-60), versionGroupCache (api.mjs:135-142), and memoize (api.mjs:96-107). A caching-rule change (TTL, invalidation) touches all three.",
+      "suggestion": "Route versionGroupCache through apiGet's cache or memoize so cache policy is defined once."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/views.mjs:1",
+      "issue": "views.mjs is a 620-line monolith mixing data preparation (getHomeData, getPokemonPageData, getMovesData) with rendering for all six pages, which is where most edit scenarios pay their tax.",
+      "suggestion": "Split per page (or at least data prep from renderers); page-level files make removal and addition one-file operations."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/render.mjs:74",
+      "issue": "The generic pokemonCard carries an ability-specific 'hidden' flag whose only consumer is the ability page (views.mjs:263), so removing Abilities means editing the shared component and orphaning styles.css:257.",
+      "suggestion": "Accept optional trailing content/children, or let the ability page pass pre-rendered extras, so the component stays feature-agnostic."
+    },
+    {
+      "severity": "low",
+      "location": "app/server.mjs:29",
+      "issue": "Static assets are hand-served via boot-time file reads and three explicit routes; each new asset needs another route plus a readPublicFile entry.",
+      "suggestion": "Use @hono/node-server's serveStatic for /styles.css, /tokens.css and /htmx.min.js (it is already a dependency), keeping one place that serves /public."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/api.mjs:42",
+      "issue": "Dead exports: englishEffect (api.mjs:42) and typeDisplayName (api.mjs:192) are exported but unused, adding noise to the module's real surface.",
+      "suggestion": "Delete them, or inline where the intent actually applies."
+    }
+  ],
+  "summary": "A clean three-layer shape (routes / data / render) with genuinely good low-level primitives — pokemonCard, cardGrid, section, homeUrl and the memoized catalogs — that make the most common edits one-file changes. The mid-level is the weak spot: views.mjs is a 620-line data-plus-render monolith with triplicated card-list construction, the API module doubles as a formatting library, and dead by-name wrappers duplicate the server's route logic. Everyday fixes land easily; adding, removing or reshaping a page means scattered edits and copy-paste.",
+  "scenarios": [
+    {
+      "change": "Remove the Abilities pages and every link to them",
+      "files": [
+        "app/server.mjs",
+        "app/src/views.mjs",
+        "app/src/api.mjs",
+        "app/src/render.mjs",
+        "app/public/styles.css"
+      ],
+      "difficulty": 3,
+      "notes": "Route delete is trivial (server.mjs:88-93) but the feature leaks into the Pokémon page's Abilities section (views.mjs:563), the shared card's hidden flag (render.mjs:74), getAbility (api.mjs:169), a dead wrapper (views.mjs:602-606) and one CSS class."
+    },
+    {
+      "change": "Fix wrong sprite for species whose default Pokémon has a different name",
+      "files": [
+        "app/src/api.mjs",
+        "app/src/render.mjs"
+      ],
+      "difficulty": 5,
+      "notes": "spriteUrl (api.mjs:46) and pokemonCard (render.mjs:65-74) are the single seam; every card list — home, type, move, ability — renders through cardGrid→pokemonCard, so one fix covers all of them (plus the artwork fallback at views.mjs:557 if needed)."
+    },
+    {
+      "change": "Add sorting by name to every list of Pokémon cards",
+      "files": [
+        "app/src/render.mjs",
+        "app/src/views.mjs"
+      ],
+      "difficulty": 4,
+      "notes": "cardGrid (render.mjs:86) is the natural single place, but the home page must stay dex-ordered per spec, so it needs an option plus edits at the three non-home call sites (views.mjs:205, 246, 274). Two files, a few small edits."
+    },
+    {
+      "change": "Add an Items section (/items, /items/:name) shaped like Moves",
+      "files": [
+        "app/server.mjs",
+        "app/src/api.mjs",
+        "app/src/views.mjs",
+        "app/src/render.mjs"
+      ],
+      "difficulty": 3,
+      "notes": "Reusable pieces are helpers only (wrapPage, section, cardGrid, englishName, fetchJson/memoize); the move page's fact-list pattern (moveFact, views.mjs:214) is unexported and its composition is inline, so the page is largely copied rather than instantiated, plus a nav link in render.mjs:31."
+    },
+    {
+      "change": "Change the API base URL and caching rules",
+      "files": [
+        "app/src/api.mjs"
+      ],
+      "difficulty": 4,
+      "notes": "Base URL and path construction are confined to api.mjs:1-3 with no other file referencing them. Caching policy, however, is spread across three mechanisms in the same file (fetchJson cache, versionGroupCache, memoize), so a rule change means three edits — all within one file."
+    }
+  ]
+}

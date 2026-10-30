@@ -1,0 +1,127 @@
+{
+  "dimension": "mergeability",
+  "criteria": {
+    "idiomatic": {
+      "score": 5,
+      "evidence": [
+        "app/src/views/layout.tsx:14 — jsxRenderer layout exactly per hono-jsx skill",
+        "app/src/views/layout.tsx:4-8 — declare module 'hono' ContextRenderer typed props, the documented pattern for layout props",
+        "app/src/index.tsx:24-34 — handlers load data and pass props to components; c.render for pages, c.html for htmx fragments",
+        "app/src/index.tsx:18-26 — isPartial + Vary: HX-Request, HX-History-Restore-Request — correct htmx/proxy cache hygiene",
+        "app/src/views/home.tsx:93-108 — hx-sync 'closest form:replace', delayed input trigger, hx-include: textbook htmx filter form",
+        "app/src/views/team.tsx:11-35 — hono/cookie getCookie/setCookie/deleteCookie with SameSite=Lax, httpOnly",
+        "app/package.json:11-13 — hono 4.13.14 and @hono/node-server 2.1.5, the current stable releases (v5 still RC as of 2026-10)"
+      ],
+      "rationale": "Reads like the framework's own examples across Hono and htmx; version pins are current stable, and the fragment/URL-state handling (HX-Push-Url, Vary) is more careful than the docs require."
+    },
+    "correctness_risks": {
+      "score": 3,
+      "evidence": [
+        "app/src/views/team.tsx:37-51 — addToTeam/removeFromTeam read-modify-write the cookie with no serialization; team.tsx:133's hx-post has no hx-sync, so two rapid Remove clicks race and lose updates",
+        "app/src/index.tsx:33,39,80 — /pokemon/:name and /team render cookie-dependent HTML but set no Vary: Cookie / Cache-Control (only the home route sets Vary, index.tsx:26), risking stale or cross-user cached team state behind the assumed reverse proxy",
+        "app/src/index.tsx:93-96 — POST /team/add/:name writes any param into the cookie unvalidated; data.ts loadTeam (team.tsx:54-66) silently drops unknowns so count and button state can diverge",
+        "app/src/index.tsx:15-18,103-112 — notFound/onError return full documents even for htmx partial requests, so a fragment swap would insert a whole page",
+        "app/src/api.ts:43 — stale-while-revalidate refresh errors are silently swallowed, so a failing API serves stale data forever with no log",
+        "app/src/api.ts:9 — request-keyed cache Map is never evicted; bounded only because the API is a fixed snapshot"
+      ],
+      "rationale": "No showstopper, but several real ones the tests can't see: a cookie race in the team mutations, missing Vary: Cookie on cookie-dependent pages, unvalidated team writes, and swallowed background refresh errors."
+    },
+    "global_abstractions": {
+      "score": 4,
+      "evidence": [
+        "app/src/api.ts — one small client (fetch + cache + idFromUrl), no other module touches fetch",
+        "app/src/data.ts:1-36 — pure helpers cleanly separated from network-dependent builders (mainTypes, speciesById, cardsForPokemon)",
+        "app/src/views/components.tsx — one shared components module (Section, CardList, TypeBadge, orDash), reused everywhere without duplication",
+        "app/src/data.ts:61-76 — typesByPokemonId rebuilds a ~1000-entry map from type records on every home/team request instead of memoizing beside the API cache; speciesById (data.ts:91-96) same per cardsForPokemon call",
+        "app/src/views/team.tsx — single module exports 8 names spanning cookie persistence, loaders and UI; slight boundary blur but locally consistent with the app's loader+view convention"
+      ],
+      "rationale": "Layering is clean and each module earns its keep; the only global-cost issue is data.ts rebuilding large lookup maps per request and the team module doing double duty as persistence + UI."
+    },
+    "readability": {
+      "score": 4,
+      "evidence": [
+        "app/src/index.tsx:1-30 — flat route table, self-describing, with a why-comment on partial handling at line 17",
+        "app/src/api.ts:1-2 — comment explains the SWR caching intent and the request-time-data constraint",
+        "app/src/views/pokemon.tsx:55-90 — loadMoves derives tables with named intermediate steps; sortRows keeps nulls-last logic visible",
+        "app/src/views/pokemon.tsx:191-197,222-226 — (g: any)/(a: any) casts and untyped species/pokemon records mean readers learn the data shape only from context",
+        "app/src/views/team.tsx:37-51 — addToTeam/removeFromTeam declared async with no await, a small consistency wart"
+      ],
+      "rationale": "Naming, file organization and comment quality are high; the pervasive `any` typing of API records is the one thing that makes reading the domain logic harder than it should be."
+    },
+    "review_cost": {
+      "score": 4,
+      "evidence": [
+        "app/src/index.tsx:33-39 — two-line fix available for Vary: Cookie on cookie-dependent routes",
+        "app/src/views/team.tsx:133-139 — one hx-sync attribute away from closing the mutation race",
+        "app/src/api.ts:36-48 — api<T = any> generic exists; threading real types through data.ts is mechanical",
+        "app/build.mjs:1-19 — 19-line build script, trivial to audit",
+        "app/package.json:15-18 — a typecheck script exists and tsconfig is strict, so review fixes stay checkable"
+      ],
+      "rationale": "I'd approve after one small round: add Vary/Cache-Control on cookie-dependent routes, serialize team mutations, and type the API layer; everything else is nits."
+    }
+  },
+  "overall": 4,
+  "findings": [
+    {
+      "severity": "medium",
+      "location": "app/src/index.tsx:33",
+      "issue": "/pokemon/:name and /team render cookie-dependent HTML with no Vary: Cookie or Cache-Control, so a shared reverse-proxy or heuristic browser cache can serve one user's team state to another or a stale Add/Remove button",
+      "suggestion": "Set `Vary: Cookie` (or `Cache-Control: no-store`) on the /team and /pokemon/:name routes, mirroring the Vary already set for HX-Request on '/'"
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/views/team.tsx:37-51",
+      "issue": "Team mutations read-modify-write the cookie with no serialization; concurrent POSTs (e.g. two fast clicks on Remove buttons, team.tsx:133, which has no hx-sync) race and can drop updates",
+      "suggestion": "Add hx-sync to the team buttons (as done on the home form) or make the POST handlers idempotent under last-write-wins by re-reading the cookie server-side per request in a single critical section"
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/data.ts:46",
+      "issue": "The entire PokeAPI surface is typed as `any` (api<T = any>, casts like pokemon.tsx:191 `g: any`), so renames and shape changes in API data fail silently at runtime instead of at tsc",
+      "suggestion": "Define interfaces for the resources actually consumed (species, pokemon, type, move, ability, generation) in api.ts or data.ts and use api<T> everywhere"
+    },
+    {
+      "severity": "low",
+      "location": "app/src/index.tsx:93",
+      "issue": "POST /team/add/:name writes arbitrary unvalidated names into the cookie; loadTeam later drops unknown species silently, so the stored team can diverge from the displayed one",
+      "suggestion": "Validate the name against the species list (the data is cached anyway) and reject or ignore unknown names when writing the cookie"
+    },
+    {
+      "severity": "low",
+      "location": "app/src/index.tsx:15",
+      "issue": "notFound() and onError() return full page documents even when the request is an htmx partial, so swapping a fragment (e.g. a moves-table or results div) would inject a whole HTML page",
+      "suggestion": "Branch on isPartial(c) in notFound/onError and return a bare fragment for HX-Request requests"
+    },
+    {
+      "severity": "low",
+      "location": "app/src/api.ts:43",
+      "issue": "Stale-while-revalidate background refresh failures are swallowed with .catch(() => {}), so a persistently failing API serves stale data forever with no signal",
+      "suggestion": "Log refresh failures (or set a short error backoff on the entry) instead of discarding the rejection"
+    },
+    {
+      "severity": "low",
+      "location": "app/src/api.ts:9",
+      "issue": "The in-memory cache Map is never evicted; memory is bounded only by the assumption that the API is a fixed snapshot, which is undocumented",
+      "suggestion": "Document the bounded-snapshot assumption next to the cache, or add TTL/LRU eviction keyed on FRESH_MS"
+    },
+    {
+      "severity": "low",
+      "location": "app/src/data.ts:61",
+      "issue": "typesByPokemonId (and speciesById via cardsForPokemon, data.ts:91) rebuild ~1000-entry Maps on every request from cached records — repeated O(dataset) work per page view",
+      "suggestion": "Memoize the derived maps alongside the API cache (e.g. rebuild only when the upstream entries refresh)"
+    },
+    {
+      "severity": "low",
+      "location": "app/src/views/team.tsx:37",
+      "issue": "addToTeam/removeFromTeam are declared async but contain no awaits, which misleads readers into assuming I/O",
+      "suggestion": "Drop the async keyword (or hoist species validation inside so it does await)"
+    },
+    {
+      "severity": "low",
+      "location": "app/src/index.tsx:26",
+      "issue": "The home full page is rendered with { title: '' } to hit the layout's fallback branch — a slightly awkward encoding of 'no title suffix'",
+      "suggestion": "Make the renderer props title optional ({ title?: string }) instead of passing an empty string"
+    }
+  ],
+  "summary": "A genuinely idiomatic Hono 4 + htmx app on current stable versions, with clean layering (api client → domain mapping → per-page loaders/views) that a team could own comfortably. The merge blockers are small and concentrated in the team feature: an unsynchronized cookie read-modify-write race, missing Vary: Cookie on cookie-dependent pages, and an untyped API surface. Fix those in one small round and it's an easy approve."
+}

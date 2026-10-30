@@ -1,0 +1,139 @@
+## Review
+
+The app is a classic no-framework SPA: `server.mjs` (static file server + config injection), `src/api.js` (fetch + formatters), `src/data.js` (species/types/generations loaders and ref→species mapping), `src/ui.js` (card/panel HTML helpers), and `src/main.js` (router + all eight pages, 878 lines). Layering is one-way and clean, and the shared Pokémon-card component genuinely covers every list, which is what makes the sprite-bug scenario trivial. The main drag on editability is that every feature lives inside the single `main.js` module with some duplicated badge markup, so feature removal/addition is a grep-and-edit exercise rather than a delete-a-file exercise.
+
+Scenario walkthrough:
+
+1. **Remove Abilities** — `renderAbility` (`app/src/main.js:690-726`), the route branch (`main.js:807`), the Abilities panel and `/abilities/...` links on the Pokémon page (`main.js:639-643`), and `.hidden-ability` CSS (`styles.css:259`). Two files, several spots; the `extraHtml` card option (`ui.js:19`) becomes vestigial.
+2. **Sprite fix** — cards are built only in `pokemonCardHtml` (`ui.js:9-32`) via `spriteUrl` (`api.js:84`), and all four card lists go through `pokemonCardListHtml` (`main.js:156, 685, 715, 767`). One fix covers every list. (Note: this app derives sprites from the species ID, which matches the documented `/media/sprites/pokemon/<id>.png` pattern, so it likely isn't actually buggy — but if it were, the fix point is singular.)
+3. **Sorting by name** — three lists share `speciesIdsFromPokemonRefs`/`speciesRefsByIds` (`data.js:90-105`), but the home page has its own filter/slice pipeline over `speciesData.refs` (`main.js:131-167`), so ordering changes land in two places; English-name (vs humanized-API-name) sorting would additionally require loading species details.
+4. **Items section** — route entry plus two new render functions mirroring `renderTypeList`/`renderMove`; reusable: `api()`, `panelHtml`, `setPage`, token guard, not-found handling. No page-level abstraction to plug into, so the shape is copied, not reused.
+5. **Data source** — base URL lives in `server.mjs:8` (env → injected `window.__API_BASE_URL__`) and `api.js:1-4`; caching exists in two layers: `responseCache` (`api.js:11`) and promise memoization in `data.js:11-13`, so a caching-rule change touches two files.
+
+```json
+{
+  "dimension": "editability",
+  "criteria": {
+    "removability": {
+      "score": 3,
+      "evidence": [
+        "app/src/main.js:690-726 — renderAbility is one self-contained function",
+        "app/src/main.js:807 — abilities route branch must be deleted separately",
+        "app/src/main.js:639-643 — abilities panel + /abilities links live inside renderPokemon, not with the feature",
+        "app/src/styles.css:259 — .hidden-ability rule left behind unless hunted down",
+        "app/src/ui.js:19 — extraHtml card option exists only for the ability page and becomes dead"
+      ],
+      "rationale": "Deleting the feature means several scattered edits inside one 878-line file plus a CSS cleanup; nothing is entangled across modules, but features are not module-isolated, so removal is a grep exercise, not a delete-a-file operation."
+    },
+    "changeability": {
+      "score": 4,
+      "evidence": [
+        "app/src/ui.js:21 — the only sprite <img> in the codebase, fed by spriteUrl (app/src/api.js:84)",
+        "app/src/main.js:156 — home list, and app/src/main.js:685,715,767 — move/ability/type lists all render through pokemonCardListHtml (app/src/ui.js:30)",
+        "app/src/main.js:317-344 — move-table sorting is a single generic sortRows/keyed-header pair for all methods",
+        "app/src/main.js:361,584,678,751 — type-badge link markup duplicated inline four times vs the unused span variant in app/src/ui.js:12"
+      ],
+      "rationale": "The named bug and most data fixes land in exactly one helper covering every consumer. Deducted one point because badge markup is duplicated four times, so a badge change means five edits."
+    },
+    "coupling": {
+      "score": 4,
+      "evidence": [
+        "app/server.mjs:25-35 — server only injects window.__API_BASE_URL__ and serves files; all rendering is client-side",
+        "app/src/api.js:15-20 — resolveApiUrl is the single place that knows the /api/v2/ prefix",
+        "app/src/ui.js:10-17 — the card component depends only on a narrow {name, id} species ref plus an options callback",
+        "app/src/main.js:131-167 — renderHomeResults mutates a shared filters object captured in a closure and re-renders partial DOM"
+      ],
+      "rationale": "Clean one-way layering (api → data/ui → main), narrow interfaces, explicit config injection, no global mutable state beyond the render token. Minor tangles: media-URL knowledge sits in the HTTP module and home-page filter state is mutated inside a closure."
+    },
+    "abstraction_design": {
+      "score": 3,
+      "evidence": [
+        "app/src/ui.js:27-32 — optionsForSpecies callback handles the real variation (types on home, hidden-ability badge) without flag parameters",
+        "app/src/data.js:90-105 — speciesIdsFromPokemonRefs/speciesRefsByIds reused by three pages",
+        "app/src/main.js:651-652 — detailsPanelHtml is a trivial one-use wrapper",
+        "app/src/main.js:655-780 — each page is a bespoke render function; no page/section abstraction to plug an Items section into",
+        "app/src/ui.js:12 — typeBadge doesn't stretch to linked badges, hence the four inline copies"
+      ],
+      "rationale": "The shared abstractions (card, panel, ref→species helpers) are well shaped for the app's actual variation, but they stop short of a page-level abstraction: a new section means copying a render function, and small helpers show copy-paste or one-off drift."
+    }
+  },
+  "overall": 4,
+  "findings": [
+    {
+      "severity": "medium",
+      "location": "app/src/main.js:786",
+      "issue": "Router, all eight pages' rendering, and all event handling live in a single 878-line module; features cannot be added or removed by touching or deleting one file.",
+      "suggestion": "Split into per-page modules (e.g. src/pages/home.js, pokemon.js, moves.js, ...) with a small router that imports and dispatches to them."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/main.js:361",
+      "issue": "Type-badge link markup is duplicated inline four times (main.js:361, 584, 678, 751) while ui.js exports a span-only typeBadge that main.js imports but never uses.",
+      "suggestion": "Extend typeBadge to emit a link when given an href (or add a typeBadgeLink helper) and use it from all five sites; drop the dead import."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/main.js:685",
+      "issue": "The '<count> Pokémon' + card-list panel pattern is repeated in three renderers (685, 712-718, 767) with slight variations.",
+      "suggestion": "Add a pokemonListPanelHtml(id, title, species) helper in ui.js so the count text, list, and panel markup change in one place."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/data.js:11",
+      "issue": "Caching exists in two layers: the response cache in api.js:11 and per-entity promise memoization in data.js, so a change to caching rules (TTL, invalidation) touches both files and three memoized variables.",
+      "suggestion": "Route the data.js memoization through a single memoize helper in api.js (or add an option on api()) so caching policy has one home."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/main.js:131",
+      "issue": "Home-page filter state is a mutable object captured in a closure, with two render paths: partial innerHTML on input/change (131-167) and a full renderRoute re-render on pagination links, which reloads and rebuilds everything.",
+      "suggestion": "Make filter state derivable from the URL only and re-render through one path (still fine to keep partial DOM updates, but let the URL be the single source of truth)."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/api.js:84",
+      "issue": "spriteUrl bakes the media path (/media/sprites/pokemon/<id>.png) into the HTTP/fetch module, which is otherwise data-source agnostic.",
+      "suggestion": "Move sprite/media URL construction to ui.js or a small media.js so api.js stays purely about fetching and formatting API data."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/main.js:651",
+      "issue": "detailsPanelHtml is a one-line wrapper used exactly once, adding indirection without abstraction.",
+      "suggestion": "Inline it in renderMove."
+    }
+  ],
+  "summary": "Well-layered for a framework-free app: one shared card component covers every Pokémon list, all HTTP and caching goes through a single api.js seam, and server/client code are cleanly separated, so the sprite-bug scenario is a one-file fix. The main cost is the monolithic 878-line main.js holding the router and every page's rendering and handlers, which turns feature removal and new sections into grep-and-edit work. Smaller duplication (type-badge markup ×5, the count+list panel pattern ×3, two caching layers) is findable but will bite anyone changing shared markup or data-source policy.",
+  "scenarios": [
+    {
+      "change": "Remove the Abilities pages and every link to them",
+      "files": ["app/src/main.js", "app/src/styles.css"],
+      "difficulty": 3,
+      "notes": "Delete renderAbility (690-726) and the route branch (807), plus the Abilities panel and /abilities links inside renderPokemon (639-643) and .hidden-ability CSS (styles.css:259). No cross-module entanglement, but everything is inside main.js and the extraHtml card option becomes dead, so it's four scattered edits rather than deleting a module."
+    },
+    {
+      "change": "Fix wrong card sprite for species whose default Pokémon has a different name (e.g. Deoxys)",
+      "files": ["app/src/ui.js", "app/src/api.js"],
+      "difficulty": 5,
+      "notes": "Cards are built in one place (ui.js:21 via spriteUrl in api.js:84) and every list — home (main.js:156), move (685), ability (715), type (767) — renders through pokemonCardListHtml, so a single fix covers all of them. Note the app derives sprites from the species ID, which matches the documented /media/sprites/pokemon/<id>.png pattern, so it likely renders correctly today."
+    },
+    {
+      "change": "Add sorting by name to every list of Pokémon cards",
+      "files": ["app/src/data.js", "app/src/main.js"],
+      "difficulty": 3,
+      "notes": "Move/ability/type lists all flow through speciesIdsFromPokemonRefs/speciesRefsByIds (data.js:90-105), so one sort there covers three; the home page has its own filter/slice pipeline over speciesData.refs (main.js:131-167) that must be edited separately. Sorting by English (not humanized API) names would also require loading species details, which the current species refs don't carry."
+    },
+    {
+      "change": "Add an Items section (/items, /items/:name) shaped like Moves",
+      "files": ["app/src/main.js", "app/src/styles.css", "app/src/api.js", "app/src/ui.js"],
+      "difficulty": 3,
+      "notes": "api(), panelHtml, setPage, the render-token guard, not-found handling and the router's dispatch are reusable, but there is no page-level abstraction: the item detail/list pages are ~80 lines copied in shape from renderMove/renderTypeList inside main.js, plus new CSS. Reuse is of generic helpers, not of the Moves code itself."
+    },
+    {
+      "change": "Change the API base URL and caching rules",
+      "files": ["app/server.mjs", "app/src/api.js", "app/src/data.js"],
+      "difficulty": 3,
+      "notes": "Base URL is a deliberate seam: server.mjs:8 reads the env and injects one global that api.js:1-4 consumes; a base-URL change alone is two coordinated places. Caching, however, lives in two layers — responseCache in api.js:11 and memoized species/types/generations promises in data.js:11-13 — so changing cache policy (TTL, invalidation) means editing both files."
+    }
+  ]
+}
+```

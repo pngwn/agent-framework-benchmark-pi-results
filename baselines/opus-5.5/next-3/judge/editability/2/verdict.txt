@@ -1,0 +1,122 @@
+I've now read every source file in `app/`, verified the Next.js version against the current release (16.4.3, Oct 2026 — and confirmed Cache Components is the new recommended model that will be default in 17), and worked through each editability scenario. Findings and scores below.
+
+```json
+{
+  "dimension": "editability",
+  "criteria": {
+    "removability": {
+      "score": 4,
+      "evidence": [
+        "app/app/abilities/[name]/page.tsx:1 — entire feature lives in one route directory; imports only shared generic helpers",
+        "app/app/pokemon/[name]/page.tsx:117 — the only inbound link is the Abilities section on the Pokémon page (spec-mandated), so removal means one localized edit there",
+        "app/app/layout.tsx:26 — nav links only Pokémon and Types; no ability references in shared chrome",
+        "app/lib/api.ts:136 — Ability type in api.ts would linger as dead code, and .card__note CSS (app/app/globals.css:254) only serves the ability hidden-note"
+      ],
+      "rationale": "The feature is self-contained in one directory with no dedicated shared code; the only extra edits are the spec-mandated cross-links on the Pokémon page plus minor dead-code cleanup (Ability type, card__note CSS)."
+    },
+    "changeability": {
+      "score": 3,
+      "evidence": [
+        "app/lib/data.ts:55-76 — cardsForPokemon builds cards for move/ability/type lists",
+        "app/app/page.tsx:33-39 — home page re-implements card construction inline instead of reusing cardsForPokemon, so a sprite/name fix lands twice",
+        "app/lib/data.ts:21-23 — spriteUrl derives sprites by ID convention, while app/app/pokemon/[name]/page.tsx:54 uses API-provided sprites on the detail page — two sources of truth for 'the right sprite'",
+        "app/components/Filters.tsx:13-20 — client href builder duplicates the omit-defaults query rule that app/app/page.tsx:41-50 (pageHref) and :22-28 (parsing) also encode; adding/renaming a filter param touches both files in sync"
+      ],
+      "rationale": "Most fixes are findable but not one-place: card-building and query-param knowledge are each duplicated across two files, so the Deoxys-style sprite fix and any filter change land in 2–3 coordinated places."
+    },
+    "coupling": {
+      "score": 4,
+      "evidence": [
+        "app/lib/api.ts:1 and app/lib/data.ts:1 — import \"server-only\" enforces the server/client boundary at module level",
+        "app/components/MoveTable.tsx:8-19 — client component receives a narrow, serializable MoveRow prop; no API knowledge leaks in",
+        "app/components/PokemonCards.tsx:5 — takes plain CardData, shared by four routes without depending on any page",
+        "app/app/pokemon/[name]/page.tsx:178 — getMoves orchestration (version-group ordering constants at :30, :37) lives inside the page file rather than the data layer, making the biggest page also own data-shaping policy"
+      ],
+      "rationale": "Loosely coupled with clear seams — all HTTP goes through lib/api, all card logic through lib/data, client components are leaf and prop-driven. The only tangle is the Pokémon page file doing its own move-table data orchestration."
+    },
+    "abstraction_design": {
+      "score": 4,
+      "evidence": [
+        "app/lib/data.ts:55-75 — cardsForPokemon is generic over the entry shape with an extra() callback, absorbing the real variation (hidden-ability note at app/app/abilities/[name]/page.tsx:24) without flags",
+        "app/components/Section.tsx:17 — Section handles titled-region markup once for every page",
+        "app/components/TypeBadge.tsx:8 — link/size flags map to genuine variation (linked vs plain, card vs summary size)",
+        "app/app/moves/[name]/page.tsx:10-19, app/app/abilities/[name]/page.tsx:11-20, app/app/types/[name]/page.tsx:31-40 — the getX + generateMetadata + notFound boilerplate is copy-pasted per resource; an Items route would copy it a fourth time",
+        "app/lib/format.ts:7-30 — formatting rules (humanize, english, orMissing, latestFlavorText) extracted around the spec's actual definitions, reused everywhere"
+      ],
+      "rationale": "The data and component abstractions stretch to new cases without flags (the extra() seam is well judged), but the resource-page skeleton is duplicated rather than factored, so a new resource type repeats ~20 lines of boilerplate per page."
+    }
+  },
+  "overall": 4,
+  "findings": [
+    {
+      "severity": "medium",
+      "location": "app/app/page.tsx:33",
+      "issue": "Home page re-implements card construction (sprite URL, label, types) instead of reusing cardsForPokemon, so any card fix must land in two places",
+      "suggestion": "Have the home page build CardData via a shared builder (or make getSpeciesIndex emit CardData-ready rows) so all four card lists share one construction path"
+    },
+    {
+      "severity": "medium",
+      "location": "app/components/Filters.tsx:13",
+      "issue": "Query-param knowledge (names, defaults, omit-empty rule) is duplicated between the client href builder and the server's parse + pageHref; adding a filter requires synchronized edits",
+      "suggestion": "Extract a single buildQuery(state, page?) helper in lib (no server-only import) used by both Filters.tsx and page.tsx"
+    },
+    {
+      "severity": "low",
+      "location": "app/lib/data.ts:21",
+      "issue": "Sprites are derived by URL convention while the detail page uses API-provided sprite fields (app/app/pokemon/[name]/page.tsx:54), creating two sources of truth for sprite selection",
+      "suggestion": "Centralize sprite selection in lib/data.ts (species → default variety) and have cards consume it, so the Deoxys-type fix is one change"
+    },
+    {
+      "severity": "low",
+      "location": "app/app/pokemon/[name]/page.tsx:178",
+      "issue": "The 260-line Pokémon page mixes presentation with the getMoves data orchestration (method ordering constants, version-group sorting)",
+      "suggestion": "Move getMoves into lib/data.ts alongside cardsForPokemon/getSpeciesIndex, keeping the page compositional like the other three resource pages"
+    },
+    {
+      "severity": "low",
+      "location": "app/app/moves/[name]/page.tsx:10",
+      "issue": "The getX + generateMetadata + notFound boilerplate is copy-pasted in all four resource pages; an Items route would copy it again",
+      "suggestion": "Add a small helper (e.g. resourcePage(fetch, formatTitle)) shared by resource routes, or accept the duplication consciously — it is the framework's per-route shape"
+    },
+    {
+      "severity": "low",
+      "location": "app/app/layout.tsx:7",
+      "issue": "export const dynamic = \"force-dynamic\" plus a hand-rolled TTL cache (app/lib/api.ts:7-34) is the legacy model; Next.js 16.4 recommends Cache Components and removes `dynamic` when it's enabled (default in 17)",
+      "suggestion": "Plan the migration: replace the manual cache with `use cache`/cacheLife and drop the route-segment config; today's single-place caching rules make that a contained change"
+    }
+  ],
+  "summary": "A well-structured App Router codebase: server-only data modules with narrow interfaces, generic seams (cardsForPokemon's extra callback, Section, TypeBadge) that absorb real variation, and a single apiBase for the data source. The main editability costs are duplicated card construction (home page vs cardsForPokemon) and query-param knowledge split between server and client, which make the sprite-class and filter-class fixes two-place changes. Everything else — removal, data-source swap, a new Items route — is close to best case, and the code sits on the current stable Next 16.4.3, with only the legacy caching model flagged for the upcoming 17 migration.",
+  "scenarios": [
+    {
+      "change": "Remove the Abilities pages and every link to them",
+      "files": ["app/app/abilities/[name]/page.tsx", "app/app/pokemon/[name]/page.tsx", "app/lib/api.ts", "app/app/globals.css"],
+      "difficulty": 4,
+      "notes": "Delete one directory, remove the spec-mandated Abilities section from the Pokémon page (:117-127); Ability type and .card__note CSS linger as minor dead code unless cleaned. No shared helpers are ability-specific."
+    },
+    {
+      "change": "Fix the Deoxys-class sprite bug (wrong sprite when the default Pokémon differs)",
+      "files": ["app/lib/data.ts", "app/app/page.tsx"],
+      "difficulty": 3,
+      "notes": "spriteUrl and cardsForPokemon (lib/data.ts:21,55) cover the three cross-referenced lists, but the home page builds cards separately (page.tsx:33-39), and getSpeciesNames only maps id→name, so a correct fix needs a species→default-variety map. Detail page already uses API sprite fields, so cards and detail would need reconciling."
+    },
+    {
+      "change": "Add sorting by name to every list of Pokémon cards",
+      "files": ["app/lib/data.ts", "app/app/page.tsx"],
+      "difficulty": 3,
+      "notes": "Order lives in the data layer: cardsForPokemon's sort (data.ts:75) covers moves/abilities/types in one edit, but the home list's order comes from getSpeciesIndex plus pagination slicing (page.tsx:29-39), a second edit point."
+    },
+    {
+      "change": "Add an Items section (/items, /items/:name) shaped like Moves",
+      "files": ["app/app/items/[name]/page.tsx", "app/lib/api.ts", "app/app/types/[name]/page.tsx"],
+      "difficulty": 4,
+      "notes": "Everything below the page is reusable: get/find/list client, cardsForPokemon, Section, PokemonCards, TypeBadge, format helpers, facts-dl markup. You copy only the ~60-line move-page skeleton plus an Item type in api.ts; no flag creep needed."
+    },
+    {
+      "change": "Change the API base URL and caching rules",
+      "files": ["app/lib/api.ts", "app/lib/data.ts", "app/app/layout.tsx"],
+      "difficulty": 5,
+      "notes": "Base URL is read once in apiBase (api.ts:14-16) and everything, including spriteUrl, routes through it; TTL and no-store live in api.ts:7-20; the only Next-level knob is force-dynamic in layout.tsx:7. Three small, findable places, no scattered literals (grep for localhost/9000 returns only the one default)."
+    }
+  ]
+}
+```

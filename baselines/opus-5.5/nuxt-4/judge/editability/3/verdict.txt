@@ -1,0 +1,147 @@
+I've read all of `app/` (26 source files) and verified the current framework state: Nuxt 4.6.3 is the stable release, and since 3.14/Nuxt 4 the framework provides a `shared/` directory (`#shared` alias) for code and types used by both the Vue app and the Nitro server. The app doesn't use it — that's the basis for my main editability findings.
+
+**How the architecture is shaped (for the scenarios):**
+- Every page fetches from the app's own Nitro routes through one seam: `app/app/composables/usePageData.ts` (`usePageData` wrapping `useFetch` + 404). Pages never talk to PokeAPI directly.
+- All PokeAPI knowledge (base URL, cache TTL, sprite derivation, card building, name/label helpers) lives in one server file: `app/server/utils/pokeapi.ts` (auto-imported into handlers).
+- Presentational components (`PokemonCard`, `CardGrid`, `TypeBadge`, `PageSection`, `MoveTable`, `SiteHeader`, `SiteFooter`) take narrow props; no component reaches into another's internals.
+- The weaknesses: each page hand-declares the response interface it expects (e.g. `app/app/pages/pokemon/[name].vue:5-40` mirrors the handler's return in `app/server/api/pokemon/[name].get.ts:81-101`), `humanize` exists twice (`app/server/utils/pokeapi.ts:51` vs `app/app/utils/format.ts:3`), and the "count + CardGrid + v-for of PokemonCard" pattern is repeated verbatim in four pages, so cross-cutting list behaviour is not one-touch.
+
+```json
+{
+  "dimension": "editability",
+  "criteria": {
+    "removability": {
+      "score": 4,
+      "evidence": [
+        "app/app/pages/abilities/[name].vue:1-24 — the whole ability page; delete the file",
+        "app/server/api/abilities/[name].get.ts:1-11 — the whole ability endpoint; delete the file",
+        "app/app/pages/pokemon/[name].vue:131-136 — Abilities section link list on the Pokémon page must be removed too",
+        "app/server/api/pokemon/[name].get.ts:92-94 — abilities mapping in the Pokémon payload, plus the mirrored field at app/app/pages/pokemon/[name].vue:20",
+        "app/app/components/SiteHeader.vue:10-12 — nav has no Abilities link, so nothing to clean there"
+      ],
+      "rationale": "The feature is two self-contained files plus its own footprint on the Pokémon page; deleting it leaves no dead code except the now-unused generic `extra` callback of `cardsFor` (app/server/utils/pokeapi.ts:118). Slightly more than 'delete a route and a nav link', but every touch is inside the feature's own concern."
+    },
+    "changeability": {
+      "score": 4,
+      "evidence": [
+        "app/server/utils/pokeapi.ts:12-14 — spriteUrl() is the single sprite derivation, used by cardsFor (line 125) and the home payload (app/server/api/pokedex.get.ts:38), so one fix covers every card list",
+        "app/server/utils/pokeapi.ts:99-127 — cardsFor centralizes form filtering, species-name mapping and dex ordering for all card lists",
+        "app/server/utils/pokeapi.ts:51 and app/app/utils/format.ts:3 — humanize implemented twice; a label fix must be made in both",
+        "app/app/pages/moves/[name].vue:2-10 — MoveData interface hand-mirrors app/server/api/moves/[name].get.ts's return; shape changes need two edits"
+      ],
+      "rationale": "The two riskiest behaviours (sprites, species-vs-Pokémon mapping, cache/base URL) each live in one obvious function. The deduction is for duplicated label helpers and per-page mirrored response types that make data-shape changes two-place."
+    },
+    "coupling": {
+      "score": 4,
+      "evidence": [
+        "app/app/composables/usePageData.ts:5-13 — single seam between pages and server routes; missing resources become Not found in one place",
+        "app/server/utils/pokeapi.ts:21-38 — the only code that knows API_BASE_URL, the /api/v2 path shape and the cache",
+        "app/app/components/PokemonCard.vue:3-6 — narrow prop interface; card knows nothing about moves, abilities or types",
+        "app/app/pages/pokemon/[name].vue:127-132 — page imports only component interfaces (EvolutionNode, MoveRow), a clean type boundary",
+        "app/server/utils/pokeapi.ts:20 — pokeapi<T = any> and pervasive `any` in handlers (e.g. app/server/api/pokemon/[name].get.ts:90-95) weaken the server-side contract"
+      ],
+      "rationale": "Server/client separation is exemplary for a Nuxt app: one composable fetches, one server util owns the external API, components are prop-driven. Docked for the `any`-heavy server code and the `external` prop plumbing duplicated between app.vue and error.vue."
+    },
+    "abstraction_design": {
+      "score": 3,
+      "evidence": [
+        "app/server/utils/pokeapi.ts:118-127 — cardsFor's optional extra() callback is a genuinely good abstraction for real variation (hidden-ability note)",
+        "app/app/components/PageSection.vue:1-12 and MoveTable.vue:5-12 — reusable, prop-driven, no flag creep",
+        "app/app/pages/index.vue:66-68, app/app/pages/moves/[name].vue:29-30, app/app/pages/abilities/[name].vue:22-24, app/app/pages/types/[name].vue:33-35 — count + CardGrid + v-for + PokemonCard pattern copy-pasted in four pages; no card-list abstraction owns ordering",
+        "app/app/pages/pokemon/[name].vue:5-40 — ~35 lines of hand-mirrored types instead of Nuxt's shared/ directory (#shared alias), same in moves/abilities/types/index pages",
+        "app/server/api/moves/[name].get.ts:8 vs app/server/api/pokemon/[name].get.ts:83 vs app/server/api/types/[name].get.ts:15 — the `labels[t.name] ?? humanize(t.name)` typeRef pattern repeated three times"
+      ],
+      "rationale": "The component and data-helper abstractions stretch well, but a Moves-shaped Items section would copy a handler and page with edits, adding sorting to card lists touches four pages, and the missing shared types layer means every new resource duplicates its shape twice."
+    }
+  },
+  "overall": 4,
+  "findings": [
+    {
+      "severity": "medium",
+      "location": "app/app/pages/pokemon/[name].vue:5-40",
+      "issue": "Every page hand-declares an interface mirroring its server route's return shape (also moves/[name].vue:2-10, abilities/[name].vue:2-5, types/[name].vue:3-11, index.vue:2-6); nothing keeps them in sync",
+      "suggestion": "Move the response types (Card, TypeInfo, MoveRow-like payloads) into a shared/ folder and import them via the #shared alias in both server handlers and pages, per current Nuxt 4 practice"
+    },
+    {
+      "severity": "medium",
+      "location": "app/server/utils/pokeapi.ts:51",
+      "issue": "humanize is implemented twice with slightly different bodies (server vs app/utils/format.ts:3), so a display-name rule change (e.g. 'Mr Mime' vs 'Mr. Mime') is a two-place fix",
+      "suggestion": "Keep one implementation in shared/utils (via #shared) and use it in both the Nitro server and the Vue app"
+    },
+    {
+      "severity": "low",
+      "location": "app/app/pages/index.vue:66-68",
+      "issue": "The 'N Pokémon' count + CardGrid + v-for PokemonCard block is duplicated in four pages, so any cross-cutting card-list behaviour (sorting, empty state, batching) is a four-file change",
+      "suggestion": "Extract a PokemonCardList component that owns the list, ordering and count, parameterised by the card array and optional per-card props"
+    },
+    {
+      "severity": "low",
+      "location": "app/server/api/moves/[name].get.ts:8",
+      "issue": "The typeRef mapping (`labels[t.name] ?? humanize(t.name)`) is repeated in three handlers",
+      "suggestion": "Add a typeRef(labels, name) helper next to typeLabels() in server/utils/pokeapi.ts"
+    },
+    {
+      "severity": "low",
+      "location": "app/server/utils/pokeapi.ts:20",
+      "issue": "PokeAPI client and handlers are typed as `any` throughout, so refactoring a data shape or endpoint contract has no compile-time safety net",
+      "suggestion": "Give pokeapi a concrete generic or declared response type for the resources it fetches, at least for the fields the app reads"
+    },
+    {
+      "severity": "low",
+      "location": "app/app/error.vue:11-15",
+      "issue": "The app shell (SiteHeader/SiteFooter/container) is duplicated between app.vue and error.vue, with an `external` prop threaded through SiteHeader to make it work",
+      "suggestion": "Use a Nuxt layout (or a shared AppShell component) so error.vue gets the chrome for free"
+    }
+  ],
+  "summary": "This is a well-organized Nuxt 4 codebase: one server util owns the external API, one composable owns page fetching, and components are narrow and reusable, so most targeted fixes and source changes are one-file changes. The recurring costs are the absent shared types layer — every page re-declares its endpoint's shape by hand — and small duplications (humanize, the card-list block, the typeRef mapping) that turn cross-cutting changes into multi-file edits. Net: pleasant to own, with room to consolidate before it grows another resource section.",
+  "scenarios": [
+    {
+      "change": "Remove the Abilities feature entirely",
+      "files": [
+        "app/app/pages/abilities/[name].vue",
+        "app/server/api/abilities/[name].get.ts",
+        "app/app/pages/pokemon/[name].vue",
+        "app/server/api/pokemon/[name].get.ts"
+      ],
+      "difficulty": 4,
+      "notes": "Delete two self-contained files, plus the Abilities section and payload field on the Pokémon page (which are the feature's own footprint). No nav links, no dead CSS classes of consequence; cardsFor's now-unused extra() callback is the only leftover."
+    },
+    {
+      "change": "Fix wrong sprite for species whose default Pokémon has a different name (e.g. Deoxys)",
+      "files": [
+        "app/server/utils/pokeapi.ts"
+      ],
+      "difficulty": 5,
+      "notes": "All sprite URLs derive from spriteUrl()/cardsFor in one file; the home-page payload also calls spriteUrl (app/server/api/pokedex.get.ts:38), so a single fix covers every list of cards. No client-side changes needed."
+    },
+    {
+      "change": "Add sorting by name to every list of Pokémon cards",
+      "files": [
+        "app/app/pages/index.vue",
+        "app/app/pages/moves/[name].vue",
+        "app/app/pages/abilities/[name].vue",
+        "app/app/pages/types/[name].vue"
+      ],
+      "difficulty": 3,
+      "notes": "Server endpoints already sort cards by dex id via cardsFor, so either change the sort key per endpoint (plus the home page's client-side slice) or touch each page's v-for. Either way it's four files because no single component owns card-list ordering."
+    },
+    {
+      "change": "Add an Items section (/items, /items/:name) shaped like Moves",
+      "files": [
+        "app/server/api/items/[name].get.ts",
+        "app/app/pages/items/[name].vue"
+      ],
+      "difficulty": 4,
+      "notes": "Nuxt file conventions make it purely additive: copy the small moves handler and page (~60 LOC each) and adjust fields. cardsFor, PokemonCard, CardGrid, PageSection, orDash, englishName and the 404 flow all reuse as-is; the new page would add a fourth copy of the card-list block and its mirrored interface, though."
+    },
+    {
+      "change": "Change the API base URL and caching rules",
+      "files": [
+        "app/server/utils/pokeapi.ts"
+      ],
+      "difficulty": 5,
+      "notes": "apiBase() and the TTL_MS cache live in exactly one file; every handler goes through pokeapi()/listAll(). One edit, nothing else knows about the base URL or cache."
+    }
+  ]
+}
+```

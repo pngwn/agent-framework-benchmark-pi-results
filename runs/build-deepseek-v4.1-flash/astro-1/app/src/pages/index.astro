@@ -1,0 +1,168 @@
+---
+import Layout from '../components/Layout.astro';
+import PokemonCard from '../components/PokemonCard.astro';
+import { getHomeData } from '../lib/pokeapi';
+
+const data = await getHomeData();
+const url = Astro.url;
+const search = (url.searchParams.get('q') ?? '').trim();
+const typeParam = (url.searchParams.get('type') ?? '').trim();
+const generationParam = (url.searchParams.get('generation') ?? '').trim();
+const pageParam = Number.parseInt(url.searchParams.get('page') ?? '1', 10);
+
+const validType = data.types.some((type) => type.name === typeParam) ? typeParam : '';
+const validGeneration = data.generations.some((generation) => generation.name === generationParam)
+  ? generationParam
+  : '';
+
+const query = search.toLowerCase();
+const matches = data.list.filter((species) => {
+  if (query && !species.displayName.toLowerCase().includes(query)) return false;
+  if (validType && !species.types.some((type) => type.name === validType)) return false;
+  if (validGeneration && species.generation !== validGeneration) return false;
+  return true;
+});
+
+const perPage = 48;
+const totalPages = Math.max(1, Math.ceil(matches.length / perPage));
+const requestedPage = Number.isFinite(pageParam) && pageParam > 0 ? pageParam : 1;
+const page = Math.min(requestedPage, totalPages);
+const pageItems = matches.slice((page - 1) * perPage, page * perPage);
+
+function hrefFor(nextPage: number) {
+  const params = new URLSearchParams();
+  if (query) params.set('q', query);
+  if (validType) params.set('type', validType);
+  if (validGeneration) params.set('generation', validGeneration);
+  if (nextPage > 1) params.set('page', String(nextPage));
+  const queryString = params.toString();
+  return queryString ? `/?${queryString}` : '/';
+}
+---
+
+<Layout title="Pokédex">
+  <h1 class="page-heading">Pokémon</h1>
+
+  <form class="filters" id="home-filters" method="get" action="/">
+    <div class="field">
+      <label for="search-input">Search</label>
+      <input id="search-input" name="q" type="search" value={search} autocomplete="off" />
+    </div>
+    <div class="field">
+      <label for="type-select">Type</label>
+      <select id="type-select" name="type">
+        <option value="">All types</option>
+        {data.types.map((type) => (
+          <option value={type.name} selected={type.name === validType}>{type.label}</option>
+        ))}
+      </select>
+    </div>
+    <div class="field">
+      <label for="generation-select">Generation</label>
+      <select id="generation-select" name="generation">
+        <option value="">All generations</option>
+        {data.generations.map((generation) => (
+          <option value={generation.name} selected={generation.name === validGeneration}>
+            {generation.label}
+          </option>
+        ))}
+      </select>
+    </div>
+  </form>
+
+  <div id="pokemon-results">
+    <p class="result-summary">{matches.length} Pokémon</p>
+    {pageItems.length > 0 ? (
+      <ul class="card-grid">
+        {pageItems.map((species) => (
+          <PokemonCard
+            id={species.id}
+            name={species.name}
+            displayName={species.displayName}
+            types={species.types}
+          />
+        ))}
+      </ul>
+    ) : (
+      <p class="no-results">No Pokémon found</p>
+    )}
+
+    {matches.length > 0 && (
+      <div class="pagination">
+        <span>Page {page} of {totalPages}</span>
+        {page > 1 && <a href={hrefFor(page - 1)}>Previous page</a>}
+        {page < totalPages && <a href={hrefFor(page + 1)}>Next page</a>}
+      </div>
+    )}
+  </div>
+</Layout>
+
+<script is:inline>
+  (() => {
+    const form = document.getElementById('home-filters');
+    const results = document.getElementById('pokemon-results');
+    if (!form || !results) return;
+
+    const search = form.querySelector('input[name="q"]');
+    const type = form.querySelector('select[name="type"]');
+    const generation = form.querySelector('select[name="generation"]');
+    let debounce = null;
+    let sequence = 0;
+    let controller = null;
+
+    function targetUrl() {
+      const params = new URLSearchParams();
+      const query = search.value.trim().toLowerCase();
+      if (query) params.set('q', query);
+      if (type.value) params.set('type', type.value);
+      if (generation.value) params.set('generation', generation.value);
+      const queryString = params.toString();
+      return queryString ? `/?${queryString}` : '/';
+    }
+
+    async function refresh(url, historyMode) {
+      const current = ++sequence;
+      if (controller) controller.abort();
+      controller = new AbortController();
+      try {
+        const response = await fetch(url, {
+          headers: { 'X-Requested-With': 'fetch' },
+          signal: controller.signal,
+        });
+        if (!response.ok) throw new Error('Request failed');
+        const html = await response.text();
+        const documentCopy = new DOMParser().parseFromString(html, 'text/html');
+        const nextResults = documentCopy.getElementById('pokemon-results');
+        if (!nextResults) throw new Error('Missing results');
+        if (current !== sequence) return;
+        results.innerHTML = nextResults.innerHTML;
+        const parsed = new URL(url, window.location.href);
+        history[`${historyMode}State`](null, '', `${parsed.pathname}${parsed.search}`);
+      } catch (error) {
+        if (error?.name === 'AbortError' || current !== sequence) return;
+        window.location.href = url;
+      }
+    }
+
+    function queueSearch() {
+      if (debounce) clearTimeout(debounce);
+      debounce = setTimeout(() => refresh(targetUrl(), 'replace'), 250);
+    }
+
+    search.addEventListener('input', queueSearch);
+    type.addEventListener('change', () => {
+      if (debounce) clearTimeout(debounce);
+      refresh(targetUrl(), 'push');
+    });
+    generation.addEventListener('change', () => {
+      if (debounce) clearTimeout(debounce);
+      refresh(targetUrl(), 'push');
+    });
+    form.addEventListener('submit', (event) => {
+      event.preventDefault();
+      if (debounce) clearTimeout(debounce);
+      refresh(targetUrl(), 'push');
+    });
+    window.addEventListener('popstate', () => window.location.reload());
+  })();
+</script>

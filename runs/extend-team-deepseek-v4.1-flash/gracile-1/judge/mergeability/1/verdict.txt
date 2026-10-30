@@ -1,0 +1,134 @@
+I've reviewed the app against Gracile's current stable release (0.11.0 — exactly what `app/package.json` pins, and still `latest` on npm today) and its official docs/examples. Here's my assessment.
+
+**Framework fit.** The route shape (`defineRoute({ handler, document, template })`), `route-template-outlet`, `server-html` templates, `gracile/node` adapter + `getClientBuildPath` + `nodeAdapter` in `app/server.js`, and the `[param].ts` file routing all match the framework's annotated examples closely. The islands are vanilla custom elements rather than Lit elements — Gracile treats vanilla CEs as first-class, and since these islands are progressive enhancement over server-rendered markup (no hydration), that's defensible, though it leaves `lit` an unused direct dependency. Two deviations from convention: all five islands load globally via `document.client.ts` instead of per-route `.client.ts` bundles (forgoing the framework's per-route code-splitting), and `isBuildRender` guards the build-time asset-collection pass by matching an undocumented stub hostname (`'gracile-static'`) — a real coupling to framework internals that works today but isn't a public API.
+
+**Correctness.** The data layer is careful: promise-dedup + TTL cache, a concurrency limiter, 404→`null` semantics, `apiRequired` for required resources, and proper `responseInit.status = 404` on missing resources. SSR-first rendering means no hydration mismatches; islands only re-render on interaction. Sorting handles missing-values-last in both directions correctly. Remaining risks are minor: a module-global `AbortController` in `client/fragments.ts` shared by all islands (one island's fetch can abort another's), a `popstate` listener never removed, and the team page's `<n> of 6` counting cookie names while unresolvable names are silently dropped from the card list.
+
+**Structure.** `lib/data.ts` is a 430-line god data module every route leans on (with `getTypeLabels()` hiding a fetch-all-types fan-out behind a trivial name); server/client boundaries are otherwise clean (`lib/` vs `client/`, `lib/team.ts` shared verbatim between both sides), and the feature (team builder) was added exactly in the existing idiom — cookie-state SSR, islands reusing the `fetchFragment` pattern, no rework of existing routes.
+
+```json
+{
+  "dimension": "mergeability",
+  "criteria": {
+    "idiomatic": {
+      "score": 4,
+      "evidence": [
+        "app/src/routes/(home).ts:16 — defineRoute({handler, document, template}) matches Gracile 0.11.0's documented route shape",
+        "app/src/document.ts:41 — route-template-outlet document wrapper, matching the docs' annotated example",
+        "app/server.js:10-23 — express.static(gracile.getClientBuildPath(...)) + gracile.nodeAdapter(handler), the documented Node/Express integration",
+        "app/src/lib/api.ts:62-64 — isBuildRender matches an undocumented stub hostname 'gracile-static' to detect Gracile's build-time asset-collection pass",
+        "app/src/document.client.ts:1-5 — all islands bundled globally instead of per-route *.client.ts convention (no per-route code splitting)",
+        "app/package.json:12 — 'lit' declared as a direct dependency but never imported in src (islands are vanilla custom elements)"
+      ],
+      "rationale": "Faithful to the current stable framework's documented patterns (routes, document, adapter, static assets); docked for the magic-hostname build-render workaround, the global client bundle, and the unused lit dep in a 'Gracile with Lit' app."
+    },
+    "correctness_risks": {
+      "score": 4,
+      "evidence": [
+        "app/src/lib/api.ts:33-52 — 404→null semantics, error responses rejected and evicted from cache, request dedup via shared promises",
+        "app/src/client/fragments.ts:5-7 — single module-global AbortController shared by all islands: one island's refresh aborts another's in-flight fetch",
+        "app/src/client/pokemon-browser.ts:32 — window 'popstate' listener added in connectedCallback, never removed (no disconnectedCallback)",
+        "app/src/routes/team.ts:26 — '<n> of 6' counts cookie names while lib/data.ts:209-212 silently drops names that don't resolve, so count can exceed rendered cards",
+        "app/src/client/sortable-table.ts:35-40 — missing values sort last in both directions, correctly ignoring the sign flip",
+        "app/src/lib/api.ts:14-15 — cache Map never evicts expired entries (only rejected ones); bounded by API snapshot size so acceptable"
+      ],
+      "rationale": "Careful data layer and SSR-first design leave no serious bugs; the shared abort controller, listener lifetime, and count/list edge case are minor and each has a graceful fallback."
+    },
+    "global_abstractions": {
+      "score": 3,
+      "evidence": [
+        "app/src/lib/data.ts:1-430 — single god data module holding every API type shape and every derived query; all five routes depend on it",
+        "app/src/lib/data.ts:110-112 — getTypeLabels() hides a fan-out fetching every type record behind a trivial-looking helper used by four routes",
+        "app/src/client/fragments.ts:5 — hidden module-global state (the AbortController) coupling four independent islands",
+        "app/src/lib/team.ts:1-46 — good counter-example: one shared, well-bounded module used verbatim by both server and client"
+      ],
+      "rationale": "Boundaries between lib/client/routes/components are otherwise clean and the team feature reuses them well, but data.ts and the global abort controller are the two abstractions that will need untangling as the app grows."
+    },
+    "readability": {
+      "score": 4,
+      "evidence": [
+        "app/src/lib/api.ts:1-4 — header comment explains the caching and dedup strategy",
+        "app/src/lib/format.ts:1-46 — small, pure, well-named helpers with a doc comment each",
+        "app/src/routes/pokemon/[name].ts:123 — template helper moveTables exported from the route file rather than living with the other partials in components/",
+        "app/src/client/team-store.ts:16-20 — dead toggleTeamMember duplicates the inline toggle logic in client/team-toggle.ts:23-30",
+        "app/src/routes/moves/[name].ts:18-30 — consistent load() → defineRoute structure repeated across all resource routes"
+      ],
+      "rationale": "Consistent layout, why-comments where they matter, and uniform route structure; rough spots are the 278-line pokemon route mixing data shaping with template helpers and the small dead-code duplication."
+    },
+    "review_cost": {
+      "score": 4,
+      "evidence": [
+        "app/src/client/team-store.ts:16 — dead duplicate logic to delete",
+        "app/src/lib/api.ts:63 — magic 'gracile-static' constant needs a source/version comment or a safer guard",
+        "app/src/routes/team.ts:26 — count should derive from resolved cards, a two-line fix",
+        "app/src/document.client.ts:1-5 — one-line-per-route move to per-route client bundles if code splitting is wanted"
+      ],
+      "rationale": "Everything works, matches the spec, and follows one coherent style; the required changes are nits and small refactors, not rework."
+    }
+  },
+  "overall": 4,
+  "findings": [
+    {
+      "severity": "medium",
+      "location": "app/src/lib/api.ts:63",
+      "issue": "isBuildRender keys on the undocumented stub hostname 'gracile-static' used by Gracile's build-time asset-collection pass; if a framework update changes it, every build silently fires the full API fan-out (species, all types, all generations) instead of failing loudly.",
+      "suggestion": "Guard more defensively (e.g. also skip when API_BASE_URL is unreachable or wrap in try/catch returning empty data), and cite the Gracile version/source that defines the stub URL in a comment."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/client/fragments.ts:5",
+      "issue": "A single module-global AbortController is shared by pokemon-browser, moves-panel and team-page, so starting one island's fragment fetch aborts another's; the abort is swallowed as a no-op, leaving stale UI.",
+      "suggestion": "Key controllers per island (or per URL) so concurrent fetches from different islands don't cancel each other."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/lib/data.ts:1",
+      "issue": "430-line god data module: every API type shape and every derived query (species index, types, generations, cards, team, coverage, move tables) lives in one file all five routes import; getTypeLabels() hides a fetch-all-types fan-out.",
+      "suggestion": "Split by resource (pokemon.ts, types.ts, moves.ts, team.ts) and keep the api.ts client as the only shared low-level module."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/routes/team.ts:26",
+      "issue": "The '<n> of 6' count uses cookie names while getTeamCards drops names that don't resolve to a species, so the count can disagree with the rendered card list.",
+      "suggestion": "Derive the count from props.cards.length (or filter names to resolved cards before returning)."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/client/pokemon-browser.ts:32",
+      "issue": "window 'popstate' listener is added in connectedCallback with no disconnectedCallback cleanup; benign today because the element is never unmounted, but team-page.ts:24 shows this codebase does replace elements dynamically.",
+      "suggestion": "Add disconnectedCallback removing the listener, or attach via AbortController stored on the instance."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/client/team-store.ts:16",
+      "issue": "toggleTeamMember is dead code that duplicates the add/remove logic implemented inline in team-toggle.ts:23-30.",
+      "suggestion": "Delete it, or have team-toggle call it so the rule lives in one place."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/document.client.ts:1",
+      "issue": "All five client islands ship on every page via the global document bundle instead of Gracile's per-route *.client.ts convention, forgoing per-route code splitting.",
+      "suggestion": "Move each island import into a sibling route client file (e.g. routes/(home).client.ts), or note the deliberate trade-off in a comment."
+    },
+    {
+      "severity": "low",
+      "location": "app/package.json:12",
+      "issue": "'lit' is a declared direct dependency but no module in src imports it (islands are vanilla custom elements).",
+      "suggestion": "Either drop the dependency (Gracile brings Lit transitively) or use LitElement for the islands as the 'Gracile with Lit' stack implies."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/lib/api.ts:14",
+      "issue": "The in-memory cache never removes expired entries, only rejected promises, so it grows to the size of the API snapshot and holds stale values forever.",
+      "suggestion": "Prune expired entries on insert (or use an LRU cap) to keep the cache's memory story explicit."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/routes/pokemon/[name].ts:123",
+      "issue": "The moveTables template helper is exported from the route module while all other shared template helpers live in components/partials.ts, breaking the file's own convention.",
+      "suggestion": "Move it (with the COLUMNS constant) into components/partials.ts alongside cardList/section."
+    }
+  ],
+  "summary": "A disciplined, framework-faithful Gracile 0.11.0 app: correct route/document/adapter usage, a careful cached data layer, SSR-first pages enhanced by small vanilla islands, and a team-builder feature that slots cleanly into the existing conventions. The notable debts are the undocumented 'gracile-static' build-render guard, the shared island AbortController, and the monolithic lib/data.ts. I'd merge after a nits round addressing those and the dead code."
+}
+```

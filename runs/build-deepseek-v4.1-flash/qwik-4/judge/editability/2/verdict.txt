@@ -1,0 +1,171 @@
+## Review: editability of `app/` (Qwik + Qwik City 1.20.3 — current stable, verified against qwik.dev docs/releases)
+
+**Shape of the code.** A clean three-layer app: `src/routes/*` (one directory per feature), `src/components/{ui,not-found,router-head}`, and one server-side data module `src/lib/data.ts` (300 lines) that owns every API URL, cache and cross-resource mapping. Components take small prop objects; nothing imports a route's internals; `data.ts` imports no components. That layering is the app's biggest editability strength and makes several of the requested scenarios genuinely cheap.
+
+**Where it's weaker.** The weak spots are all at the route layer and all the same disease: small copy-paste that will eventually diverge. Sprite derivation is written twice inside `data.ts` (`getHomeCatalog` vs `speciesCardsFromRefs`), so the exact bug in scenario 2 needs two edits — one covers the moves/types/abilities lists, the home list has its own copy. The `TypeBadgeLink` component exists but three routes inline the same badge-link markup anyway. The "count + card-grid + PokemonCard" block and the loader → `notFound` flag → `head` check pattern are re-implemented per route instead of wrapped. Qwik City's documented 404 mechanism (`throw ev.error(404, …)` / a custom `404.tsx`, per qwik.dev error-handling docs) would have collapsed the per-route not-found scaffolding; today the app serves 200 for not-found pages, which the spec tolerates but which leaves four copies of the pattern.
+
+**Data source change** is the best scenario: every URL and both cache layers (`store.promises` per-URL memo + per-derivation promises) live in one module, with `apiBase()`/`apiUrl()` as the single choke point.
+
+```json
+{
+  "dimension": "editability",
+  "criteria": {
+    "removability": {
+      "score": 4,
+      "evidence": [
+        "app/src/routes/abilities/[name]/index.tsx:1-59 — the whole feature is one self-contained route file; no other module imports it",
+        "app/src/routes/layout.tsx:12-14 — nav links only / and /types, so no nav edits needed to drop a feature",
+        "app/src/routes/pokemon/[name]/index.tsx:390-396 — the only inbound links to /abilities are this single Abilities section",
+        "app/src/lib/data.ts:271-273 — hidden-ability plumbing (hiddenBySpecies param) exists solely for the Abilities page",
+        "app/src/components/ui.tsx:29 — card.hidden rendering and app/src/global.css:278 (.hidden-ability) would be dead code after removal"
+      ],
+      "rationale": "Features map 1:1 to route directories and nav links are minimal, so removal is a directory delete plus one section; only the small hidden-ability plumbing spread across data.ts/ui.tsx/global.css is left behind."
+    },
+    "changeability": {
+      "score": 3,
+      "evidence": [
+        "app/src/lib/data.ts:257 and app/src/lib/data.ts:290 — front_default sprite derivation duplicated in getHomeCatalog and speciesCardsFromRefs; a sprite bug needs two edits, one of which (speciesCardsFromRefs) covers moves/types/abilities lists but not home",
+        "app/src/components/ui.tsx:41 vs app/src/routes/pokemon/[name]/index.tsx:306, app/src/routes/moves/[name]/index.tsx:57, app/src/routes/types/[name]/index.tsx:73 — TypeBadgeLink exists but the same badge-link markup is inlined three times",
+        "app/src/routes/index.tsx:61-113 — three near-identical handlers each re-implementing set-signal + reset-page + window.history.replaceState; a URL policy change is three edits",
+        "app/src/lib/data.ts:52-62 — positive: apiBase/apiUrl is a single choke point for the whole data source",
+        "app/src/components/ui.tsx:13-37 — positive: card markup (dex number, name, sprite fallback) lives in exactly one component"
+      ],
+      "rationale": "Most fixes land in one obvious place (data.ts choke point, one card component), but sprite derivation and the type-badge link are duplicated, so the classic card bug needs two synchronized edits — easy to fix one and miss the home list."
+    },
+    "coupling": {
+      "score": 4,
+      "evidence": [
+        "app/src/lib/data.ts:52-84 — only module that knows the API base URL, fetch and caching; routes call exported helpers (e.g. getRecord, speciesCardsFromRefs) with narrow inputs",
+        "app/src/components/ui.tsx:4-11 — PokemonCard takes a plain data object; no component reaches into route state or loader internals",
+        "app/src/routes/index.tsx:32-39 — filter state duplicated between signals and the URL, synced by hand via window.history.replaceState (app/src/routes/index.tsx:64), bypassing the router; back/forward doesn't re-sync the signals",
+        "app/src/routes/types/[name]/index.tsx:89-90 — SpeciesCard's shape redeclared inline instead of importing the type",
+        "app/src/lib/data.ts:15 — 'record: any' (and Promise<any> returns at :297, :306) make the server/client seam untyped despite strict tsconfig (app/tsconfig.json:9)"
+      ],
+      "rationale": "Dependency direction is strictly one-way (routes → data.ts → API; components → props) which is what most edits need, but the seams are untyped (any), one prop shape is copy-typed, and home's filter state is mirrored by hand rather than derived."
+    },
+    "abstraction_design": {
+      "score": 3,
+      "evidence": [
+        "app/src/lib/data.ts:271-291 — speciesCardsFromRefs is a well-shaped abstraction (id→species mapping, alternate-form exclusion, dedupe, dex order, hidden flags) reused by 3 routes",
+        "app/src/routes/moves/[name]/index.tsx:86-92, app/src/routes/abilities/[name]/index.tsx:53-59, app/src/routes/types/[name]/index.tsx:85-92 — the count + card-grid + PokemonCard section is copy-pasted three times instead of being a list-section component",
+        "app/src/lib/data.ts:289 — fixed sort-by-id policy baked into the helper; stretching it (name sorting) needs a new parameter or per-call-site sorting",
+        "app/src/routes/[…]/index.tsx + head (app/src/routes/pokemon/[name]/index.tsx:435-437, moves:55, abilities:44, types:47) — the loader → {notFound:true} → head-check pattern re-implemented per route rather than wrapped (Qwik City's ev.error(404)/custom 404.tsx would centralize it)",
+        "app/src/components/ui.tsx:13 — showTypes boolean flag used by a single call site"
+      ],
+      "rationale": "The two hardest problems (card-list construction, URL/parse/serialize for filters) got real, reusable abstractions, but the route layer repeats its small boilerplate per resource, so a Moves-shaped Items section reuses data helpers yet still copies the page template."
+    }
+  },
+  "overall": 3,
+  "findings": [
+    {
+      "severity": "medium",
+      "location": "app/src/lib/data.ts:257",
+      "issue": "Card sprite derivation is implemented twice (also app/src/lib/data.ts:290); a sprite bug fix in speciesCardsFromRefs covers moves/types/abilities lists but silently leaves the home list wrong.",
+      "suggestion": "Have getHomeCatalog build its entries through speciesCardsFromRefs, or extract a single spriteForPokemon(record) helper used by both."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/routes/index.tsx:61",
+      "issue": "Three filter handlers each duplicate 'set signal, reset page, window.history.replaceState(homeUrl(...))' and sync the URL by hand, bypassing the Qwik City router (back/forward won't re-sync the signals).",
+      "suggestion": "One applyFilter(patch) helper in the route; consider useNavigate()/useLocation() so the router stays the single owner of URL state."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/routes/moves/[name]/index.tsx:86",
+      "issue": "The '<count> Pokémon' + <ul class=card-grid> + PokemonCard list block is copy-pasted across the moves, abilities and types detail routes (app/src/routes/abilities/[name]/index.tsx:53, app/src/routes/types/[name]/index.tsx:85).",
+      "suggestion": "Extract a PokemonCardList (or CardListSection) component that takes the cards array and heading, so list behaviour/presentation changes land once."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/routes/pokemon/[name]/index.tsx:306",
+      "issue": "TypeBadgeLink exists (app/src/components/ui.tsx:41) but the identical badge-link markup is inlined here, at app/src/routes/moves/[name]/index.tsx:57 and app/src/routes/types/[name]/index.tsx:73.",
+      "suggestion": "Use TypeBadgeLink everywhere; a badge change (markup, href scheme, CSS class) then lands in one file."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/routes/pokemon/[name]/index.tsx:68",
+      "issue": "The not-found flow ({notFound:true} flags plus matching head branches) is re-implemented in four routes and serves HTTP 200 for missing resources; Qwik City's documented approach is throwing ev.error(404, ...) from the loader with a shared 404.tsx.",
+      "suggestion": "Wrap resource loading in one helper (or use ServerError/ev.error) and a single custom 404 route, collapsing four copies of the pattern and producing a real 404 status."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/lib/data.ts:97",
+      "issue": "data.ts mixes server-only data access with presentation helpers (humanize :97, displayDex :129, formatValue :133 — imported by client components at app/src/components/ui.tsx:3) and route-level query parsing (parseHomeQuery :330), making the module a grab-bag and blurring where an edit belongs.",
+      "suggestion": "Split into lib/api.ts (fetch + cache), lib/format.ts (pure helpers) and keep query parsing in the route that owns it."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/lib/data.ts:15",
+      "issue": "The data seam is untyped (record: any, Promise<any> returns at :297/:306) despite strict tsconfig, so API shape changes surface as runtime breakage rather than compile errors.",
+      "suggestion": "Declare minimal interfaces for the API records actually consumed (name/names, sprites, types, moves) instead of any."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/routes/types/[name]/index.tsx:89",
+      "issue": "The SpeciesCard shape is redeclared inline here instead of importing the exported type from lib/data.ts.",
+      "suggestion": "Import SpeciesCard so shape changes are caught by the compiler in all consumers."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/global.css:260",
+      "issue": "All styling for five pages lives in one 700-line global stylesheet with feature-specific selectors (.hidden-ability :278, .move-links, .relations), so feature removal or class renames leave dead CSS and risk global name collisions; Qwik's idiomatic option is scoped styles in components.",
+      "suggestion": "Move per-page/per-component styles into the owning components with Qwik's scoped <style> blocks, keeping only tokens and layout globals in global.css."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/routes/pokemon/[name]/index.tsx:413",
+      "issue": "The Game select navigates with window.location.assign, forcing a full page reload instead of a SPA navigation.",
+      "suggestion": "Use Qwik City's useNavigate() to update the ?game param so navigation stays router-managed."
+    }
+  ],
+  "summary": "The app is layered unusually well for its size: routes → one server-side data module → API, with components that only know prop objects, so data-source and cross-resource changes land in a single file. The cost shows up in repeated small boilerplate at the route layer — duplicated sprite derivation, copy-pasted card-list and not-found blocks, and inline type-badge markup — meaning the classic bug fix or feature extension touches several near-identical files. Net: pleasant to extend along existing seams, mediocre when a change must sweep every instance of a repeated pattern.",
+  "scenarios": [
+    {
+      "change": "Remove the Abilities pages and every link to them",
+      "files": [
+        "app/src/routes/abilities/[name]/index.tsx",
+        "app/src/routes/pokemon/[name]/index.tsx",
+        "app/src/lib/data.ts",
+        "app/src/components/ui.tsx",
+        "app/src/global.css"
+      ],
+      "difficulty": 4,
+      "notes": "Delete the route directory and the Abilities section at pokemon/[name]/index.tsx:390-396; nav (layout.tsx) has no ability links. Optional cleanup of the hidden-ability plumbing (data.ts:271, ui.tsx:29, global.css:278) or it lingers as dead code."
+    },
+    {
+      "change": "Fix the card sprite for species whose default Pokémon differs (e.g. Deoxys)",
+      "files": ["app/src/lib/data.ts"],
+      "difficulty": 3,
+      "notes": "Two independent implementations: speciesCardsFromRefs (data.ts:290) fixes the moves/types/abilities lists, but the home list derives its sprite separately in getHomeCatalog (data.ts:257), so the same one-line fix must land twice — easy to fix one and miss the other."
+    },
+    {
+      "change": "Add sorting by name to every list of Pokémon cards",
+      "files": [
+        "app/src/lib/data.ts",
+        "app/src/routes/index.tsx",
+        "app/src/routes/moves/[name]/index.tsx",
+        "app/src/routes/abilities/[name]/index.tsx",
+        "app/src/routes/types/[name]/index.tsx"
+      ],
+      "difficulty": 4,
+      "notes": "Cheap because the helper is shared: changing the ordering policy in speciesCardsFromRefs (data.ts:289) covers three lists, and the home list is one line in index.tsx's visible computed. It does mean editing a shared policy inline rather than a per-list option."
+    },
+    {
+      "change": "Add an Items section (/items, /items/:name) shaped like Moves",
+      "files": [
+        "app/src/routes/items/index.tsx",
+        "app/src/routes/items/[name]/index.tsx",
+        "app/src/routes/layout.tsx"
+      ],
+      "difficulty": 3,
+      "notes": "The data helpers (getRecord, englishName, formatValue, latestEnglishFlavor, NotFound, the head pattern) carry most of the work, but there is no list-route precedent for moves and no generic 'resource detail' abstraction, so the detail page is a ~80-line copy of moves/[name]/index.tsx rather than a reuse of it."
+    },
+    {
+      "change": "Change the API base URL and caching rules",
+      "files": ["app/src/lib/data.ts", "app/vite.config.ts"],
+      "difficulty": 5,
+      "notes": "apiBase()/apiUrl() (data.ts:52-62) is the only place URLs are built, and both cache layers (per-URL promise memo data.ts:64-76, per-derivation promises on the same store) are adjacent in one module. Only the HTTP Cache-Control header in vite.config.ts:53-57 is a second place that 'caches'."
+    }
+  ]
+}
+```

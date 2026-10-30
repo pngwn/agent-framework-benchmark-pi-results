@@ -1,0 +1,88 @@
+## Review
+
+**Structure & framework use.** The app is squarely idiomatic Nuxt 4 (pinned to the current stable, 4.6.3, released two days before "today"): `app/` srcDir with `pages/`, `components/`, `layouts/` (`app/app.vue:1`), Nitro routes under root `server/` with `defineEventHandler`/`getRouterParam`/`getQuery`/`setResponseStatus` (`app/server/api/app/pokemon/[name].get.ts:2-6`), reactive URL `useFetch` for param-driven pages (`app/app/pages/pokemon/[name].vue:104-107`), a keyed `useAsyncData` for the shared dex index (`app/app/pages/index.vue:55`), and URL-as-state routing for filters. The server/client boundary is clean: app code never imports the data layer, everything goes through `/api/app/*`.
+
+**What I'd flag before merging**
+
+1. **Leaked debounce timer on the home page** — `app/app/pages/index.vue:104-113`: the 250 ms `setTimeout` is never cleared on unmount. Type a query, then click a card within 250 ms: after navigating to `/pokemon/x`, the timer fires `router.replace({ path: '/' })` and yanks the user back to the home page. Clear it in `onUnmounted`/`onBeforeUnmount`.
+2. **Errors conflated with not-found** — every detail page renders `NotFoundPage` whenever `data` is falsy (`app/app/pages/moves/[name].vue:46`, `types/[name].vue:33`, …). Since `useFetch` swallows the error into `error` and leaves `data` null, a 500 or a network hiccup shows "Not found" for a resource that exists. The `error` ref is never inspected anywhere.
+3. **The data contract is `any` end-to-end** — `getPokemonPage`/`getMovePage`/etc. return `Promise<any | null>` (`app/server/utils/pokeapi.ts:243`, 438, 469, 496), the callbacks annotate nearly everything `(a: any, b: any)` (e.g. `pokeapi.ts:167-169`), and components consume the results untyped. In a codebase with typed route handlers (`defineEventHandler`), exporting one interface per page payload and `useFetch<PokemonPage>(…)` would let the compiler catch renames across the server/app boundary. This is the biggest maintainability gap.
+4. **Deprecated overload in a page** — `app/app/pages/[...slug].vue:6` calls `setResponseStatus(404)`; the docs' current signature is `setResponseStatus(event, 404)` and the no-event form is marked deprecated (safe on the client, but not what the docs teach).
+5. **Duplication and small smells in the data layer** — `typeLabel` map is built four times (`pokeapi.ts:161,230,282,442`), `displayNumber`/`isMissing` exist in two components (`MoveTables.vue:126` and `moves/[name].vue:56`), `index.species.find(...)` is a linear scan inside loops instead of one `Map` keyed by id (`pokeapi.ts:433,454,527`), and `findSpeciesSummary` (`pokeapi.ts:220`) is dead code.
+6. **No failure state on the home page** — if `/api/app/dex` fails, `index.value` is null and the page shows "No Pokémon found" and "0 Pokémon" (`index.vue:39,55`) rather than anything indicating a load problem.
+7. **Redundant `watch: [game]`** on the pokemon page's `useFetch` (`pokemon/[name].vue:109`) — the reactive `query` object already drives refetching; harmless but noise.
+
+**What's good**: promise caches with rejection-eviction (`pokeapi.ts:89-95`), failed index builds reset so a retry happens (`pokeapi.ts:140`), `loading="lazy"` + explicit sprite dimensions (`PokemonCard.vue:8-14`), thoughtful `aria-sort` handling with missing-values-last tie-breaks (`MoveTables.vue:110-133`), recursive `EvolutionTree` using Vue's implicit self-reference, and a single consistent stylesheet.
+
+```json
+{
+  "dimension": "mergeability",
+  "criteria": {
+    "idiomatic": {
+      "score": 4,
+      "evidence": [
+        "app/app/app.vue:1 — NuxtLayout/NuxtPage with app/ srcDir layout, current Nuxt 4 structure",
+        "app/app/pages/pokemon/[name].vue:104 — reactive URL useFetch driven by route params, exactly the docs pattern",
+        "app/server/api/app/pokemon/[name].get.ts:2-6 — defineEventHandler + getRouterParam/getQuery/setResponseStatus in Nitro routes",
+        "app/app/pages/index.vue:55 — keyed useAsyncData for shared data, URL-query-driven filter state",
+        "app/app/pages/[...slug].vue:6 — setResponseStatus(404) uses the deprecated no-event overload the docs tell you to avoid"
+      ],
+      "rationale": "Recognisably the framework's own recommended style throughout, with one deprecated API call and a small hand-rolled scroll-to-hash workaround for async content."
+    },
+    "correctness_risks": {
+      "score": 3,
+      "evidence": [
+        "app/app/pages/index.vue:104-113 — debounce setTimeout never cleared on unmount; late router.replace navigates the user back to '/' after they click a card",
+        "app/app/pages/moves/[name].vue:46 — !data?.found renders NotFoundPage for any fetch failure, not just 404s; useFetch error ref is never checked",
+        "app/app/pages/index.vue:39 — failed dex fetch renders 'No Pokémon found' instead of an error state",
+        "app/server/utils/pokeapi.ts:258-262 — getMoveForTable failures are swallowed and rows silently dropped",
+        "app/server/utils/pokeapi.ts:220 — dead findSpeciesSummary"
+      ],
+      "rationale": "A real (if edge-case) navigation bug, systematic error/404 conflation, and silent data loss on move-fetch failure; nothing catastrophic, but a careful reviewer finds several."
+    },
+    "global_abstractions": {
+      "score": 4,
+      "evidence": [
+        "app/server/utils/pokeapi.ts — single data-layer module owns caching + label logic for all five resources; clear boundary, never imported by app code",
+        "app/server/utils/pokeapi.ts:20-23 — module-level caches; rawCache evicts rejected promises (line 95), index build resets on failure (line 140)",
+        "app/app/components/MoveTables.vue — sorting/display logic properly component-scoped, no hidden global state in the Vue layer"
+      ],
+      "rationale": "One 550-line data module is on the large side but it is cohesive, lazily populated and well-bounded; server/client split is clean. Minor duplication inside it is the only structural smell."
+    },
+    "readability": {
+      "score": 3,
+      "evidence": [
+        "app/server/utils/pokeapi.ts:243,438 — getPage functions return Promise<any | null>; the payload shape must be inferred by reading each component's template",
+        "app/server/utils/pokeapi.ts:167-169,310 — pervasive (a: any, b: any) annotations where a named interface would document intent",
+        "app/app/assets/css/main.css — single consistent BEM-style stylesheet, easy to navigate",
+        "app/server/utils/pokeapi.ts:220 — dead code left in"
+      ],
+      "rationale": "Names, file layout and helpers are clear and consistent, so a new teammate finds their way fast; but the untyped any-heavy data contract means the compiler and reader both have to reconstruct the shape of every page payload from templates."
+    },
+    "review_cost": {
+      "score": 3,
+      "evidence": [
+        "app/app/pages/index.vue:104-113 — timer cleanup must be added before approve",
+        "app/app/pages/moves/[name].vue:46 — error handling requested across four detail pages",
+        "app/server/utils/pokeapi.ts — typing pass plus dedupe of typeLabel/displayNumber helpers",
+        "app/app/pages/[...slug].vue:6 — one-line fix to pass event explicitly"
+      ],
+      "rationale": "Approve direction without debate, but a real round of changes: timer bug, error/404 separation, and a typing pass across the data contract."
+    }
+  },
+  "overall": 4,
+  "findings": [
+    { "severity": "medium", "location": "app/app/pages/index.vue:107", "issue": "Debounce timer not cleared on unmount; fires after navigation and router.replace's the user back to '/'", "suggestion": "Clear searchTimer in onBeforeUnmount (and skip the push if route is no longer '/')" },
+    { "severity": "medium", "location": "app/app/pages/moves/[name].vue:46", "issue": "Any fetch failure (500/network) renders the Not-found page because only data?.found is checked and useFetch's error is ignored; same pattern on pokemon/ability/type pages", "suggestion": "Distinguish error from 404: surface useFetch's error ref or have endpoints return 200 with found:false for 404 and use error boundaries for real failures" },
+    { "severity": "medium", "location": "app/server/utils/pokeapi.ts:243", "issue": "Page-payload functions return Promise<any|null> and callbacks annotate everything as any; the server/app data contract is untyped", "suggestion": "Export an interface per page payload and use useFetch<PokemonPage>(…) / typed defineEventHandler in the API routes" },
+    { "severity": "low", "location": "app/app/pages/[...slug].vue:6", "issue": "setResponseStatus(404) uses the deprecated no-event overload", "suggestion": "const event = useRequestEvent(); if (event) setResponseStatus(event, 404)" },
+    { "severity": "low", "location": "app/server/utils/pokeapi.ts:433", "issue": "index.species.find() linear scan per entry inside learned-by/ability/type loops (O(n*m))", "suggestion": "Build a Map<number, SpeciesSummary> by id once alongside the index" },
+    { "severity": "low", "location": "app/server/utils/pokeapi.ts:161", "issue": "typeLabel Map construction duplicated four times; displayNumber/isMissing also duplicated in MoveTables.vue and moves/[name].vue", "suggestion": "Extract a typeLabelMap() helper and a shared isMissing/displayNumber util" },
+    { "severity": "low", "location": "app/server/utils/pokeapi.ts:220", "issue": "findSpeciesSummary is dead code", "suggestion": "Delete it" },
+    { "severity": "low", "location": "app/app/pages/index.vue:39", "issue": "Failed /api/app/dex fetch shows 'No Pokémon found' / '0 Pokémon' rather than an error state", "suggestion": "Branch on the error/status ref and render a retryable message" },
+    { "severity": "low", "location": "app/app/pages/pokemon/[name].vue:109", "issue": "watch: [game] is redundant since the reactive query object already triggers refetch", "suggestion": "Drop the explicit watch option" },
+    { "severity": "low", "location": "app/nuxt.config.ts:2", "issue": "compatibilityDate '2025-07-15' predates the pinned Nuxt 4.6.3; no lint/typecheck dev tooling in the project", "suggestion": "Bump compatibilityDate to the current date and add a typecheck script" }
+  ],
+  "summary": "A genuinely idiomatic Nuxt 4 app: correct app/ structure, server routes, reactive useFetch and URL-driven state, with clean server/client separation and careful accessible markup. The main merge blockers are an unmounted debounce timer that can hijack navigation, systematic conflation of fetch errors with 404s, and an any-typed data contract that undermines the framework's typing story. All fixable in one focused round of changes."
+}
+```

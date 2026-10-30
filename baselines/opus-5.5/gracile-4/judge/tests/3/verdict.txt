@@ -1,0 +1,173 @@
+I've reviewed the app code, the spec, and the acceptance tests. Verified facts: `app/` contains **zero test files** — no test runner in `devDependencies` (`app/package.json:14-16` is empty), no `test` script (`app/package.json:6-9` defines only `dev`, `build`, `start`), and grep for `vitest|playwright|node:test|assert|\.spec\.` across `app/` matches nothing outside `package-lock.json`.
+
+What follows is the risk map, since the acceptance suite in `tests/` is the only guard.
+
+**Riskiest untested logic (with concrete locations):**
+
+- **Pagination and URL filter state** — `app/src/routes/(home).ts:45-52`: `slice((page-1)*48, page*48)`, the `Number.parseInt`/`Math.max`/`Math.min` clamp chain, and `totalPages = Math.max(1, Math.ceil(...))`. A refactor that drops the upper clamp makes `?page=999` render an empty list; a dropped `Math.max(1, …)` breaks zero-result filtering; `parseInt('2x')` silently yields `2`. Paired with `app/src/lib/home-url.ts:9-12`, which must omit defaults (`page=1`, empty `q`) — a regression that always emits `page=1` violates the spec and nothing in-app would catch it.
+- **Alternate-form exclusion and dedup** — `app/src/lib/data.ts:27` (`id < 10000` bound) and `data.ts:35-52` (`seen` set, sort by dex, species-map fallback). Inverting the bound, dropping the dedup, or linking `deoxys-normal` instead of `deoxys` are all one-line regressions with visible consequences on every move/ability/type page.
+- **API client cache + concurrency semaphore** — `app/src/lib/api.ts:14-33` (`withSlot` queue, `queue.shift()?.()` in `finally`) and `api.ts:55-70` (TTL, LRU re-insert, `value.catch(() => cache.delete(url))`). This is the most likely place for a refactor to hang every request (missed release, `pop()` instead of `shift()`) — a deadlock that acceptance tests might mask by timing, and that nothing in-app would ever flag.
+- **Client-side table sorting** — `app/src/routes/pokemon/[name].client.ts:19-26`: missing values (`data-sort === ''`) are pushed last *regardless of `sign`*. The classic refactor — applying `sign` to that comparison — makes blanks sort first when descending. Same file, lines 23-24: `aria-sort` clearing/toggling.
+- **Moves table assembly** — `app/src/routes/pokemon/[name].ts:101` (`game = requestedGame && gameNames.includes(...)` — falls back silently on an invalid `?game=`), `[name].ts:114-117` (dedup key `${method}|${move.name}|${level}`; including `level` unconditionally would drop machine/egg duplicates or keep dupes), `[name].ts:88-95` (default game = highest `order` via `games.at(-1)` with a `MAX_SAFE_INTEGER` fallback in `data.ts:140-147`).
+- **Progressive enhancement race handling** — `app/src/routes/(home).client.ts:39-59`: the `AbortController` swap is what prevents a stale slow response from overwriting a newer one; deleting it during a "simplify" pass is invisible until a user on slow network sees wrong results.
+- **404 contract** — `app/src/lib/api.ts:52-55` returns `null` on 404; routes like `app/src/routes/moves/[name].ts:47-50` turn that into a 404 page. If `load` ever threw on 404, every bad slug becomes a 500.
+- **Pure helpers begging for unit tests** — all of `app/src/lib/format.ts` (`humanize`, `dexNumber` padStart, `latestEnglishFlavorText`'s "last English entry + whitespace collapse", `orDash`, `pageTitle`) and `app/src/lib/home-url.ts` are pure, dependency-free, and cover spec-defined edge cases — the cheapest possible coverage, and it's absent.
+- **Build-render guard** — `app/src/lib/build.ts:8`: if the `gracile-static` hostname check were removed, handlers would fetch API data at build time — exactly the violation the spec's live-overlay test exists to catch, but a partial regression (only some routes) could slip through.
+
+Positive note: the app is otherwise cleanly layered (`lib/` pure helpers, route handlers returning plain data, thin templates), so the logic most needing tests is already isolated and easy to test — which makes the absence more glaring, not less.
+
+```json
+{
+  "dimension": "tests",
+  "criteria": {
+    "coverage_of_risk": {
+      "score": 1,
+      "evidence": [
+        "app/package.json:14-16 — empty devDependencies, no test runner or test script anywhere",
+        "app/src/routes/(home).ts:45-52 — pagination clamp and slice logic with zero coverage",
+        "app/src/lib/api.ts:14-33 — concurrency semaphore with queue release, untested",
+        "app/src/lib/format.ts:24-32 — latestEnglishFlavorText whitespace/ordering edge cases, untested"
+      ],
+      "rationale": "No tests were written at all; the riskiest logic (pagination, alternate-form filtering, cache/semaphore, client sorting) has zero coverage."
+    },
+    "behaviour_not_implementation": {
+      "score": 1,
+      "evidence": [
+        "app/package.json:6-9 — only dev/build/start scripts; no test script to speak of"
+      ],
+      "rationale": "There are no tests to judge; per the rubric this scores 1."
+    },
+    "regression_power": {
+      "score": 1,
+      "evidence": [
+        "app/src/lib/data.ts:27 — isDefaultPokemonId bound (<10000) would silently admit Mega Evolutions if flipped",
+        "app/src/routes/pokemon/[name].client.ts:19-26 — missing-values-last-vs-sign logic is a classic silent refactor break",
+        "app/src/lib/api.ts:66 — queue.shift() in finally; a missed release deadlocks all requests with nothing to flag it"
+      ],
+      "rationale": "With no in-app tests, every regression listed here slips through once the acceptance suite stops being run."
+    },
+    "signal_to_noise": {
+      "score": 3,
+      "evidence": [
+        "app/package.json:6-9 — no test script, so no noise either"
+      ],
+      "rationale": "No tests means no low-value tests; per the rubric this scores 3."
+    }
+  },
+  "overall": 1,
+  "findings": [
+    {
+      "severity": "high",
+      "location": "app/package.json:6-16",
+      "issue": "No test script, no test runner in devDependencies, zero test files in the app; the acceptance suite is the only guard on a codebase with substantial data-transformation logic.",
+      "suggestion": "Add vitest (already Vite-based) with unit tests for the pure helpers in lib/format.ts, lib/home-url.ts and lib/data.ts, plus a Playwright smoke test for the pagination/sort interactions."
+    },
+    {
+      "severity": "high",
+      "location": "app/src/routes/(home).ts:45-52",
+      "issue": "Pagination (slice bounds, parseInt fallback, min/max clamping) and default-omitting URL building in home-url.ts are untested; off-by-one and clamp regressions would render empty or wrong pages.",
+      "suggestion": "Unit-test homeUrl() against the omit-defaults rule and extract the page-clamp math into a tested pure function (e.g. paginate(matches, page, 48))."
+    },
+    {
+      "severity": "high",
+      "location": "app/src/lib/data.ts:27-52",
+      "issue": "Alternate-form exclusion (id < 10000), dedup and dex-number sort in pokemonRefsToSpecies are all one-line-regression territory with visible consequences on move/ability/type lists.",
+      "suggestion": "Unit-test pokemonRefsToSpecies with fixture refs containing a Mega (>10000), a duplicate, and deoxys-normal→deoxys, asserting the species link and ordering."
+    },
+    {
+      "severity": "high",
+      "location": "app/src/lib/api.ts:14-33",
+      "issue": "The MAX_CONCURRENT semaphore's release path (queue.shift() in finally) and the cache's LRU/TTL bookkeeping are untested; a missed release would deadlock every request and no test would fail.",
+      "suggestion": "Add a test that pushes >MAX_CONCURRENT concurrent api() calls against a stubbed fetch and asserts all resolve; also test 404→null and error→cache-eviction behavior."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/routes/pokemon/[name].client.ts:19-26",
+      "issue": "Missing-values-sort-last in both directions and the aria-sort toggle are untested; the standard refactor of applying `sign` to the blank comparison silently breaks descending sort.",
+      "suggestion": "Playwright test: click a header with null Power/Accuracy values twice and assert blanks stay last and aria-sort flips."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/routes/pokemon/[name].ts:101-117",
+      "issue": "Silent fallback for an invalid ?game=, the dedup key for learned moves, and the highest-order default game are untested; any of these regressing changes which moves render with no failure.",
+      "suggestion": "Unit-test the game selection and table-grouping logic by extracting it from the route handler into a pure function over fixture API payloads."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/routes/(home).client.ts:39-59",
+      "issue": "The AbortController-based result swap prevents stale responses overwriting newer ones; deleting it during simplification introduces a race only visible on slow networks.",
+      "suggestion": "Playwright test typing two search queries quickly and asserting the rendered list matches the final query."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/lib/format.ts:8-32",
+      "issue": "Pure, dependency-free helpers covering spec-defined edge cases (humanize, dexNumber padding, last-English flavor text, orDash) are the cheapest possible coverage and are untested.",
+      "suggestion": "A ten-line vitest file covering each helper's spec examples (mr-mime → Mr Mime, 25 → #0025) would pin the display rules."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/lib/api.ts:52-55",
+      "issue": "The 404→null contract underpins every route's not-found path; if load() threw on 404 instead, all bad slugs would become 500s.",
+      "suggestion": "Include a 404 case in the api.ts unit tests."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/lib/build.ts:8",
+      "issue": "The gracile-static hostname guard is what keeps API data out of the build; removing it reintroduces build-time data fetching, the exact violation the live-overlay acceptance test targets.",
+      "suggestion": "A unit test asserting isBuildRender() truthiness for a synthetic build URL documents the invariant."
+    }
+  ],
+  "summary": "The agent wrote no tests at all — no runner, no script, no dev dependency — leaving the acceptance suite as the sole guard over genuinely risky logic: pagination/clamping, alternate-form filtering, a hand-rolled cache and concurrency semaphore, and client-side sorting with direction-dependent missing-value handling. The code is well factored for testing (pure helpers in lib/, data-returning route handlers), so the omission is cheap to fix: a vitest file over lib/ plus two Playwright interaction tests would cover the highest-risk paths. Until then, any refactor of the data layer or the filter/sort logic is flying blind.",
+  "wroteTests": false,
+  "testCount": 0,
+  "valuableTests": [],
+  "lowValueTests": [],
+  "untested": [
+    {
+      "area": "Home pagination and filter URL state — page clamping, 48-per-page slicing, parseInt fallback, default-omitting query building (app/src/routes/(home).ts:45-52, app/src/lib/home-url.ts:9-12)",
+      "risk": "high",
+      "likelyBug": "Off-by-one in slice bounds or a dropped clamp makes ?page=999 render an empty list, or homeUrl() starts emitting page=1 on every link, violating the omit-defaults rule."
+    },
+    {
+      "area": "Alternate-form exclusion and dedup in pokemonRefsToSpecies (app/src/lib/data.ts:27-52)",
+      "risk": "high",
+      "likelyBug": "A flipped id bound or removed dedup lets Mega Evolutions into move/ability/type lists or shows duplicate cards for the same species."
+    },
+    {
+      "area": "API client cache and concurrency limiter — TTL, LRU eviction, semaphore release (app/src/lib/api.ts:14-70)",
+      "risk": "high",
+      "likelyBug": "A missed queue release or a broken finally block deadlocks all requests once concurrency exceeds 24; an eviction bug makes the cache leak or serve stale entries forever."
+    },
+    {
+      "area": "Client-side sortable tables — missing values last in both directions, aria-sort toggling (app/src/routes/pokemon/[name].client.ts:13-38)",
+      "risk": "medium",
+      "likelyBug": "Applying the sort direction to the blank-value comparison makes null Power/Accuracy sort first when descending."
+    },
+    {
+      "area": "Moves section assembly — default game selection (highest order), invalid ?game= fallback, per-method dedup and table ordering (app/src/routes/pokemon/[name].ts:88-141)",
+      "risk": "medium",
+      "likelyBug": "A changed dedup key drops or duplicates rows; a broken default-game pick renders the wrong version group's moves with no error."
+    },
+    {
+      "area": "Progressive enhancement on home and moves — debounced search, history push/replace, abortable fetch-and-swap of #results/#moves-tables (app/src/routes/(home).client.ts:38-78, app/src/routes/pokemon/[name].client.ts:41-77)",
+      "risk": "medium",
+      "likelyBug": "Removing the AbortController lets a slow stale response overwrite the results of a newer query, or the popstate handler stops syncing the form controls."
+    },
+    {
+      "area": "Pure display helpers — humanize, dexNumber, latestEnglishFlavorText (last English entry, whitespace collapse), orDash, pageTitle (app/src/lib/format.ts)",
+      "risk": "low",
+      "likelyBug": "Taking the first instead of last English flavor entry, or dropping the \\n/\\f collapse, silently changes every Pokémon description."
+    },
+    {
+      "area": "Not-found contract — 404 → null in the API client and the routes' responseInit.status = 404 paths (app/src/lib/api.ts:52-55, app/src/routes/moves/[name].ts:47-50)",
+      "risk": "low",
+      "likelyBug": "load() throwing on 404 turns every unknown slug into a 500 instead of the styled not-found page."
+    },
+    {
+      "area": "Build-render guard preventing build-time API fetches (app/src/lib/build.ts:8)",
+      "risk": "low",
+      "likelyBug": "Dropping the hostname check makes handlers fetch during vite build, baking API data into the production bundle in violation of the spec."
+    }
+  ]
+}
+```

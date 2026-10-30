@@ -1,0 +1,181 @@
+I've reviewed the whole app (sources live under `app/app/`: `root.tsx`, `routes.ts`, `components.tsx`, `lib/api.server.ts`, `lib/format.ts`, `routes/*.tsx`), checked it against the React Router framework-mode guidance (skill + v8 release notes — the app is on the current stable v8.5.1, and v8's conventions are `Route.*` generated types and `throw data(..., {status: 404})` + ErrorBoundary for missing records). Here's my review.
+
+**What's good for editability**
+- Server/client seam is clean: all HTTP, caching and page-shaping live in `app/app/lib/api.server.ts` (correctly named `.server.ts` so it can't leak into the client bundle); route components receive plain serializable data and keep filter state in the URL (`app/app/routes/home.tsx:31`, `app/app/routes/pokemon.tsx:59`).
+- The hypothetical sprite bug is genuinely centralized: every card list funnels through `cardSprite()` (`app/app/lib/api.server.ts:118`), so one fix covers home, move, ability and type pages.
+- Shared `Section`/`PokemonGrid`/`EvolutionList` and a `lib/format.ts` helpers module absorb most repeated markup/formatting.
+
+**What hurts**
+- Route modules throw away framework-mode type generation: loaders are `({ params, request }: any)` and components `({ loaderData }: any)` (`app/app/routes/pokemon.tsx:8`, `app/app/routes/move.tsx:5`, `app/app/routes/ability.tsx:4`, `app/app/routes/type-detail.tsx:5`) instead of `Route.LoaderArgs` / `Route.ComponentProps` from `./+types/<route>`. Loader return shapes are invisible to the components, so any data-shape change is unguarded by the compiler; only `home.tsx:19` and `types.tsx:10` approximate it via `Awaited<ReturnType<typeof loader>>`.
+- The `{ notFound: true }` sentinel is copy-pasted four times (loader + meta branch + component branch, e.g. `app/app/routes/move.tsx:7,13,22`, `ability.tsx:6,12,21`, `type-detail.tsx:7,13,22`, `pokemon.tsx:10,16,46`) where the framework idiom is one `throw data("Not Found", { status: 404 })` + `ErrorBoundary`. Changing not-found behavior means four synchronized edits, and each `meta` re-implements the identical title branch.
+- Several cross-cutting details are duplicated: dex formatting re-implemented inline (`app/app/routes/pokemon.tsx:83` vs `app/app/lib/format.ts:9`), the `type-badge type-*` class string repeated in five files (`app/app/routes/types.tsx:20`, `move.tsx:32`, `type-detail.tsx:37`, `pokemon.tsx:89,273`, `components.tsx:36`), and card assembly exists twice (`api.server.ts:137` `cardFromPokemonRef` vs the inline loop in `homeDataPromise` at `api.server.ts:213-224`). Two parallel card types (`components.tsx:27` `Card` vs `api.server.ts:130` `PokemonCard`) and an unused `humanize` import (`pokemon.tsx:5`) round it out.
+- `api.server.ts` is one 530-line module mixing transport, two separate caching layers (`recordCache` at :15 plus six module-scope IIFE promise caches at :65, :82, :96, :174, :258), indexes, and per-page shaping. Changing "the API base URL and caching rules" stays in one file (good) but touches several distinct mechanisms, and adding an Items section grows this file further. A new detail route (items) mostly copies `move.tsx`'s ~50-line skeleton plus a `getMovePage` clone — no shared "resource detail page" abstraction, and `PokemonGrid` is already collecting flags (`showTypes`, `hidden`, `components.tsx:70` bakes the ability-specific "Hidden ability" label into a generic card list).
+
+```json
+{
+  "dimension": "editability",
+  "criteria": {
+    "removability": {
+      "score": 4,
+      "evidence": [
+        "app/app/routes.ts:11 — abilities route is one line, trivially deletable",
+        "app/app/routes/ability.tsx:1-45 — self-contained route file, only getAbilityPage dependency",
+        "app/app/lib/api.server.ts:450-471 — getAbilityPage used only by the ability route, cleanly deletable",
+        "app/app/routes/pokemon.tsx:126-140 — Abilities section on the Pokémon page must also be edited out",
+        "app/app/components.tsx:27-33,70 — Card.hidden field and the 'Hidden ability' span in the shared PokemonGrid are ability-specific leftovers a remover would likely miss"
+      ],
+      "rationale": "Removal is five scattered but obvious edits with no nav links to chase; the trap is the ability-specific hidden-flag left inside the shared grid component."
+    },
+    "changeability": {
+      "score": 3,
+      "evidence": [
+        "app/app/lib/api.server.ts:118-127 — cardSprite is the single funnel for every card sprite, so the Deoxys fix lands in one function",
+        "app/app/lib/api.server.ts:137-148,213-224 — but card assembly is duplicated (cardFromPokemonRef vs the homeDataPromise loop), so a naming/derivation fix needs verifying both",
+        "app/app/routes/pokemon.tsx:83 — dex number re-implemented inline instead of lib/format.ts:9 dexNumber",
+        "app/app/routes/move.tsx:13, ability.tsx:12, type-detail.tsx:13, pokemon.tsx:16 — identical not-found title branch copy-pasted four times",
+        "app/app/routes/types.tsx:20, move.tsx:32, type-detail.tsx:37, pokemon.tsx:89 — type-badge class string duplicated in five places instead of one TypeBadge"
+      ],
+      "rationale": "The specific sprite bug is centralized, but several cross-cutting concerns (dex format, badge markup, not-found handling, card assembly) exist in 2–5 copies each, so other fixes land N times."
+    },
+    "coupling": {
+      "score": 4,
+      "evidence": [
+        "app/app/lib/api.server.ts:1 — .server.ts naming keeps all HTTP/caching server-only; components never see the API",
+        "app/app/routes/home.tsx:31, pokemon.tsx:59 — filter/game state lives in the URL, explicit and shareable",
+        "app/app/routes/move.tsx:3, ability.tsx:2 — routes import narrow named getters, not internals",
+        "app/app/routes/pokemon.tsx:8, move.tsx:5, ability.tsx:4 — `any`-typed loaderData weakens the seam: the contract exists but the compiler doesn't enforce it",
+        "app/app/components.tsx:70 — shared PokemonGrid knows the ability-specific 'Hidden ability' concept"
+      ],
+      "rationale": "Server/client separation and URL-as-state are genuinely clean; the main tangles are the untyped loaderData seam and an ability-specific concern baked into the generic card list."
+    },
+    "abstraction_design": {
+      "score": 3,
+      "evidence": [
+        "app/app/components.tsx:11-24,36-76 — Section/PokemonGrid/EvolutionList absorb real variation (nested chains, card lists)",
+        "app/app/lib/format.ts:1-37 — shared formatting helpers used by both server and client code",
+        "app/app/routes/move.tsx:20-55, ability.tsx:18-33 — move and ability detail pages are structural twins (~85% same shape) with no shared resource-page abstraction; an Items section means copying the skeleton again",
+        "app/app/components.tsx:44,70 — PokemonGrid already carries showTypes and hidden flags; per-resource card shapes grow the component",
+        "app/app/lib/api.server.ts:269-418 — getPokemonPage is a 150-line monolith; per-page shaping lives beside generic transport in one file"
+      ],
+      "rationale": "Real variation (sections, cards, evolution trees) is abstracted well, but the detail-page skeleton and loader/meta/not-found boilerplate are copy-paste, and the grid is starting down the flag-parameter path."
+    }
+  },
+  "overall": 3,
+  "findings": [
+    {
+      "severity": "high",
+      "location": "app/app/routes/pokemon.tsx:8",
+      "issue": "Route modules discard framework-mode type generation: loaders take `any` args and components take `({ loaderData }: any)` (also move.tsx:5, ability.tsx:4, type-detail.tsx:5, and `any`-typed props throughout), so loader return shapes are unenforced and renames/typos surface only at runtime.",
+      "suggestion": "Import the generated types (`import type { Route } from './+types/pokemon'`) and use `Route.LoaderArgs`, `Route.MetaArgs`, `Route.ComponentProps` in every route module, as the v8 framework-mode docs prescribe."
+    },
+    {
+      "severity": "high",
+      "location": "app/app/routes/move.tsx:7",
+      "issue": "The `{ notFound: true }` sentinel plus the meta title branch and component early-return are copy-pasted across four route modules (move.tsx:7,13,22; ability.tsx:6,12,21; type-detail.tsx:7,13,22; pokemon.tsx:10,16,46) instead of the framework idiom, so any change to not-found behavior needs four synchronized edits.",
+      "suggestion": "Throw `data('Not Found', { status: 404 })` from loaders and render one shared ErrorBoundary (or at minimum factor the sentinel + meta title into a shared helper), per the framework-mode guidance."
+    },
+    {
+      "severity": "medium",
+      "location": "app/app/lib/api.server.ts:213",
+      "issue": "Card assembly is duplicated: the homeDataPromise species loop rebuilds id/name/humanized/sprite by hand while cardFromPokemonRef (api.server.ts:137) does the same mapping for other lists, so a card-derivation fix (e.g. the Deoxys sprite/species case) must be verified in two places; cardSprite's hardcoded `id <= 1025` threshold is a fragile magic number.",
+      "suggestion": "Build home cards through cardFromPokemonRef (or a shared cardFromSpecies), and derive the sprite from the species' default variety rather than a count-based special case."
+    },
+    {
+      "severity": "medium",
+      "location": "app/app/routes/types.tsx:20",
+      "issue": "The `type-badge type-${name}` class string is duplicated in five files (types.tsx:20, move.tsx:32, type-detail.tsx:37, pokemon.tsx:89 and 273) while a TypeBadge component exists (components.tsx:36) but only the non-link grid uses it — changing badge markup/classnames means a five-file sweep.",
+      "suggestion": "Give TypeBadge an optional link behavior (or add a TypeLink wrapper) and use it everywhere the class string currently appears."
+    },
+    {
+      "severity": "medium",
+      "location": "app/app/routes/pokemon.tsx:83",
+      "issue": "Dex-number formatting is re-implemented inline (`#{String(data.id).padStart(4, '0')}`) even though the file already imports from lib/format.ts, which exports dexNumber — the two can drift.",
+      "suggestion": "Import and use dexNumber from lib/format.ts."
+    },
+    {
+      "severity": "medium",
+      "location": "app/app/lib/api.server.ts:65",
+      "issue": "Six module-scope IIFE promise caches (typeInfosPromise :65, generationInfosPromise :82, speciesIndexPromise :96, homeDataPromise :174, versionGroupsPromise :258) fire hundreds of fetches at import time and form a second caching layer beside recordCache (:15) — changing cache rules or failure handling means touching several distinct mechanisms with import-time side effects.",
+      "suggestion": "Wrap index building in an explicit `getIndex()`-style memoized function (single memo helper) so caching policy lives in one place and imports stay side-effect free."
+    },
+    {
+      "severity": "low",
+      "location": "app/app/components.tsx:70",
+      "issue": "The generic PokemonGrid renders the ability-specific 'Hidden ability' label and carries an optional `hidden` card flag (and `showTypes`), entangling one feature's presentation with every card list; a parallel `Card` type (components.tsx:27) duplicates api.server.ts's PokemonCard (:130).",
+      "suggestion": "Keep PokemonGrid purely presentational (accept an optional trailing slot per card, or move the hidden label to the ability page) and define the card shape once in lib/ and import it in both files."
+    },
+    {
+      "severity": "low",
+      "location": "app/app/routes/home.tsx:48",
+      "issue": "onSearch re-implements the param-update logic of navigateWithParam (home.tsx:37-46), and the q/URL sync effect (:28-35) with previousQ/searchInput refs is subtle enough that changing filter behavior requires reverse-engineering it.",
+      "suggestion": "Extract one setParam(key, value, {replace}) helper used by both search and selects, and document the focus-guard logic."
+    },
+    {
+      "severity": "low",
+      "location": "app/app/routes/pokemon.tsx:5",
+      "issue": "Dead code: unused `humanize` import (pokemon.tsx:5) and an unused `label` field computed for evolution nodes (api.server.ts:253) that EvolutionList ignores in favor of humanize(node.name).",
+      "suggestion": "Drop the unused import and either use node.label in EvolutionList or stop computing it."
+    },
+    {
+      "severity": "low",
+      "location": "app/app/lib/api.server.ts:269",
+      "issue": "The single 530-line data module mixes transport, caching, shared indexes and four page-shaped builders; adding an Items section (routes + getItemPage) grows this file and copies move.tsx's detail-page skeleton rather than reusing an abstraction.",
+      "suggestion": "Split per-resource builders (species.ts, move.ts, type.ts, …) over the shared fetch/cache core, and factor the 'loader → notFound sentinel → meta title → NotFoundPage' skeleton so new detail pages reuse it."
+    }
+  ],
+  "summary": "A well-seamed SSR app: data access is fully centralized in one server-only module, filter state lives in the URL, and shared components absorb most markup variation, so the highest-value changes (sprite fix, data source) land in one file. But the framework's biggest editability lever — generated Route.* types — is discarded in favor of `any` throughout the route modules, and not-found handling, dex formatting, badge markup and card assembly are each duplicated 2–5 times, so many smaller fixes must be repeated. Detail pages are structural twins with no shared skeleton, meaning new sections (items) are mostly copy-paste. Acceptable and navigable today, but it will accumulate drift as sections are added.",
+  "scenarios": [
+    {
+      "change": "Remove the Abilities pages and every link to them",
+      "files": [
+        "app/app/routes.ts",
+        "app/app/routes/ability.tsx",
+        "app/app/lib/api.server.ts",
+        "app/app/routes/pokemon.tsx",
+        "app/app/components.tsx"
+      ],
+      "difficulty": 3,
+      "notes": "Route file and its getAbilityPage are cleanly paired and there are no nav links, but you must also strip the Abilities section from the Pokémon page and remember the ability-specific `hidden` flag/label living inside the shared PokemonGrid (components.tsx:27,70)."
+    },
+    {
+      "change": "Fix cards showing the wrong sprite for species whose default Pokémon differs (e.g. Deoxys)",
+      "files": [
+        "app/app/lib/api.server.ts"
+      ],
+      "difficulty": 4,
+      "notes": "Every list (home, move, ability, type) gets its sprite through cardSprite() (api.server.ts:118), so one fix covers all of them; you must double-check the second card-assembly path in homeDataPromise (:213) and replace the hardcoded id<=1025 sprite-pattern guess with data from the species' default variety."
+    },
+    {
+      "change": "Add sorting by name to every list of Pokémon cards",
+      "files": [
+        "app/app/components.tsx",
+        "app/app/routes/home.tsx",
+        "app/app/routes/move.tsx",
+        "app/app/routes/ability.tsx",
+        "app/app/routes/type-detail.tsx"
+      ],
+      "difficulty": 3,
+      "notes": "Cleanest path is a sort option on PokemonGrid plus the four call sites; server-side ordering is itself duplicated (cardsFromRefs vs getAbilityPage's own dedupe+sort) so the server route means 2–3 edits in api.server.ts, and home's pagination slice interacts with the sort order."
+    },
+    {
+      "change": "Add an Items section (/items, /items/:name) shaped like Moves",
+      "files": [
+        "app/app/routes.ts",
+        "app/app/routes/item.tsx",
+        "app/app/routes/items.tsx",
+        "app/app/lib/api.server.ts"
+      ],
+      "difficulty": 3,
+      "notes": "Section, PokemonGrid, format helpers and the fetch/cache core are reusable, but the detail-page skeleton (loader sentinel, meta title, NotFound branch, dl/sections) and a getMovePage-style builder must be copied — roughly 60% reuse, 40% new copy-paste."
+    },
+    {
+      "change": "Change the API base URL and caching rules",
+      "files": [
+        "app/app/lib/api.server.ts"
+      ],
+      "difficulty": 4,
+      "notes": "API_BASE_URL and the sprite pattern are each defined once in the data module and nothing else knows the URL, which is excellent; the catch is two separate caching mechanisms — recordCache plus six module-scope promise caches — so new caching rules (TTLs, invalidation) touch several spots in one file."
+    }
+  ]
+}
+```

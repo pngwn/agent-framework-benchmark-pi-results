@@ -1,0 +1,96 @@
+I've read the full app, verified the toolchain against current release notes, and checked the framework guidance. Here is my review.
+
+**What the app is:** a zero-runtime-dependency vanilla TS SPA on Vite — a ~70-line typed `h()` DOM helper (`app/src/dom.ts`), a regex router (`app/src/main.ts`), all API access behind one module with payload interfaces (`app/src/api.ts`), plus a small Node static server with SPA fallback and runtime config injection (`app/server.mjs`).
+
+**Toolchain currency (verified):** `vite ^8.3.5` is the latest stable (Vite 8 shipped 2026-03-12, Rolldown-based; 8.3.5 published two days ago — vite.dev/blog/announcing-vite8, npm) and `typescript ^7.0.2` is the current stable native compiler (devblogs.microsoft.com/typescript/announcing-typescript-7-0, July 2026; 7.1 still in beta). The app is on the current generation of both. No `vite.config` exists at all — the app runs on zero-config defaults, so there is no generated boilerplate to go stale.
+
+**Platform use:** consistently modern — `fetch` with a promise-dedup cache (`api.ts:113-125`), `URL`/`searchParams` everywhere for filter state, History API with `history.scrollRestoration = 'manual'` (`main.ts:84`), `replaceChildren`, `loading="lazy"` on sprites (`components.ts:18`), `:focus-visible`, logical CSS properties, CSS custom properties from the design tokens. Gaps: no `AbortController` (navigation races are handled with hand-rolled render tokens at `main.ts:32` and `pokemon.ts:303` instead of aborting the actual requests), and the CSS is flat where nesting would now be safe in the spec's "latest Chromium" target — both minor.
+
+**Churn resistance:** strong — typed API boundary in one module, config injected at runtime in one place (`server.mjs:26`, consumed at `api.ts:9`), no framework internals. The one real duplication: the route regexes exist twice, in `main.ts:20-27` and again in `server.mjs:25` for HTTP 404s; adding a route means editing both.
+
+```json
+{
+  "dimension": "forward-thinking",
+  "criteria": {
+    "latest_apis": {
+      "score": 4,
+      "evidence": [
+        "app/package.json:9-12 — vite ^8.3.5 and typescript ^7.0.2, both verified current stable (vite.dev npm shows 8.3.5 as latest; MS blog July 2026 announces TS 7.0, 7.1 still beta)",
+        "app/src/main.ts:84 — history.scrollRestoration = 'manual', current History API",
+        "app/src/main.ts:61-66 — replaceChildren / scrollIntoView for rendering and hash jumps",
+        "app/src/api.ts:113-125 — fetch + promise-dedup cache, current loading primitive",
+        "app/tsconfig.json:3-4 — moduleResolution 'bundler', strict, verbatim-free modern setup; but target ES2022 vs lib ES2023 slight mismatch",
+        "app/src/main.ts:88-92 — full-page re-render per navigation instead of e.g. View Transitions; nothing newer misused though"
+      ],
+      "rationale": "Consistently current: latest stable Vite 8 (Rolldown) and native TypeScript 7, zero vite.config boilerplate to rot, and no legacy browser APIs anywhere. Kept from 5 by a conservative vanilla-DOM style that misses cheap modern wins (AbortController, CSS nesting)."
+    },
+    "platform": {
+      "score": 4,
+      "evidence": [
+        "app/src/main.ts:48 — URL-based routing and URLSearchParams-backed filter state (home.ts:26-42)",
+        "app/src/components.ts:17-21 — native loading=\"lazy\" + onerror fallback for sprites, no lazy-loading library",
+        "app/src/dom.ts:6-16 — thin createElement wrapper, not a polyfill or virtual-DOM hand-roll",
+        "app/src/styles.css:47-55 — :focus-visible, and logical properties like padding-inline/margin-block (styles.css:76-77)",
+        "app/src/api.ts:113-115 — fetch without AbortSignal; races are guarded by manual tokens (main.ts:25-33, pokemon.ts:303-307)",
+        "app/src/styles.css:1-558 — flat CSS throughout; nesting (Baseline 2023, fine in latest Chromium per SPEC) unused"
+      ],
+      "rationale": "Reaches for the platform first — fetch, URL, History, replaceChildren, lazy images, custom properties — with zero polyfills or hand-rolled substitutes. Just shy of 5: no AbortController to cancel abandoned fetches, and CSS stays flat where modern features would be safe for the stated Chromium-only target."
+    },
+    "dependencies": {
+      "score": 5,
+      "evidence": [
+        "app/package.json:13-16 — devDependencies are exactly typescript and vite, both at current stable majors",
+        "app/package.json:1-12 — zero runtime dependencies; router (main.ts:20-27) and DOM helpers (dom.ts) are ~100 lines of code instead of packages",
+        "app/server.mjs:1-7 — production server is node:http only, no express/sirv/serve"
+      ],
+      "rationale": "Minimal and modern: two dev-only deps at the latest stable releases, no runtime packages at all, and even the server is bare node:http. Nothing to trim, nothing to upgrade."
+    },
+    "churn_resistance": {
+      "score": 4,
+      "evidence": [
+        "app/src/api.ts:22-103 — every API payload typed at the boundary, all HTTP access confined to get()/getList()",
+        "app/src/api.ts:7-9 — single API_BASE_URL injected at request time by the server (server.mjs:26), so one build serves any API; no baked-in config",
+        "app/server.mjs:25 — ROUTES regexes duplicate the client route table (main.ts:20-27); a new route must be edited in both files",
+        "app/src/main.ts:20-27 — routing in one declarative table; pages take (params, URL) so URL handling won't ripple",
+        "app/src/pages/home.ts:59-71 — per-render derivation of typesById/generationById is local and re-derivable, but rebuilding indexes on every home render could be memoized in api.ts",
+        "app/src/dom.ts:44-53 — section() auto-generates heading ids from a counter, fine while rendering is full-replace (main.ts:61)"
+      ],
+      "rationale": "Data access, types, and config each live in exactly one module, and there's no vite.config or framework-generated boilerplate to drift from an upgrade. The only real churn risk is the duplicated route regexes between client and server, plus some re-derivable per-render index building."
+    }
+  },
+  "overall": 4,
+  "findings": [
+    {
+      "severity": "medium",
+      "location": "app/server.mjs:25",
+      "issue": "Server-side ROUTES regexes duplicate the client route table in app/src/main.ts:20-27; adding or renaming a page requires synchronized edits in two files and two languages.",
+      "suggestion": "Either serve index.html for all unknown paths (accepting 200 instead of 404) or export the route patterns from a shared module (e.g. a routes.json consumed by both server.mjs and main.ts)."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/api.ts:113-115",
+      "issue": "fetch has no AbortSignal; when the user navigates mid-load the request keeps running and correctness is protected only by manual render tokens (main.ts:25-33, pokemon.ts:303-307).",
+      "suggestion": "Thread an AbortController per render: create it in render(), pass signal to get(), abort on the next navigation. The promise cache already deletes rejected entries, so this composes cleanly."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/pages/home.ts:59-71",
+      "issue": "The id→types and id→generation indexes are rebuilt from scratch on every home-page render (raw data comes from the cache, but the aggregation is repeated).",
+      "suggestion": "Memoize the derived indexes in api.ts (e.g. alongside speciesIndex()) so pages consume one well-defined dataset and future pages can reuse it."
+    },
+    {
+      "severity": "low",
+      "location": "app/tsconfig.json:3-4",
+      "issue": "target ES2022 while lib is ES2023; Vite 8's default browser target ('baseline-widely-available', Chrome 111+) would support a higher target, and SPEC only requires latest Chromium.",
+      "suggestion": "Align target/lib (e.g. ES2023/ES2023) or drop target and rely on Vite's default build.target."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/main.ts:88-92",
+      "issue": "Every navigation does a full teardown/re-render of main with no SPA fallback niceties; acceptable now, but adding anything stateful (focus preservation on back, view transitions) will mean reworking render().",
+      "suggestion": "Consider document.startViewTransition() (current Chromium) around replaceChildren for cheap polish, and keep focus management in mind if forms grow."
+    }
+  ],
+  "summary": "A lean, current-generation vanilla TS/Vite app: latest stable Vite 8 and native TypeScript 7, zero runtime dependencies, all API access typed and confined to one module, and runtime config injection instead of baked build values. The platform is used first everywhere (fetch, URL/History, replaceChildren, lazy images, CSS custom properties). The only notable aging risks are duplicated route tables between client and server and the absence of AbortController for navigation races."
+}
+```

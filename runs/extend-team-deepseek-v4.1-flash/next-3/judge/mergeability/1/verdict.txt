@@ -1,0 +1,142 @@
+## Review
+
+This is a genuinely well-built Next.js 16 App Router app. I verified the framework's current guidance (Next 16, Oct 2025 release — `connection()`, cacheComponents still opt-in, async `params`/`searchParams`) against the code before judging.
+
+**What's strong**
+
+- **Routing/data loading is textbook current-gen App Router.** Every route is a server component with `generateMetadata`; `params`/`searchParams` are awaited as promises (`app/src/app/pokemon/[name]/page.tsx:35-37`), `notFound()` is used on every resource page, and `React.cache` dedupes the metadata/page fetch per request (`app/src/app/pokemon/[name]/page.tsx:38-45`, same pattern in moves/types/abilities). `await connection()` on every page (`app/src/app/page.tsx:31`, etc.) is the documented way to keep builds from prerendering API data, which the spec demands — and it's the forward-compatible primitive for when cacheComponents becomes default. The `server-only` guard on `api.ts:1` plus the `team.ts` / `team-server.ts` split gives a clean server/client boundary.
+- **The feature change fits the house style.** `CHANGES.diff` shows the team builder reuses `Section`, `PokemonCard`, the token-driven CSS with a labeled block, and cookie state that is *rendered from the server* (`team-server.ts`) so the toggle label never flashes — exactly what FEATURE.md demanded. The "adjust state during render" sync in `team-toggle.tsx:16-21` is the pattern React's docs endorse.
+- **Care is visible.** The 404-response drain with an explanation of why cancelling a tee'd body hangs (`api.ts:48-53`), LRU-position refresh on hit (`api.ts:64-66`), rejection eviction (`api.ts:71-73`), missing-values-sort-last in both directions (`moves-table.tsx:52-54`), and the `aria-sort`/`aria-live`/`scope` details all read like someone who understood the primitives.
+
+**What I'd push back on**
+
+- The bespoke fetching layer in `api.ts:16-118` (TTL/LRU Map cache, promise dedupe, FIFO concurrency limiter) is ~60 lines of infrastructure that overlaps what `fetch(url, { next: { revalidate: 60 } })` — or `use cache` under cacheComponents — already provides. It's well-built and bounded (1500 entries), but a team will have to own, test and explain it. Same class of nit: `document.cookie` writes from the client (`team.ts:30-31`) where a Server Action writing via `cookies()` is the framework's path.
+- Small duplication: default-variety resolution exists twice (`pokemon/[name]/page.tsx:44-45` vs `team/page.tsx:35-36`), and query-string building twice (`app/page.tsx:20` vs `filters.tsx:11`).
+- No `error.tsx` / `loading.tsx` anywhere: an API hiccup becomes the default framework 500, and the home page's full index rebuild per request (`getSpeciesIndex`) blocks with no streamed shell.
+- Minor fragility: the concurrency limiter can overshoot its cap (a freed slot can be taken by a new request before a queued waiter resumes, `api.ts:27-33`), and 404 results are cached for the full 60s (`api.ts:70`) so a newly-added resource stays "not found" up to a minute.
+
+```json
+{
+  "dimension": "mergeability",
+  "criteria": {
+    "idiomatic": {
+      "score": 4,
+      "evidence": [
+        "app/src/app/pokemon/[name]/page.tsx:38-45 — React cache() + generateMetadata + notFound(): current App Router data loading exactly as documented",
+        "app/src/app/page.tsx:31 — await connection() (next/server) to opt out of build-time prerendering, the documented primitive and the forward-compatible one for cacheComponents",
+        "app/src/app/filters.tsx:49-51 — useTransition + router.replace for URL-as-state, correct debounce (200ms ≤ 300ms spec)",
+        "app/src/lib/api.ts:46 — fetch with cache:'no-store' plus a hand-rolled TTL/LRU Map (api.ts:16-74) where the framework offers next:{revalidate:60} / use cache",
+        "app/src/lib/team.ts:30-31 — document.cookie writes from a client component instead of a Server Action using cookies().set()"
+      ],
+      "rationale": "Reads like the framework's own examples for routing, metadata, dynamic rendering and client transitions; the only real deviations are the bespoke fetch cache/concurrency layer and raw document.cookie mutation, both deliberate but non-framework paths."
+    },
+    "correctness_risks": {
+      "score": 4,
+      "evidence": [
+        "app/src/lib/api.ts:27-33 — the concurrency limiter can exceed MAX_CONCURRENT_REQUESTS when a freed slot is taken by a fresh request before a queued waiter resumes; best-effort but undocumented",
+        "app/src/lib/api.ts:70 — null (404) results are cached for the full 60s TTL, so a resource added server-side stays 'not found' for up to a minute",
+        "app/src/app/ (no error.tsx / loading.tsx) — a 500 from the API throws inside the page render and surfaces as the default framework error page; nothing streams while heavy pages fetch",
+        "app/src/app/page.tsx:44-46 — page param is parsed, NaN-guarded and clamped to [1,totalPages]: pagination cannot break",
+        "app/src/components/team-toggle.tsx:16-21 — props→state sync follows server refreshes, so no stale label after router.refresh()"
+      ],
+      "rationale": "No serious bug found after a careful look: 404 handling, dedupe, cache eviction and sorting edge cases (missing values last in both directions) are all handled. The residual risks are minor and mostly in the custom fetch layer."
+    },
+    "global_abstractions": {
+      "score": 4,
+      "evidence": [
+        "app/src/lib/api.ts:1 — server-only guard; app/src/lib/team.ts vs team-server.ts — isomorphic cookie helpers split cleanly from the server reader",
+        "app/src/lib/api.ts:16-118 — transport (cache, limiter) and domain assembly (getSpeciesIndex, pokemonCards) live in one 280-line module every page imports; cohesive now, will need splitting as it grows",
+        "app/src/app/pokemon/[name]/page.tsx:44-45 and app/src/app/team/page.tsx:35-36 — identical default-variety→default-Pokémon resolution duplicated",
+        "app/src/app/page.tsx:20 and app/src/app/filters.tsx:11 — two near-identical URL-query builders",
+        "app/src/lib/api.ts:274 — spriteUrl hardcodes the API's media path pattern (sanctioned by SPEC.md but unexplained in code)"
+      ],
+      "rationale": "Boundaries are drawn well and the shared module earns its keep, but api.ts is a latent god data module (transport + caching + three derived views), and two small helpers are duplicated across the feature boundary."
+    },
+    "readability": {
+      "score": 5,
+      "evidence": [
+        "app/src/lib/api.ts:48-53 — comment explaining WHY the 404 body is drained instead of cancelled (fetch tee behaviour)",
+        "app/src/lib/format.ts — small, purely-named, one-purpose helpers (humanize, dexNumber, latestFlavorText)",
+        "app/src/app/types/[name]/page.tsx:18-25 — declarative RELATIONS table instead of six copy-pasted blocks",
+        "app/src/app/globals.css:129-232 — CSS organised in labelled sections, all values from tokens.css",
+        "app/src/components/section.tsx — the spec's 'section' concept is named once, as a component, and reused everywhere"
+      ],
+      "rationale": "Consistent page skeleton (cache()'d loader → generateMetadata → notFound → render), small components, and comments that explain intent rather than restating code; a new teammate would find their way in minutes."
+    },
+    "review_cost": {
+      "score": 4,
+      "evidence": [
+        "app/src/lib/api.ts:16-118 — the one substantive discussion point: replace or justify the bespoke cache/limiter against next:{revalidate}",
+        "app/src/app/pokemon/[name]/page.tsx:44-45 — extract the duplicated default-Pokémon lookup (small, mechanical)",
+        "app/src/app/page.tsx:20 / filters.tsx:11 — merge the two query builders",
+        "app/src/components/pokemon-cards.tsx:9 — eslint-disable for @next/next/no-img-element but ESLint isn't configured in the project; dead directive"
+      ],
+      "rationale": "Nothing blocking: the changes I'd ask for are the custom fetch layer plus a handful of extractions and one missing error boundary — approve after one comment round."
+    }
+  },
+  "overall": 4,
+  "findings": [
+    {
+      "severity": "medium",
+      "location": "app/src/lib/api.ts:16-118",
+      "issue": "A hand-rolled TTL/LRU promise cache plus a FIFO concurrency limiter reimplements data caching that the framework already provides (fetch with next:{revalidate:60}, or 'use cache' under cacheComponents); ~60 lines of infra the team must own, test and explain.",
+      "suggestion": "Use the framework's fetch caching (or 'use cache' when adopting cacheComponents) and drop the custom cache; keep withSlot only if the local API genuinely needs a concurrency cap, with a comment saying why."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/lib/api.ts:27-33",
+      "issue": "The concurrency limiter can overshoot MAX_CONCURRENT_REQUESTS: a released slot can be grabbed by a newly arriving request before a queued waiter's resolve runs, and waiters don't re-check the cap on wake.",
+      "suggestion": "Re-check active >= MAX after the await, or document that the cap is best-effort."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/lib/api.ts:70",
+      "issue": "404 responses are cached as null for the full 60-second TTL, so a resource that appears on the API stays 'Not found' for up to a minute.",
+      "suggestion": "Use a much shorter (or zero) negative TTL for null results, or a comment noting the trade-off is intentional."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/app/pokemon/[name]/page.tsx:44-45",
+      "issue": "Default-variety → default-Pokémon resolution is duplicated verbatim in app/src/app/team/page.tsx:35-36.",
+      "suggestion": "Extract a getDefaultPokemon(species) helper next to getSpecies in lib/api.ts."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/app/page.tsx:20",
+      "issue": "Query-string building is duplicated between pageHref (page.tsx:20) and href (filters.tsx:11); they must stay in sync (defaults omitted, page reset).",
+      "suggestion": "Share one buildQuery(filters, page?) helper in lib."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/app/layout.tsx",
+      "issue": "No error.tsx or loading.tsx anywhere: an API failure throws inside page render and produces the default framework 500, and data-heavy pages block with no streamed shell or pending state.",
+      "suggestion": "Add a root error.tsx with a friendly message and a loading.tsx (or Suspense boundaries) around the heavy data loads."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/app/page.tsx:24",
+      "issue": "getSpeciesIndex() already fetches all types and generations internally; the page fetches both again for the dropdowns, and the 1025-entry index is rebuilt on every request (only the underlying fetches are cached).",
+      "suggestion": "Have getSpeciesIndex return the types/generations it loaded, and consider memoising the assembled index for the cache TTL."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/lib/api.ts:274",
+      "issue": "spriteUrl hardcodes the API's media path pattern (/media/sprites/pokemon/<id>.png) with no comment; it's sanctioned by SPEC.md but embeds unexplained API knowledge.",
+      "suggestion": "Add a comment citing the documented sprite pattern, or fall back to the API-provided front_default URL when available."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/components/pokemon-cards.tsx:9",
+      "issue": "eslint-disable-next-line @next/next/no-img-element comment, but the project has no ESLint config or dependency — the directive is dead weight.",
+      "suggestion": "Either add eslint + eslint-config-next to the devDependencies, or drop the disable comments."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/lib/team.ts:30-31",
+      "issue": "Team mutation writes document.cookie directly from the client; the framework's supported path for cookie writes is a Server Action (or route handler) using cookies().set().",
+      "suggestion": "Acceptable as a deliberate, simple choice (avoids a round trip before refresh), but consider a Server Action for consistency; if kept, note why in a comment."
+    }
+  ],
+  "summary": "A disciplined, current-generation App Router implementation — async params, cache-deduped loaders, notFound(), connection()-driven request-time rendering, and a cookie-based feature that renders server-side so state never flashes. The one structural reservation is the bespoke fetch cache/concurrency layer where the framework already provides caching, plus a couple of duplicated helpers and missing error/loading boundaries. I'd merge after one comment round."
+}
+```

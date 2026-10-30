@@ -1,0 +1,124 @@
+{
+  "dimension": "mergeability",
+  "criteria": {
+    "idiomatic": {
+      "score": 4,
+      "evidence": [
+        "app/index.html:14 — static shell with <main> landmark, Vite entry /src/main.ts; no SSR hacks",
+        "app/vite.config.ts:4 — minimal, correct Vite config (chrome120 target matches the Chromium-only constraint)",
+        "app/src/main.ts:73-89 — history pushState/popstate router with delegated link clicks; the standard vanilla-SPA shape",
+        "app/server.mjs:30-34 — runtime API base injected as a <script> global consumed at app/src/api.ts:1-4; reasonable for runtime config, though the window-as-unknown cast is a wart",
+        "app/src/components.ts:4-12 — single escapeHtml helper used consistently instead of ad-hoc escaping"
+      ],
+      "rationale": "For a no-framework app this is the recommended shape: Vite for bundling, native DOM/history APIs, no reactivity reimplemented. A few home-grown spots (global config cast, inline onerror) keep it from reading like a reference example."
+    },
+    "correctness_risks": {
+      "score": 3,
+      "evidence": [
+        "app/src/main.ts:23-31 — renderToken/isActive guard correctly discards stale async renders",
+        "app/src/pages/pokemon.ts:381-391 — gameRequest counter guards the game-switch race on top of isActive",
+        "app/src/api.ts:152-168 — module-level Map cache with no eviction; grows unbounded across a long browsing session",
+        "app/src/pages/pokemon.ts:150-158 — Promise.all over every move of the selected game (can be 100+ parallel fetches) with no concurrency limit; repeated per Pokémon visited",
+        "app/package.json:8 — 'build': 'vite build' with tsconfig noEmit (app/tsconfig.json:14); TypeScript is never type-checked in the build, so type errors ship silently",
+        "app/src/pages/home.ts:101-102 — out-of-range ?page= is clamped for display but the URL is not rewritten",
+        "app/src/main.ts:75-78 — every API/network error (including 500s) is rendered as the 'Not found' page"
+      ],
+      "rationale": "The async races the tests would miss are handled genuinely well (tokens, cache-once promise reuse, error eviction). The remaining risks are real but mild: an unbounded cache plus unbounded fetch fan-out, and a build that never type-checks the TS it ships."
+    },
+    "global_abstractions": {
+      "score": 3,
+      "evidence": [
+        "app/src/api.ts:1-370 — single god module: transport + cache + 20 interface definitions + display helpers (humanize/formatDex/displayNumber, api.ts:200-228) + three derived dataset singletons (getSpeciesIndex/getGenerations/getHomeData, api.ts:230-370)",
+        "app/src/api.ts:229-246 — speciesRefsFromPokemon and its speciesFromPokemonList wrapper: a redundant extra layer",
+        "app/src/pages/details.ts:16-45 — pages stay thin and only consume api/components; the api/components/pages boundary is otherwise clean",
+        "app/src/components.ts:14-27 — href helpers centralize URL building, good leak-free boundary"
+      ],
+      "rationale": "The layering is legible and pages are thin, but api.ts conflates HTTP transport, caching, display formatting and precomputed app-wide datasets in one file; that will need splitting before it grows. One wrapper function is pure dead weight."
+    },
+    "readability": {
+      "score": 3,
+      "evidence": [
+        "app/src/pages/pokemon.ts:169-400 — renderPokemonPage is ~230 lines mixing data prep, four template literals and three event listeners; loadMoveTables and sortRows (pokemon.ts:82-104, 112-180) are fine on their own",
+        "app/src/api.ts:160-166 — cache-then-delete-on-failure pattern is subtle and unexplained (one of the only comment-worthy spots; the whole app has 1 comment line)",
+        "app/src/pages/home.ts:20-33 — HomeState + buildUrl make filter-state handling easy to follow",
+        "app/src/pages/details.ts:139-141 — RELATION_TERMS table is a nice declarative touch, consistent with STAT_LABELS/METHOD_ORDER in pokemon.ts"
+      ],
+      "rationale": "Naming is consistent and the structure is easy to orient in, but the Pokémon page render is one very long function and there is almost nothing explaining the non-obvious choices (token guards, cache eviction, 10000-ID rule at api.ts:236)."
+    },
+    "review_cost": {
+      "score": 3,
+      "evidence": [
+        "app/package.json:7-9 — must add a type-check step (tsc -b) before I'd approve the build script",
+        "app/src/api.ts:200-370 — I'd ask for display helpers and the dataset singletons to move out of the transport module",
+        "app/src/components.ts:49 — inline onerror handler: swap for delegated addEventListener (CSP hygiene)",
+        "app/src/pages/pokemon.ts:144-160 — replace apiFetch<any> with the existing MoveRecord type",
+        "app/src/main.ts:59-64 and app/src/pages/pokemon.ts:397-400 — duplicated hash-scroll logic; keep one"
+      ],
+      "rationale": "Nothing blocks conceptually and the race handling earns trust, but there's a concrete round of asks: a type-checking build, an api.ts split, bounded fan-out/cache, and a handful of type/nit cleanups."
+    }
+  },
+  "overall": 3,
+  "findings": [
+    {
+      "severity": "medium",
+      "location": "app/package.json:8",
+      "issue": "The build script is 'vite build' only; with tsconfig set to noEmit, the TypeScript in the repo is never type-checked anywhere in the pipeline, so type regressions ship to production.",
+      "suggestion": "Add a type-check script ('tsc --noEmit' or 'tsc -b') and chain it before vite build in the build script, plus a CI step."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/pages/pokemon.ts:150-158",
+      "issue": "loadMoveTables fires one fetch per move in the selected version group via Promise.all with no concurrency limit (easily 100+ simultaneous requests), repeated for every Pokémon page and game switch; combined with the never-evicting cache at app/src/api.ts:152 memory grows unbounded during a session.",
+      "suggestion": "Cap parallelism (small pool or chunked Promise.all), reuse already-cached records, and either bound the cache with an LRU or scope move-record caching per visited Pokémon."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/api.ts:1-370",
+      "issue": "God data module: HTTP transport, promise cache, all API interfaces, display formatting helpers (humanize/formatDex/displayNumber) and three app-wide dataset singletons all live in one file that every page imports.",
+      "suggestion": "Split into api/client (transport + cache + types) and separate modules for display formatting and the derived catalogs (species index, generations, home data)."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/pages/details.ts:38",
+      "issue": "A move with null damage_class renders 'Unknown' rather than the em dash the spec prescribes for missing values (same pattern at app/src/pages/pokemon.ts:171).",
+      "suggestion": "Use displayNumber-style '—' fallback for a null damage_class instead of humanizing the string 'unknown'."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/pages/home.ts:101-102",
+      "issue": "An out-of-range ?page= value is clamped for display but the URL keeps the stale page number, so reload/refresh pagination links disagree with the shown page.",
+      "suggestion": "After clamping, history.replaceState to the canonical URL (as the filter changes already do)."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/components.ts:49",
+      "issue": "Inline onerror attribute on card sprites; a CSP without 'unsafe-inline' breaks it, and it's the only string-based handler in the codebase.",
+      "suggestion": "Delegate a single 'error' listener on the list containers (or use CSS to hide broken images) instead of inline JS."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/pages/pokemon.ts:144-160",
+      "issue": "apiFetch<any> plus any-typed record maps, even though a full MoveRecord interface exists in api.ts; the type layer is being paid for and then bypassed on the hottest table in the app.",
+      "suggestion": "Type the fetch as MoveRecord and delete the any casts; the filter(Boolean) map can be typed cleanly."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/main.ts:59-64",
+      "issue": "Hash-scroll-into-view logic is duplicated in the router and again inside renderPokemonPage (app/src/pages/pokemon.ts:397-400), so the two can double-scroll or drift.",
+      "suggestion": "Keep the single post-render hash handling in main.ts and delete the page-local copy."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/api.ts:244-247",
+      "issue": "speciesFromPokemonList is a pass-through wrapper around the unexported speciesRefsFromPokemon — an abstraction layer that does nothing.",
+      "suggestion": "Export one function with the clearer name and drop the wrapper."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/main.ts:75-78",
+      "issue": "Every API failure (5xx, network down) renders the 'Not found' page and only console.errors, so a backend outage looks like a missing Pokémon.",
+      "suggestion": "Distinguish NotFoundError from other errors and render a distinct 'Something went wrong' state with a retry affordance."
+    }
+  ],
+  "summary": "A competent, genuinely idiomatic vanilla TS + Vite SPA with unusually careful async-race handling (render tokens, request counters, promise-shared caching) that I'd be comfortable owning. The main liabilities are an unbounded fetch fan-out/cache on the moves tables, a build pipeline that never type-checks its TypeScript, and an api.ts god module mixing transport, formatting and app-wide datasets. One round of review changes, not a rework."
+}

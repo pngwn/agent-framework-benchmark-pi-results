@@ -1,0 +1,112 @@
+{
+  "dimension": "mergeability",
+  "criteria": {
+    "idiomatic": {
+      "score": 4,
+      "evidence": [
+        "app/astro.config.mjs:5 — output: 'server' + @astrojs/node standalone adapter, exactly the current docs' SSR setup; astro ^7.4.2 is today's stable line",
+        "app/src/pages/types/[name].astro:9-10 — Astro.response.status = 404 on missing resource, mirroring the on-demand-rendering guide's example",
+        "app/src/components/Evolution.astro:22 — Astro.self recursion for the branching evolution chain, the documented primitive",
+        "app/src/pages/404.astro:5 — reserved 404 route sets status and reuses the NotFound component, as recommended",
+        "app/src/pages/index.astro:96-137 — client enhancement via a processed Astro <script> with TS, the framework's recommended no-UI-framework path",
+        "app/src/pages/index.astro:104 — hand-rolled fetch + DOMParser fragment swap instead of any Astro primitive (Actions/endpoint fragments/ClientRouter), a homegrown pattern repeated three times"
+      ],
+      "rationale": "Routing, SSR, 404s, cookies and recursion all read like the current Astro 7 docs; the only non-idiomatic streak is the thrice-duplicated DOMParser swap-navigation, which no framework feature quite replaces."
+    },
+    "correctness_risks": {
+      "score": 3,
+      "evidence": [
+        "app/src/lib/api.ts:11,60 — cache is an unbounded Map whose keys include request-derived paths (e.g. pokemon/[name].astro:26 feeds Astro.params.name in), so 404 nulls are cached forever and URL fuzzing grows memory unboundedly",
+        "app/src/lib/api.ts:48-55 — SWR sets hit.at = now before the refresh resolves and swallows refresh failures, pinning stale data (and delaying retry) for another 60s after an API hiccup",
+        "app/src/lib/api.ts:33-35 — non-404 API errors throw out of api(), producing a bare 500 with no error page or graceful fallback on any route",
+        "app/src/pages/index.astro:84-85 — non-null assertions on querySelector mean a markup refactor silently throws in the browser instead of failing gracefully",
+        "app/src/components/MovesSection.astro:184-201 — game-select change handler does abort/replace correctly and restores focus; popstate falls back to reload — divergent but sound"
+      ],
+      "rationale": "The interactive flows (abort controllers, popstate, focus restore, cookie-driven rendering) are handled with unusual care, but the cache layer has two real defects: unbounded growth keyed by user input and a stale-pin on failed background refresh."
+    },
+    "global_abstractions": {
+      "score": 3,
+      "evidence": [
+        "app/src/lib/team.ts:4-5 vs app/src/components/TeamButton.astro:20-27 and app/src/pages/team.astro:78-87 — the team cookie contract (name, comma format, TEAM_SIZE=6) is written three times across a server module and two inline scripts",
+        "app/src/pages/index.astro:103-107, app/src/components/MovesSection.astro:194-200, app/src/pages/team.astro:92-97 — three near-identical 'fetch page → DOMParser → replaceWith(#id)' helpers with divergent error and popstate behavior",
+        "app/src/lib/pokedex.ts:64-94 — getTypes/getGenerations/getTypeLabels form a cohesive domain layer every page shares; boundaries are clean and server-only",
+        "app/src/pages/moves/[name].astro:35 and app/src/components/MovesSection.astro:75 — the show()/dash helper duplicated in two files",
+        "app/src/lib/api.ts:11 — module-level cache is hidden global state, but it is deliberate, documented, and permitted by the spec"
+      ],
+      "rationale": "The lib/ layer is well-factored with clear server/client boundaries, but the team-cookie protocol and the fragment-swap pattern are copy-pasted across files, so a future change (cookie rename, size limit, swap semantics) must be made in two or three places and can drift — as the differing popstate handling already shows."
+    },
+    "readability": {
+      "score": 4,
+      "evidence": [
+        "app/src/lib/api.ts:1-2,13-14 — header comments explain why (stale-while-revalidate, concurrency limiter), not what",
+        "app/src/lib/pokedex.ts:47,96,120 — docstrings on cardsForPokemon/getHomeEntries explain the alternate-form and slot-order rules",
+        "app/src/components/Section.astro:9-10 — small, single-purpose components with derived ids; consistent Props interfaces across all components",
+        "app/src/pages/pokemon/[name].astro:27-33 — the ternary building [pokemon, chain, typeLabel] as null-triple is dense and needs a re-read; also leans on 'any' for API records (e.g. abilities at line 48)",
+        "app/src/components/MovesSection.astro:37-72 — move-table derivation is long but linear, commented, and easy to follow"
+      ],
+      "rationale": "A new teammate can find their way quickly: consistent naming, small files, why-comments where they matter. Rough spots are the occasional dense ternary and pervasive 'any' on API records instead of typed interfaces."
+    },
+    "review_cost": {
+      "score": 4,
+      "evidence": [
+        "app/src/lib/api.ts:11 — fix cache growth (evict negatives or bound the map) before merge, but the change is local",
+        "app/src/components/TeamButton.astro:20-28 — extract a shared client-side team-cookie module; small, mechanical",
+        "app/src/pages/index.astro:107 — unify the three fragment-swap copies into one helper; mechanical but touches three pages",
+        "app/src/pages/pokemon/[name].astro:15 — correct, spec-complete pages that need no rework"
+      ],
+      "rationale": "Approve after one small round: nothing structural needs to change, but the cache bound and the duplicated cookie/swap logic are the kind of things I'd ask for before signing off."
+    }
+  },
+  "overall": 4,
+  "findings": [
+    {
+      "severity": "medium",
+      "location": "app/src/lib/api.ts:11",
+      "issue": "Unbounded module-level cache whose keys include request-derived path segments (pokemon-species/<url param> from app/src/pages/pokemon/[name].astro:26); 404 results are cached forever and never evicted, so crawling or fuzzing URLs grows server memory without limit.",
+      "suggestion": "Only cache paths you can validate against a known collection (or apply an LRU bound / TTL eviction), and don't cache negative lookups keyed by user input."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/lib/api.ts:55",
+      "issue": "Stale-while-revalidate sets hit.at = now before the refresh resolves and swallows refresh errors in an empty catch, so a failed revalidation pins stale data and suppresses retry for another full 60s window.",
+      "suggestion": "Update the entry timestamp only in the success callback (the existing promise.then at line 51-53) and either retry or drop the entry on failure."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/components/TeamButton.astro:20",
+      "issue": "The team cookie contract (name 'team', comma-separated format, TEAM_SIZE = 6) is implemented three times: lib/team.ts on the server and two inline client scripts (TeamButton.astro:20-28, team.astro:78-87), so the constant and format can drift.",
+      "suggestion": "Extract a shared src/lib/team-cookie.ts (cookie name, size, read/write) and import it from both Astro <script> blocks — Astro bundles script imports natively."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/pages/index.astro:103",
+      "issue": "The 'fetch page → DOMParser → replaceWith(#id)' partial-update pattern is duplicated three times (index.astro:96-137, MovesSection.astro:184-206, team.astro:88-100) with divergent popstate and error-fallback behavior.",
+      "suggestion": "Extract one small client helper (e.g. swapFragment(url, containerId, {onError})) and use it in all three places so behavior is consistent and testable."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/lib/api.ts:35",
+      "issue": "Non-404 API errors throw out of the data layer and surface as a bare 500 from the Node adapter on every route, with no user-facing error state.",
+      "suggestion": "Add a custom 500 page or catch API errors at the page boundary and render a friendly error (or fall back to NotFound) instead of letting the framework default leak."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/pages/index.astro:84",
+      "issue": "Non-null assertions on querySelector('[data-filters]') and the search input mean any markup rename turns into a runtime TypeError in the browser.",
+      "suggestion": "Guard with an early return (if (!form) return;) so the script degrades silently, or type the element via a ref-style attribute check."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/lib/pokedex.ts:134",
+      "issue": "getHomeEntries rebuilds the 1025-entry list plus two index maps (typesById, genById) on every request; only the raw fetches are cached, not the derived result.",
+      "suggestion": "Memoize the derived HomeEntry[] alongside the fetch cache with the same freshness window, so the home page does O(2k) work per request."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/pages/pokemon/[name].astro:48",
+      "issue": "API records are handled as 'any' throughout (types, abilities, stats), so typos in property names would fail silently and the spec's field mapping is untyped.",
+      "suggestion": "Define minimal interfaces for the PokeAPI records used (Pokemon, Species, Type, Move) in lib/pokedex.ts and reuse them across pages."
+    }
+  ],
+  "summary": "This is a well-crafted Astro 7 app: current-stable version, idiomatic SSR with correct 404 semantics, a clean lib/ data layer, and careful a11y and client-enhancement details. The merge blockers are localized: an unbounded request-keyed cache and a stale-pin in the SWR logic, plus the team-cookie contract and fragment-swap pattern being copy-pasted across two or three files each. One small round of changes gets it to approve."
+}

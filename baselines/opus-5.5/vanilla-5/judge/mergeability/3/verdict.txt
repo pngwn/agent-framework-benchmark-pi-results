@@ -1,0 +1,114 @@
+I've reviewed the whole app. Summary of what I found before scoring: a dependency-free Vite 8 + TS 7 SPA (~670 significant LOC across 9 modules plus a small Node static server), hand-rolled History-API router, `h()` DOM helper, promise-cache data layer, and per-page modules. Dependencies match today's stable releases (vite 8.3.5, typescript 7), verified against current release notes.
+
+```json
+{
+  "dimension": "mergeability",
+  "criteria": {
+    "idiomatic": {
+      "score": 4,
+      "evidence": [
+        "app/package.json:8 — 'tsc --noEmit && vite build' + 'type: module', vite ^8.3.5 / typescript ^7.0.2 are today's stable majors",
+        "app/tsconfig.json:1-15 — strict, moduleResolution bundler, 'types': ['vite/client'] — exactly the Vite-recommended TS setup",
+        "app/src/api.ts:9 — import.meta.env.VITE_API_BASE_URL used for API base, current Vite env idiom",
+        "app/src/dom.ts:4-32 — DOM built with createElement/text nodes, no innerHTML anywhere in src/ (grep confirms)",
+        "app/src/main.ts:74-83 — client routing via History API (pushState/popstate), the right platform primitive for a framework-free app",
+        "app/server.mjs:18-23 — runtime API-base injection via a documented placeholder comment; mildly home-grown but there is no Vite feature for this in a custom server"
+      ],
+      "rationale": "Recognisably the way a current Vite vanilla-TS app is meant to be built: strict TS, vite/client types, platform primitives (History API, replaceChildren, AbortSignal.timeout) instead of reinvented machinery. Only the index.html config-placeholder trick is home-grown, and it's justified and documented."
+    },
+    "correctness_risks": {
+      "score": 4,
+      "evidence": [
+        "app/src/main.ts:46-55 — navigation token guards against stale renders; good race handling",
+        "app/src/pages/pokemon.ts:149-154 — second token guard for the async game-select re-render; races handled here too",
+        "app/src/api.ts:131-137 — 404 → typed NotFoundError, failed requests evicted from the promise cache",
+        "app/src/main.ts:57-58 — non-404 errors surface as an error page instead of a blank screen",
+        "app/src/api.ts:131 — fetch has no timeout/AbortSignal; a hung API leaves the page on 'Loading…' forever (main.ts:51)",
+        "app/src/pages/home.ts:108-118 — 150 ms debounce timer is never cancelled on teardown; firing after a Back navigation calls updateUrl (home.ts:104 → url-state.ts:20) and rewrites the current history entry to a stale '/?q=…' URL",
+        "app/server.mjs:70 — fs.createReadStream(file).pipe(res) has no 'error' handler; a mid-stream read error emits an unhandled 'error' event",
+        "app/server.mjs:41-62 — pageStatus does an upstream API round trip (3 s timeout) per deep-link HTML response, uncached"
+      ],
+      "rationale": "Race conditions, stale renders, XSS and 404s are handled carefully, but the missing fetch timeout, the unowned debounce timer and the unprotected file stream are genuine (if low-probability) fragilities the acceptance tests can't catch."
+    },
+    "global_abstractions": {
+      "score": 4,
+      "evidence": [
+        "app/src/api.ts:122-137 — one data module: typed API contracts, promise cache, NotFoundError; clean boundary every page shares",
+        "app/src/format.ts:1-31 — pure helpers only, no state",
+        "app/src/dom.ts:4-32 — 27-line h()/append primitive; earns its keep, no premature generic layer",
+        "app/src/url-state.ts:1-22 — hidden module-global 'shown' plus the markShown/isShown protocol implicitly couples main.ts and pages; the one abstraction a new contributor must reverse-engineer",
+        "app/src/components.ts:56-66 — speciesCards centralises the Pokémon→species mapping rule once instead of duplicating it per page"
+      ],
+      "rationale": "Boundaries are clean and each module has a single job; the url-state shown-key protocol is the only thing that will need untangling when a second page manages URL state."
+    },
+    "readability": {
+      "score": 4,
+      "evidence": [
+        "app/src/format.ts:12 vs app/src/pages/home.ts:43 — idFromUrl exists in format.ts but home.ts re-implements the same regex inline",
+        "app/src/pages/home.ts:71-139 — the longest module; nested closures (update/renderResults/select) are understandable but dense",
+        "app/src/components.ts:52-55 — why-comments where they matter (species↔Pokémon mapping), same in api.ts:125 and server.mjs:2-5",
+        "app/src/pages/pokemon.ts:11-17 — STAT_LABELS/METHOD_ORDER as named constants instead of magic strings",
+        "app/src/main.ts:13-25 — route table is declarative and trivially extensible"
+      ],
+      "rationale": "Names are precise, functions are short, constants are named, and the few comments explain intent; the only rough spot is the duplicated URL-id parser and home.ts's density."
+    },
+    "review_cost": {
+      "score": 4,
+      "evidence": [
+        "app/server.mjs:41-62 — blocking pageStatus probe: I'd ask for a cache or to drop the 404-status probe (spec marks it optional)",
+        "app/src/api.ts:131 — I'd ask for AbortSignal.timeout on the client fetch",
+        "app/server.mjs:70 — one-line ask: stream error handler",
+        "app/src/pages/home.ts:43 — one-line ask: reuse idFromUrl",
+        "app/src/pages/home.ts:74 — clamped page not reflected back to the URL ('?page=999' shows last page)"
+      ],
+      "rationale": "Everything I'd ask for is nits or small hardening asks; nothing requires structural rework, and I'd approve after one light round."
+    }
+  },
+  "overall": 4,
+  "findings": [
+    {
+      "severity": "medium",
+      "location": "app/server.mjs:41",
+      "issue": "pageStatus blocks every deep-link HTML response on an uncached upstream API request (up to 3 s timeout), doubling latency and re-fetching the resource the client will fetch again.",
+      "suggestion": "Cache the 404 verdict per path (or drop the probe — the spec makes a 404 status optional and the client already renders Not found)."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/api.ts:131",
+      "issue": "Client-side fetch has no timeout or abort; a hung API request leaves the page on the loading placeholder indefinitely (main.ts:51).",
+      "suggestion": "Pass AbortSignal.timeout(…), map aborts to a retriable error so the existing errorPage path handles it."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/pages/home.ts:108",
+      "issue": "The search debounce timer is never cancelled when the page is torn down; if it fires after a Back navigation it calls updateUrl and rewrites the current history entry to a stale '/?q=…' URL (and corrupts the shown-key state in url-state.ts).",
+      "suggestion": "Clear the timer in an unmount hook (the Page interface's mounted callback could gain a disposer), or have update() no-op when the page is no longer current."
+    },
+    {
+      "severity": "low",
+      "location": "app/server.mjs:70",
+      "issue": "fs.createReadStream(file).pipe(res) has no 'error' handler; a read error after headers are sent emits an unhandled 'error' event, which can take down the process.",
+      "suggestion": "stream.on('error', () => res.destroy()) before piping."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/pages/pokemon.ts:173",
+      "issue": "First paint of the Pokémon page waits for every move record of the default game (100+ parallel fetches for scarlet-violet); the Page.mounted hook exists but is unused.",
+      "suggestion": "Render the summary/stats/evolution immediately and fill the moves container when its fetches resolve (the token guard at pokemon.ts:149 already makes this safe)."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/pages/home.ts:43",
+      "issue": "Re-implements idFromUrl's regex inline instead of reusing the existing helper from format.ts:12.",
+      "suggestion": "Import and use idFromUrl."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/pages/home.ts:74",
+      "issue": "Out-of-range ?page= is clamped for display but never written back to the URL, leaving '?page=999' pointing at the last page.",
+      "suggestion": "Replace the URL with the clamped page when it differs from the requested one."
+    }
+  ],
+  "summary": "A clean, well-typed dependency-free Vite 8/TS 7 SPA that uses platform primitives correctly and handles the hard parts (stale renders, 404s, Pokémon→species mapping, XSS-safe rendering) with real care. The shared modules have clear boundaries; the only abstraction that needs untangling eventually is the implicit url-state shown-key protocol. I'd merge after one light round: server-side 404 probe caching, fetch timeouts, and three one-line hardening fixes."
+}
+```

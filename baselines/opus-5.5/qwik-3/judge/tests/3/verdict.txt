@@ -1,0 +1,77 @@
+## Review — Test quality
+
+The app contains **zero tests of its own**: no `test` script, no test runner in `devDependencies`, and no spec files anywhere under `app/` (the measured facts confirm `testLoc: 0`). The only trace of test awareness is leftover starter scaffolding — `app/.prettierignore:31-32` and `app/eslint.config.js:39-40` ignore `*.spec.tsx`/`*.spec.ts` — while Qwik's official stance is that Vitest is the de facto unit framework and `npm run qwik add vitest` plus the shipped `@builder.io/qwik/testing` (`createDOM`) make adding tests a one-command job. It wasn't done.
+
+That's a real loss here, because this app is unusually unit-testable: `app/src/lib/format.ts` is a file of pure functions covering exactly the spec's trickiest definitions (`humanize` at `app/src/lib/format.ts:12`, `idFromUrl` at `:21`, `orDash` at `:42`, `latestFlavorText` at `:35`, `title` at `:45`), and `app/src/lib/api.ts` plus the route loaders hold substantial data-transformation logic (alternate-form exclusion and dedup at `app/src/lib/api.ts:107-108`, sparse slot indexing at `:141`, moves-table aggregation in `app/src/routes/pokemon/[name]/index.tsx:69-101`, the sort comparator in `app/src/components/moves-table.tsx:38-49`). Every one of these is currently guarded only by the acceptance suite, which asserts rendered output for a handful of fixtures; the moment someone refactors the data layer, the following will slip through:
+
+- **`orDash(0)`** — a refactor to a truthiness check turns a legitimate `0` into `—` (app/src/lib/format.ts:42).
+- **`idFromUrl`** — the regex feeds both species ordering and the `id < 10000` alternate-form cutoff; a tweak reintroduces Mega forms into every list (app/src/lib/format.ts:21, app/src/lib/api.ts:107).
+- **dedup in `cardsForPokemon`** — dropping the `seen` check duplicates cards on type/move/ability pages (app/src/lib/api.ts:108).
+- **moves aggregation** — the `groups.at(-1)` default game, the `${method}:${level}` dedup key, and the method rank ordering (app/src/routes/pokemon/[name]/index.tsx:85, 92, 103).
+- **pagination/URL clamping** — `?page=999`, `page=0`, and non-numeric `page` all rely on `Math.min/Math.max` at app/src/routes/index.tsx:73-75.
+- **cache semantics** — 404s are negatively cached for 60 s and `cache.clear()` nukes everything at 5000 entries (app/src/lib/api.ts:18-34).
+
+```json
+{
+  "dimension": "tests",
+  "criteria": {
+    "coverage_of_risk": {
+      "score": 1,
+      "evidence": [
+        "app/package.json:10-20 — no test script; devDependencies contain no vitest/playwright",
+        "app/.prettierignore:31-32 — scaffolding ignores *.spec.ts(x) but none exist",
+        "app/src/lib/format.ts:12-45 — pure spec-critical helpers (humanize, idFromUrl, orDash) entirely untested",
+        "app/src/lib/api.ts:107-108 — alternate-form exclusion and dedup in cardsForPokemon untested"
+      ],
+      "rationale": "The app wrote no tests at all, so none of its risky logic — data transformation, filtering, pagination, URL state, cache — is covered by anything it owns."
+    },
+    "behaviour_not_implementation": {
+      "score": 1,
+      "evidence": ["app/src — zero spec files (grep for .test./.spec./vitest matches only ignore lists)"],
+      "rationale": "No tests exist, so the criterion can't be satisfied; per the scale, no tests maps to 1."
+    },
+    "regression_power": {
+      "score": 1,
+      "evidence": [
+        "app/src/lib/format.ts:42 — orDash(0) vs '—' would break silently under a truthiness refactor",
+        "app/src/routes/index.tsx:73-75 — page clamping (?page=999, page=0, NaN) guarded only by acceptance fixtures",
+        "app/src/components/moves-table.tsx:38-49 — sort direction and missing-last comparator untested"
+      ],
+      "rationale": "With no app-owned tests, any refactor of the data layer passes unchallenged; only the acceptance suite's handful of fixture pages would catch breakage."
+    },
+    "signal_to_noise": {
+      "score": 3,
+      "evidence": ["app/src — no test files to be noisy or purposeful"],
+      "rationale": "No tests means no noise, but also no signal; per the rubric this scores 3."
+    }
+  },
+  "overall": 1,
+  "findings": [
+    { "severity": "high", "location": "app/package.json:10-20", "issue": "No test script and no test runner installed, despite Qwik shipping first-party Vitest support (npm run qwik add vitest) and the starter scaffolding already ignoring *.spec.ts(x)", "suggestion": "Add vitest + @builder.io/qwik/testing and a test script; the pure helpers in src/lib/format.ts need no mocking at all" },
+    { "severity": "high", "location": "app/src/lib/format.ts:12-45", "issue": "Pure, spec-critical helpers (humanize, dexNumber, idFromUrl, lastEnglishEntry, cleanText, orDash, title) are untested — the cheapest, highest-value unit targets in the codebase", "suggestion": "Write table-driven tests from the SPEC.md definitions, e.g. humanize('mr-mime') → 'Mr Mime', orDash(0) → '0', orDash(null) → '—'" },
+    { "severity": "high", "location": "app/src/lib/api.ts:107-108", "issue": "Alternate-form cutoff (id < 10000) and per-id dedup in cardsForPokemon are untested; a regression re-admits Mega forms or duplicates cards on type/move/ability pages", "suggestion": "Unit test cardsForPokemon against a speciesById map with IDs 25, 386 and 10033 (deoxys-normal)" },
+    { "severity": "high", "location": "app/src/routes/pokemon/[name]/index.tsx:69-101", "issue": "Moves aggregation — default version group (groups.at(-1)), the `${method}:${level}` dedup key, and method rank ordering — is complex and untested", "suggestion": "Extract the aggregation into a testable function in src/lib and cover default-game selection, ?game override, and method ordering" },
+    { "severity": "medium", "location": "app/src/lib/api.ts:18-34", "issue": "Cache semantics untested: 404s are negatively cached for 60s, failures evict via value.catch, and cache.clear() drops everything past 5000 entries", "suggestion": "Test the cache with a stubbed fetch: 404 → null and cached, rejected promise removed from cache, TTL expiry refetches" },
+    { "severity": "medium", "location": "app/src/routes/index.tsx:73-75", "issue": "Page clamping and URL-default omission in listUrl/index (page=999, page=0, NaN, empty q) are only guarded by two acceptance fixtures", "suggestion": "Unit test listUrl and the clamping arithmetic directly — both are pure functions" },
+    { "severity": "medium", "location": "app/src/components/moves-table.tsx:38-49", "issue": "Sort comparator (missing-last in both directions, name tie-break, direction flip, aria-sort) untested; acceptance tests only click Power on one table", "suggestion": "Extract the comparator to src/lib and test ascending/descending with null power/accuracy/level values" },
+    { "severity": "medium", "location": "app/src/routes/index.tsx:82-95", "issue": "go() reads current filter values from the DOM via form.elements.namedItem('type'|'generation'); renaming a form field silently breaks filter navigation and no test would notice", "suggestion": "Hold filter state in signals instead of scraping the form, and add a test for 'changing type keeps the search term'" },
+    { "severity": "medium", "location": "app/src/lib/api.ts:141", "issue": "Sparse slot indexing (slots[entry.slot - 1] then filter(Boolean)) can silently shift type slot order if a slot-1 entry is missing", "suggestion": "Test speciesIndex with synthetic type data covering slots {1,2}, {2} and {1}" },
+    { "severity": "low", "location": "app/src/lib/api.ts:26,41-44", "issue": "api() throws on any non-2xx and apiOrThrow on generation details turns one failed sub-fetch into a 500 for the whole list page; no error-path coverage", "suggestion": "Add a graceful fallback in speciesIndex for failed generation fetches and a test with a failing endpoint" }
+  ],
+  "summary": "The app shipped no tests of its own — no runner, no script, no spec files — leaving its dense data-transformation layer (formatting helpers, alternate-form filtering, moves aggregation, sorting, pagination, caching) guarded only by the acceptance fixtures. Most of that logic is pure and trivially unit-testable, and Qwik's official Vitest integration would have made adding it a one-command setup. As a PR into a codebase we'll own for years, this is the dimension most in need of follow-up work.",
+  "wroteTests": false,
+  "testCount": 0,
+  "valuableTests": [],
+  "lowValueTests": [],
+  "untested": [
+    { "area": "format.ts pure helpers (humanize, dexNumber, idFromUrl, orDash, latestFlavorText, cleanText, title)", "risk": "high", "likelyBug": "orDash(0) rendered as '—', zero-padding/dex-number regressions, idFromUrl tweak re-admitting alternate forms, whitespace collapse lost so flavor text keeps \\n" },
+    { "area": "cardsForPokemon alternate-form exclusion and dedup (api.ts:107-108)", "risk": "high", "likelyBug": "Mega/regional forms (ID > 10000) reappearing in type/move/ability lists, or duplicate cards when a Pokémon appears via several references" },
+    { "area": "moves aggregation on the Pokémon page (default version group, per-method dedup, method ordering)", "risk": "high", "likelyBug": "Wrong default game selected, duplicate move rows, tables ordered alphabetically instead of Level Up/Machine/Egg/Tutor first, level column leaking into non-level-up tables" },
+    { "area": "in-memory API cache (404 negative caching, TTL, eviction)", "risk": "medium", "likelyBug": "404 cached past its usefulness after the API adds data, rejected promises cached forever, cache.clear() causing request storms" },
+    { "area": "home-page pagination and URL default omission (page clamping, listUrl)", "risk": "medium", "likelyBug": "?page=999 rendering an empty list, page=0 or NaN producing NaN slice offsets, q/page params re-serialized when at defaults" },
+    { "area": "moves-table client-side sorting comparator and aria-sort", "risk": "medium", "likelyBug": "missing values sorting first in descending order, direction flip ignored, aria-sort left on all headers after refactor" },
+    { "area": "speciesIndex slot indexing and generation mapping", "risk": "medium", "likelyBug": "type slots shown out of order when a slot-1 entry is absent, species with no generation entry silently filtered out by a future change" },
+    { "area": "404/not-found paths (missing Pokémon/move/ability/type, catchall)", "risk": "low", "likelyBug": "a status(404) returning 200 or the head title falling back wrongly" }
+  ]
+}
+```

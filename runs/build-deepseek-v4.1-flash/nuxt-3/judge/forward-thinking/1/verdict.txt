@@ -1,0 +1,131 @@
+## Review
+
+I read the spec, all 19 source files in `app/`, and verified the framework facts against the Nuxt docs and release notes: **Nuxt 4.6.3 is the current stable release (2026‑10‑27)**, and the app pins exactly it. Nuxt 4.6.0 (2026‑10‑05) introduced two things this review hinges on: the `nuxt/server` import surface for Nuxt 5 portability, and the rebuilt typed `$fetch`/`useFetch` — I confirmed the app generates route types at `app/.nuxt/server-routes.d.ts` but discards them. I also confirmed against the h3 v1 source (`src/utils/request.ts` on the v1 branch) that `getRouterParam` does **not** decode by default in h3 v1, but h3 v2 (Nuxt 5) decodes by default and its docs explicitly say "Do not decode the result again."
+
+**What holds up well:** upstream API access is behind exactly one module (`app/server/utils/pokeapi.ts`), server routes are thin 5-line wrappers, config is a single 10-line `nuxt.config.ts`, and the dependency list is just `nuxt` — no CSS framework, no axios, no state library. The current-generation APIs (`useFetch` with reactive URL + `await`, `useHead` as a function, type-only `defineProps`, `app/` directory layout, `[name].get.ts` routes) are used consistently, and nothing deprecated appears anywhere.
+
+**What will churn:** `useFetch<any>` in all six page fetches throws away the route-typed fetch Nuxt 4.6 just rebuilt; the 404 flow is a hand-rolled `notFound` flag copy-pasted into four page templates (including the title ternary) instead of the documented `throw createError({ status: 404 })` + `error.vue` pattern, and the HTTP status stays 200; server handlers rely on h3 auto-imports rather than `nuxt/server`, so the already-announced Nuxt 5 (Nitro 3 / h3 2) transition touches every server file and turns the manual `decodeURIComponent` into a documented double-decode bug; `compatibilityDate` is pinned to `2025-07-15` — the framework's own year-old default, not the current date the docs recommend. Platform use is solid but not first-choice: query strings and hrefs are hand-encoded where `URLSearchParams`/`router.resolve` apply.
+
+```json
+{
+  "dimension": "forward-thinking",
+  "criteria": {
+    "latest_apis": {
+      "score": 4,
+      "evidence": [
+        "app/package.json:11 — pins nuxt 4.6.3, the exact current stable released 2026-10-27 (github.com/nuxt/nuxt/releases)",
+        "app/pages/pokemon/[name].vue:116 — current-generation data loading: awaited useFetch with a reactive URL function",
+        "app/pages/pokemon/[name].vue:121 — useHead called with a reactive function, current idiom (nuxt.com/docs/4.x/api/composables/use-head)",
+        "app/components/PokemonCard.vue:21 — type-only defineProps, Nuxt 4 app/ directory layout throughout",
+        "app/server/api/pokemon/[name].get.ts:3 — defineEventHandler via h3 auto-import; Nuxt 4.6.0 added 'nuxt/server' explicitly so server code 'runs unchanged' on Nuxt 5, but it is not used",
+        "app/pages/index.vue:63 — useFetch<any> disables the fetchdts-based typed fetch 4.6 generates (app/.nuxt/server-routes.d.ts proves route types exist)",
+        "app/pages/moves/[name].vue:2 — 404s via a hand-rolled in-payload flag instead of the documented createError({status:404}) + error.vue pattern (nuxt.com/docs/4.x/getting-started/error-handling shows this exact useFetch case)"
+      ],
+      "rationale": "Built on the newest stable release with consistently current composables and no legacy or deprecated APIs, but it misses the two forward-facing additions of its own minor release — nuxt/server for Nuxt 5 portability and typed fetch — and handles 404s off-idiom."
+    },
+    "platform": {
+      "score": 3,
+      "evidence": [
+        "app/server/utils/pokeapi.ts:63 — native fetch, no HTTP client library; Map/Set/Promise.all used throughout",
+        "app/pages/index.vue:17 — native form controls with type=search, aria-sort and :focus-visible styling in app/assets/css/main.css:44",
+        "app/pages/index.vue:112-115 — hand-rolled query-string encoder (Object.entries + encodeURIComponent + join) where URLSearchParams applies",
+        "app/pages/index.vue:107-110 — pageUrl builds hrefs by string concatenation while router.replace at :119 already serializes the same queryObject — duplicated router behavior",
+        "app/server/utils/pokeapi.ts:26-28 — regex idFromUrl on API URLs instead of new URL(url).pathname parsing",
+        "app/pages/index.vue:124-133 — hand-rolled setTimeout debounce (defensible: avoids a dependency)"
+      ],
+      "rationale": "Fetch, ES modules, native form semantics and CSS custom properties are used well, but URL/query construction is hand-rolled twice where URLSearchParams or the router's own resolver are the platform/framework-first choice."
+    },
+    "dependencies": {
+      "score": 5,
+      "evidence": [
+        "app/package.json:8-10 — a single runtime dependency: nuxt",
+        "app/package.json:7 — scripts are plain nuxt build / node .output/server/index.mjs, no extra tooling",
+        "app/assets/css/main.css:1 — own CSS importing design tokens; no CSS/UI framework, satisfying the spec without adding one"
+      ],
+      "rationale": "One dependency, and it is the latest stable release of the framework itself; everything else the app needs is covered by the platform or Nuxt."
+    },
+    "churn_resistance": {
+      "score": 3,
+      "evidence": [
+        "app/server/utils/pokeapi.ts:1-490 — all upstream PokeAPI access, caching and name/i18n rules live in one module; the four route files are 5-line wrappers (server/api/[name].get.ts:1-6)",
+        "app/nuxt.config.ts:1-12 — configuration in one place; tsconfig.json extends the generated config",
+        "app/pages/pokemon/[name].vue:116, moves/[name].vue:53, abilities/[name].vue:31, types/[name].vue:53, index.vue:63, types/index.vue:23 — every fetch typed <any>, so the typed boundary the server module defines does not propagate; renames ripple silently",
+        "app/pages/pokemon/[name].vue:2 and 118-123, moves/[name].vue:2, abilities/[name].vue:2, types/[name].vue:2 — the NotFoundContent guard plus title ternary is copy-pasted into four pages instead of one createError/error.vue seam",
+        "app/server/api/pokemon/[name].get.ts:4 (also ability/move/type) — decodeURIComponent(getRouterParam(...)); under h3 v2 (Nuxt 5) getRouterParam decodes by default and h3.dev docs say 'do not decode the result again', so this becomes a bug on upgrade",
+        "app/nuxt.config.ts:9 — compatibilityDate '2025-07-15' is the framework's year-old default, not the current date Nuxt's B5001 guidance recommends, so newer defaults are silently not opted into"
+      ],
+      "rationale": "Data access is genuinely well-seamed (one module, thin routes, one config file), but untyped fetches, a copy-pasted 404 pattern and server code not written against nuxt/server mean an announced Nuxt 5 upgrade and any payload rename will ripple across many files."
+    }
+  },
+  "overall": 3,
+  "findings": [
+    {
+      "severity": "medium",
+      "location": "app/pages/index.vue:63",
+      "issue": "useFetch<any> at every call site discards the route-typed fetch Nuxt 4.6 generates for these exact handlers (app/.nuxt/server-routes.d.ts), leaving the page/server boundary untyped",
+      "suggestion": "Drop the <any> so responses infer from the server routes, and let app/server/utils/pokeapi.ts's exported types flow through"
+    },
+    {
+      "severity": "medium",
+      "location": "app/server/api/pokemon/[name].get.ts:3",
+      "issue": "Server handlers rely on h3 auto-imports; Nuxt 4.6.0 introduced the nuxt/server import surface specifically so this code survives the Nitro 3/h3 2 transition to Nuxt 5",
+      "suggestion": "import { defineEventHandler, getRouterParam } from 'nuxt/server' in the five server files"
+    },
+    {
+      "severity": "medium",
+      "location": "app/pages/moves/[name].vue:2",
+      "issue": "The 404 flow (in-payload notFound flag, NotFoundContent guard and title ternary) is duplicated across four page templates and leaves HTTP status at 200",
+      "suggestion": "Follow the documented pattern: throw createError({ status: 404 }) after useFetch and render a single error.vue"
+    },
+    {
+      "severity": "medium",
+      "location": "app/server/api/pokemon/[name].get.ts:4",
+      "issue": "decodeURIComponent(getRouterParam(...)) throws URIError on malformed input like /pokemon/% (a 500 instead of Not found), and double-decodes once h3 v2 decodes by default",
+      "suggestion": "Use getRouterParam(event, 'name', { decode: true }) and never re-decode the result"
+    },
+    {
+      "severity": "low",
+      "location": "app/nuxt.config.ts:9",
+      "issue": "compatibilityDate pinned to 2025-07-15, the framework's own stale default, rather than the current date Nuxt's B5001 guidance recommends",
+      "suggestion": "Set it to the current date to opt in to current Nitro/preset defaults"
+    },
+    {
+      "severity": "low",
+      "location": "app/pages/index.vue:112",
+      "issue": "Hand-rolled query-string encoder plus string-concatenated hrefs duplicate what URLSearchParams and the router already do, and will diverge if filters change",
+      "suggestion": "Build hrefs with router.resolve({ query }).href or URLSearchParams, keeping queryObject as the single source"
+    },
+    {
+      "severity": "low",
+      "location": "app/pages/types/index.vue:23",
+      "issue": "The types list fetches the full 1025-entry pokedex index (embedded into the __NUXT_DATA__ payload, which Nuxt 4.6 warns about above 100 kB) to render 18 links",
+      "suggestion": "Expose a small /api/types route, or pick the types field from the cached index server-side"
+    },
+    {
+      "severity": "low",
+      "location": "app/pages/index.vue:57",
+      "issue": "definePageMeta({}) is a no-op, and watch: [name] next to an already-reactive URL function (pokemon/[name].vue:117 and siblings) is redundant",
+      "suggestion": "Delete both; the reactive URL function alone re-triggers useFetch"
+    },
+    {
+      "severity": "low",
+      "location": "app/server/utils/pokeapi.ts:26",
+      "issue": "idFromUrl parses API resource URLs with a regex instead of the URL parser the platform provides",
+      "suggestion": "Use new URL(url).pathname.split('/') for robust parsing of the upstream API's URL shapes"
+    }
+  ],
+  "summary": "This is a lean, current-generation Nuxt 4.6.3 app: one dependency, one well-defined data module, one config file, and no deprecated APIs anywhere. It loses points on forward-thinking because it ignores the portability and type-safety APIs its own minor release just shipped — nuxt/server and typed fetch — and because 404 handling and URL handling are hand-rolled in ways that will churn on the already-announced Nuxt 5 upgrade. Fixing those is a small, localized effort that would move it to exemplary.",
+  "apis": [
+    { "api": "useFetch", "location": "app/pages/pokemon/[name].vue:116", "status": "current", "replacement": "" },
+    { "api": "useHead", "location": "app/pages/pokemon/[name].vue:121", "status": "current", "replacement": "" },
+    { "api": "definePageMeta", "location": "app/pages/index.vue:57", "status": "current", "replacement": "call is a no-op here; omit it" },
+    { "api": "defineEventHandler (auto-import)", "location": "app/server/api/pokemon/[name].get.ts:3", "status": "current", "replacement": "import { defineEventHandler } from 'nuxt/server' (Nuxt 4.6+) so the handler survives Nuxt 5 / Nitro 3 / h3 2" },
+    { "api": "getRouterParam", "location": "app/server/api/pokemon/[name].get.ts:4", "status": "current", "replacement": "pass { decode: true } instead of manual decodeURIComponent; h3 v2 decodes by default and forbids re-decoding" },
+    { "api": "createError / error.vue (not used)", "location": "app/pages/moves/[name].vue:2", "status": "current", "replacement": "the documented 404 pattern is throw createError({ status: 404 }) plus a single error.vue, not a per-page notFound flag" },
+    { "api": "compatibilityDate", "location": "app/nuxt.config.ts:9", "status": "current", "replacement": "use the current date, not the framework's 2025-07-15 default (Nuxt B5001 guidance)" }
+  ],
+  "dependencies": [
+    { "name": "nuxt", "verdict": "modern", "note": "4.6.3 is the latest stable (released 2026-10-27), the app's sole runtime dependency; exact pin is backed by a lockfile and there is no CSS/UI framework, HTTP client or state library" }
+  ]
+}
+```

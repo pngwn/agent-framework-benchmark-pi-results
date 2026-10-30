@@ -1,0 +1,122 @@
+## Review
+
+I read the whole of `app/` — routes, components, `lib/` (queries, server data layer, team store), config, and the CSS — and verified the framework choices against the current SolidStart v2 docs (released 2026-08-04): `vite.config.ts` with `solidStart()` + `nitro()` from `nitro/vite`, `query` + `"use server"` + `createAsync`, `route.preload`, `FileRoutes`, `createHandler(..., { mode: "async" })`, and `setSearchParams` deleting keys on `undefined`.
+
+**Idiom** — this is textbook current SolidStart v2. `app/vite.config.ts:5` matches the docs example exactly; `app/src/lib/queries.ts:4-12` is the documented `query` + `"use server"` pattern; `app/src/routes/index.tsx:9-15` uses `route.preload` as documented; `app/src/app.tsx:12` uses `FileRoutes`; `app/src/routes/pokemon/[name].tsx:96-102` uses `Switch/Match` on a nullable `createAsync` with `HttpStatusCode` 404 (`app/src/components/NotFound.tsx:8`); the team feature reuses the framework's own `createContext`/`useContext` and `getRequestEvent()` for SSR-safe cookie reads (`app/src/lib/team.ts:48-51`) rather than inventing a persistence mechanism. No home-grown router, reactivity or data layer.
+
+**Correctness** — 404s, form-alternate-form filtering, pagination clamping, dedup/in-flight caching, sorting with nulls-last and the coverage multiplier math are all handled deliberately. The main gap is error handling: `app/src/lib/server/pokeapi.ts:46` throws on any non-404 upstream response and there is no `ErrorBoundary` anywhere (`app/src/app.tsx:18-44`), so one API hiccup takes down every page. The rest is minor: TTL stamped at fetch start (`pokeapi.ts:49`), the sweep-every-500-writes magic number (`pokeapi.ts:51`), and the search-input resync effect that skips while a debounce timer is pending (`app/src/routes/index.tsx:29-37`).
+
+**Abstractions** — the `queries.ts` → `lib/server/pokeapi.ts` split is the right boundary (thin RPC layer, server-only data module, DTOs in `types.ts`), but `pokeapi.ts` has grown into a single 440-line module covering every resource, with the `typesById` construction and sprite-URL template copy-pasted between `homeList` and `teamDetails` (`pokeapi.ts:152-186` vs `:321-342`), and `first()` duplicated between routes.
+
+```json
+{
+  "dimension": "mergeability",
+  "criteria": {
+    "idiomatic": {
+      "score": 5,
+      "evidence": [
+        "app/vite.config.ts:5 — solidStart() + nitro(), exactly the SolidStart v2 docs pattern (v1's app.config.ts/vinxi correctly replaced)",
+        "app/src/lib/queries.ts:4-12 — query() with 'use server' bodies delegating to a server-only module, the documented data-fetching shape",
+        "app/src/routes/index.tsx:9-15 — route.preload warming getHomeFilters/getHomeList; matches the 'Preload route data' docs section",
+        "app/src/app.tsx:12,18-20 — FileRoutes plus Router root with MetaProvider/Suspense; @solidjs/meta for titles",
+        "app/src/entry-server.tsx:10-28 — createHandler with { mode: 'async' }, a documented HandlerOptions field",
+        "app/src/routes/pokemon/[name].tsx:96-102 — Switch/Match on a nullable createAsync for not-found handling, plus HttpStatusCode 404 in app/src/components/NotFound.tsx:8",
+        "app/src/lib/team-store.tsx:14-16 and app/src/lib/team.ts:48-51 — team state via createContext/useContext and getRequestEvent() cookie read, so SSR already has the right team"
+      ],
+      "rationale": "Routing, data loading, rendering and state all use the recommended primitives of the current stable release, including the v2-only bits (vite.config.ts, nitro/vite, createHandler mode). I found no pattern the docs warn against."
+    },
+    "correctness_risks": {
+      "score": 4,
+      "evidence": [
+        "app/src/lib/server/pokeapi.ts:46 — non-404 upstream responses throw, and app/src/app.tsx:18-44 has no ErrorBoundary, so any API hiccup escapes rendering unhandled on every page",
+        "app/src/lib/server/pokeapi.ts:49 — TTL is stamped before the fetch resolves, so slow responses shorten effective cache life",
+        "app/src/lib/server/pokeapi.ts:51 — sweep only runs every 500 writes (magic number); expired-but-unrequested entries linger until then",
+        "app/src/routes/index.tsx:29-37 — the q-resync effect skips while a debounce timer is pending, so the input can briefly desync from the URL after programmatic navigation",
+        "app/src/lib/server/pokeapi.ts:145-150 — alternate forms (>10000) are filtered everywhere, and page is clamped to pages at pokeapi.ts:178-179",
+        "app/src/components/MoveTable.tsx:29-32 — nulls sort last in both directions, avoiding the classic sort-NaN bug"
+      ],
+      "rationale": "Careful handling of 404s, clamping, form exclusion, dedup/in-flight caching and nulls-last sorting; I found no SSR/CSR mismatch, leaked listener or injection risk. The one real gap is the total absence of an error boundary, plus a couple of cache/timing nits."
+    },
+    "global_abstractions": {
+      "score": 4,
+      "evidence": [
+        "app/src/lib/queries.ts:1-45 — thin, uniform RPC layer; all routes depend on this plus lib/types, boundaries are clean",
+        "app/src/lib/server/pokeapi.ts:440 — single data module owning home, pokemon, moves, team, abilities and types; cohesive but approaching a god-module",
+        "app/src/lib/server/pokeapi.ts:152-160 vs :321-329 — the typesById construction is copy-pasted between homeList and teamDetails",
+        "app/src/lib/server/pokeapi.ts:114,185,341 — sprite URL template built three times",
+        "app/src/routes/index.tsx:7 vs app/src/routes/pokemon/[name].tsx:62 — duplicated param-coercion helper",
+        "app/src/lib/server/pokeapi.ts:26-28 — hidden module-level cache, but documented with a comment, TTL-bounded and swept"
+      ],
+      "rationale": "The layering (routes → components → queries → server module → types) is right and each abstraction earns its keep, but the server data module concentrates every resource in one file and carries three near-duplicate helper blocks that will need extracting as it grows."
+    },
+    "readability": {
+      "score": 4,
+      "evidence": [
+        "app/src/routes/ — flat per-resource file layout mirrors the URLs; a new teammate finds any page instantly",
+        "app/src/lib/server/pokeapi.ts:82-100 — terse helper names (seg, idFromUrl, mapLimit) keep the data layer compact but dense",
+        "app/src/entry-server.tsx:5-6 and app/src/lib/team-store.tsx:13-14 — comments explain why (async mode for fragment links; cookie on first render avoids label flash)",
+        "app/src/components/Section.tsx:1-15 — small, single-purpose components with a documented a11y contract",
+        "app/src/app.css:1-160 — token-driven CSS, consistently grouped by region; no magic values in components",
+        "app/src/routes/pokemon/[name].tsx:96-99,52-55 — p()/m()-style accessor shorthands are idiomatic Solid but add a small decoding cost"
+      ],
+      "rationale": "Organisation, naming and comments are consistently good and the 'why' comments are genuinely useful; the only rough spots are the density of the server data module and the terse accessor shorthands."
+    },
+    "review_cost": {
+      "score": 4,
+      "evidence": [
+        "app/src/app.tsx:18-44 — add an ErrorBoundary around props.children (one small ask)",
+        "app/src/lib/server/pokeapi.ts:152-186,321-342 — extract the duplicated typesById/sprite construction (mechanical)",
+        "app/package.json:6-9 — 'build' is only 'vite build'; no typecheck step, so TS errors won't fail CI",
+        "app/src/routes/index.tsx:7 — fold the duplicated param coercion into a shared helper"
+      ],
+      "rationale": "I would approve after one light round: an error boundary, a small dedup pass in the data layer, and a typecheck in the build script. Nothing structural needs to change."
+    }
+  },
+  "overall": 4,
+  "findings": [
+    {
+      "severity": "medium",
+      "location": "app/src/app.tsx:18-44",
+      "issue": "No ErrorBoundary anywhere in the tree; app/src/lib/server/pokeapi.ts:46 throws on any non-404 upstream response, so a single API failure produces an unhandled render error on every route.",
+      "suggestion": "Wrap props.children in an ErrorBoundary (app root) with a modest fallback page, and consider catching fetch failures in the query layer to surface a friendly error state."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/lib/server/pokeapi.ts:152-186",
+      "issue": "The typesById construction and sprite-URL template are duplicated verbatim between homeList (152-186) and teamDetails (321-342), and the sprite URL appears a third time at line 114.",
+      "suggestion": "Extract a shared pokemonTypesById()/cardFor() helper (cardsFor already exists for exactly this) and a single spriteUrl(id) constant."
+    },
+    {
+      "severity": "low",
+      "location": "app/package.json:6-9",
+      "issue": "'build' is only 'vite build'; TypeScript errors never fail the build, and there is no lint/typecheck script despite strict mode being on.",
+      "suggestion": "Add a 'typecheck': 'tsc --noEmit' script and run it in CI (or prepend it to build)."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/lib/server/pokeapi.ts:49-51",
+      "issue": "Cache TTL is stamped before the fetch resolves (slow responses eat into the 60s window) and the sweep interval is the magic number 500 with no named constant.",
+      "suggestion": "Set expires after resolution (or add the fetch duration to the TTL) and hoist the sweep interval to a named constant."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/routes/index.tsx:7",
+      "issue": "The array-vs-string search-param coercion is duplicated: first() here, an inline equivalent in app/src/routes/pokemon/[name].tsx:62.",
+      "suggestion": "Move a single firstParam() helper into lib/format.ts (or a small router-utils module) and use it in both routes."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/routes/index.tsx:29-37",
+      "issue": "The effect that resyncs the search input from the URL skips while a debounce timer is pending, so the input text can briefly disagree with the URL after back/forward or link navigation within the 150ms window.",
+      "suggestion": "Also flush/cancel the pending timer when the URL q changes externally, or compare and resync unconditionally when values differ."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/routes/team.tsx:12",
+      "issue": "getTeamDetails is called even when the team is empty, triggering species- and type-list fetches on the server for an empty result.",
+      "suggestion": "Guard with team.team().length, or make teamDetails short-circuit before its Promise.all when names is empty."
+    }
+  ],
+  "summary": "This is a well-executed SolidStart v2 app: the config, data fetching, routing and not-found handling match the current stable docs almost line for line, and the team feature integrates cleanly via the framework's own context and cookie mechanisms. The only structural weakness is that all server data logic lives in one 440-line module with a few copy-pasted helper blocks, and the app has no error boundary, so a single upstream failure escapes rendering unhandled. I would merge after one light round of changes."
+}
+```

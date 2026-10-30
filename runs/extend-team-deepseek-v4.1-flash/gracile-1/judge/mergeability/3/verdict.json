@@ -1,0 +1,122 @@
+{
+  "dimension": "mergeability",
+  "criteria": {
+    "idiomatic": {
+      "score": 4,
+      "evidence": [
+        "app/src/routes/(home).ts:9 — canonical defineRoute handler/template/document shape, matching the docs' annotated example",
+        "app/src/document.ts:35 — route-template-outlet outlet, exactly as the 'Defining the base documents' guide shows",
+        "app/src/routes/pokemon/[name].ts:171 — responseInit.status = 404, the documented way to set route status",
+        "app/server.js:5,19 — express.static(getClientBuildPath(...)) + gracile.nodeAdapter(handler): official Express adapter pattern",
+        "app/src/lib/api.ts:80 — home-grown isBuildRender keyed on the engine's internal 'gracile-static' stub hostname (no public API exists; verified currently correct in @gracile/engine render.ts)",
+        "app/src/document.client.ts:1 — all islands bundled globally instead of per-route *.client.ts entrypoints, losing Gracile's per-route bundle splitting"
+      ],
+      "rationale": "Recognisably idiomatic current-release Gracile end to end; the deviations are one internal-detail workaround and the global client bundle rather than per-route entrypoints."
+    },
+    "correctness_risks": {
+      "score": 3,
+      "evidence": [
+        "app/src/lib/api.ts:13 — cache Map is never evicted (only failed promises removed at api.ts:56); 404 nulls and arbitrary /moves/<name> URLs accumulate for the process lifetime",
+        "app/src/lib/api.ts:43 — no timeout on the upstream fetch; a hung API call holds one of the 24 concurrency slots forever",
+        "app/src/client/fragments.ts:4 — module-global AbortController shared by pokemon-browser, moves-panel and team-page; two fetching islands on one page would abort each other",
+        "app/src/client/pokemon-browser.ts:26 — popstate listener added with no disconnectedCallback cleanup (bounded in today's MPA, leak if lifecycle changes)",
+        "app/src/routes/(home).ts:32 — out-of-range ?page= is silently clamped, leaving the URL (?page=999) disagreeing with the rendered page",
+        "app/src/routes/pokemon/[name].ts:171 plus lib/data.ts getMove/getAbility/getSpecies — solid 404-to-null plumbing; lit templates give auto-escaping; api.ts:53 dedups concurrent fetches; client abort errors fall back to full navigation"
+      ],
+      "rationale": "No serious bugs — 404s, escaping and fetch races are handled deliberately — but there are a few real minors, chiefly the unbounded cache and the shared abort controller."
+    },
+    "global_abstractions": {
+      "score": 4,
+      "evidence": [
+        "app/src/lib/data.ts:1-430 — single server-side data module every route leans on; large but cohesive, sectioned, and never imported by client code",
+        "app/src/lib/team.ts:1-40 — pure shared cookie module used by both routes/team.ts:8 and client/team-store.ts:1; clean server/client boundary",
+        "app/src/client/fragments.ts:4 — hidden singleton state spanning three islands is the one abstraction with leaky edges",
+        "app/src/lib/data.ts:205-208, 284 and app/src/routes/pokemon/[name].ts:65-68, app/src/routes/moves/[name].ts:32 — slot-sort + label-lookup badge mapping duplicated four times"
+      ],
+      "rationale": "Abstractions are few and have clear boundaries; only the shared fetch controller and the badge-mapping duplication will need untangling later."
+    },
+    "readability": {
+      "score": 4,
+      "evidence": [
+        "app/src/routes/ — routes mirror URLs one-to-one, every one using the same load/defineRoute shape",
+        "app/src/lib/api.ts:1-3, app/src/lib/team.ts:1-2, app/src/client/sortable-table.ts:1-5 — comments explain why (caching strategy, cookie choice, sort contract), not what",
+        "app/src/routes/pokemon/[name].ts:123-279 — ~160 lines mixing data shaping, table templates and page layout; moveTables exported from the route file without a consumer",
+        "app/src/styles/app.css:1-79 — BEM-ish, consistently token-driven"
+      ],
+      "rationale": "A new teammate would find their way in minutes; rough spots are the dense Pokémon route file and the four-times-duplicated badge mapping."
+    },
+    "review_cost": {
+      "score": 4,
+      "evidence": [
+        "app/src/lib/api.ts:13 — cache eviction is the one change I'd actually require before approving",
+        "app/src/document.client.ts:1 — per-route client bundles requested but arguably shippable as a follow-up",
+        "app/src/lib/format.ts, app/src/components/partials.ts — shared helpers keep routes free of copy-paste; nothing in the diff needs explaining beyond its comments"
+      ],
+      "rationale": "Approve after a round of small, local changes; nothing structural or risky enough to bounce."
+    }
+  },
+  "overall": 4,
+  "findings": [
+    {
+      "severity": "medium",
+      "location": "app/src/lib/api.ts:13",
+      "issue": "In-memory cache is unbounded: entries (including cached null 404s for arbitrary user-supplied resource names) are never evicted, only replaced on access; memory grows for the life of the process.",
+      "suggestion": "Add a size cap (LRU) or a periodic sweep of expired entries alongside the existing TTL check."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/document.client.ts:1",
+      "issue": "Every page downloads all five islands' JS because the document imports them globally, defeating Gracile's per-route client bundle splitting.",
+      "suggestion": "Move island imports to per-route routes/*.client.ts entrypoints (e.g. (home).client.ts imports pokemon-browser, pokemon/[name].client.ts imports moves-panel/sortable-table/team-toggle)."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/lib/api.ts:80",
+      "issue": "isBuildRender couples to the engine's internal 'gracile-static' stub hostname; correct for @gracile/engine 0.11.0 (verified) but an undocumented internal with no stability contract.",
+      "suggestion": "Keep the helper but reference the engine version/behavior in the comment and add a build-time smoke test that would catch a hostname change."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/client/fragments.ts:4",
+      "issue": "Module-global AbortController shared by pokemon-browser, moves-panel and team-page; two fetching islands on the same page would silently cancel each other's in-flight fragment loads.",
+      "suggestion": "Create one AbortController per island instance (per #load call) instead of a module singleton."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/lib/api.ts:43",
+      "issue": "No timeout on the upstream PokeAPI fetch; a hung request occupies a concurrency slot (and the caller) indefinitely.",
+      "suggestion": "Wrap fetch with AbortSignal.timeout(...) (a few seconds) and let the existing failure-eviction path clean up."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/routes/(home).ts:32",
+      "issue": "Out-of-range ?page= is clamped to the last page while the URL keeps the bogus value, so the URL and rendered content disagree.",
+      "suggestion": "Redirect (or replaceState) to the clamped page's URL, or render 404 for out-of-range pages."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/client/pokemon-browser.ts:26",
+      "issue": "popstate listener registered in connectedCallback with no disconnectedCallback teardown.",
+      "suggestion": "Track the handler and remove it in disconnectedCallback (cheap insurance given fragment replacement happens nearby)."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/lib/data.ts:205",
+      "issue": "The slot-sorted type-badge mapping (sort by slot, label via typeLabels ?? humanize) is duplicated in data.ts (getTeamCards, getMoveTables) and in routes/pokemon/[name].ts:65 and routes/moves/[name].ts:32.",
+      "suggestion": "Extract a typesToBadges(types, labels) helper in data.ts next to TypeBadge and use it everywhere."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/document.ts:12",
+      "issue": "Asset hrefs computed at runtime via new URL('./styles/app.css', import.meta.url).pathname inject machine-specific absolute filesystem paths into the prerendered HTML; they only work because the engine strips and re-injects server assets in server output.",
+      "suggestion": "Use the documented root-relative string paths (e.g. href=\"/src/styles/app.css\") so the emitted HTML is position-independent."
+    },
+    {
+      "severity": "low",
+      "location": "app/package.json:12",
+      "issue": "lit is declared as a direct dependency but never imported: islands are vanilla custom elements and SSR html comes from @gracile/gracile/server-html.",
+      "suggestion": "Either rewrite the islands as LitElement components (the 'Gracile with Lit' flavor) or drop the unused direct dependency."
+    }
+  ],
+  "summary": "A genuinely well-built Gracile app on the current stable release: idiomatic route/document/adapter patterns, a clean server/client boundary, deliberate 404, escaping and race handling, and a team-builder feature that reuses the existing conventions rather than bolting on new ones. The blockers are minor: an unbounded API cache, all client JS shipped on every page instead of per-route entrypoints, and a couple of robustness nits (shared abort controller, no fetch timeout). I'd merge after one small round of changes."
+}

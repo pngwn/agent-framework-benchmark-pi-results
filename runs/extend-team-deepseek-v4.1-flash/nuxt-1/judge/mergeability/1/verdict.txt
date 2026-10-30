@@ -1,0 +1,134 @@
+# Review: Nuxt Pokédex (SPEC.md + team-builder feature)
+
+**What this is:** a Nuxt 4.6 full-stack app — pages in `app/app/pages`, Nitro server routes under `app/server/api` acting as a data layer over the local PokeAPI, a shared `server/utils/pokeapi.ts` client with a 60s in-memory cache, and browser team state in a cookie. The feature (team builder) was added via a new composable, a new server route and one new page, and it follows the existing conventions exactly.
+
+**Framework fit (verified against current Nuxt 4.6.x):** `nuxt.config.ts:1` sets `compatibilityDate: '2026-10-01'` on Nuxt `^4.6.2` (current stable line). The structure (srcDir `app/`, auto-imported components/composables/server utils), reactive-getter `useFetch` (`app/app/composables/format.ts:22`), `useAsyncData` with `watch` (`app/app/pages/team.vue:16-19`), `useCookie` for SSR-consistent client state (`app/app/composables/team.ts:8`), `useHead` via `usePageTitle`, and the `NUXT_PUBLIC_API_BASE` runtime-config override in the `start` script (`app/package.json:8`) are all exactly what the docs recommend. Using a cookie rather than `localStorage` for the team is the right call — it makes the "no flash of the wrong button label" requirement fall out of SSR for free.
+
+**What I'd push back on before approving:** the biggest one is `usePageData` throwing only at setup (`app/app/composables/format.ts:23-26`), so a client-side navigation that reuses the same route record (e.g. `/pokemon/a` → `/pokemon/b`) refetches but a 404 in that refetch never surfaces as the error page — the initial setup-time throw has already happened. In practice every in-app link carries a valid name, so it's latent, but it's a trap for anyone who later adds cross-links between arbitrary names. Second, the API cache (`app/server/utils/pokeapi.ts:5`) never evicts expired entries, so long-lived processes retain every distinct URL's parsed JSON (species records are large); a delete-on-expiry or bounded LRU would be safer. Third, the Pokémon endpoint fans out one fetch per move of the Pokémon (`app/server/api/pokemon/[name].get.ts:39`) — ~100–200 parallel requests per uncached view, more than the one selected game actually needs.
+
+Smaller nits: `humanize` is duplicated verbatim between client (`app/app/composables/format.ts:1`) and server (`app/server/utils/pokeapi.ts:39`) where Nuxt 4's `shared/` directory is designed for this; sprite-URL construction is likewise duplicated (`app/server/utils/pokeapi.ts:54` vs `app/app/pages/index.vue:48`); `composables/format.ts` mixes formatting helpers with data-fetching and head-title composables; the server layer is effectively untyped (`any` throughout) while each page hand-writes an interface describing the server's payload; and `index.vue`'s onMounted DOM-read hydration workaround (`app/app/pages/index.vue:82-86`) is clever but surprising.
+
+None of these block merge. Naming is consistent, components are small and single-purpose, comments explain *why* (cache TTL, cookie rationale, the hydration hack), and the feature diff reuses `PokemonCard`, `PageSection` and the existing data module rather than growing a parallel one.
+
+```json
+{
+  "dimension": "mergeability",
+  "criteria": {
+    "idiomatic": {
+      "score": 4,
+      "evidence": [
+        "app/nuxt.config.ts:1 — compatibilityDate 2026-10-01, css array, runtimeConfig.public; textbook Nuxt 4 config",
+        "app/app/composables/format.ts:22 — useFetch with reactive URL getter, correct current API",
+        "app/app/pages/team.vue:16-19 — useAsyncData + $fetch + watch on the reactive names; recommended pattern",
+        "app/app/composables/team.ts:8 — useCookie with maxAge/sameSite; SSR-consistent state instead of localStorage",
+        "app/package.json:8 — start script sets NUXT_PUBLIC_API_BASE, the documented runtimeConfig override",
+        "app/server/api/*.ts — Nitro server routes as the data layer over the external API, with server/utils auto-imports",
+        "app/app/composables/format.ts:1 — humanize duplicated verbatim with app/server/utils/pokeapi.ts:39; Nuxt 4's shared/ dir exists for this"
+      ],
+      "rationale": "Reads like the docs' own examples for data loading, state, routing and config; the only non-idiomatic touches are the duplicated client/server helpers and sprite-URL construction."
+    },
+    "correctness_risks": {
+      "score": 4,
+      "evidence": [
+        "app/app/composables/format.ts:23-26 — 404 is thrown only at setup; a fetch error on a same-record param change never re-surfaces",
+        "app/server/utils/pokeapi.ts:5 — cache Map never evicts expired entries, only overwrites on refetch; unbounded growth per distinct URL",
+        "app/server/api/pokemon/[name].get.ts:39 — Promise.all over every move of the Pokémon (~100+ parallel fetches per uncached view)",
+        "app/app/pages/index.vue:85-86 — onBeforeUnmount clears the debounce timer; no listener/timer leaks found",
+        "app/app/components/MovesTable.vue:56-58 — missing values sort last in both directions, as specified; tie-break ignores direction (trivial)",
+        "app/app/pages/team.vue:26-28 — shownMembers filters stale fetch data against the cookie, avoiding a flash on remove"
+      ],
+      "rationale": "Careful look found no serious bugs — error paths, SSR/CSR consistency and cleanup are handled; what remains is a latent 404-on-param-change gap, an unevicted cache, and a fetch fan-out."
+    },
+    "global_abstractions": {
+      "score": 4,
+      "evidence": [
+        "app/server/utils/pokeapi.ts:1-88 — single coherent API client (api, cache, cardsFor, labels); a data layer, not a god module",
+        "app/server/utils/pokeapi.ts:5 — module-level hidden cache is the one true global; honest and small but invisible to callers",
+        "app/app/composables/team.ts — team state is fully contained in one composable consumed by two pages",
+        "app/app/pages/index.vue:18-48 — client-side duplicate of spriteUrl/mediaBase logic instead of sharing the server helper",
+        "app/app/composables/usePageData (format.ts:21-27) — one thin wrapper used by every page; earns its keep"
+      ],
+      "rationale": "Abstractions are few and have clear boundaries; the deductions are the hidden module-level cache, the client/server duplication that shared/ would remove, and a utils-ish composable file that also owns data fetching."
+    },
+    "readability": {
+      "score": 4,
+      "evidence": [
+        "app/app/components/PageSection.vue:9-12 — small, self-explanatory presentational components throughout",
+        "app/server/utils/pokeapi.ts:1-2 — comments explain why (cache TTL, no build-time data), not what",
+        "app/app/composables/format.ts — mixes humanize/dexNumber with usePageData/usePageTitle; surprising home for data fetching",
+        "app/server/api/team.get.ts:12-19 — damageMultiplier and coverage logic are clear and locally named",
+        "app/server/api/pokemon/[name].get.ts:28-32 — typeLabels/moves/learnsets built with inline anys despite page-side interfaces"
+      ],
+      "rationale": "A new teammate finds their way in minutes: consistent naming, tiny components, why-comments. Rough spots are the mixed-purpose composable file and a largely untyped server layer."
+    },
+    "review_cost": {
+      "score": 4,
+      "evidence": [
+        "app/app/composables/format.ts:23-26 — reactive error surfacing after setup is the one change I'd insist on",
+        "app/server/utils/pokeapi.ts:5 — one-line cache eviction on expiry",
+        "app/app/composables/format.ts:1 — move humanize/sprite URL to shared/, delete the duplicate",
+        "app/app/pages/team.vue — feature diff fits existing conventions with no rework needed"
+      ],
+      "rationale": "Approve after one round of small, well-localized changes; nothing requires structural rework."
+    }
+  },
+  "overall": 4,
+  "findings": [
+    {
+      "severity": "medium",
+      "location": "app/app/composables/format.ts:23",
+      "issue": "usePageData throws createError only during setup, so when Nuxt reuses the same route record for a changed param (e.g. /pokemon/a → /pokemon/b), a 404 in the refetch never shows the error page.",
+      "suggestion": "Watch the fetch error reactively and call showError(createError(...)) when it becomes set, so 404s surface on client-side param changes too."
+    },
+    {
+      "severity": "low",
+      "location": "app/server/utils/pokeapi.ts:5",
+      "issue": "The in-memory cache never evicts expired entries (they are only overwritten on the next access), so a long-lived process retains the parsed JSON of every distinct URL visited.",
+      "suggestion": "Delete the entry when an expired hit is found, or cap the Map with a small LRU bound."
+    },
+    {
+      "severity": "low",
+      "location": "app/server/api/pokemon/[name].get.ts:39",
+      "issue": "Fetches every move of the Pokémon in one unbounded Promise.all (100+ parallel requests per uncached view) even though only the selected game's moves are ever displayed.",
+      "suggestion": "Collect only the move names referenced by the selected (or requested) version group's learnsets, or bound the concurrency."
+    },
+    {
+      "severity": "low",
+      "location": "app/app/composables/format.ts:1",
+      "issue": "humanize is duplicated verbatim between the client composable and server/utils/pokeapi.ts:39, and sprite URL construction is duplicated between pokeapi.ts:54 and app/app/pages/index.vue:48.",
+      "suggestion": "Move the pure helpers into Nuxt 4's shared/ directory so client and server use one implementation."
+    },
+    {
+      "severity": "low",
+      "location": "app/app/composables/format.ts",
+      "issue": "One composable file mixes formatting helpers (humanize, dexNumber, orDash) with usePageTitle and the usePageData fetching wrapper.",
+      "suggestion": "Split into usePageData.ts, usePageTitle.ts and utils; data fetching hidden in a file named format.ts is a surprise."
+    },
+    {
+      "severity": "low",
+      "location": "app/server/api/team.get.ts:7",
+      "issue": "The server data layer is effectively untyped (api<T = any>, damageMultiplier(attacking: any), etc.) while each page hand-writes a parallel interface describing the payload.",
+      "suggestion": "Define the payload types once (in shared/ or the server routes) and reuse them in the pages so the two can't drift."
+    },
+    {
+      "severity": "low",
+      "location": "app/app/pages/index.vue:83",
+      "issue": "The onMounted DOM read of the search input is a workaround for input typed before hydration; it works but is non-obvious and fragile.",
+      "suggestion": "Keep the comment (it has one) or simplify: let the debounced watcher reconcile from the ref, and drop the synthetic Event cast."
+    },
+    {
+      "severity": "low",
+      "location": "app/app/pages/team.vue:17",
+      "issue": "useAsyncData uses a static 'team' key; on client-side re-entry after changing the team elsewhere, whether the handler re-runs depends on Nuxt's async-data cleanup semantics, and shownMembers filtering only masks staleness in one direction.",
+      "suggestion": "Return undefined from getCachedData (or refresh on mount) so the page always reflects the current cookie."
+    },
+    {
+      "severity": "low",
+      "location": "app/app/components/MovesTable.vue:56",
+      "issue": "When two rows both have a missing value, the tie-break compares labels ignoring the sort direction, so ascending and descending can produce identical order for null-heavy columns.",
+      "suggestion": "Apply dir to the label tie-break, or accept it explicitly with a comment."
+    }
+  ],
+  "summary": "A genuinely idiomatic Nuxt 4 app: server routes as a data layer, reactive fetchers, cookie-backed team state that satisfies the no-flash requirement through SSR, and small single-purpose components with why-comments. The main merge blockers are small: a setup-only 404 throw that misses errors on client-side param changes, an unevicted server cache, and a move-fetch fan-out. I'd approve after one round of localized fixes."
+}
+```

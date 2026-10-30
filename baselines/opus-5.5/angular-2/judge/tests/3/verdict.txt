@@ -1,0 +1,129 @@
+## Review — test quality
+
+**The app's own suite is one file, three cases, eight assertions** (`app/src/app/shared/format.spec.ts:1-20`, run via the current vitest-based `@angular/build:unit-test` builder configured in `app/angular.json:33` and `app/package.json:11`). The tests are behavioural and clean — pure functions, no mocks, no snapshots — but they cover ~15 lines of trivial string formatting out of ~876 significant LOC. Every piece of genuinely risky logic is unguarded except by the acceptance Playwright suite.
+
+What's tested and what it would catch:
+
+- `humanize` (spec lines 4-8) — a regression here breaks every list label in the app.
+- `dexNumber` padding (lines 10-13) — catches a `padStart` off-by-one.
+- `orDash` null-vs-`0` distinction (lines 15-18) — a real edge case (power 0 is not "missing").
+
+What isn't tested — and this is where the money is:
+
+- **View-model construction** (`app/src/server/loaders.ts:116-180, 232-315`): English-name selection, "last English flavor text" (`latestFlavorText`, line 120 — picking the *first* instead of the *last* English entry would still pass for most species and is a classic silent regression), `$effect_chance` substitution (line 134), alternate-form exclusion and dex-sorting in `toCards` (lines 159-169), the move-row dedup key `${method}|move|level` and method-table ordering (lines 281-311, `METHOD_ORDER` line 180), default game selection "highest order" (line 260). All of this is pure-enough logic that would be cheap to unit test once extracted from the loaders, but nothing pins it.
+- **URL state / filtering / pagination** (`app/src/app/pages/home/home.ts:62-86`): the filter predicate, `page` clamping, `slice((page-1)*48, page*48)` math, and the "omit defaults from the query" rule in `updateFilters` (lines 88-91). An off-by-one or a lost `page: null` reset would only be caught by the acceptance suite's specific fixtures.
+- **Sortable move tables** (`app/src/app/pages/pokemon/move-table.ts:66-79`): spec-mandated "missing values sort last in both directions" and the flip-on-second-click `aria-sort` logic. Refactoring the comparator (e.g. dropping the null short-circuit) would reorder rows with no failing app-owned test.
+- **Caching layers** (`app/src/server/api-client.ts:31-71`, `app/src/app/data/page-data.ts:11-26`): TTL expiry, error eviction, 404→`ApiNotFoundError` mapping, TransferState handoff. Stale-data or swallowed-error bugs here are subtle and hard to reproduce.
+- **Not-found paths**: `apiFind` → `null` → `NotFound` rendering, the `/ _data` 404 (`app/src/server.ts:18-25`) and malformed-URI handling (`app/src/server/loaders.ts:394-397`).
+
+The acceptance tests currently mask all of this; the moment someone refactors the data layer, there is essentially no safety net in `app/`.
+
+```json
+{
+  "dimension": "tests",
+  "criteria": {
+    "coverage_of_risk": {
+      "score": 1,
+      "evidence": [
+        "app/src/app/shared/format.spec.ts:1-20 — the entire app-owned suite: three tests of trivial string helpers",
+        "app/src/server/loaders.ts:159-169 — toCards alternate-form exclusion and dex ordering, untested",
+        "app/src/server/loaders.ts:120-134 — latestFlavorText 'last English entry' and $effect_chance substitution, untested",
+        "app/src/app/pages/home/home.ts:62-86 — filtering, pagination slice and page clamping, untested",
+        "app/src/app/pages/pokemon/move-table.ts:66-79 — spec-mandated sorting with missing-values-last, untested",
+        "app/src/server/api-client.ts:42-71 — TTL cache, error eviction, 404 mapping, untested"
+      ],
+      "rationale": "Only three trivial pure helpers are tested; the data transformation, URL-state, sorting, pagination and caching logic — the code most likely to break under refactor — has zero app-owned coverage."
+    },
+    "behaviour_not_implementation": {
+      "score": 2,
+      "evidence": [
+        "app/src/app/shared/format.spec.ts:4-18 — asserts function inputs/outputs, no mocks, no internals",
+        "app/src/app/shared/format.ts:3-14 — the only code under test is three exported pure functions"
+      ],
+      "rationale": "The three tests that exist are behavioural (input→output on pure functions), but they are the only thing tested; behaviour of components, loaders and routing is entirely untested."
+    },
+    "regression_power": {
+      "score": 1,
+      "evidence": [
+        "app/src/app/shared/format.spec.ts:1-20 — would catch breakage of humanize/dexNumber/orDash only",
+        "app/src/server/loaders.ts:260-311 — game selection, move dedup and table ordering would pass through untouched",
+        "app/src/app/pages/home/home.ts:70-74 — a page-slice off-by-one or lost page-reset fails nothing in app/"
+      ],
+      "rationale": "Breaking any of the risky behaviours fails no app-owned test; the suite pins ~15 LOC of formatting helpers and nothing else."
+    },
+    "signal_to_noise": {
+      "score": 4,
+      "evidence": [
+        "app/src/app/shared/format.spec.ts:1-20 — lean, no duplication, no framework-testing noise",
+        "app/package.json:11 and app/angular.json:33-34 — vitest via the current @angular/build:unit-test builder, correctly wired"
+      ],
+      "rationale": "What little exists is purposeful with zero padding; the problem is absence, not noise. (Near-empty suite, so this can't earn 5.)"
+    }
+  },
+  "overall": 2,
+  "findings": [
+    {
+      "severity": "high",
+      "location": "app/src/server/loaders.ts:116-315",
+      "issue": "The core data-transformation logic (English name/flavor selection, alternate-form exclusion, move dedup, table ordering) is untested; 'first vs last English flavor entry' or dedup-key regressions would be silent.",
+      "suggestion": "Extract the pure helpers (englishName, latestFlavorText, shortEffect, toCards, move-table assembly) into plain functions with small fake payloads and unit-test them with vitest — the runner is already set up."
+    },
+    {
+      "severity": "high",
+      "location": "app/src/app/pages/home/home.ts:62-91",
+      "issue": "Filter predicate, pagination math, page clamping and the 'reset page / omit defaults' URL update are unguarded.",
+      "suggestion": "Test the filter/paginate computation directly (it's already nearly pure) and add a routing test for filter→URL round-trips."
+    },
+    {
+      "severity": "high",
+      "location": "app/src/app/pages/pokemon/move-table.ts:66-79",
+      "issue": "Spec-critical sorting semantics — missing values last in both directions, ascending-first flip, aria-sort — have no regression coverage.",
+      "suggestion": "Unit-test the rows() comparator with rows containing null power/accuracy, and a component test asserting aria-sort toggling."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/server/api-client.ts:31-71",
+      "issue": "TTL cache and error eviction are untested; a stale-hit or swallowed-error bug would be intermittent and hard to trace in production.",
+      "suggestion": "Inject a fake fetch/clock and test hit, expiry, failure eviction and 404→ApiNotFoundError mapping."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/app/data/page-data.ts:29-47",
+      "issue": "TransferState handoff and /_data 404→null→NotFound client-navigation path are untested.",
+      "suggestion": "Test PageData.load against a stubbed loader and TransferState for both the hydration-hit and miss branches."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/server/loaders.ts:391-410",
+      "issue": "loadPageData routing (unknown kind, extra segments, malformed escapes → null) has no coverage; a bad decode would 500 instead of 404.",
+      "suggestion": "Table-test loadPageData with a stubbed apiGet for each segment shape, including '%zz' escapes and trailing slashes."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/app/shared/format.spec.ts:1-20",
+      "issue": "The suite tests only three helpers, so its existence gives a false sense that unit testing is in place.",
+      "suggestion": "Use this file as the seed and grow coverage into loaders/home/move-table; the vitest builder is already configured."
+    }
+  ],
+  "summary": "The app ships a single, well-written vitest spec covering three trivial formatting helpers — behavioural and noise-free, but pinning ~15 lines out of ~876. All the genuinely risky logic (loader transformations, home filtering/pagination/URL state, move-table sorting, both cache layers, not-found paths) has zero app-owned coverage and relies entirely on the acceptance suite. Infrastructurally the vitest setup is current and correct, so the main ask is to extend it to the pure transformation functions before any data-layer refactor lands.",
+  "wroteTests": true,
+  "testCount": 3,
+  "valuableTests": [
+    "humanizes API names — would catch a capitalization/split regression that breaks every list label in the app",
+    "shows missing values as an em dash — pins the null/undefined/'' vs 0 and 'Special' distinction, a real edge case for move power",
+    "formats dex numbers — catches a padStart width regression in the '#0025' display rule"
+  ],
+  "lowValueTests": [],
+  "untested": [
+    { "area": "loaders.ts view-model construction (toCards alternate-form exclusion/dedup/dex sort, englishName, latestFlavorText, shortEffect $effect_chance)", "risk": "high", "likelyBug": "Mega/alternate forms leaking into lists, first-instead-of-last English flavor text, or raw '$effect_chance' placeholders rendering on move/ability pages" },
+    { "area": "Home page filtering, 48-per-page pagination, page clamping and URL query state", "risk": "high", "likelyBug": "Off-by-one page slice, lost page reset when filters change, or default params (page=1, empty q) polluting the URL" },
+    { "area": "Move table sorting: missing-values-last in both directions, ascending-first flip, aria-sort", "risk": "high", "likelyBug": "Null power/accuracy rows jumping to the top on descending sort, or aria-sort never flipping on second click" },
+    { "area": "Pokémon page: default game selection (highest order) and ?game= override; method table ordering", "risk": "high", "likelyBug": "Wrong default version group (first instead of last by order), duplicate move rows after dedup-key refactor, or Level Up/Machine/Egg/Tutor out of order" },
+    { "area": "api-client in-memory cache (TTL, error eviction, MAX_ENTRIES eviction, 404 mapping)", "risk": "medium", "likelyBug": "Stale data after a failed fetch, cached rejected promises surfacing as 500s, or 404s rendered as errors instead of Not Found" },
+    { "area": "PageData TransferState handoff and client-side /_data fetch (404→null)", "risk": "medium", "likelyBug": "Client navigation to an unknown Pokémon throwing instead of rendering Not Found, or hydration serving stale view models" },
+    { "area": "loadPageData path parsing (unknown segments, extra path parts, malformed URI escapes)", "risk": "medium", "likelyBug": "A '%zz' escape or trailing-segment URL throwing a 500 instead of returning null/Not Found" },
+    { "area": "Not-found rendering and /_data 404 status plumbing (server.ts /_data handler)", "risk": "medium", "likelyBug": "Unknown-resource pages returning 200 with an empty shell, or the JSON endpoint reporting 404 for valid resources" },
+    { "area": "Scroll restoration logic in App (app.ts:25-42)", "risk": "low", "likelyBug": "Scrolling to top when only a filter changes, or losing position on back-navigation" }
+  ]
+}
+```

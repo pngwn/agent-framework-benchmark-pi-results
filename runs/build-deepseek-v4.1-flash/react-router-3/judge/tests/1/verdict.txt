@@ -1,0 +1,142 @@
+I've read the spec, all seven route modules, `lib/data.server.ts`, `lib/format.ts`, `root.tsx`, and `package.json`. Findings on the test-quality dimension:
+
+## Reality check
+
+There are **no tests in `app/`** — confirmed by the measured facts (`testLoc: 0`, no runner in deps) and by inspection: `app/package.json:6-9` defines only `build`, `dev`, `start`, `typecheck`; there is no test script, no runner dependency (no vitest/playwright/node test), and not a single spec file anywhere under `app/`. The app's correctness rests entirely on the harness-owned acceptance suite in `tests/`, which the team won't own once this merges.
+
+## What the acceptance suite will stop guarding, and what bugs that invites
+
+The app contains a substantial amount of exactly the logic that breaks under refactor:
+
+- **Filter/pagination/URL-state pipeline** — `app/app/routes/home.tsx:34-71` chains type filter (species↔`type.pokemon` ID join), generation filter, and case-insensitive humanized search, then slices pages with a clamp (`Math.min(requestedPage, totalPages)`) and a `Math.max(1, …)` total-pages floor. The URL side is equally delicate: `home.tsx:131-144` debounces search (250 ms, `replace`), deletes `page` on every filter change, and `pageHref` (`home.tsx:175-182`) omits `page` at 1. A refactor that reorders these effects, or changes clamp/default-omission rules, silently breaks deep links like `/?type=fire&generation=generation-i`.
+- **Column sorting** — `app/app/routes/pokemon.tsx:56-77` (`compareRows`) implements missing-values-sort-last in *both* directions, numeric vs `localeCompare` dispatch, plus `aria-sort` state; default ordering for `level-up` vs other tables is separate (`pokemon.tsx:223-234`). A one-character change (`1`/`-1`, or `?? MAX_SAFE_INTEGER` dropped) inverts missing-last and nothing currently owned by the app fails.
+- **English-name / flavor-text selection** — `app/app/lib/format.ts:17-25` reverse-scans for the *last* English entry and collapses `\s+`; `englishName`/`displayName` (`format.ts:7-11`) fall back to humanized names. Picking the first instead of last, or matching the wrong language key, renders plausible-looking wrong text everywhere.
+- **Alternate-form exclusion** — the `id > 10000` cut is hand-rolled in four places: `app/app/lib/data.server.ts:109`, `home.tsx:51`, `ability.tsx:24`, `type.tsx:47`. Any one site drifting (or the `refId` regex at `data.server.ts:48-51` mis-parsing a URL shape) leaks Mega forms into one list but not the others.
+- **Promise cache** — `data.server.ts:12-21` evicts on rejection and keys `getResource` by lowercased name (`data.server.ts:59-61`) but `getByUrl` by raw URL. Key-collision or eviction bugs produce stale/cached-error behavior that's invisible until the API data changes (which the spec's `live-data-overlay.json` fixture explicitly exercises).
+- **Move-method grouping / default game** — `pokemon.tsx:157-160` picks the default game as the highest `order`, and `methodSortValue` (`pokemon.tsx:44-47`) enforces the Level Up/Machine/Egg/Tutor-then-alphabetical order. Both are pure logic, trivially unit-testable, currently untested.
+- **Smaller gaps**: the empty state keys off `cards.length` rather than `total` (`home.tsx:96-99`), so an enrichment failure would show "No Pokémon found" beside a nonzero count; `HashScroller`'s double-`setTimeout` scroll hack (`app/app/root.tsx:33-49`); and the not-found contract is duplicated as a `{ notFound: true }` loader flag + per-route render branch in five routes (e.g. `move.tsx:25`, `pokemon.tsx:144`) — nothing would fail if one route dropped its branch. (Throwing a 404 response would let the framework's `ErrorBoundary` centralize this; spec says HTTP 404 is encouraged but untested.)
+
+The framework usage itself is current and idiomatic — React Router v8.5.1 in framework mode with route-module loaders/meta, `react-router-serve`, `isRouteErrorResponse` — so none of the untested risk comes from outdated APIs; it's all the app's own transformation logic.
+
+Scores follow the rubric for a no-test submission: coverage and regression power at 1, signal-to-noise at the rubric's no-test neutral.
+
+```json
+{
+  "dimension": "tests",
+  "criteria": {
+    "coverage_of_risk": {
+      "score": 1,
+      "evidence": [
+        "app/package.json:6-9 — no test script or test runner dependency anywhere in the app",
+        "app/app/routes/home.tsx:34-71 — multi-filter + pagination + clamp logic, zero tests",
+        "app/app/routes/pokemon.tsx:56-77 — column sort with missing-values-last, zero tests",
+        "app/app/lib/format.ts:17-25 — latest-English flavor text selection, zero tests"
+      ],
+      "rationale": "No tests exist; the riskiest logic (filtering, pagination, URL state, sorting, language selection) is entirely uncovered by anything the team will own."
+    },
+    "behaviour_not_implementation": {
+      "score": 1,
+      "evidence": [
+        "app/app — zero test files (facts: testLoc 0, tests.files 0)"
+      ],
+      "rationale": "There are no tests to be behavioural or implementation-focused."
+    },
+    "regression_power": {
+      "score": 1,
+      "evidence": [
+        "app/app/routes/home.tsx:71-75 — pagination slice and page clamp would break silently on refactor",
+        "app/app/routes/pokemon.tsx:223-234 — default level-up ordering unguarded",
+        "app/app/lib/data.server.ts:109 — id>10000 alternate-form cut duplicated in 4 sites, unguarded"
+      ],
+      "rationale": "Once the acceptance suite is out of the picture, breaking any covered behaviour — i.e. all of it — fails nothing. A single sign flip in compareRows or reordering the debounce effects in home.tsx ships undetected."
+    },
+    "signal_to_noise": {
+      "score": 3,
+      "evidence": [
+        "app/app — no tests, hence no padding or noise"
+      ],
+      "rationale": "No tests means no low-value tests; per the rubric this is neutral, though the value a lean suite over format.ts and compareRows would have added is real."
+    }
+  },
+  "overall": 1,
+  "findings": [
+    {
+      "severity": "high",
+      "location": "app/package.json:6-9",
+      "issue": "No test runner, no test script, and no test files — the whole app depends on the harness-owned acceptance suite",
+      "suggestion": "Add vitest (or @react-router/dev's test tooling) and a 'test' script; start with unit tests for format.ts, data.server.ts helpers, and the home/pokemon loader logic"
+    },
+    {
+      "severity": "high",
+      "location": "app/app/routes/home.tsx:34-71",
+      "issue": "Filter pipeline, page clamping and pagination slicing are pure-ish logic with no coverage; deep-link URL-state contract (q/type/generation/page defaults, page reset on filter change) is only guarded by the external suite",
+      "suggestion": "Extract filtering/pagination into a testable function and add cases for combined filters, empty results, page > totalPages, and default-parameter omission"
+    },
+    {
+      "severity": "high",
+      "location": "app/app/routes/pokemon.tsx:56-77",
+      "issue": "compareRows implements missing-values-last in both sort directions plus numeric/string dispatch; a one-character change inverts it and nothing fails",
+      "suggestion": "Unit-test ascending/descending on each column with missing values present, and the default level-up (level, then name) ordering"
+    },
+    {
+      "severity": "medium",
+      "location": "app/app/lib/format.ts:17-25",
+      "issue": "latestEnglishFlavorText picks the LAST English entry with whitespace collapse; easy to regress to first entry or wrong language match",
+      "suggestion": "Unit tests with multi-language entries, \\n/\\f whitespace, and no-English cases"
+    },
+    {
+      "severity": "medium",
+      "location": "app/app/lib/data.server.ts:12-21",
+      "issue": "Promise cache with rejection-eviction and mixed key schemes (lowercased name vs raw URL) is untested; stale-error or key-collision bugs surface only when API data changes",
+      "suggestion": "Unit tests: rejected loads are evicted and retried; same resource by name and URL share cache correctly"
+    },
+    {
+      "severity": "medium",
+      "location": "app/app/lib/data.server.ts:48-51",
+      "issue": "refId regex parsing plus the id>10000 alternate-form exclusion duplicated at data.server.ts:109, home.tsx:51, ability.tsx:24, type.tsx:47 — four sites that can drift independently",
+      "suggestion": "Centralize the exclusion in one helper and test it against form URLs like /pokemon/10033/"
+    },
+    {
+      "severity": "medium",
+      "location": "app/app/routes/pokemon.tsx:152-160",
+      "issue": "Default game = highest order and method ordering (Level Up, Machine, Egg, Tutor, then alphabetical) are untested pure logic",
+      "suggestion": "Loader-level tests with a small fixture Pokémon asserting game selection from ?game= and fallback, and method table order"
+    },
+    {
+      "severity": "medium",
+      "location": "app/app/routes/home.tsx:96-99",
+      "issue": "Empty state keys on cards.length instead of total; an enrichment failure would render 'No Pokémon found' beside a nonzero count",
+      "suggestion": "Branch on total === 0; add a test asserting the count message and list are consistent"
+    },
+    {
+      "severity": "low",
+      "location": "app/app/root.tsx:33-49",
+      "issue": "HashScroller uses two setTimeouts (0/100 ms) to work around hydration timing; no test would catch it breaking when data loading timings change",
+      "suggestion": "A route-level test asserting /pokemon/pikachu#moves scrolls to #moves, or use ScrollRestoration's hash handling if sufficient"
+    },
+    {
+      "severity": "low",
+      "location": "app/app/routes/move.tsx:24-25",
+      "issue": "The notFound contract (loader flag + per-route render branch + meta branch) is duplicated across five routes; one route dropping its branch fails silently",
+      "suggestion": "Throw a 404 Response from loaders so the root ErrorBoundary centralizes handling, and test one unknown name per resource type"
+    }
+  ],
+  "summary": "The app contains zero tests and no test infrastructure; everything rests on the harness's acceptance suite. The most regression-prone code — home filtering/pagination/URL state, move-table sorting, English-name/flavor-text selection, the caching layer, and the quadruple-duplicated alternate-form exclusion — has no owned guard. Any refactor of the data layer or loaders after merge would ship bugs undetected.",
+  "wroteTests": false,
+  "testCount": 0,
+  "valuableTests": [],
+  "lowValueTests": [],
+  "untested": [
+    { "area": "Home filtering, pagination and URL state (q/type/generation/page, page reset on filter change, default omission)", "risk": "high", "likelyBug": "Reordered effects or changed clamp/default rules break deep links like /?type=fire&generation=generation-i and silently reset users to page 1 or strand them past the last page" },
+    { "area": "Move table column sorting (compareRows, aria-sort, default level-up ordering)", "risk": "high", "likelyBug": "Missing values start sorting first, direction flip breaks, or aria-sort values drift from column state" },
+    { "area": "Move-method grouping and default game selection on the Pokémon page", "risk": "high", "likelyBug": "Default game no longer the highest-order version group; method tables fall out of Level Up/Machine/Egg/Tutor order" },
+    { "area": "English name and latest English flavor text selection, whitespace collapse", "risk": "medium", "likelyBug": "First instead of last flavor entry, wrong-language text, or raw \\n/\\f rendered" },
+    { "area": "Alternate-form exclusion (id > 10000) duplicated across four call sites + refId URL parsing", "risk": "medium", "likelyBug": "Mega/form entries leak into the Type/Ability/Move 'Pokémon' lists or home filter on one page but not others" },
+    { "area": "In-memory promise cache (rejection eviction, lowercased-name vs raw-URL keys)", "risk": "medium", "likelyBug": "A failed fetch is cached as rejected forever, or the same resource is fetched twice under different keys" },
+    { "area": "Not-found paths for unknown pokemon/move/ability/type and unmatched URLs", "risk": "medium", "likelyBug": "A loader starts rendering a page for a missing resource instead of the Not found page" },
+    { "area": "Card building and sprite fallback (front_default ?? derived path) on the home page", "risk": "medium", "likelyBug": "Broken sprite URLs or the empty message shown when enrichment fails while the count still says e.g. '48 Pokémon'" },
+    { "area": "Formatting helpers (dexNumber padding, metres/kilograms conversion, stat labels, em-dash fallback)", "risk": "low", "likelyBug": "Off-by-one padding ('#25' instead of '#0025') or a missing-value rendering as '0' instead of '—'" },
+    { "area": "HashScroller #moves jump in root.tsx", "risk": "low", "likelyBug": "Anchor navigation stops landing on the Moves section when hydration timing changes" }
+  ]
+}
+```

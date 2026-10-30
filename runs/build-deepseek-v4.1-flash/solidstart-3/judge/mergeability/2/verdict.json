@@ -1,0 +1,127 @@
+{
+  "dimension": "mergeability",
+  "criteria": {
+    "idiomatic": {
+      "score": 4,
+      "evidence": [
+        "app/vite.config.ts:6-8 — solidStart({ ssr: false }) + nitro() matches the SolidStart v2 docs pattern exactly; deps are current stable (start 2.1.0, router 1.0.0, vite 8, nitro 3) per package-lock.json:1128-1150,2270",
+        "app/src/routes/api-proxy/[...path].ts:5 — file-based API route with APIEvent from @solidjs/start/server, the documented way to add server endpoints",
+        "app/src/app.tsx:15-28 — FileRoutes, Router root layout, MetaProvider/Title, Suspense: reads like the docs' root layout",
+        "app/src/routes/index.tsx:13-14,132 — data loading via createResource + .map() in JSX instead of the router's query/preload/createAsync (docs.solidjs.com/solid-router/data-fetching/how-to/preload-data) and <For>",
+        "app/src/app.tsx:11 — side effect (document.documentElement.lang) in a component body instead of in the entry/document shell",
+        "app/src/lib/api.ts:17-38 — hand-rolled TTL cache + inflight dedup reimplements what @solidjs/router's query() provides"
+      ],
+      "rationale": "Recognisably idiomatic against the current v2 docs everywhere structural (config, routing, API routes, meta); the deviations — createResource instead of query/preload, .map in JSX, a render-body side effect, a bespoke fetch cache — are nits plus one home-grown layer where the router ships a feature."
+    },
+    "correctness_risks": {
+      "score": 3,
+      "evidence": [
+        "app/src/lib/data.ts:28-31,67,80,96,110,118 — module-level memoized promises (speciesPromise ??= …) cache a rejected promise forever; a single transient API failure permanently breaks every page that shares the index",
+        "grep ErrorBoundary|catchError across app/src — no matches: no error boundary anywhere, so resource errors render the bare fallback h1 (app/src/routes/index.tsx:136-139) with no retry or message",
+        "app/src/routes/index.tsx:41-43 — the 200 ms debounce timer is only cleared on new input/unmount; clicking Next page (client nav keeps Home mounted) within the window lets setParams({ q, page: null }) bounce the user back to page 1",
+        "app/src/lib/api.ts:17-29 — TTL cache never evicts entries, but growth is bounded by the API's dataset size (~1.3k keys), so acceptable",
+        "app/src/lib/data.ts:215-250 — pokemon page loader catches each fetch individually and falls back to NotFound, which is the right pattern (contrast data.ts:82 where one generation fetch failure rejects everything)",
+        "app/src/components/MoveTable.tsx:118-128 — th onClick plus inner button with stopPropagation is redundant dual wiring, though not double-firing"
+      ],
+      "rationale": "Happy-path behaviour is solid and 404/edge handling in the page loaders is careful, but the permanently-cached rejection plus zero error boundaries is one serious robustness gap, with a couple of minor races/cache nits alongside."
+    },
+    "global_abstractions": {
+      "score": 3,
+      "evidence": [
+        "app/src/lib/data.ts (430 lines) — single data module every route imports (routes/index.tsx:6, pokemon/[name].tsx:9, moves/[name].tsx:7, abilities/[name].tsx:6, types/*:5-6); a god data module in the making",
+        "app/src/lib/data.ts:124,298,322,353 — the same `new Map(species.map((s) => [s.id, s]))` is rebuilt identically in getHomeData, getMovePage, getAbilityPage and getTypePage",
+        "app/src/lib/data.ts:28-32,118 — hidden module-level promise caches hold global mutable state shared across routes; fine here, but a seam that will bite when someone needs per-request or per-user data",
+        "app/src/lib/api.ts:17-38 + data.ts promise layer — two overlapping cache layers (TTL response cache and memoized derived-data promises) with different invalidation stories",
+        "app/src/routes/api-proxy/[...path].ts and app/src/routes/media/[...path].ts — the server/client boundary is clean and small: only these two routes are server code, everything else is client-only under ssr:false"
+      ],
+      "rationale": "Abstractions are mostly well-placed and boundaries are clean, but the central data module has grown into a god module with hidden global caches and four copies of the same lookup construction — untangling later is likely, not hypothetical."
+    },
+    "readability": {
+      "score": 4,
+      "evidence": [
+        "app/src/routes/, app/src/components/, app/src/lib/ — clear separation; components are small and single-purpose (Header.tsx, Footer.tsx, TypeBadge.tsx, PokemonCard.tsx)",
+        "app/src/lib/format.ts:8-15,44-64 — small, well-named pure helpers (humanize, englishName, typeLabel) that are easy to reason about",
+        "app/src/app.css:122,269,307,327,553 — CSS is sectioned with comments and named consistently with the components",
+        "app/src/lib/data.ts:330-331 — `.filter(({ id }) => id !== null && id <= 10_000 && !seen.has(id) && (seen.add(id), true))` comma-operator trick is cryptic",
+        "app/src/lib/data.ts — `any` throughout (interfaces exist for outputs at :175-200, but inputs like species/pokemon/type/move are untyped)",
+        "repo has 1 comment line total (app/src/routes/pokemon/[name].tsx:59) — mostly self-documenting, but the caching/fan-out strategy in lib deserves a note"
+      ],
+      "rationale": "A new teammate finds their way quickly: layout, naming and CSS are consistent and clean. The rough spots are concentrated in the data layer's any-typing and one or two clever one-liners."
+    },
+    "review_cost": {
+      "score": 3,
+      "evidence": [
+        "app/src/lib/data.ts:28-31,118 — rejection caching + no error boundary: must be fixed before merge (app/src/app.tsx has no ErrorBoundary wrapper)",
+        "app/package.json:6-10 — build is `vite build` only; no typecheck or lint step, so the strict tsconfig (app/tsconfig.json:17) is never enforced",
+        "app/src/routes/index.tsx:105,118,132 — `.map()` in JSX and `data()!` assertions to swap for `<For>`",
+        "app/src/lib/data.ts:124,298,322,353 — dedupe the speciesById construction",
+        "app/src/app.tsx:11 — remove the render-body side effect once lang is confirmed handled by the entry"
+      ],
+      "rationale": "One real round of changes: error recovery, enforced typechecking, and a handful of consistency cleanups. No architectural rework is needed, but it isn't an approve-with-nits either."
+    }
+  },
+  "overall": 3,
+  "findings": [
+    {
+      "severity": "medium",
+      "location": "app/src/lib/data.ts:28",
+      "issue": "Memoized module-level promises cache rejections permanently, and there is no ErrorBoundary anywhere in app/src, so one transient API failure leaves a blank fallback page for the whole session",
+      "suggestion": "Reset the cached promise on rejection (e.g. wrap with a .catch that clears the memo) and add an ErrorBoundary with a retry in app.tsx around props.children"
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/lib/data.ts:43",
+      "issue": "The entire data layer is typed `any` (species, pokemon, type, move details) under a strict tsconfig that nothing enforces — `npm run build` never runs tsc",
+      "suggestion": "Define interfaces for the API payloads (at least the top level of each resource) and add a `typecheck` script wired into build or CI"
+    },
+    {
+      "severity": "low",
+      "location": "app/src/routes/index.tsx:41",
+      "issue": "The search debounce timer isn't cleared when other params change; clicking Next page (which keeps Home mounted) within the 200 ms window lets the pending setParams reset page to 1",
+      "suggestion": "Clear the pending timer in onTypeChange/onGenerationChange and in the pagination handlers, or key the debounce on the whole query string"
+    },
+    {
+      "severity": "low",
+      "location": "app/src/routes/index.tsx:132",
+      "issue": "Lists rendered with `.map()` and `data()!` non-null assertions instead of `<For>`, inconsistent with every other route file",
+      "suggestion": "Use `<For each={pageItems()}>` and a non-asserted accessor inside the Show, matching moves/abilities/types routes"
+    },
+    {
+      "severity": "low",
+      "location": "app/src/lib/data.ts:124",
+      "issue": "The `speciesById` map construction is duplicated verbatim in getHomeData, getMovePage, getAbilityPage and getTypePage",
+      "suggestion": "Export a `getSpeciesById()` helper next to getSpeciesIndex() and reuse it"
+    },
+    {
+      "severity": "low",
+      "location": "app/src/lib/api.ts:17",
+      "issue": "Hand-rolled TTL cache + inflight dedup reimplements the dedup/caching that @solidjs/router's `query()` provides, adding a second caching layer on top of data.ts's memoized promises",
+      "suggestion": "Consider the router's `query` + `createAsync` (and route `preload`) so the framework owns dedup; at minimum document why the custom layer exists"
+    },
+    {
+      "severity": "low",
+      "location": "app/src/app.tsx:11",
+      "issue": "Side effect in a component body setting documentElement.lang, redundant with `lang=\"en\"` in entry-server.tsx's document shell",
+      "suggestion": "Rely on the entry document; if SPA mode bypasses entry-server, handle it there rather than in a render body"
+    },
+    {
+      "severity": "low",
+      "location": "app/src/lib/data.ts:330",
+      "issue": "Comma-operator dedup idiom `!seen.has(id) && (seen.add(id), true)` is clever but hard to scan",
+      "suggestion": "Use an explicit filter callback with a Set check on its own line, as done in getTypePage (data.ts:355-362)"
+    },
+    {
+      "severity": "low",
+      "location": "app/src/components/MoveTable.tsx:118",
+      "issue": "Header sorting is wired twice: onClick on the th plus a button with stopPropagation inside it",
+      "suggestion": "Keep only the button (better a11y semantics anyway) and drop the th onClick"
+    },
+    {
+      "severity": "low",
+      "location": "app/src/lib/api.ts:19",
+      "issue": "Cache entries are never evicted — the TTL is only checked on read — so the Map grows with every distinct resource requested",
+      "suggestion": "Fine at this dataset size, but either bound the Map or delete expired entries on read; add a comment stating the expected bound"
+    }
+  ],
+  "summary": "A genuinely current, recognisably idiomatic SolidStart v2 app: config, routing, API routes and meta all match the docs, and the URL-as-state home page plus careful 404 handling show the author knew the framework. The merge blockers are in the data layer: a 430-line `any`-typed god module with hidden promise caches that poison the whole session on a single failed fetch, no error boundary, and no enforced typecheck. I'd want one solid round of changes — error recovery, typed payloads, and a few consistency cleanups — before merging."
+}

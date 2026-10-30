@@ -1,0 +1,131 @@
+## Review: `app/` (Pokédex, Next.js)
+
+**Context check.** The app pins `next@16.4.3` — which *is* the current stable release as of today (v16.4.3, Oct 23 2026). But the Next.js 16.4 announcement (Oct 6 2026, nextjs.org/blog/next-16-4) recommends **Cache Components** ("the new programming model… will become the default in Next.js 17"; new `create-next-app` apps enable it by default), and the docs label fetch-based caching without `use cache` the "Previous Model" (nextjs.org/docs/app/getting-started/caching, 2026-10-06). That's the pivotal forward-thinking fact for this codebase: it is written entirely in the previous model.
+
+### What ages well
+
+- **Data access is centralized** in `app/src/lib/api.ts` (all HTTP, 404 handling, list walking) plus `app/src/lib/cards.ts` and pure helpers in `app/src/lib/format.ts`. An API change touches one module — genuinely good.
+- **Current stable APIs, correctly used**: `await connection()` (`app/src/lib/api.ts:44`, current per nextjs.org/docs/app/api-reference/functions/connection), Promise-based `params`/`searchParams` (`app/src/app/pokemon/[name]/page.tsx:14,113`), split `Metadata`/`Viewport` exports (`app/src/app/layout.tsx:3,11`), `notFound()` + `generateMetadata` per route, native `history.pushState/replaceState` URL-state pattern (`app/src/app/HomeView.tsx:66`, documented App Router behavior).
+- **Dependencies are as lean as it gets**: three runtime deps, zero CSS/UI packages, hand-written CSS with custom properties (`app/src/app/globals.css`, `tokens.css`).
+- Sensible config: `turbopack.root` via `import.meta.dirname` for the nested app dir, `compress: false`/`poweredByHeader: false` matching the reverse-proxy assumption (`app/next.config.ts:1-9`).
+
+### What will cause churn
+
+- **The whole data layer is the documented "Previous Model"** — `fetch(url, { cache: 'no-store' })` plus a hand-rolled module-scope `Map` TTL cache (`app/src/lib/api.ts:16-29,46-70`). Since 16.4 the recommended equivalent is `cacheComponents: true` + `'use cache'` with `cacheLife` profiles; that's exactly the API this cache re-implements by hand (in-flight promise dedup, expiry, eviction). When 17 makes Cache Components default, this is the module that gets rewritten. Spec-compliant (request-time data, short TTL), but built on the outgoing model.
+- **No static shell / streaming anywhere**: every route is fully dynamic with no `loading.tsx` or Suspense boundaries, so nothing benefits from PPR/instant-navigation guarantees the framework now optimizes for.
+- **Types at the API boundary are `any`**: `api<T = any>` (`app/src/lib/api.ts:46`) and `getMoves(pokemon: any)` with `s: any`/`a: any`/`t: any` map callbacks (`app/src/app/pokemon/[name]/page.tsx:58-111`). Domain types exist only *after* parsing (`Game`, `MoveInfo`, `CardData`, `IndexEntry`), so the raw API shape is untyped everywhere it matters; PokeAPI shape changes would surface as runtime bugs, not compile errors.
+- **`prefetch={false}` on essentially every link** (`app/src/components/PokemonCard.tsx:16`, `app/src/components/TypeBadge.tsx:12`, `app/src/app/pokemon/[name]/page.tsx:41,168,178`…). Valid today, but it deliberately opts out of the framework's navigation optimizations (incremental/partial prefetching) with no comment explaining why.
+- Minor: `new URLSearchParams(searchParams.toString())` round-trips what `useSearchParams` already provides (`app/src/app/HomeView.tsx:82`); per-table `<button>` sort headers rebuild sort state in `useState` rather than deriving from one place (`MovesSection.tsx:53`) — fine, just more hand-rolling than needed.
+
+### Scores
+
+- **latest_apis: 3** — Current stable version, current stable APIs throughout (async params, `connection()`, metadata/viewport, history-API URL state). But the data-loading/caching model is the one the framework itself now calls "Previous Model" and will flip defaults on in 17; a 16.4-era greenfield app built from current defaults would use `cacheComponents`/`use cache`.
+- **platform: 4** — Reaches for the platform readily: `URLSearchParams`/`URL` (`HomeView.tsx:31,42`, `MovesSection.tsx:118`), `fetch` with explicit `no-store`, `Array.at(-1)`, `padStart`, `localeCompare`, native `<select>`/`<form>`/`<dl>`, CSS custom properties and `rem` media queries. Only misses 5 because the in-memory cache hand-rolls something the framework/platform now provide, and sprite URLs are string-concatenated rather than `URL`-built (`PokemonCard.tsx:11-13`).
+- **dependencies: 5** — next 16.4.3 (exact pin), react 19.3.1, react-dom, and four dev-only type packages. Nothing heavy, nothing redundant; the platform/framework cover everything else.
+- **churn_resistance: 3** — One well-defined data module and pure shared helpers mean API/upstream changes are localized, and there's no reliance on framework internals. But the untyped `any` boundary and the bespoke cache are precisely the things a Next 17 / API-shape change would break silently.
+
+```json
+{
+  "dimension": "forward-thinking",
+  "criteria": {
+    "latest_apis": {
+      "score": 3,
+      "evidence": [
+        "app/package.json:8 — next pinned to 16.4.3, the current stable release (Oct 23 2026)",
+        "app/src/lib/api.ts:44 — await connection() from next/server, current stable API per nextjs.org/docs/app/api-reference/functions/connection",
+        "app/src/app/pokemon/[name]/page.tsx:14 — Promise-based params/searchParams, the current App Router contract",
+        "app/src/app/layout.tsx:3-15 — separate Metadata/Viewport exports, current pattern",
+        "app/src/lib/api.ts:16-70 — fetch cache:'no-store' + hand-rolled Map TTL cache: the docs call fetch-based caching without 'use cache' the 'Previous Model' (nextjs.org/docs/app/getting-started/caching, 2026-10-06); Next 16.4 announcement recommends Cache Components for every app and it becomes the default in Next 17 (nextjs.org/blog/next-16-4)"
+      ],
+      "rationale": "Every individual API used is current and stable in 16.4.3, and the version itself is exactly current. But the data-loading model is the one Vercel now brands 'Previous Model' and will replace by default in 17, so the app sits one major release behind the framework's direction."
+    },
+    "platform": {
+      "score": 4,
+      "evidence": [
+        "app/src/app/HomeView.tsx:42,82 — URLSearchParams for query build/parse; no hand-rolled query strings",
+        "app/src/app/pokemon/[name]/MovesSection.tsx:118 — new URL() + searchParams for game selection",
+        "app/src/lib/format.ts:10,24 — padStart and Array.at(-1) instead of index math",
+        "app/src/components/PokemonCard.tsx:15 — native img with width/height/loading/decoding, no lazy-loading library",
+        "app/src/app/globals.css:518 — rem-based media query; tokens.css custom properties throughout"
+      ],
+      "rationale": "Consistently reaches for native URL/history/fetch/Intl primitives and hand-written CSS on custom properties, with zero polyfills or shims. Not a 5 because the caching layer re-implements what the framework's use cache/cacheLife now provide, and sprite URLs are plain string concatenation (PokemonCard.tsx:11-13)."
+    },
+    "dependencies": {
+      "score": 5,
+      "evidence": [
+        "app/package.json:7-18 — exactly three runtime deps (next 16.4.3, react 19.3.1, react-dom 19.3.1) plus type-only devDeps",
+        "app/src/components — all UI hand-built; no CSS or component library, as the spec requires"
+      ],
+      "rationale": "Minimal, modern, exact-pinned framework version with React 19.3 matching what 16.4 ships; nothing a platform or framework primitive doesn't already cover."
+    },
+    "churn_resistance": {
+      "score": 3,
+      "evidence": [
+        "app/src/lib/api.ts — all HTTP access, 404 mapping and list walking behind one module; a PokeAPI change touches one file",
+        "app/src/lib/format.ts — pure, shared server/client helpers instead of duplicated inline logic",
+        "app/src/lib/api.ts:46 — api<T = any> default: the API response shape is untyped at the boundary",
+        "app/src/app/pokemon/[name]/page.tsx:58-111 — getMoves(pokemon: any) and any-typed map/sort callbacks throughout the page",
+        "app/src/components/PokemonCard.tsx:16 and app/src/components/TypeBadge.tsx:12 — prefetch={false} on every link, silently opting out of framework navigation optimizations with no comment"
+      ],
+      "rationale": "Centralized data access and pure helpers localize most change, and nothing depends on framework internals. But the untyped any boundary means upstream API changes fail at runtime rather than compile time, and the bespoke TTL cache is the one piece a Next 17 upgrade rewrites."
+    }
+  },
+  "overall": 3,
+  "findings": [
+    {
+      "severity": "medium",
+      "location": "app/src/lib/api.ts:16-70",
+      "issue": "Hand-rolled in-memory Map cache (TTL, promise dedup, LRU-ish prune) on top of fetch cache:'no-store' — this is the 'Previous Model' of data fetching, superseded by cacheComponents + 'use cache'/cacheLife which Next 16.4 now recommends and 17 makes the default.",
+      "suggestion": "Adopt cacheComponents: true + partialPrefetching: true in next.config.ts, mark api()/getTypeRecords() etc. with 'use cache' and a short cacheLife profile, and delete the custom cache. Keeps request-time freshness while removing the hand-rolled layer that a Next 17 upgrade would force anyway."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/app/pokemon/[name]/page.tsx:58-111",
+      "issue": "Pervasive any typing at the API boundary (getMoves(pokemon: any), any-typed sort/map callbacks) leaves the raw PokeAPI shape unchecked; upstream changes surface as runtime bugs.",
+      "suggestion": "Define minimal interfaces for the API payloads consumed (Species, Pokemon, MoveRecord, VersionGroup) in lib/api.ts and let api<T> default to them or require the type argument."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/app/pokemon/[name]/MovesSection.tsx:118-121",
+      "issue": "URL state is written via window.history.replaceState with manual pathname+search+hash reassembly rather than the router's URL helpers; works because App Router syncs with the history API, but the hash-assembly logic is brittle hand-rolling.",
+      "suggestion": "Use `url.href` (or router.replace with scroll:false) and keep only one place per page that owns query-string serialization."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/components/TypeBadge.tsx:12",
+      "issue": "prefetch={false} on nearly every Link in the app disables the framework's optimized prefetching (incremental/partial prefetching in 16.x) with no recorded reason.",
+      "suggestion": "Either enable prefetch for card/type links (they are the app's main navigation) or leave a comment explaining the deliberate opt-out so a future maintainer re-evaluates it."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/app/HomeView.tsx:82",
+      "issue": "new URLSearchParams(searchParams.toString()) round-trips an object that already exposes .get(); redundant conversion.",
+      "suggestion": "Read filters directly from the ReadonlyURLSearchParams passed to readFilters."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/app/HomeView.tsx:100-118",
+      "issue": "Pagination uses raw <a> plus manual pushState, preventDefault and window.scrollTo instead of next/link — hand-rolled router integration that a framework update or a11y review could invalidate.",
+      "suggestion": "Use <Link> with scroll handling (scroll={true}) or document that plain anchors are chosen to avoid RSC round-trips for purely client-side filtering."
+    }
+  ],
+  "summary": "A clean, minimal App Router app pinned to the exact current stable Next.js and using current stable APIs (connection(), async params, metadata/viewport split), with all data access funneled through one typed-enough module and only three runtime dependencies. The central forward-looking weakness is that its entire data layer — fetch with no-store plus a hand-rolled TTL cache, fully dynamic pages, no use of cacheComponents/'use cache' or streaming shells — is the model the framework now labels 'Previous Model' and flips defaults on in Next 17. Combined with an untyped any boundary against the upstream API, an upgrade will be localized but real; acceptable today, slightly behind the curve tomorrow.",
+  "apis": [
+    { "api": "next/server#connection", "location": "app/src/lib/api.ts:44", "status": "current", "replacement": "" },
+    { "api": "next/navigation#useSearchParams", "location": "app/src/app/HomeView.tsx:10", "status": "current", "replacement": "" },
+    { "api": "next/navigation#notFound", "location": "app/src/app/moves/[name]/page.tsx:16", "status": "current", "replacement": "" },
+    { "api": "next/link#default (prefetch prop)", "location": "app/src/components/TypeBadge.tsx:12", "status": "current", "replacement": "" },
+    { "api": "next#Metadata / next#Viewport exports", "location": "app/src/app/layout.tsx:3-15", "status": "current", "replacement": "" },
+    { "api": "Promise-based params/searchParams", "location": "app/src/app/pokemon/[name]/page.tsx:14", "status": "current", "replacement": "" },
+    { "api": "fetch cache:'no-store' + custom in-memory cache (previous data model)", "location": "app/src/lib/api.ts:46-53", "status": "legacy", "replacement": "cacheComponents: true with 'use cache' + cacheLife, recommended for all apps as of Next 16.4 (nextjs.org/blog/next-16-4), default in Next 17" },
+    { "api": "window.history.pushState/replaceState for URL state", "location": "app/src/app/HomeView.tsx:66,98", "status": "current", "replacement": "" }
+  ],
+  "dependencies": [
+    { "name": "next", "verdict": "modern", "note": "16.4.3, the current stable release, exact-pinned" },
+    { "name": "react", "verdict": "modern", "note": "19.3.1, the React version shipped with Next 16.4" },
+    { "name": "react-dom", "verdict": "modern", "note": "matches react 19.3.1" },
+    { "name": "typescript", "verdict": "established", "note": "^5, standard" },
+    { "name": "@types/node, @types/react, @types/react-dom", "verdict": "established", "note": "type-only devDeps, nothing extraneous" }
+  ]
+}
+```

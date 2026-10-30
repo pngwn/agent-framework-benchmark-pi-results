@@ -1,0 +1,163 @@
+I've reviewed the whole app (all 19 source files) against SvelteKit 3 / Svelte 5 conventions (which this codebase correctly targets: config in `vite.config.js` with the `sveltekit()` plugin, `#lib` subpath imports, runes mode, snippets, `$app/state`). Here's my review focused on editability.
+
+## Scenario walkthrough
+
+**1. Remove Abilities pages.** The feature lives entirely in `app/src/routes/abilities/[name]/` (2 files). The only inbound links are the Abilities section on the Pokémon detail page (`app/src/routes/pokemon/[name]/+page.svelte:90-100`) plus the abilities mapping built in its loader (`app/src/routes/pokemon/[name]/+page.server.js:90-99`, returned at `:187`). No nav link, no shared helper, no leftover types. Three files, ~5 small edits, no dead code risk. Difficulty 4.
+
+**2. Deoxys-style sprite fix.** Card objects are produced by *two independent pipelines*: `buildCards` in `app/src/lib/server/pokeapi.js:113-141` (covers moves/abilities/types pages) and an inline mapper in `app/src/routes/+page.server.js:76-84` (home page). Both hardcode the sprite pattern (`pokeapi.js:146`, `+page.server.js:79`). A fix that used the default variety's actual sprite would have to land in both — and the home loader never fetches Pokémon records at all (it only has the species list, `+page.server.js:11`), so it can't be fixed without restructuring. One fix does **not** cover every list of cards. Difficulty 2.
+
+**3. Sort every card list by name.** Data-layer-only sorting: change `buildCards`' comparator (`pokeapi.js:140`) and sort `filtered` in the home loader — 2 files, small. Per-list UI sorting would touch 4 templates (`routes/+page.svelte:112`, `moves/[name]/+page.svelte:54`, `abilities/[name]/+page.svelte:21`, `types/[name]/+page.svelte:36`) since the `<ul class="card-grid">{#each}` scaffold is repeated rather than extracted into a CardList component. Difficulty 3.
+
+**4. Items section shaped like Moves.** Moves is two small files using shared seams: `#lib/format` helpers, `PokemonCard`, `buildCards`, and the `.panel`/`.facts` classes. An Items route is new code that reuses all of those; the copy cost is the ~30-line page scaffold (section/panel + `dl` facts markup) which is duplicated by design rather than componentized. Difficulty 4.
+
+**5. API base URL / caching rules.** Base URL is a single constant (`pokeapi.js:3`) and all caching lives in one `memo` function (`pokeapi.js:6-16`) — excellent. The one leak: the home loader re-derives a media URL inline (`+page.server.js:79`) instead of importing a shared `spriteUrl`, so the URL *pattern* is known in two files. Difficulty 4.
+
+## Findings summary
+
+The architecture is genuinely good: a server-only data module with promise-level memoization, presentational components with narrow props (MoveTable receives a fully-precomputed, sort-ready table), and all name/formatting rules centralized in `format.js`. The main editability tax is the home page's parallel card pipeline and a few copy-paste seams (MoveTable's column set defined three times, panel scaffold repeated per page, near-duplicate `buildCard`/`hiddenCard`).
+
+```json
+{
+  "dimension": "editability",
+  "criteria": {
+    "removability": {
+      "score": 4,
+      "evidence": [
+        "app/src/routes/abilities/[name]/ — feature fully contained in one route dir",
+        "app/src/routes/pokemon/[name]/+page.svelte:90-100 — the only inbound links (Abilities section)",
+        "app/src/routes/pokemon/[name]/+page.server.js:90-99 — abilities mapping to delete alongside",
+        "app/src/routes/+layout.svelte:15-18 — nav has no Abilities link, so nothing dangles"
+      ],
+      "rationale": "Deleting Abilities means removing one directory plus two small edits in the Pokémon detail page's template and loader; no shared code is orphaned and no nav/router registry needs updating."
+    },
+    "changeability": {
+      "score": 3,
+      "evidence": [
+        "app/src/lib/format.js — humanize/englishName/displayValue centralize every display rule (one place, good)",
+        "app/src/lib/server/pokeapi.js:146 vs app/src/routes/+page.server.js:79 — sprite URL pattern duplicated in two modules",
+        "app/src/routes/+page.server.js:76-84 — home builds card objects inline instead of via buildCards, so card-shape/sprite fixes land twice",
+        "app/src/lib/components/MoveTable.svelte:7,17,88-103 — column set defined three times inside the component, plus makeRow in pokemon/[name]/+page.server.js:64-82"
+      ],
+      "rationale": "Most behaviour changes (naming, formatting, caching) land in one obvious module, but card construction is duplicated across two independent pipelines and MoveTable column changes need four touch points in two files."
+    },
+    "coupling": {
+      "score": 4,
+      "evidence": [
+        "app/src/lib/server/pokeapi.js — imported only by +page.server.js files (grep), so server-only state can't leak into components",
+        "app/src/lib/components/MoveTable.svelte:3 — single precomputed table prop, no fetching or API knowledge in the component",
+        "app/src/lib/components/PokemonCard.svelte — presentational, props-only, reused by 4 pages",
+        "app/src/routes/+page.svelte:5-8 — URL/filter state is local and explicit; no stores or context magic",
+        "app/src/lib/components/PokemonCard.svelte:210-233 styles — .pokemon-card styles live in global app.css:210, so component markup is coupled to a distant stylesheet"
+      ],
+      "rationale": "Clean server/client separation and narrow, presentational component interfaces; the tangles are the implicit card-object shape shared by two producers and the global stylesheet as an implicit class-name contract."
+    },
+    "abstraction_design": {
+      "score": 4,
+      "evidence": [
+        "app/src/lib/server/pokeapi.js:113-141 — buildCards absorbs real API variation (pokemon refs vs raw entries, hidden flags, alternate-form filtering) for 3 pages",
+        "app/src/lib/format.js:6-10,31-33 — englishName/latestEnglishFlavorText/displayValue are exactly the variation the app has",
+        "app/src/lib/server/pokeapi.js:150-166 — buildCard/hiddenCard near-duplicates that stretch poorly",
+        "app/src/routes/+page.server.js:76-84 — home re-implements card building rather than reusing the abstraction",
+        "app/src/routes/types/[name]/+page.svelte:33-41 — panel/section scaffold repeated per page rather than extracted, so similar new sections are copied"
+      ],
+      "rationale": "The core abstractions are shaped around real variation and stretch well to an Items-like section, but the home page bypasses buildCards and a few near-duplicates (card factories, panel scaffold, MoveTable columns) would be copied rather than reused."
+    }
+  },
+  "overall": 4,
+  "findings": [
+    {
+      "severity": "medium",
+      "location": "app/src/routes/+page.server.js:76",
+      "issue": "The home page builds Pokémon card objects inline, duplicating the card construction that buildCards does in lib/server/pokeapi.js; changes to card shape or sprite logic must be made twice, and this pipeline has no Pokémon records so it can't be fixed the same way buildCards can.",
+      "suggestion": "Extract a single card factory (shared by buildCards and the species-list path, e.g. a buildCardsFromSpecies sibling) so every list of cards is produced in one module."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/routes/+page.server.js:79",
+      "issue": "Sprite URL pattern '/media/sprites/pokemon/<id>.png' is duplicated here and in pokeapi.js spriteUrl (line 146); a media-URL change needs two edits.",
+      "suggestion": "Export spriteUrl from the data module (or include the sprite in a shared card factory) and import it in the home loader."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/lib/components/MoveTable.svelte:7",
+      "issue": "The column set is defined three times in the component (columns array, valueFor switch, hardcoded <td> cells) plus makeRow on the server, so adding/removing a column touches four spots across two files.",
+      "suggestion": "Drive headers and cells from one column descriptor list (key, label, renderer) so the definition exists once per side."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/lib/components/PokemonCard.svelte:3",
+      "issue": "Two mechanisms carry the same fact: the card object already has a hidden field (pokeapi.js:159) but the component reads a separate hidden prop, only passed by abilities/[name]/+page.svelte:27; other pages silently ignore the data field.",
+      "suggestion": "Drop the prop and read pokemon.hidden (or derive it) so the data is the single source."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/lib/server/pokeapi.js:150",
+      "issue": "buildCard and hiddenCard are near-duplicates that differ only in the hidden flag — exactly the boolean-flag creep that grows when card fields change.",
+      "suggestion": "One factory with a hidden parameter, or set hidden after construction."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/app.css:201",
+      "issue": "All component styles (e.g. .pokemon-card at 210, card-grid at 201) live in a 596-line global stylesheet, so editing a component's appearance means editing a distant file and relying on an implicit class-name contract rather than Svelte's scoped styles.",
+      "suggestion": "Co-locate component styles in <style> blocks (PokemonCard, MoveTable) and keep only tokens/layout/shared classes in app.css."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/routes/types/[name]/+page.svelte:33",
+      "issue": "The section/panel scaffold (<section class=\"panel\" aria-labelledby> + h2 + '<count> Pokémon' intro) is hand-repeated in every page template, so a scaffold change or a new Items-like page copies it again.",
+      "suggestion": "Extract a small Section snippet/component (heading slot + children) and reuse it across pages."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/routes/+page.svelte:50",
+      "issue": "Home hardcodes <title>Pokédex</title> while its loader also returns title: 'Pokédex' (+page.server.js:87) — the server-returns-title convention used by every other page is inconsistent, and the returned field is dead data.",
+      "suggestion": "Render {data.title} like the other pages (or stop returning it)."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/lib/server/pokeapi.js:166",
+      "issue": "mapLimit, a generic concurrency utility, is defined in and exported from the API module, so a future generic helper either stays stranded in a data file or triggers a move-and-reimport across loaders.",
+      "suggestion": "Move it to a neutral #lib/util module."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/routes/pokemon/[name]/+page.svelte:49",
+      "issue": "The `type-badge type-${name}` class composition is hand-built in five templates (also MoveTable.svelte:93, moves/[name]/+page.svelte:19, types/[name]/+page.svelte:22, PokemonCard.svelte:15), an implicit convention spread across the UI.",
+      "suggestion": "A tiny TypeBadge component (or shared snippet) would centralize the class scheme and link building."
+    }
+  ],
+  "summary": "A well-structured SvelteKit 3 app with a genuinely good data layer: server-only memoized fetching, centralized formatting rules, and presentational components with narrow interfaces, so most changes land in one predictable place. The main editability cost is the home page's parallel card/sprite pipeline that duplicates buildCards and would force any card-level fix to be made twice, once without access to the data needed. Secondary seams (MoveTable's triple-defined columns, repeated panel scaffold, global-only styles) are small but will each require copy-paste when stretched.",
+  "scenarios": [
+    {
+      "change": "Remove the Abilities pages and every link to them",
+      "files": ["app/src/routes/abilities/[name]/+page.server.js", "app/src/routes/abilities/[name]/+page.svelte", "app/src/routes/pokemon/[name]/+page.svelte", "app/src/routes/pokemon/[name]/+page.server.js"],
+      "difficulty": 4,
+      "notes": "Self-contained route dir; only inbound links are the Abilities section on the Pokémon detail page (template lines 90-100 and the loader's abilities mapping at 90-99/187). No nav link or shared helper to unwind."
+    },
+    {
+      "change": "Fix the card sprite for species whose default Pokémon has a different name (e.g. Deoxys)",
+      "files": ["app/src/lib/server/pokeapi.js", "app/src/routes/+page.server.js"],
+      "difficulty": 2,
+      "notes": "Two independent card pipelines each hardcode the sprite URL (pokeapi.js:146, +page.server.js:79). The fix is easy in buildCards, but the home loader never fetches Pokémon records, so covering every list means restructuring its data loading, not just editing a URL."
+    },
+    {
+      "change": "Add sorting by name to every list of Pokémon cards",
+      "files": ["app/src/lib/server/pokeapi.js", "app/src/routes/+page.server.js"],
+      "difficulty": 3,
+      "notes": "Data-layer-only sorting touches two places (buildCards' comparator at 140, plus sorting `filtered` in the home loader). Per-list UI sorting would be worse: the `<ul class=\"card-grid\">` scaffold is repeated in four templates because there's no CardList component."
+    },
+    {
+      "change": "Add an Items section (/items, /items/:name) shaped like Moves",
+      "files": ["app/src/routes/items/[name]/+page.server.js", "app/src/routes/items/[name]/+page.svelte"],
+      "difficulty": 4,
+      "notes": "Everything Moves depends on is shared and reusable: format helpers, PokemonCard, buildCards, and the panel CSS classes. The ~30-line page scaffold (section/facts dl) is copied per page, which is the main duplication, and the Moves route has nothing entangled to work around."
+    },
+    {
+      "change": "Change the API base URL and caching rules",
+      "files": ["app/src/lib/server/pokeapi.js"],
+      "difficulty": 4,
+      "notes": "Base URL is one constant (line 3) and all caching is one memo function (lines 6-16). Only wrinkle: the media-URL pattern is re-derived inline in the home loader (line 79) instead of importing a shared spriteUrl, so a URL-pattern change touches two files."
+    }
+  ]
+}
+```

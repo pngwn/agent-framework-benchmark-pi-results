@@ -1,0 +1,104 @@
+{
+  "dimension": "mergeability",
+  "criteria": {
+    "idiomatic": {
+      "score": 4,
+      "evidence": [
+        "app/astro.config.mjs:5 — output: 'server' with @astrojs/node standalone, matching current Astro 7 docs",
+        "app/package.json:14-16 — astro ^7.4.2 with @astrojs/node ^11.1.9 (peer dep astro ^7.2.1), versions are current and matched",
+        "app/src/pages/pokemon/[name].astro:21-30 — top-level await data loading plus Astro.response.status = 404, both current APIs",
+        "app/src/components/EvolutionTree.astro:19 — Astro.self recursion, the documented way to do recursive components",
+        "app/src/components/Section.astro:9 — class:list and aria-labelledby sections, idiomatic Astro",
+        "app/src/styles/global.css:1 — all 452 lines of CSS live in one global file instead of Astro's default scoped component styles"
+      ],
+      "rationale": "Recognisably current Astro: correct output mode, adapter, frontmatter data loading, Astro.response.status and Astro.self. Two soft divergences from the framework's grain: a single global stylesheet rather than scoped component styles, and hand-rolled fetch/DOMParser page-patch scripts where Astro offers ClientRouter — though the vanilla approach is defensible for this size."
+    },
+    "correctness_risks": {
+      "score": 3,
+      "evidence": [
+        "app/src/lib/api.ts:14-32 — cache Map never evicts expired entries (only deletes on fetch rejection); a crawl over all 1,025 Pokémon × all games accumulates unbounded entries",
+        "app/src/pages/index.astro:99-100 — non-null assertions on querySelector mean a markup refactor throws and silently kills all filter/search/pagination interactivity",
+        "app/src/components/MoveTables.astro:151-156 — popstate syncs the select only when ?game is present; back-navigating to the default game leaves a stale label over the freshly loaded default tables",
+        "app/src/lib/api.ts:27-28 — non-OK, non-404 responses throw with no page-level handling, surfacing as raw 500 error pages",
+        "app/src/pages/index.astro:126-127 — AbortController correctly cancels superseded fetches, so no stale-response race",
+        "app/src/components/MoveTables.astro:106 — missing values sort last in both directions, matching the spec edge case"
+      ],
+      "rationale": "The core flows are careful (request cancellation, 404 handling everywhere, sort-last-for-missing), but there are a few real fragilities: an unbounded cache, a script that dies on null selectors, a back-navigation desync, and unhandled upstream API failures."
+    },
+    "global_abstractions": {
+      "score": 3,
+      "evidence": [
+        "app/src/lib/api.ts:1-139 — one module mixes formatting helpers, the HTTP cache, and four shared indexes (species/types/generations/pokemon index); every page imports it",
+        "app/src/pages/index.astro:124-141 and app/src/components/MoveTables.astro:119-131 — two near-identical AbortController + DOMParser + innerHTML/replaceWith swap helpers duplicated across files",
+        "app/src/lib/api.ts:104-112 — getTypeLabels() re-derives all 18 type records from scratch on every call; cheap only because of the underlying fetch cache"
+      ],
+      "rationale": "api.ts is a cohesive-enough data layer and component boundaries are clean, but the duplicated client-side swap logic in two scripts is exactly the kind of copy-paste that will drift, and the lib module will need splitting once a second data source or longer caching policy arrives."
+    },
+    "readability": {
+      "score": 4,
+      "evidence": [
+        "app/src/lib/api.ts:1-3 — why-comment explaining the fetch-at-request-time and short-TTL cache contract",
+        "app/src/lib/moves.ts:28 — doc comment on getMoveTables; METHOD_ORDER constant at top",
+        "app/src/pages/types/[name].astro:10-17 — RELATIONS table maps spec terms to API keys, self-documenting",
+        "app/src/lib/api.ts:22 — getJson<T = any> plus pervasive (a: any) casts in pages (e.g. pokemon/[name].astro:34, abilities/[name].astro:11) despite astro/tsconfigs/strict"
+      ],
+      "rationale": "A new teammate finds their way quickly: consistent page structure, named constants for magic values, and comments that explain intent. The main rough spot is that the strict tsconfig is undermined by `any` everywhere for API payloads, so the types document nothing about the data shape."
+    },
+    "review_cost": {
+      "score": 4,
+      "evidence": [
+        "app/src/lib/api.ts:14 — needs an eviction/LRU policy added",
+        "app/src/pages/index.astro:124 and app/src/components/MoveTables.astro:119 — extract the duplicated swap helper into src/lib",
+        "app/src/pages/index.astro:99-100 — replace `!` assertions with guards like the sibling script uses",
+        "app/src/components/MoveTables.astro:153 — sync select unconditionally on popstate"
+      ],
+      "rationale": "Approve-with-changes territory: the fixes are small, local and mechanical (cache eviction, one extracted helper, two guard fixes, some payload types); nothing requires rearchitecting or touches risky code paths."
+    }
+  },
+  "overall": 4,
+  "findings": [
+    {
+      "severity": "medium",
+      "location": "app/src/lib/api.ts:14",
+      "issue": "The in-memory cache Map is never swept: expired entries stay forever and are only removed on fetch rejection. A crawl across all 1,025 Pokémon pages and every version group's moves can accumulate tens of thousands of parsed-JSON entries.",
+      "suggestion": "Evict expired entries on read/write (the `expires` timestamp is already stored) or cap the map with a simple LRU bound."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/pages/index.astro:124",
+      "issue": "The AbortController + fetch + DOMParser + innerHTML-swap helper is duplicated almost line-for-line in components/MoveTables.astro:119-131; the two copies will drift when one is fixed.",
+      "suggestion": "Extract one shared client helper (e.g. src/lib/swap.ts exporting swapRegion(url, selector)) used by both scripts."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/pages/index.astro:99-100",
+      "issue": "Non-null assertions on document.querySelector mean a markup rename throws at module init and silently disables search, filters and pagination; the twin script in MoveTables.astro uses optional chaining, so the two are inconsistent.",
+      "suggestion": "Guard with `if (!form) return;` or optional chaining, matching MoveTables.astro."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/components/MoveTables.astro:151-156",
+      "issue": "The popstate handler only syncs the Game select when the ?game parameter is present, so back-navigating to a URL without ?game loads the default game's tables but leaves the old game's label selected.",
+      "suggestion": "Set select.value to the fetched document's selected option (or reset to the default) on popstate, as index.astro's syncForm does for the home filters."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/lib/api.ts:22",
+      "issue": "All API payloads are typed `any` (getJson<T = any>, and pages cast records with `(a: any)`), so the strict tsconfig provides no safety on the app's main data path.",
+      "suggestion": "Define interfaces for the API records actually used (Named, TypeRecord, MoveRecord, PokemonRecord) and annotate getJson calls."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/lib/api.ts:28",
+      "issue": "A non-OK, non-404 upstream response throws inside page frontmatter with no handling, producing a bare 500 error page for a transient API hiccup.",
+      "suggestion": "Catch at the page level (or retry once in getJson) and fall back to a friendly error page; the 60s cache makes a single retry cheap."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/styles/global.css:1",
+      "issue": "All 452 lines of styling live in one global stylesheet instead of Astro's default scoped component styles, so component markup and its CSS live far apart and selectors rely on naming discipline alone.",
+      "suggestion": "At minimum split per-component sections into the corresponding .astro files as scoped styles; keep the token-heavy base rules in global.css."
+    }
+  ],
+  "summary": "A genuinely current, idiomatic Astro 7 SSR app: correct adapter setup, frontmatter data loading, proper 404 handling on every dynamic route and tidy, well-commented modules. The main merge blockers are an unbounded response cache and a duplicated client-side fetch-and-swap helper duplicated across two scripts, plus scattered `any` typing that negates the strict tsconfig. I'd approve after one mechanical round of fixes."
+}

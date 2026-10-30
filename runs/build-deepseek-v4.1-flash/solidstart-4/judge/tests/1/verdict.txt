@@ -1,0 +1,170 @@
+## Review: test quality
+
+**The agent wrote no tests at all.** `app/package.json` has no `test` script, an empty `devDependencies` block, and no runner (vitest/playwright) is installed anywhere in `app/` — the measured facts confirm 0 test files. All protection comes from the black-box acceptance suite in `tests/`, which exercises only a handful of happy paths on a handful of species. Yet the app contains a large amount of pure, easily-testable logic (a `lib/format.ts` full of spec-driven string/number rules, a 700-line data layer in `lib/queries.ts`, sorting and pagination in components/routes) that currently has zero safety net for refactors.
+
+Where the risk concentrates:
+
+- **Sorting**: `app/src/components/MoveTable.tsx:11` — `sortRows` implements the spec's trickiest rule (missing values sort last in *both* directions, handled by returning before the direction multiplier) plus `aria-sort` bookkeeping at `MoveTable.tsx:53`. A refactor that applies the direction to the missing-value comparison would pass every acceptance test unless a fixture happens to have a null in the sorted column.
+- **Pagination**: `app/src/routes/index.tsx:96-104` — clamping (`?page=99` → last page, `?page=0` → 1), `totalPages`, and the `slice` are classic off-by-one territory; acceptance only walks Previous/Next on pages 1–2.
+- **Level-up dedupe**: `app/src/lib/queries.ts:566-576` — collapsing multiple `version_group_details` for the same move into the minimum level is subtle, and other methods rely on "first entry wins" (`queries.ts:572`).
+- **URL-state sync**: `app/src/routes/index.tsx:29-77` — a hand-rolled debounce plus a `createEffect` reconciling the input with the URL through a mutable `lastUrlSearch` closure (`index.tsx:41-43`); back/forward navigation races here are exactly what an interaction test would catch.
+- **Error paths**: `app/src/lib/queries.ts:159-166` — `fetchJson` throws on any non-404 failure, and `app/src/app.tsx:19` has a `Suspense` with no `ErrorBoundary`; a 500 from the API leaves a blank page. Nothing tests this.
+- **Alternate-form exclusion**: the magic `id > 10000` guard is copy-pasted in four places (`queries.ts:292`, `367`, `416`, `453`); changing one and not the others leaks Mega Evolutions into exactly one list type.
+- **Formatters**: `app/src/lib/format.ts:20-28` — `collapseWhitespace` (spec demands `\n`/`\f` runs collapse), `formatMeasurement` (decimetres → `0.4 m`), `dexNumber` padding. One-line unit tests each; none exist.
+
+The pure functions in `lib/format.ts` and the transformation logic in `lib/queries.ts`/`MoveTable.tsx` would be trivial to cover with vitest (no DOM needed) — the agent's choice to ship zero is the main weakness of this PR.
+
+```json
+{
+  "dimension": "tests",
+  "criteria": {
+    "coverage_of_risk": {
+      "score": 1,
+      "evidence": [
+        "app/package.json:11-20 — empty devDependencies, no test script, no runner installed",
+        "app/src/lib/queries.ts:566-576 — untested min-level dedupe for level-up moves",
+        "app/src/routes/index.tsx:96-104 — untested pagination clamp and slicing",
+        "app/src/components/MoveTable.tsx:11-29 — untested missing-values-sort-last logic"
+      ],
+      "rationale": "No tests exist in app/, and none of the riskiest logic (sorting, pagination, URL state, error/404 paths) has any coverage beyond the external acceptance suite."
+    },
+    "behaviour_not_implementation": {
+      "score": 1,
+      "evidence": [
+        "app/src — 0 test files anywhere in the app tree (measured facts: tests.files = 0)"
+      ],
+      "rationale": "There are no tests to evaluate; per the anchor, no tests scores 1."
+    },
+    "regression_power": {
+      "score": 1,
+      "evidence": [
+        "app/src/lib/queries.ts:292 — one of four duplicated `id > 10000` alternate-form guards; changing one silently leaks forms into one list only",
+        "app/src/lib/queries.ts:159-166 — fetchJson throws on non-404 with no ErrorBoundary (app/src/app.tsx:19), so an API hiccup regression would render blank with nothing to catch it"
+      ],
+      "rationale": "With zero tests in app/, any refactor of the data layer or sorting is guarded only by the acceptance suite's narrow fixtures; most breakages would sail through."
+    },
+    "signal_to_noise": {
+      "score": 3,
+      "evidence": [
+        "app/src — no tests at all, so no noise either"
+      ],
+      "rationale": "No tests means no low-value tests; per the anchor this is a 3."
+    }
+  },
+  "overall": 1,
+  "findings": [
+    {
+      "severity": "high",
+      "location": "app/package.json:11-20",
+      "issue": "No test runner, no test script, and zero tests anywhere in app/, despite ~700 lines of pure data-transformation logic that needs no DOM to test.",
+      "suggestion": "Add vitest as a devDependency with a `test` script, and start with unit tests for lib/format.ts, the sort/filter/pagination functions, and the queries.ts transformations (they are pure once the fetch is injected)."
+    },
+    {
+      "severity": "high",
+      "location": "app/src/routes/index.tsx:96-104",
+      "issue": "Pagination math (clamping ?page=0 / ?page=999, totalPages, slice bounds at 48/page) is untested; off-by-one or clamping regressions would only be caught if an acceptance fixture happens to hit the boundary.",
+      "suggestion": "Extract the page-clamp/slice into a pure function and unit-test first/last/overflow pages, including the empty-result case (totalPages floors at 1)."
+    },
+    {
+      "severity": "high",
+      "location": "app/src/components/MoveTable.tsx:11-29",
+      "issue": "sortRows implements the spec's subtlest rule — missing values sort last in both directions because the direction multiplier is applied only after the missing checks — and nothing pins that behaviour.",
+      "suggestion": "Unit-test sortRows directly with null power/accuracy in ascending and descending order, plus the aria-sort bookkeeping (only the active header carries a direction)."
+    },
+    {
+      "severity": "high",
+      "location": "app/src/lib/queries.ts:566-576",
+      "issue": "Level-up moves are deduped to the minimum level while other methods take the first entry; a refactor could show max level, first-seen level, or duplicate rows and no test would fail.",
+      "suggestion": "Factor this into a pure function taking pokemon.moves and the selected game, and test a move with multiple version_group_details entries."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/routes/index.tsx:29-77",
+      "issue": "Search debounce plus URL reconciliation relies on a mutable `lastUrlSearch` closure and a timer guard; back/forward navigation and rapid filter changes are a classic race that nothing exercises.",
+      "suggestion": "Add a Playwright interaction test typing, then pressing browser Back, asserting the input, URL and rendered list stay consistent; also that a pending debounce is cancelled by a filter change."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/lib/queries.ts:159-166",
+      "issue": "fetchJson throws on any non-404 failure and app.tsx:19 wraps routes in Suspense with no ErrorBoundary, so an API 500 blanks the page; the error path is completely untested.",
+      "suggestion": "Add an ErrorBoundary with a fallback, and a test that simulates a failing endpoint and expects a readable error page rather than a blank main."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/lib/queries.ts:292",
+      "issue": "The alternate-form exclusion `id > 10000` is duplicated verbatim at queries.ts:292, 367, 416 and 453; a change to one copy leaks Mega Evolutions into exactly one list type with no test to notice.",
+      "suggestion": "Extract a single isAlternateForm(id) helper with a unit test, and add a data-layer test that a learned_by_pokemon entry above 10000 is excluded from card lists."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/lib/queries.ts:592-630",
+      "issue": "Learn-method priority (level-up, machine, egg, tutor, then alphabetical) and default row ordering (level with Infinity-fallback, then name) are untested ordering invariants that acceptance only checks for one Pokémon.",
+      "suggestion": "Unit-test the method ordering and the default row sort with a fixture containing an 'other' method and a null-level level-up entry."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/lib/format.ts:20-28",
+      "issue": "Pure spec-driven formatters — collapseWhitespace (must eat \\f), formatMeasurement (decimetres/10 with one decimal), dexNumber padding — are one-line unit tests that don't exist.",
+      "suggestion": "Cover these first: they encode the spec's exact display rules and are the cheapest possible tests in the codebase."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/lib/queries.ts:453-462",
+      "issue": "The hidden-ability merge (existing entry upgraded when a later entry has is_hidden) is untested; a broken merge would mark every Pokémon as hidden or none.",
+      "suggestion": "Unit-test with an ability whose pokemon array lists the same species twice (normal then hidden) and in the reverse order."
+    }
+  ],
+  "summary": "The app ships with zero tests, no runner, and no test script, leaving ~700 lines of spec-critical transformation logic (sorting, dedupe, pagination, formatting, form exclusion) guarded only by the external acceptance suite's narrow fixtures. The code is unusually unit-test-friendly — pure functions and injectable fetches — so the omission is a choice, not an obstacle. For a codebase owned for years, the first PR after this one should add vitest coverage for the data layer before touching any of it.",
+  "wroteTests": false,
+  "testCount": 0,
+  "valuableTests": [],
+  "lowValueTests": [],
+  "untested": [
+    {
+      "area": "Pagination clamping and slicing (app/src/routes/index.tsx:96-104)",
+      "risk": "high",
+      "likelyBug": "Off-by-one in the 48-per-page slice or the clamp for ?page=0 / ?page beyond total, showing duplicate or missing cards on boundary pages."
+    },
+    {
+      "area": "Move-table sorting incl. missing-values-last and aria-sort (app/src/components/MoveTable.tsx:11-53)",
+      "risk": "high",
+      "likelyBug": "Applying the sort direction to the missing-value comparison makes nulls sort first when descending; wrong header keeps aria-sort after a refactor."
+    },
+    {
+      "area": "Search debounce and URL↔input reconciliation (app/src/routes/index.tsx:29-77)",
+      "risk": "high",
+      "likelyBug": "Browser back/forward leaves the input and the rendered list out of sync with params.q, or a pending debounce fires after a filter change and clobbers it."
+    },
+    {
+      "area": "Level-up move dedupe to minimum level (app/src/lib/queries.ts:566-576)",
+      "risk": "medium",
+      "likelyBug": "A move learned at several levels shows the first or highest level instead of the minimum, or duplicate rows appear in machine/egg tables."
+    },
+    {
+      "area": "Non-404 API error handling (app/src/lib/queries.ts:159-166, app/src/app.tsx:19)",
+      "risk": "medium",
+      "likelyBug": "A 500 from the API produces a blank page with no error UI because there is no ErrorBoundary under Suspense."
+    },
+    {
+      "area": "Alternate-form exclusion, duplicated 4× (app/src/lib/queries.ts:292,367,416,453)",
+      "risk": "medium",
+      "likelyBug": "Mega/alternate forms leak into the type, move, ability or home list when one copy of the id > 10000 guard is changed or missed."
+    },
+    {
+      "area": "Pure display formatters (app/src/lib/format.ts:20-28)",
+      "risk": "low",
+      "likelyBug": "Height shown as 4.0 m instead of 0.4 m, dex numbers with wrong padding, or flavor text keeping \\f characters."
+    },
+    {
+      "area": "Hidden-ability merge on ability pages (app/src/lib/queries.ts:453-462)",
+      "risk": "low",
+      "likelyBug": "The (hidden) marker is dropped or applied to every Pokémon when a species appears twice in ability.pokemon."
+    },
+    {
+      "area": "Generation/type directory caches and their error-reset behaviour (app/src/lib/queries.ts:235-339)",
+      "risk": "low",
+      "likelyBug": "A failed directory fetch caches the rejection or, worse, caches partial data, silently dropping species from the home list after a transient API error."
+    }
+  ]
+}
+```

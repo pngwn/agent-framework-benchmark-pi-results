@@ -1,0 +1,157 @@
+I've read all the app source (`server.mjs` ~820 lines, `lib/api.mjs`, `lib/format.mjs`, `views/layout.mjs`, `scripts/build.mjs`), the acceptance suite, and confirmed the measured facts: `app/` contains zero test files, no test runner, and no test script in `app/package.json`. The app's logic is concentrated in exactly the risky categories this dimension cares about — sorting with missing-value semantics, filtering, pagination clamping, URL-state construction, a promise-based in-memory cache, and a multi-step move-table data pipeline — none of which the agent guarded with a single test of its own. `lib/format.mjs` is a file of small pure functions that would have been trivially unit-testable with no infrastructure at all, which makes the omission more notable.
+
+```json
+{
+  "dimension": "tests",
+  "criteria": {
+    "coverage_of_risk": {
+      "score": 1,
+      "evidence": [
+        "app/package.json:7-10 — only build and start scripts; no test script, no runner, no devDeps",
+        "app/lib/format.mjs:4-60 — pure, easily testable data-shaping helpers (humanize, latestEnglishFlavorText, dexNumber, displayValue) with zero tests",
+        "app/server.mjs:147-171 — sortRows, the riskiest logic in the app (missing-value placement, numeric vs lexicographic, direction inversion), untested"
+      ],
+      "rationale": "The agent wrote no tests at all, so the riskiest logic — sorting, filtering, pagination, URL state, the API cache — is covered by nothing it owns."
+    },
+    "behaviour_not_implementation": {
+      "score": 1,
+      "evidence": [
+        "app/server.mjs:1-820 — no test file anywhere imports or exercises the routes",
+        "app/lib/api.mjs:16-28 — cached() promise memoisation, a classic implementation detail, has no behavioural guard either"
+      ],
+      "rationale": "No tests exist, so there is nothing to classify."
+    },
+    "regression_power": {
+      "score": 1,
+      "evidence": [
+        "app/lib/format.mjs:17-21 — latestEnglishFlavorText uses .at(-1) (last entry); a refactor to .find (first) would pass silently with no app-side test",
+        "app/server.mjs:66-69,478-486 — page clamping (Math.min(requestedPage, totalPages), normalizePage) would silently regress on ?page=999",
+        "app/server.mjs:71-80 — buildQuery omits page when 1; a refactor that drops q or type from pagination hrefs would go unnoticed"
+      ],
+      "rationale": "With zero tests, any behavioural break — including in the tricky sort/pagination/URL-state logic — fails nothing the team owns."
+    },
+    "signal_to_noise": {
+      "score": 3,
+      "evidence": [
+        "app/scripts/build.mjs:1-8 — the only 'checked' script just copies htmx; no test noise exists because no tests exist"
+      ],
+      "rationale": "No tests means no low-value tests either; per the anchor this scores 3, but that is no credit to the app."
+    }
+  },
+  "overall": 1,
+  "findings": [
+    {
+      "severity": "high",
+      "location": "app/package.json:7-10",
+      "issue": "No tests, no test runner, no test script anywhere in app/ despite ~750 LOC of non-trivial logic",
+      "suggestion": "Add a lightweight runner (node --test needs zero deps) with unit tests for lib/format.mjs and lib/api.mjs helpers, plus a few route-level tests via app.fetch() against a stubbed API"
+    },
+    {
+      "severity": "high",
+      "location": "app/server.mjs:147-171",
+      "issue": "sortRows encodes subtle semantics — missing values forced to the end regardless of direction, numeric vs string comparison per column, moveName tie-break — with nothing pinning them down",
+      "suggestion": "Unit-test sortRows directly (it's a pure function): ascending/descending per column, em-dash/null placement, tie-breaks, and level-0 rows"
+    },
+    {
+      "severity": "high",
+      "location": "app/server.mjs:145-243",
+      "issue": "getPokemonMoveInfo is the most complex pipeline in the app (version-group ordering, latest-game default, per-method dedup) and is only exercised end-to-end by acceptance tests against real data",
+      "suggestion": "Extract and test with fixture payloads: unknown requestedGame falls back to the highest-order group, rows deduped by method+move, method ordering via compareMethods"
+    },
+    {
+      "severity": "medium",
+      "location": "app/lib/api.mjs:16-28",
+      "issue": "The in-memory promise cache is global, unbounded (every pokemon, move, and version-group response cached forever) and offers no injection point, which also makes future tests order-dependent",
+      "suggestion": "Add a TTL or LRU bound and expose a clear/flush hook (or make the cache injectable) and test the rejection-deletes-key behaviour"
+    },
+    {
+      "severity": "medium",
+      "location": "app/server.mjs:66-69,478-486",
+      "issue": "Pagination clamping and page normalisation (?page=abc → 1, ?page=999 → last page, slice bounds) are untested edge behaviour",
+      "suggestion": "Unit-test normalizePage and the clamping arithmetic, including the empty-result case where the pagination block is omitted"
+    },
+    {
+      "severity": "medium",
+      "location": "app/server.mjs:71-80",
+      "issue": "buildQuery is the URL-state contract (param order, dropping page=1, preserving q/type/generation in pagination links and HX-Push-Url) with no test",
+      "suggestion": "Unit-test buildQuery for all filter combinations and the page-omission rule; it is the regression point for shareable URLs"
+    },
+    {
+      "severity": "medium",
+      "location": "app/server.mjs:531-540",
+      "issue": "Partial-render branches keyed on the HX-Request header (moves section vs full page, moves-table swap target) have no route-level tests; a changed hx-target or swap mode breaks them silently in a way unit tests of pure functions won't catch",
+      "suggestion": "Add app.fetch()-based tests asserting the htmx branch returns only the #moves section plus the HX-Push-Url header, and the moves-table route returns exactly one <table>"
+    },
+    {
+      "severity": "medium",
+      "location": "app/lib/format.mjs:17-21",
+      "issue": "Spec-critical pure helpers (latestEnglishFlavorText must take the LAST English entry and collapse whitespace; humanize capitalisation; dexNumber zero-padding) are untested one-liners that a refactor could silently flip (e.g. .find vs .at(-1))",
+      "suggestion": "Cover format.mjs with table-driven unit tests; zero cost, high regression value"
+    },
+    {
+      "severity": "low",
+      "location": "app/server.mjs:812-816",
+      "issue": "Error handling is untested: only API 404s map to the styled not-found page; any other API failure falls through to app.onError's plain-text 500",
+      "suggestion": "Test NotFoundError → 404 HTML per route, and that a simulated API 500 yields the 500 text response rather than a crash"
+    },
+    {
+      "severity": "low",
+      "location": "app/lib/api.mjs:76-79",
+      "issue": "englishName duplicates format.mjs's englishOrHumanized lookup logic; with no tests, the two can drift apart unnoticed",
+      "suggestion": "Delete the duplicate and use englishOrHumanized (or test both)"
+    }
+  ],
+  "summary": "The agent wrote zero tests of its own — no runner, no script, nothing — leaving ~750 lines of genuinely risky logic (multi-key sorting with missing-value rules, filtering, pagination clamping, URL-state construction, a global promise cache) guarded only by the borrowed acceptance suite. Most of the riskiest code is pure or nearly pure functions that would have been cheap to test with node --test and no new dependencies. Once anyone refactors the data layer or the move-table pipeline, regressions in sort ordering, URL shape, or cache behaviour will ship silently.",
+  "wroteTests": false,
+  "testCount": 0,
+  "valuableTests": [],
+  "lowValueTests": [],
+  "untested": [
+    {
+      "area": "Move-table sorting (sortRows, compareMethods, valueForColumn) — app/server.mjs:131-171",
+      "risk": "high",
+      "likelyBug": "Missing values (—/null) start sorting to the front on descending, numeric columns compared lexicographically (\"9\" > \"80\"), or tie-breaks lost, silently reordering every moves table"
+    },
+    {
+      "area": "getPokemonMoveInfo pipeline — version-group ordering, latest-game default, per-method row dedup (app/server.mjs:145-243)",
+      "risk": "high",
+      "likelyBug": "Default game becomes the alphabetically-last instead of highest-order group, a move appears twice under one method, or rows from the wrong version group leak into a table"
+    },
+    {
+      "area": "Home filtering: type/generation/q intersection and id ≤ 10000 form exclusion (app/server.mjs:464-490)",
+      "risk": "high",
+      "likelyBug": "Filters applied as OR instead of AND, alternate forms (IDs > 10000) reappearing in lists, or search matching raw names instead of humanized ones (mr-mime vs Mr Mime)"
+    },
+    {
+      "area": "Pagination: normalizePage, clamping to totalPages, slice bounds, link generation (app/server.mjs:66-69,478-500)",
+      "risk": "medium",
+      "likelyBug": "?page=999 or ?page=abc producing an empty page, an off-by-one on the last page, or Previous/Next links losing the active filters"
+    },
+    {
+      "area": "URL state construction — buildQuery and HX-Push-Url values (app/server.mjs:71-80,489-496,531-536)",
+      "risk": "medium",
+      "likelyBug": "Pushed URLs dropping q/type/generation or the game param, breaking back-button and shareable links after any refactor of query handling"
+    },
+    {
+      "area": "In-memory promise cache — rejection eviction, key stability across absolute/relative URLs, unbounded growth (app/lib/api.mjs:16-28)",
+      "risk": "medium",
+      "likelyBug": "A rejected response cached forever (stale 404/500 persists after the API recovers), or memory growth across full catalog crawls; both invisible without targeted tests"
+    },
+    {
+      "area": "htmx partial-render branches — HX-Request gating on / and /pokemon/:name, moves-table swap target (app/server.mjs:63-65,412-426,531-540)",
+      "risk": "medium",
+      "likelyBug": "A partial response accidentally returning a full document (double layout) or missing the HX-Push-Url header, breaking htmx swaps and browser history"
+    },
+    {
+      "area": "Formatting helpers — latestEnglishFlavorText (last entry, whitespace collapse), humanize, dexNumber, displayValue (app/lib/format.mjs)",
+      "risk": "medium",
+      "likelyBug": "Flavor text flipping to the first English entry, names losing capitalisation (mr mime vs Mr Mime), or missing values rendering as 'null' instead of —"
+    },
+    {
+      "area": "Error and not-found paths — NotFoundError mapping per route, app.onError 500 behaviour (app/server.mjs:812-816 and each route's catch)",
+      "risk": "low",
+      "likelyBug": "An API 500 surfacing as an unstyled stack-trace page or an unhandled rejection instead of the styled not-found/500 page"
+    }
+  ]
+}
+```

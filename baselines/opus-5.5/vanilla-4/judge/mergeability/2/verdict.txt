@@ -1,0 +1,87 @@
+## Review
+
+A clean, deliberately minimal vanilla-TS/Vite app: a hand-rolled `h()` DOM helper, a promise-caching API client, one small router, five page modules, and a hand-written static server. For a framework-less Vite app, hand-rolling the router/render loop *is* the idiomatic choice, and the implementation is careful: stale-render tokens (`main.ts:23`, `pokemon.ts:314`), `NotFoundError` → Not-found handling, `title` from the post-render `h1`, `aria-busy`, `history.scrollRestoration`, XSS-safe DOM construction (text nodes everywhere, escaped config injection in `server.mjs:27`), and path-traversal guarding on the server (`server.mjs:42`).
+
+**Strengths**
+- `app/src/api.ts` is a genuinely thin data layer: typed responses, single in-memory promise cache with rejection eviction (`api.ts:108`), and pure text/aggregation helpers (`humanize`, `latestFlavorText`, `toSpeciesCards`) that every page reuses instead of re-implementing.
+- `pages/pokemon.ts:157-197` turns the spec's sortable-move-tables requirement into a small table-driven `COLUMNS` model with per-column `value`/`cell` pairs — the right shape for this feature, not premature generality.
+- `server.mjs` is production-appropriate: HEAD support, immutable caching for hashed assets, 404 status for unknown routes while the app renders the Not-found page.
+
+**Concerns**
+- The route table exists twice: `main.ts:13` and `server.mjs:31`. Adding a route (or changing a URL shape) requires editing both files in two runtimes; this is the one leaky server/client boundary and my top merge-blocking-adjacent nit.
+- `pages/pokemon.ts:286` fires one parallel fetch per learn-entry for the selected game with no concurrency limit (Mew in `scarlet-violet` is several hundred requests on first view). Cached afterwards, and the API is local, but it's unbounded fan-out.
+- `get()` has no `AbortSignal`; navigating away mid-fetch lets in-flight requests run to completion (only the commit is guarded by `renderToken`).
+- `pages/home.ts:94` clamps an out-of-range `page` for display but leaves the bogus `page=999` in the URL; `pokemon.ts:273` similarly leaves an invalid `game=` param. Cosmetic state/URL mismatches.
+- `dom.ts:36-40` uses a module-global monotonic `sectionId` counter — hidden global state, harmless but slightly smelly; ids grow forever over a long session.
+
+I found no security or serious correctness problems. I'd approve after a round of nits.
+
+```json
+{
+  "dimension": "mergeability",
+  "criteria": {
+    "idiomatic": {
+      "score": 4,
+      "evidence": [
+        "app/src/main.ts:13-59 — hand-rolled history-API router with pushState/popstate interception and hash handling; the right primitive set for framework-less Vite",
+        "app/src/api.ts:99-118 — fetch + in-memory promise cache keyed by URL, matching the spec's sanctioned runtime caching",
+        "app/package.json:7 — 'tsc --noEmit && vite build' with strict tsconfig (app/tsconfig.json:9); standard Vite project layout (src/, index.html entry)",
+        "app/src/dom.ts:1-33 — tiny createElement-based h() instead of innerHTML; safe and idiomatic vanilla TS"
+      ],
+      "rationale": "Recognisably idiomatic vanilla-Vite: web-standard routing/data primitives, strict TS, standard layout. Only deduction is the duplicated route table across client and server rather than one shared source."
+    },
+    "correctness_risks": {
+      "score": 4,
+      "evidence": [
+        "app/src/main.ts:23,73 — renderToken guards against stale async renders; app/src/pages/pokemon.ts:314-321 — same guard for the game-select tables",
+        "app/src/api.ts:110-113 — 404 → NotFoundError, non-ok → Error, rejected promises evicted from the cache so a retry is possible",
+        "app/src/pages/pokemon.ts:75 — evolution-chain fetch degrades to a single-species chain via .catch(() => null)",
+        "app/src/pages/pokemon.ts:286 — Promise.all over every learn-entry for a game with no concurrency limit (Mew = hundreds of parallel fetches)",
+        "app/src/pages/home.ts:94 — out-of-range ?page= is clamped for display but the stale value stays in the URL; app/src/pages/pokemon.ts:273-276 — invalid ?game= falls back silently but keeps the bad param"
+      ],
+      "rationale": "Race guards, 404 handling and XSS-safe rendering are all done properly; the only real fragility is unbounded parallel fetch fan-out in the moves section plus two cosmetic URL/state mismatches. No serious bug found."
+    },
+    "global_abstractions": {
+      "score": 4,
+      "evidence": [
+        "app/src/api.ts:1-225 — single data module but thin: typed responses, one cache, pure helpers; pages depend on it without it depending on them",
+        "app/src/components.ts:1-30 — small shared presentational helpers, not a god component",
+        "app/src/main.ts:13 vs app/server.mjs:31 — route regexes duplicated between client and server; adding a route requires editing both",
+        "app/src/api.ts:160 — spriteUrl hardcodes the /media/sprites/pokemon/<id>.png pattern (sanctioned by the spec, but an assumption buried in code)"
+      ],
+      "rationale": "Abstractions are few, well-typed and earn their keep. The one that will cause a future bug is the client/server route-table duplication; everything else is locally reasonable with clear boundaries."
+    },
+    "readability": {
+      "score": 5,
+      "evidence": [
+        "app/src/pages/* — one file per route, each ~60-290 lines, same shape (fetch → build DOM → return)",
+        "app/src/pages/pokemon.ts:157-176 — table-driven COLUMNS make the sortable moves tables easy to follow",
+        "app/src/api.ts:28-33 — comment explains the runtime-caching constraint; app/server.mjs:2-3 and dom.ts:35/46 explain why, not what",
+        "app/src/dom.ts:12-16 — the tiny h()/append contract is readable in seconds; consistent naming (englishName, humanize, orDash) across all files"
+      ],
+      "rationale": "A new teammate finds their way in minutes: router, API client, DOM helpers, components, then a file per page, with consistent naming and a few well-placed why-comments. No rough spots worth flagging."
+    },
+    "review_cost": {
+      "score": 4,
+      "evidence": [
+        "app/server.mjs:31 + app/src/main.ts:13 — reviewer would ask for a shared route table before approving",
+        "app/src/pages/pokemon.ts:286 — reviewer would ask for bounded concurrency or an AbortSignal on navigation",
+        "app/src/pages/home.ts:94 — reviewer would ask to sync the clamped page back into the URL"
+      ],
+      "rationale": "Approve with nits: none of the required changes touch architecture, and everything else (types, guards, a11y, CSS token usage) is already done the way I'd have written it."
+    }
+  },
+  "overall": 4,
+  "findings": [
+    { "severity": "medium", "location": "app/server.mjs:31", "issue": "Route regexes duplicated between server.mjs (404 decisions) and main.ts (rendering); the two can drift when a route is added or changed", "suggestion": "Export the route patterns from one shared module imported by both the server and the client bundle" },
+    { "severity": "medium", "location": "app/src/pages/pokemon.ts:286", "issue": "Unbounded parallel fetch fan-out: one request per learn-entry for the selected game (hundreds for Mew), with no AbortSignal on navigation away", "suggestion": "Chunk the fetches (or a simple concurrency limiter) and thread an AbortSignal through get() keyed to the render token" },
+    { "severity": "low", "location": "app/src/pages/home.ts:94", "issue": "Out-of-range ?page= is clamped for display but the URL keeps the stale page number", "suggestion": "ReplaceState the clamped URL after renderResults" },
+    { "severity": "low", "location": "app/src/pages/pokemon.ts:273", "issue": "Invalid ?game= value silently selects the default game but leaves the bad param in the URL", "suggestion": "ReplaceState without the invalid param when falling back" },
+    { "severity": "low", "location": "app/src/api.ts:160", "issue": "Sprite URL pattern hardcoded in code instead of taken from API data (justified by the spec's documented pattern, but an assumption baked in)", "suggestion": "Prefer the pokemon's sprites.front_default where a Pokemon object is already fetched; keep spriteUrl only as the list-page fallback" },
+    { "severity": "low", "location": "app/src/api.ts:108", "issue": "Module-global cache never evicts (bounded only by URLs visited in a session); sanctioned by the spec but worth documenting", "suggestion": "Add a brief comment noting the intended lifetime, or cap the map size" },
+    { "severity": "low", "location": "app/src/pages/pokemon.ts:265", "issue": "Re-declares the version-group map shape inline ({ name: string; order: number }) instead of Map<string, VersionGroup>", "suggestion": "Reuse the VersionGroup type from api.ts" },
+    { "severity": "low", "location": "app/src/dom.ts:36", "issue": "Module-global sectionId counter is hidden shared state and ids grow unboundedly across a long session", "suggestion": "Derive the heading id from the section title or pass it explicitly" }
+  ],
+  "summary": "A disciplined, well-typed vanilla-Vite implementation that makes the right framework-free choices: web-standard routing, a thin promise-cached API layer, safe DOM construction and careful stale-render guards. Merge blockers are absent; the only structural complaint is the duplicated client/server route table plus unbounded fetch fan-out in the moves section. I'd approve after one round of small changes."
+}
+```

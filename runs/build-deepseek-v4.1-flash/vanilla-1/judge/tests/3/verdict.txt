@@ -1,0 +1,175 @@
+## Review: test quality
+
+**No tests exist in `app/`.** `app/package.json:6-9` defines only `dev`, `build`, and `start` scripts — there is no test script, no test runner among the two devDependencies (`typescript`, `vite`), and static analysis confirms zero test files/cases. The acceptance suite in `tests/` is the only guard.
+
+That's a real loss here because this codebase is unusually unit-testable for a no-framework app: `app/src/api.ts` is dominated by pure, dependency-free helpers (`humanize`, `englishName`, `latestEnglishFlavor`, `idFromUrl`, `formatDex`, `displayNumber`, `speciesFromPokemonList`, `speciesFromEntries`, `api.ts:131-247`) that encode exactly the spec's trickiest formatting/normalization rules, and the home page's filter/sort/paginate math (`home.ts:94-126`) plus the moves-table builder and sorter (`pokemon.ts:60-194`) are pure-in/pure-out given API fixtures. None of it is covered.
+
+### What isn't tested, and the bugs it could hide
+
+- **Home filtering + pagination math** (`app/src/pages/home.ts:94-126`): the search/type/generation predicates, `Math.ceil(filtered.length / PAGE_SIZE)`, `slice(start, start + PAGE_SIZE)`, and the page-clamp (`state.page > totalPages`). A refactor of the filter chain or an off-by-one in the clamp would ship silently. Related: `buildUrl` (`home.ts:16-25`) decides which query params get omitted at defaults — a regression here breaks deep links like `/?type=fire&generation=generation-i` without failing any unit-level check.
+- **Moves-table assembly** (`app/src/pages/pokemon.ts:112-194`): filtering `version_group_details` by selected game, grouping by learn method, the `level-up/machine/egg/tutor/then-alphabetical` method ordering, and default row ordering. Note `loadMoveTables` swallows per-move fetch failures (`pokemon.ts:139-146`, `catch { return null }` → row silently dropped) — nothing would catch a change from "row skipped only on error" to "rows dropped routinely". Also `apiFetch<any>` (`pokemon.ts:141`) erases the type the rest of the file works hard to keep.
+- **Column sorting** (`pokemon.ts:60-102, 328-345`): nulls-last in *both* directions, numeric vs `localeCompare` comparison, direction toggle on second click, and `aria-sort` placement. These are subtle rules with known failure modes (e.g., nulls jumping to the top in descending, string-comparing numbers) and are completely uncovered.
+- **Species transforms** (`api.ts:220-247`): the `id > 10000` alternate-form exclusion is a bare boundary comparison with no test pinning it, and the hidden-ability merge (`existing.hidden || entry.is_hidden`, `api.ts:236`) is exactly the kind of boolean-accumulation logic that breaks in a refactor.
+- **Text normalization rules**: `latestEnglishFlavor`'s whitespace collapse (`api.ts:146-151`), `englishName`'s humanize fallback (`api.ts:140`), `humanize` (`api.ts:135-139`) — the spec defines these precisely (e.g., "last en entry", `\n`/`\f` collapsed) and they're one-line regression targets.
+- **Error paths**: a non-404 API failure and a 404 both render the same "Not found" page (`main.ts:66-72`), so a transient 500 would masquerade as a missing resource — no test distinguishes them, and the cache-delete-on-failure behavior (`api.ts:164-176`) is unverified.
+- **URL/query round-trips and race guards**: `?game=` fallback (`pokemon.ts:231-234`), popstate re-render, the `gameRequest` stale-response guard (`pokemon.ts:351-358`), and `isActive()` token checks across `main.ts`/`home.ts`/`pokemon.ts` — regressions here (double-render, stale tables after rapid game switches) only show up in manual interaction.
+
+### Verdict
+
+For a PR into a codebase the team will own, I'd require at least a thin layer of unit tests over `api.ts`'s pure helpers and the sort/filter/paginate logic (Vitest would slot into the existing Vite toolchain trivially), plus one or two DOM-level tests for the moves tables. The acceptance suite passing proves the app works today; it proves nothing about the next refactor.
+
+```json
+{
+  "dimension": "tests",
+  "criteria": {
+    "coverage_of_risk": {
+      "score": 1,
+      "evidence": [
+        "app/package.json:6-9 — only dev/build/start scripts; no test script or runner",
+        "app/src/pages/home.ts:94-126 — filter/pagination math completely uncovered",
+        "app/src/pages/pokemon.ts:60-194 — moves-table assembly and sorting uncovered"
+      ],
+      "rationale": "No tests exist anywhere in app/, so none of the riskiest logic (filtering, pagination, URL state, sorting, data transforms) is covered."
+    },
+    "behaviour_not_implementation": {
+      "score": 1,
+      "evidence": [
+        "app/package.json:10-13 — devDependencies are only typescript and vite",
+        "app/src/api.ts:131-247 — pure helpers like humanize/latestEnglishFlavor/speciesFrom* have no assertions of any kind"
+      ],
+      "rationale": "There are no tests, so the criterion is at its floor; the codebase does have easily behaviour-testable pure functions, which makes the omission worse."
+    },
+    "regression_power": {
+      "score": 1,
+      "evidence": [
+        "app/src/api.ts:220-247 — id > 10000 form-exclusion boundary and hidden-ability merge unguarded",
+        "app/src/pages/home.ts:104-105 — page clamp and slice math unguarded",
+        "app/src/pages/pokemon.ts:139-146 — silent per-move fetch failure path unguarded"
+      ],
+      "rationale": "Breaking any behaviour would pass unnoticed; the acceptance suite is the only guard and it isn't owned by the app."
+    },
+    "signal_to_noise": {
+      "score": 3,
+      "evidence": [
+        "app/ — zero test files, so no noise, but also no signal"
+      ],
+      "rationale": "No tests means no low-value padding (per rubric a 3), but that's a technicality, not merit."
+    }
+  },
+  "overall": 1,
+  "findings": [
+    {
+      "severity": "high",
+      "location": "app/package.json:6-9",
+      "issue": "No test script, runner, or test files anywhere; all regression risk rests on the external acceptance suite.",
+      "suggestion": "Add Vitest (already a Vite project) and unit-test the pure helpers in api.ts and the filter/sort/paginate logic."
+    },
+    {
+      "severity": "high",
+      "location": "app/src/pages/home.ts:94-126",
+      "issue": "Filter predicate chain, page clamping and 48-per-page slicing are untested; an off-by-one or broken clamp would ship silently, and the clamp is not reflected back into the URL.",
+      "suggestion": "Extract filter+paginate into a pure function taking (species, state) → {items, totalPages} and test it including boundary pages and empty results."
+    },
+    {
+      "severity": "high",
+      "location": "app/src/pages/pokemon.ts:112-194",
+      "issue": "Moves-table construction (game filtering, method grouping, level-up/machine/egg/tutor/others-alphabetical ordering) is untested, and per-move fetch failures silently drop rows.",
+      "suggestion": "Extract loadMoveTables into a pure builder over fixture records and test method ordering, level ordering, and the error-swallowing behavior explicitly."
+    },
+    {
+      "severity": "high",
+      "location": "app/src/pages/pokemon.ts:60-102",
+      "issue": "Column sorting rules (nulls-last in both directions, numeric vs string comparison, toggle direction) are untested; classic regression territory.",
+      "suggestion": "Unit-test sortRows against rows with nulls across ascending/descending and every column key."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/api.ts:220-247",
+      "issue": "Alternate-form exclusion uses a bare id > 10000 comparison and the hidden-ability flag is merged with boolean OR; neither boundary is pinned by a test.",
+      "suggestion": "Add unit tests with ids 10000/10001 and mixed hidden/normal entries."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/pages/home.ts:16-25",
+      "issue": "buildUrl controls which query params are serialized (defaults omitted); a regression breaks deep-linked filtered views like /?type=fire&generation=generation-i.",
+      "suggestion": "Unit-test buildUrl for default/empty/page>1 combinations."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/main.ts:66-72",
+      "issue": "Transient API 5xx and genuine 404 both render the same 'Not found' page; untested error handling conflates missing resources with server failures.",
+      "suggestion": "Test the route error path with a rejected fetch and distinguish error states from not-found."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/api.ts:131-165",
+      "issue": "Spec-precise text rules (humanize, latest English flavor whitespace collapse, englishName fallback, em-dash missing values) have no regression tests despite being one-line targets.",
+      "suggestion": "Add a small unit-test file covering each helper with the spec's own examples (mr-mime, 0.4 m, —)."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/pages/pokemon.ts:351-358",
+      "issue": "The gameRequest stale-response guard and the ?game= URL fallback (pokemon.ts:231-234) are untested; rapid game switching could resurrect stale tables after a refactor.",
+      "suggestion": "Add an interaction test that switches games quickly and asserts the last selection's tables."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/api.ts:343-365",
+      "issue": "Type-per-species derivation in getHomeData (slot ordering, ?? 1 fallback) is untested; wrong slot ordering would silently mis-render type filters and card badges.",
+      "suggestion": "Test the derivation against a small fixture type catalog with out-of-order entries."
+    }
+  ],
+  "summary": "The app contains no tests of its own — no test script, runner, or test file exists in app/, leaving every piece of risky logic (filtering, pagination, move-table construction, column sorting, URL state, data transforms, error paths) guarded only by the external acceptance suite. This is a particularly poor trade-off because much of the logic lives in pure functions that would be trivial to test with Vitest. I'd block the PR on adding unit coverage for api.ts helpers and the home/moves logic.",
+  "wroteTests": false,
+  "testCount": 0,
+  "valuableTests": [],
+  "lowValueTests": [],
+  "untested": [
+    {
+      "area": "Home filtering, pagination math and page clamping (app/src/pages/home.ts:94-126)",
+      "risk": "high",
+      "likelyBug": "Off-by-one in the 48-per-page slice or clamp, filters applied as AND vs OR, page param not reset on filter change"
+    },
+    {
+      "area": "Moves-table construction per game/method and method ordering (app/src/pages/pokemon.ts:112-194)",
+      "risk": "high",
+      "likelyBug": "Moves from other version groups leaking in, level-up/machine/egg/tutor order broken, silent row loss when a move fetch fails"
+    },
+    {
+      "area": "Column sorting incl. nulls-last, direction toggle and aria-sort (app/src/pages/pokemon.ts:60-102,328-345)",
+      "risk": "high",
+      "likelyBug": "Nulls jumping to the top in descending, string-comparing numeric columns, aria-sort left on the wrong header"
+    },
+    {
+      "area": "URL query state round-trips: q/type/generation/page on home, game on pokemon pages (app/src/pages/home.ts:16-25; app/src/pages/pokemon.ts:231-234)",
+      "risk": "high",
+      "likelyBug": "Default params no longer omitted, unknown ?game= not falling back to the highest-order version group, deep links rendering unfiltered"
+    },
+    {
+      "area": "Species-from-pokemon transforms: id > 10000 form exclusion, hidden-ability merge, dex sort (app/src/api.ts:220-247)",
+      "risk": "medium",
+      "likelyBug": "Boundary comparison flipped to >=, alternate forms appearing in lists, hidden flag lost or ORed incorrectly"
+    },
+    {
+      "area": "Spec-precise text helpers: humanize, latestEnglishFlavor whitespace collapse, englishName fallback, formatDex, em-dash missing values (app/src/api.ts:131-165)",
+      "risk": "medium",
+      "likelyBug": "Flavor text keeping \\n/\\f, wrong names entry picked, dex number padding changing to 3 digits"
+    },
+    {
+      "area": "Error and not-found paths: 404 vs 5xx conflation, per-move fetch failures, cache invalidation on failure (app/src/main.ts:66-72; app/src/api.ts:161-176; app/src/pages/pokemon.ts:139-146)",
+      "risk": "medium",
+      "likelyBug": "Server errors shown as 'Not found', failed responses cached forever, move rows dropped without any signal"
+    },
+    {
+      "area": "Race guards and re-render tokens (isActive/gameRequest) across router and pages (app/src/main.ts:26-29; app/src/pages/pokemon.ts:351-358)",
+      "risk": "low",
+      "likelyBug": "Stale game tables or duplicate content after rapid navigation, hash scroll on the wrong page"
+    },
+    {
+      "area": "Evolution-chain recursion and type-per-species derivation (app/src/pages/pokemon.ts:104-110; app/src/api.ts:343-365)",
+      "risk": "low",
+      "likelyBug": "Branching chains (Eevee) rendered flat, type slots out of order so badges and type filter disagree with the Pokémon page"
+    }
+  ]
+}
+```

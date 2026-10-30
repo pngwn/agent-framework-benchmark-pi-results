@@ -1,0 +1,165 @@
+I've reviewed the app and the acceptance suite. The measured facts are confirmed: **`app/` contains zero tests** — no test runner in `app/package.json:6-12` (only `dev`, `build`, `start`, `preview`, `prepare`, `check`), no `vitest`/`playwright`/`@testing-library` in `app/package.json:15-24`, and no spec/test files anywhere under `app/src`. So the app's only safety net is the acceptance suite in `tests/`, which the agent doesn't own and which won't guard refactors once it stops being run.
+
+What's unprotected is substantial, because the app concentrates real logic in untested pure-ish code:
+
+- **Filter/sort/paginate pipeline** — `app/src/routes/+page.server.ts:33-66` builds type slots per species, generation sets, substring matching and the `slice` pagination; an off-by-one in `PAGE_SIZE` slicing or the slot sort would pass review silently.
+- **Pokémon→species mapping** — `app/src/lib/server/api.ts:110-127` (`cardsFor`) does alternate-form exclusion (`MAX_SPECIES_ID`), dedup by ID, and dex-number ordering; a regression drops or duplicates cards on move/ability/type pages.
+- **Move-table sorting** — `app/src/lib/components/MovesTable.svelte:46-70` implements missing-values-last, direction flip and tiebreaks in one dense comparator; a sign flip or `x === y` check change breaks ordering only visibly in the browser.
+- **URL-state sync** — `app/src/routes/+page.svelte:18-46` debounces search input and only re-reads the URL for non-`goto` navigations via `afterNavigate`; this is exactly the kind of stateful code that rots.
+- **Fallback chains** — `app/src/routes/moves/[name]/+page.server.ts:34-38` (short_effect → flavor → null) and `app/src/routes/pokemon/[name]/+page.server.ts:75-78` (unknown version group gets `Infinity` order and becomes the **default game**) — edge cases no unit test pins down.
+- **Cheap pure helpers** — `app/src/lib/format.ts:4-19` (`humanize`, `dexNumber`, `orDash`) are one-line vitest targets and have none.
+- **Failure paths** — the 503/502 branches in `app/src/lib/server/api.ts:36-41` and the 404-vs-5xx heading in `app/src/routes/+error.svelte:6` are only exercised by the acceptance suite's one not-found case.
+
+None of this is hard to test: the load functions take `url`/`params` and return plain data (ideal for `svelte-testing-library` / load-function tests), and `format.ts` is trivially unit-testable. Their absence is a choice, not a constraint — the spec explicitly permitted extra tooling.
+
+```json
+{
+  "dimension": "tests",
+  "criteria": {
+    "coverage_of_risk": {
+      "score": 1,
+      "evidence": [
+        "app/package.json:6-12 — no test script, no test runner dependency; zero test files in app/",
+        "app/src/routes/+page.server.ts:48-66 — filtering, generation sets and 48-per-page slicing entirely untested",
+        "app/src/lib/server/api.ts:110-127 — cardsFor alternate-form exclusion, dedup and ordering untested",
+        "app/src/lib/components/MovesTable.svelte:46-70 — sort comparator (missing-last, direction, tiebreaks) untested"
+      ],
+      "rationale": "No tests exist, so the riskiest logic — filtering, pagination, sorting, data mapping — has no app-owned coverage at all."
+    },
+    "behaviour_not_implementation": {
+      "score": 1,
+      "evidence": ["app/ — zero test files (confirmed by find/grep and measured facts tests.files=0)"],
+      "rationale": "There are no tests to classify; per the anchor, no tests scores 1."
+    },
+    "regression_power": {
+      "score": 1,
+      "evidence": [
+        "app/package.json:15-24 — devDependencies contain no vitest, playwright or testing-library",
+        "app/src/lib/format.ts:4-19 — pure helpers (humanize, dexNumber, orDash) trivially unit-testable, untested",
+        "app/src/routes/+page.svelte:18-46 — debounce/URL-sync logic would silently regress"
+      ],
+      "rationale": "With zero tests, breaking any behaviour in app/ is caught only by the externally-owned acceptance suite, which won't run on future refactors."
+    },
+    "signal_to_noise": {
+      "score": 3,
+      "evidence": ["app/ — no test files, so no low-value tests either"],
+      "rationale": "No tests means no noise; per the anchor, a test-free app scores 3 on signal-to-noise."
+    }
+  },
+  "overall": 1,
+  "findings": [
+    {
+      "severity": "high",
+      "location": "app/package.json:6-12",
+      "issue": "No test runner, no test script, no tests anywhere in the app; every load function and helper is unguarded",
+      "suggestion": "Add vitest (+ @testing-library/svelte for components) with a `test` script; start with unit tests for format.ts and the load functions, which return plain data"
+    },
+    {
+      "severity": "high",
+      "location": "app/src/routes/+page.server.ts:48-66",
+      "issue": "Filter intersection, slot ordering and pagination slicing are untested; an off-by-one or a broken slot filter would ship silently",
+      "suggestion": "Unit-test the load function against fixture data: filter combos, empty results, page clamping (page=0, page=999), count across pages"
+    },
+    {
+      "severity": "high",
+      "location": "app/src/lib/server/api.ts:110-127",
+      "issue": "cardsFor handles alternate-form exclusion, dedup and dex ordering — a regression drops or duplicates cards on move/ability/type pages",
+      "suggestion": "Unit-test with refs including IDs > 10000 (e.g. deoxys-normal) and duplicates; mock fetchApi"
+    },
+    {
+      "severity": "high",
+      "location": "app/src/lib/components/MovesTable.svelte:46-70",
+      "issue": "Dense sort comparator (missing-values-last regardless of direction, sign flip, tiebreaks) has no coverage",
+      "suggestion": "Component/render test asserting row order for asc/desc clicks on numeric and null-bearing columns"
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/routes/+page.svelte:18-46",
+      "issue": "Search debounce and afterNavigate-based URL re-sync only run in a real browser; regressions (double-navigation, stale query on back/forward) are invisible to any non-browser check",
+      "suggestion": "A Playwright component/browser test typing rapidly and pressing back, asserting URL and rendered results"
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/routes/pokemon/[name]/+page.server.ts:75-78",
+      "issue": "Unknown version groups sort last via `?? Infinity` and thus become the default game selection — untested edge case that would flip the default table",
+      "suggestion": "Unit-test game selection with a version group absent from version-group orders"
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/lib/server/api.ts:33-51",
+      "issue": "Cache stores resolved 404s and rejected promises; failure paths (503/502) and cache eviction (size>5000 with no expired entries) are untested",
+      "suggestion": "Unit-test fetchApi with a fetch stub: 404→null, non-ok→502, network error→503, cache hit within TTL"
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/routes/moves/[name]/+page.server.ts:34-38",
+      "issue": "Effect fallback chain (short_effect → flavor text → null) and $effect_chance substitution are untested",
+      "suggestion": "Table-driven unit test over the three fallback cases plus null effect_chance"
+    },
+    {
+      "severity": "low",
+      "location": "app/src/lib/format.ts:4-19",
+      "issue": "Pure helpers (humanize, dexNumber, orDash, pageTitle) are the cheapest possible tests and have none",
+      "suggestion": "Add a small vitest suite covering edge inputs ('', ids > 9999, 0 vs null)"
+    },
+    {
+      "severity": "low",
+      "location": "app/src/routes/+error.svelte:6-9",
+      "issue": "404 vs 5xx heading branch untested; a status check typo would turn every API outage into a 'Not found' page",
+      "suggestion": "Render test for error.svelte with page.status 404 and 503"
+    }
+  ],
+  "summary": "The app ships zero tests — no runner, no script, no spec files — leaving its riskiest logic (list filtering and pagination, Pokémon→species mapping, move-table sorting, URL state sync) guarded only by the externally-owned acceptance suite. Nearly all of that logic lives in load functions and pure helpers that would be cheap to test with vitest and svelte-testing-library. As it stands, any refactor of the data layer after acceptance testing would land unreviewed by tests.",
+  "wroteTests": false,
+  "testCount": 0,
+  "valuableTests": [],
+  "lowValueTests": [],
+  "untested": [
+    {
+      "area": "Home-page filter/pagination logic (app/src/routes/+page.server.ts:48-66)",
+      "risk": "high",
+      "likelyBug": "Off-by-one in the 48-per-page slice, wrong slot ordering of card types, or a filter that silently ignores `generation` — pages would show wrong/missing Pokémon with no failing check"
+    },
+    {
+      "area": "Pokémon→species card mapping and alternate-form exclusion (app/src/lib/server/api.ts:110-127)",
+      "risk": "high",
+      "likelyBug": "A changed MAX_SPECIES_ID comparison or broken dedup would drop legitimate species (or admit Mega forms) on move/ability/type pages"
+    },
+    {
+      "area": "Moves-table sorting (app/src/lib/components/MovesTable.svelte:46-70)",
+      "risk": "high",
+      "likelyBug": "Missing values sorting first on descending, or a dropped sign flip, reversing apparent column order — only visible by manually clicking headers"
+    },
+    {
+      "area": "Search debounce and URL re-sync (app/src/routes/+page.svelte:18-46)",
+      "risk": "medium",
+      "likelyBug": "Stale `q` after back/forward navigation or a lost debounce timer firing twice, pushing duplicate history entries"
+    },
+    {
+      "area": "API fetch/cache error paths (app/src/lib/server/api.ts:33-51)",
+      "risk": "medium",
+      "likelyBug": "Cached rejected promises or 404s served beyond TTL, or 502/503 misclassified as 404 when the API changes shape"
+    },
+    {
+      "area": "Version-group default selection and move-table grouping/dedup (app/src/routes/pokemon/[name]/+page.server.ts:68-118)",
+      "risk": "medium",
+      "likelyBug": "An unknown version group (order ?? Infinity) becoming the default game, or the dedup key dropping the level component so egg moves vanish"
+    },
+    {
+      "area": "Move effect fallback chain (app/src/routes/moves/[name]/+page.server.ts:34-38)",
+      "risk": "medium",
+      "likelyBug": "Flavor-text fallback lost or `$effect_chance` left unsubstituted, showing raw placeholders to users"
+    },
+    {
+      "area": "Pure formatting helpers (app/src/lib/format.ts:4-19)",
+      "risk": "low",
+      "likelyBug": "humanize or dexNumber edge cases (id > 9999, empty strings) regressing every list label"
+    },
+    {
+      "area": "Error page branching (app/src/routes/+error.svelte:6-9)",
+      "risk": "low",
+      "likelyBug": "API outages rendered as 'Not found' because the status check broke"
+    }
+  ]
+}
+```

@@ -1,0 +1,145 @@
+## Review summary
+
+**Framework currency check** (verified against npm + gracile.js.org, 2026-10-30): the app pins `@gracile/gracile@^0.11.0` — the current stable release (dist-tag `latest`). Its structure matches the current docs closely: `(home).ts` → `/` is a documented index convention; `routes/[name].ts` params, the `404.ts` route (Gracile's request pipeline explicitly falls back to a `/404/` route for unmatched URLs), handler-returns-props → `template(context.props.GET)`, `@gracile/gracile/server-html`, and the Hono adapter (`serveStatic` before `honoAdapter`) all read like the official examples. Gracile ships no CSR, so the full-page-navigation + small progressive-enhancement script is in keeping with the framework's MPA philosophy.
+
+The problems are concentrated in the API client layer and small hygiene debt:
+
+1. **`app/src/lib/api.ts:22`** — the non-OK path does `throw new Error(\`HTTP ${res.status} ${res.statusText}\`)`, but the variable is `response`; this throws a `ReferenceError: res is not defined` instead. It's masked by `tryApi`/`.catch` so 404s still render, but every "API failed" path is broken and logs garbage. The `ApiError` class at `api.ts:4-8` is dead code that was clearly meant to be used here.
+2. **`app/src/lib/api.ts:25`** — rejected promises are cached forever in the module-level `Map`. A transient API error (or a 404 for a resource that later appears) is sticky until process restart, and `getMoveDetailsForGame` (`data.ts:283`) silently drops moves whose fetch failed — data disappears from tables with no signal.
+3. **`app/src/routes/abilities/[name].ts:16`** — `.catch(() => null)` turns any upstream failure into a 404 "Not found" page; error vs. not-found is conflated across all detail routes via `tryApi`.
+4. **`app/src/document.ts:12-13`** — asset URLs built with `new URL('./document.css', import.meta.url)` instead of the docs' explicit instruction to use "the full real path (relative to the project root)" (e.g. `/src/document.client.ts`). Vite's build rewrites it correctly (verified in `dist/server/entrypoint.js`), but it deviates from the documented pattern every starter uses.
+5. Duplication/dead code: the Not-found markup is repeated in five places (`pokemon/[name].ts:55`, `moves/[name].ts:31`, `abilities/[name].ts:33`, `types/[name].ts:29`, `404.ts:11`) while the shared `notFound()` helper sits unused at `components.ts:43`; `sectionHeading` (`components.ts:50`) is also unused; `(home).ts:60-62` re-implements `idFromUrl`/`isSpeciesId` inline.
+6. Pervasive `any` for the PokeAPI shapes (`data.ts` throughout, ~11 type lines total) leaves the external API contract untyped, and `data.ts:261` has a NaN edge (`??` doesn't catch `idFromUrl`'s `NaN`).
+
+On the positive side: the server/client boundary is clean (client JS isolated in `client/interactions.ts`), concurrency is throttled everywhere via `mapLimit`, URL/filter state handling is correct and test-proofed (NaN page, invalid game, empty params), and the CSS is token-driven and consistent.
+
+```json
+{
+  "dimension": "mergeability",
+  "criteria": {
+    "idiomatic": {
+      "score": 4,
+      "evidence": [
+        "app/package.json:7 — pins @gracile/gracile ^0.11.0, verified as npm's current stable dist-tag",
+        "app/src/routes/(home).ts:1 — parenthesised index route, a documented Gracile convention ('(anything).ts → /')",
+        "app/src/routes/404.ts:1 — 404 route matches the engine's built-in fallback that looks up a route at '/404/' for unmatched URLs (verified in @gracile/engine request.ts)",
+        "app/src/routes/pokemon/[name].ts:18-45 — handler returns props, template consumes context.props.GET, exactly the documented defineRoute shape",
+        "app/server.mjs:10-13 — serveStatic before gracile.honoAdapter(handler), byte-for-byte the documented Hono adapter setup",
+        "app/src/document.ts:12-13 — asset URLs via new URL(./document.css, import.meta.url) instead of the docs' explicit 'full real path relative to project root' convention",
+        "app/src/routes/(home).ts:60-62 — hand-rolled ID regex where lib/api.ts already exports idFromUrl/isSpeciesId"
+      ],
+      "rationale": "Reads like the framework's own docs for routing, handlers, server adapter and the 404 convention, on the current stable release; only the document asset-reference form and one inline ID parser deviate from documented patterns."
+    },
+    "correctness_risks": {
+      "score": 3,
+      "evidence": [
+        "app/src/lib/api.ts:22 — throws `HTTP ${res.status}` but the variable is `response`; ReferenceError on every non-OK API response",
+        "app/src/lib/api.ts:25 — rejected promises are stored in the unbounded cache, so a transient API failure or a later-added resource stays broken until restart",
+        "app/src/lib/data.ts:283 — moves whose detail fetch failed are silently filtered out of the moves tables",
+        "app/src/routes/abilities/[name].ts:16-19 — .catch(() => null) turns upstream API errors into a 404 Not found page",
+        "app/src/routes/pokemon/[name].ts:21 — decodeURIComponent can throw URIError (e.g. '/pokemon/%'), yielding a 500 instead of 404",
+        "app/src/lib/data.ts:261 — `detail?.order ?? idFromUrl(...)` leaves NaN possible since ?? doesn't catch NaN"
+      ],
+      "rationale": "No hydration/mismatch or listener-leak issues (no client framework code), and pagination/filter edge cases are handled carefully, but the central fetch helper has an outright undefined-variable bug plus permanently-cached rejections that silently corrupt data after transient errors."
+    },
+    "global_abstractions": {
+      "score": 3,
+      "evidence": [
+        "app/src/lib/api.ts:10 — module-level promise cache is hidden global state (acceptable per spec, but never evicts, including failures)",
+        "app/src/lib/components.ts:43-47 — shared notFound() helper exists but is unused; the same 5-line markup is duplicated in pokemon/[name].ts:55, moves/[name].ts:31, abilities/[name].ts:33, types/[name].ts:29 and 404.ts:11",
+        "app/src/lib/components.ts:50 — sectionHeading exported, never called",
+        "app/src/lib/data.ts — one 300-line module owns all four resources plus move-table building; locally coherent but the app's single point of change",
+        "app/src/client/interactions.ts — client concerns cleanly isolated; no server/client boundary leakage"
+      ],
+      "rationale": "The lib/ layering (api / data / format / components) is sensible with clear boundaries, but duplicated near-identical markup, dead exports and a re-implemented helper show the abstraction layer isn't fully earning its keep."
+    },
+    "readability": {
+      "score": 3,
+      "evidence": [
+        "app/src/routes/ — file layout mirrors URLs exactly, easy to navigate",
+        "app/src/lib/format.ts — small, well-named pure helpers (humanize, dexNumber, statLabel)",
+        "app/src/lib/data.ts:5-30 — pervasive `any` typing for all API shapes; ~11 type lines across the whole app",
+        "app/src/routes/pokemon/[name].ts:53,63,107 — mixes `const props = context.props.GET`, `const data = …` and inline context.props.GET.data in the same template",
+        "app/src — zero comments anywhere; spec-critical choices (missing-values sort last, aria-sort lifecycle, fixed method order) are implicit"
+      ],
+      "rationale": "Organization and naming are good and a new teammate would find pages fast, but the untyped API contract, inconsistent prop access and absent comments leave the trickier spec rules unexplained."
+    },
+    "review_cost": {
+      "score": 3,
+      "evidence": [
+        "app/src/lib/api.ts:22 — must fix the res/response bug and use the dead ApiError at api.ts:4",
+        "app/src/lib/api.ts:25 — must evict rejected promises from the cache",
+        "app/src/lib/components.ts:43 + 5 route sites — must consolidate the not-found markup and delete sectionHeading",
+        "app/src/routes/(home).ts:60-62 — must reuse idFromUrl/isSpeciesId",
+        "app/src/document.ts:12-13 — must switch to the documented project-root asset paths",
+        "app/src/routes/abilities/[name].ts:16 — must separate 404 from upstream errors"
+      ],
+      "rationale": "A full round of changes before approving, but every item is small, local and mechanical — nothing structural would need rework."
+    }
+  },
+  "overall": 3,
+  "findings": [
+    {
+      "severity": "high",
+      "location": "app/src/lib/api.ts:22",
+      "issue": "The non-OK branch throws `HTTP ${res.status} ${res.statusText}` but the parameter is `response`; every failed API request throws ReferenceError: res is not defined. The ApiError class (api.ts:4-8) was written for this and is never used.",
+      "suggestion": "Throw `new ApiError(response.status, url)` (or at minimum use `response.status`), and delete or use ApiError consistently."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/lib/api.ts:25",
+      "issue": "Rejected promises are cached in the module-level Map forever, so a transient API failure (or a 404 for a resource that is added later, which the spec explicitly anticipates) remains broken until process restart; the cache is also unbounded.",
+      "suggestion": "Evict the cache entry when the promise rejects (`request.catch(() => cache.delete(url))`) and consider an LRU/TTL bound for large payloads."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/lib/data.ts:283",
+      "issue": "getMoveDetailsForGame silently filters out moves whose detail fetch failed, so rows vanish from the moves tables with no error surfaced (compounded by the sticky rejection cache).",
+      "suggestion": "Distinguish 404s (drop the row) from transient errors (fail the page render), and log the dropped move."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/routes/abilities/[name].ts:16",
+      "issue": "`.catch(() => null)` conflates upstream API errors with genuine not-found, serving a 404 page (and 404 status) when the API is down or erroring; tryApi does the same in the other detail routes.",
+      "suggestion": "Only map a 404 status to the not-found page; propagate other failures to Gracile's error handler (500)."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/document.ts:12-13",
+      "issue": "Stylesheet and client-script URLs are built with `new URL('./document.css', import.meta.url).pathname` instead of the documented convention of project-root paths (`/src/document.client.ts`), relying on implicit Vite build-time rewriting.",
+      "suggestion": "Use the documented form: `<link rel=\"stylesheet\" href=\"/src/document.css\">` and `<script type=\"module\" src=\"/src/document.client.ts\">`."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/lib/components.ts:43",
+      "issue": "A shared notFound() helper exists unused while the same not-found markup is copy-pasted in five places (pokemon/[name].ts:55, moves/[name].ts:31, abilities/[name].ts:33, types/[name].ts:29, 404.ts:11), so a wording change requires five edits.",
+      "suggestion": "Use the helper everywhere (or a tiny fragment route) and delete the copies; also delete the unused sectionHeading (components.ts:50)."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/routes/(home).ts:60-62",
+      "issue": "Re-implements idFromUrl/isSpeciesId inline with a fresh regex instead of importing the existing helpers from lib/api.ts:32-40.",
+      "suggestion": "Replace with `isSpeciesId(idFromUrl(entry.pokemon?.url))`."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/lib/data.ts:261",
+      "issue": "`Number(detail?.order ?? idFromUrl(ref.url) ?? 0)` can produce NaN because ?? doesn't catch NaN from idFromUrl, corrupting the version-group sort.",
+      "suggestion": "Use `Number.isFinite` on the fallback, e.g. `const n = detail?.order ?? idFromUrl(ref.url); return Number.isFinite(n) ? n : 0`."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/routes/pokemon/[name].ts:21",
+      "issue": "decodeURIComponent on a malformed param (e.g. `/pokemon/%`) throws URIError, which Gracile's middleware converts to a 500 instead of the spec's not-found page.",
+      "suggestion": "Wrap decode in a try/catch (or validate the param) and return the 404 branch on failure."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/lib/data.ts:5",
+      "issue": "Every API response is typed `any` (api<T = any> call sites never pass T), so the external PokeAPI contract — the app's main integration surface — is untyped.",
+      "suggestion": "Define minimal interfaces for the consumed shapes (species, pokemon, move, ability, type, generation) and pass them to api<T>."
+    }
+  ],
+  "summary": "This is a competent, genuinely idiomatic Gracile 0.11 SSR app: documented route conventions, the official Hono adapter, clean handler→props→template flow and a tidy server/client split. The merge blockers are concentrated in the API client — an undefined-variable bug in the error path, permanently cached rejected promises that silently drop or misclassify data, and 404/error conflation — plus copy-pasted not-found markup and untyped API shapes. Fixable in one focused round; I'd approve after that round."
+}
+```

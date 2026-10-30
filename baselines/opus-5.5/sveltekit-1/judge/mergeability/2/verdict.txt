@@ -1,0 +1,111 @@
+I've read the full app, the spec, the official Svelte skills, and verified the app's patterns against the current SvelteKit 3 docs (config in `vite.config.ts`, `#lib` subpath imports, `$app/env/private` + `defineEnvVars`, `$app/state`, Kit 3 `goto` options `replace`/`reset`). This is a modern, idiom-correct SvelteKit 3 / Svelte 5 runes codebase; the issues I found are narrow.
+
+```json
+{
+  "dimension": "mergeability",
+  "criteria": {
+    "idiomatic": {
+      "score": 5,
+      "evidence": [
+        "app/vite.config.ts:4-13 — config passed to the sveltekit() Vite plugin (adapter + compilerOptions.runes as a per-file function), exactly the SvelteKit 3 way; no legacy svelte.config.js",
+        "app/src/env.ts:1-7 and app/src/lib/server/api.ts:2 — defineEnvVars + $app/env/private, the current (non-deprecated) env var API",
+        "app/package.json:27-29 — '#lib/*' subpath imports with explicit .ts extensions, per the Kit 3 migration guide",
+        "app/src/routes/+page.svelte:46 — goto(..., { replace, reset: false }) uses the renamed Kit 3 options correctly",
+        "app/src/routes/+error.svelte:2 — page from $app/state (stores removed in Kit 3)",
+        "app/src/routes/pokemon/[name]/+page.svelte:15-22 — recursive {#snippet} for the evolution tree instead of a self-referencing component",
+        "app/src/lib/components/MovesTable.svelte:38-45 — keyed {#each}, $derived.by for sorting, aria-sort managed correctly",
+        "app/src/lib/components/TypeBadge.svelte:8 — style:--badge-bg custom property, the skill-recommended way to pass JS values into scoped CSS"
+      ],
+      "rationale": "Reads like the framework's own Kit 3 examples: runes everywhere, PageProps/LayoutProps types, Snippets, $app/state, new env module, new plugin config. I verified each against current docs and found no legacy patterns."
+    },
+    "correctness_risks": {
+      "score": 4,
+      "evidence": [
+        "app/src/routes/+page.svelte:49-52 — debounce setTimeout is never cleared on unmount; typing in search and clicking a card within ~200ms lets the timer fire after navigation and goto() hijacks the user back to /?q=...",
+        "app/src/lib/server/api.ts:47-49 — cache eviction only runs when size exceeds 5000 and only removes already-expired entries; below that threshold stale entries linger indefinitely (bounded by distinct URLs in practice, but lazy)",
+        "app/src/routes/pokemon/[name]/+page.server.ts:81-89 — up to ~100 parallel move-detail fetches on first request for a popular Pokémon; mitigated by the TTL cache but a real fan-out burst",
+        "app/src/routes/moves/[name]/+page.server.ts:31-33 — replaceAll('$effect_chance', String(move.effect_chance ?? '')) leaves a bare '%' if the placeholder occurs while effect_chance is null",
+        "app/src/lib/server/api.ts:32-45 — fetch errors become thrown SvelteKit errors and rejected cached promises are evicted via value.catch(); 404s resolve to null and error(404) at the caller — no unhandled rejections found"
+      ],
+      "rationale": "Error paths, 404s and cache-invalidation are handled carefully; the only genuine bug is the un-cancelled debounce timer, plus two low-severity robustness nits."
+    },
+    "global_abstractions": {
+      "score": 5,
+      "evidence": [
+        "app/src/lib/server/api.ts — single cohesive server-side data module: fetch+cache+domain helpers, with a comment explaining the TTL rationale (lines 5-8)",
+        "app/src/lib/server/ — server-only code physically separated under lib/server; app/src/lib/format.ts is the only shared module and is pure",
+        "app/src/lib/types.ts:1-33 — load-to-page DTOs live in one small file, keeping components decoupled from API shapes",
+        "app/src/routes/+page.server.ts:34-46 — home filtering logic stays in the load; no leaked global UI state"
+      ],
+      "rationale": "Abstractions are few and earn their keep: one data module with a clear server boundary, one format helper, shared DTOs, and small presentational components. No god components, no hidden client/server leakage."
+    },
+    "readability": {
+      "score": 5,
+      "evidence": [
+        "app/src/lib/server/api.ts:24-28 — comments explain *why* (404→null contract), not what",
+        "app/src/routes/+page.server.ts:34 — 'A species' default Pokémon has the species' ID' explains the non-obvious data model",
+        "app/src/routes/+page.svelte:10-11 — comment explains the local-query vs URL-state strategy",
+        "app/src/lib/format.ts:3-21 — tiny, well-named helpers (humanize, dexNumber, orDash) reused everywhere instead of inline duplication",
+        "app/src/routes/pokemon/[name]/+page.server.ts:38-40 — domain constants (STAT_LABELS, METHOD_ORDER) named and placed at top"
+      ],
+      "rationale": "Consistent naming and organisation across all routes; every non-obvious decision carries a short explanatory comment. A new teammate can navigate this in minutes."
+    },
+    "review_cost": {
+      "score": 4,
+      "evidence": [
+        "app/src/routes/+page.svelte:49-52 — the one change I'd actually ask for (clear the timer on destroy / before unmounting)",
+        "app/src/routes/+page.svelte:15-17 — initialQuery() indirection is redundant; $state(data.q) is equivalent",
+        "app/src/lib/server/api.ts:47-49 — nits on cache eviction policy",
+        "app/src/routes/types/+page.svelte:41-64 — type-list link styling duplicates TypeBadge.svelte:10-27 badge styling"
+      ],
+      "rationale": "I'd approve after one small round: fix the debounce-timer cleanup, and optionally tidy the three low-severity nits. Everything else is merge-ready."
+    }
+  },
+  "overall": 4,
+  "findings": [
+    {
+      "severity": "medium",
+      "location": "app/src/routes/+page.svelte:49",
+      "issue": "Debounce timer is never cancelled on unmount; typing in the search box and then clicking a card within ~200 ms fires applyFilters after the navigation, and goto('/?q=...') pulls the user back from the Pokémon page",
+      "suggestion": "Clear the timer on destroy, e.g. $effect(() => () => clearTimeout(timer)), or clear it in an onDestroy/onNavigate handler"
+    },
+    {
+      "severity": "low",
+      "location": "app/src/lib/server/api.ts:47",
+      "issue": "Cache eviction only runs when size exceeds 5000 and only deletes already-expired entries; unexpired entries are never proactively removed below that threshold",
+      "suggestion": "Sweep expired entries on insert (cheap with the existing expiry check) or use an LRU so memory tracks the working set"
+    },
+    {
+      "severity": "low",
+      "location": "app/src/routes/pokemon/[name]/+page.server.ts:81",
+      "issue": "First uncached request for a move-heavy Pokémon fans out ~100 parallel move-detail fetches",
+      "suggestion": "Fine against the local API given the 60 s cache, but consider a concurrency limit or move-detail endpoint batching if the API ever moves off-host"
+    },
+    {
+      "severity": "low",
+      "location": "app/src/routes/moves/[name]/+page.server.ts:33",
+      "issue": "If a move's short_effect contains the $effect_chance placeholder but effect_chance is null, the replacement produces malformed text like 'Has a % chance'",
+      "suggestion": "Only substitute when move.effect_chance is non-null, otherwise leave the placeholder or fall back to the flavor text"
+    },
+    {
+      "severity": "low",
+      "location": "app/src/routes/+page.svelte:19",
+      "issue": "Syncing the search input via afterNavigate with a navigation.type !== 'goto' discrimination is subtle; any goto issued from elsewhere (or future Kit navigation-type changes) would desynchronise the input from the URL",
+      "suggestion": "Consider comparing the derived URL state instead of navigation.type, or document the invariant more prominently"
+    },
+    {
+      "severity": "low",
+      "location": "app/src/routes/+page.svelte:15",
+      "issue": "initialQuery() wrapper adds indirection with no behaviour difference",
+      "suggestion": "Use let query = $state(data.q) directly"
+    },
+    {
+      "severity": "low",
+      "location": "app/src/routes/types/+page.svelte:41",
+      "issue": "Type-list link styling (badge background, radius, on-type colour) duplicates the CSS in TypeBadge.svelte",
+      "suggestion": "Reuse TypeBadge (with link) on the types page so the badge look has one source of truth"
+    }
+  ],
+  "summary": "This is a clean, fully idiomatic SvelteKit 3 / Svelte 5 runes app: plugin-based config, #lib imports, defineEnvVars, $app/state, Snippets and keyed each-blocks all match the current docs I verified against. The structure is sound — one cohesive server-only data module with clear boundaries and small presentational components — and readability is excellent. The one real defect is an un-cancelled debounce timer on the home page that can hijack a navigation after unmount; everything else is nits."
+}
+```

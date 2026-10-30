@@ -1,0 +1,148 @@
+## Review: editability of `app/`
+
+This is a well-organized SvelteKit 5 app: server-only API access quarantined in `lib/server/api.ts` with layered helpers (`fetchApi` → `fetchOr404` → `fetchByName`), narrow typed data contracts in `lib/types.ts` (`Card`, `MoveTable`, `TypeRef`), and small single-purpose components (`Section`, `CardList`, `MovesTable`, `TypeBadge`, `TypeList`). Shared visual vocabulary (`.panel`, `.stack`, `.count`, `.control`) lives in `app.css` rather than being re-styled per page. The main editability seams are the duplicated card-construction between `cardsFor` and the home load, and the home load being one monolithic 60-line function.
+
+**Scenario walkthrough:**
+
+1. **Remove Abilities**: delete `app/src/routes/abilities/`, drop the section at `app/src/routes/pokemon/[name]/+page.svelte:87-93` and the `abilities` mapping at `app/src/routes/pokemon/[name]/+page.server.ts:175-179`. Nav (`+layout.svelte`) never linked to it. Residue: `Card.hidden` + the "Hidden ability" branch in `CardList.svelte:18-20` + `is_hidden` propagation in `cardsFor` become dead — a thorough removal touches 6-7 files.
+2. **Sprite bug**: sprite derivation is a single function, `spriteUrl` (`app/src/lib/server/api.ts:86-87`), and *both* card builders call it (`api.ts:128` for moves/types/abilities, `app/src/routes/+page.server.ts:59` for home). One fix covers every list — but a reviewer must check both builders pass the right ID since card construction is duplicated.
+3. **Name sorting on every card list**: ordering is decided in two places — `cardsFor` (`api.ts:132`) and the home load's species sort (`routes/+page.server.ts:49`) — or can be done once in `CardList.svelte`. Findable but split.
+4. **Items section**: new `routes/items/[name]/` with a thin load/page copying the ~40-line moves skeleton; everything else (`Section`, `CardList`, `TypeBadge`, `orDash`, `englishName`, `fetchByName`, `cardsFor`, `getTypeLabels`) is reused as-is. The moves page is thin enough that copying it is cheap.
+5. **Data source change**: `API_BASE_URL` defined once in `app/src/env.ts:3-9`, consumed only in `api.ts` (`resolveUrl` at :22-23, `spriteUrl` at :87); the cache (`TTL_MS`/`cache`, `api.ts:8-11,44-53`) is fully contained in one module. Excellent.
+
+```json
+{
+	"dimension": "editability",
+	"criteria": {
+		"removability": {
+			"score": 4,
+			"evidence": [
+				"app/src/routes/abilities/ — self-contained route dir, deletable as a unit",
+				"app/src/routes/pokemon/[name]/+page.svelte:87-93 — the only inbound links to /abilities, in one Section",
+				"app/src/routes/pokemon/[name]/+page.server.ts:175-179 — the only load data feeding those links",
+				"app/src/lib/server/api.ts:127-130 — cardsFor's is_hidden handling would be left dead after removal",
+				"app/src/lib/components/CardList.svelte:18-20 — 'Hidden ability' branch exists only for the abilities page"
+			],
+			"rationale": "Deleting a feature is a route directory plus one page and its load, with no unrelated edits; the only knock is the small hidden-ability residue spread across Card/CardList/cardsFor."
+		},
+		"changeability": {
+			"score": 4,
+			"evidence": [
+				"app/src/lib/server/api.ts:86-87 — spriteUrl is the single sprite-derivation point",
+				"app/src/lib/server/api.ts:128 — cardsFor delegates to spriteUrl",
+				"app/src/routes/+page.server.ts:59 — home load also delegates to spriteUrl, so one fix covers every card list",
+				"app/src/lib/server/api.ts:121-132 — card shape (id/name/label/sprite) duplicated with app/src/routes/+page.server.ts:49-61",
+				"app/src/routes/moves/[name]/+page.server.ts:31-35 — effect fallback near-duplicated in app/src/routes/abilities/[name]/+page.server.ts:17-19"
+			],
+			"rationale": "Most fixes land in one obvious helper (spriteUrl, orDash, englishName, cleanText), and the sprite bug in particular is centralized; card-shape and effect-fallback logic are the two spots where a change needs two edits."
+		},
+		"coupling": {
+			"score": 4,
+			"evidence": [
+				"app/src/lib/types.ts:1-38 — pages receive narrow, serializable data contracts (Card, MoveTable, TypeRef) via load functions",
+				"app/src/lib/server/api.ts — all API knowledge is server-only, Kit-enforced under lib/server; browser code never touches the API",
+				"app/src/lib/components/Section.svelte:1-9 — generic snippet-based section component, no knowledge of pages",
+				"app/src/lib/components/MovesTable.svelte:14-30 — sorting driven by a key→accessor map, no flag parameters",
+				"app/src/lib/components/TypeBadge.svelte:3-4 — boolean `link` prop is mild flag creep",
+				"app/package.json:31-33 — `#lib/*` package subpath imports instead of SvelteKit's standard `$lib` alias"
+			],
+			"rationale": "Server/client separation is clean, shared state is explicit (URL + load data only), and components depend on small typed interfaces; the non-idiomatic import alias and a couple of boolean props are minor tangles."
+		},
+		"abstraction_design": {
+			"score": 4,
+			"evidence": [
+				"app/src/lib/server/api.ts:56-84 — layered fetch helpers plus localisation utilities reused by all four page types",
+				"app/src/lib/server/api.ts:121-132 — cardsFor reused by moves, abilities and types pages unchanged",
+				"app/src/routes/types/[name]/+page.server.ts:8-16 — RELATIONS table models damage-relation variation as data, not branches",
+				"app/src/lib/components/MovesTable.svelte:31-37 — per-method column variation handled by filtering a column map, not duplicated tables",
+				"app/src/routes/+page.server.ts:18-66 — home load inlines type-index building, filtering, card building and pagination in one 50-line function, duplicating cardsFor's card shape"
+			],
+			"rationale": "The abstractions genuinely stretch: an Items section would reuse Section/CardList/TypeBadge, the api helpers, and the data-driven table pattern with only a thin copy of the moves page skeleton. The one real copy-paste seam is home-page card construction."
+		}
+	},
+	"overall": 4,
+	"findings": [
+		{
+			"severity": "medium",
+			"location": "app/src/routes/+page.server.ts:49-61",
+			"issue": "Card construction is duplicated between the home load and cardsFor (app/src/lib/server/api.ts:121-132); the Card shape, humanized label and sprite rules exist in two places, so any change to cards must be made twice and can drift",
+			"suggestion": "Extract a shared card builder (e.g. `cardsForSpecies([...])` or a `makeCard(id, name, extra)` helper in lib/server/api.ts) and have the home load use it"
+		},
+		{
+			"severity": "medium",
+			"location": "app/src/routes/+page.server.ts:18-66",
+			"issue": "The home load is one monolithic function mixing type-index construction, filtering, pagination and card building in the route file, untestable and unshareable",
+			"suggestion": "Move the type→species index and filtering into lib/server/api.ts (or a lib/server/pokedex.ts), leaving the load to parse URL params and slice pages"
+		},
+		{
+			"severity": "low",
+			"location": "app/src/routes/moves/[name]/+page.server.ts:31-35",
+			"issue": "Effect-fallback logic (short_effect → flavor text → —) is near-duplicated in the abilities load (app/src/routes/abilities/[name]/+page.server.ts:17-19) with subtle differences ($effect_chance substitution)",
+			"suggestion": "Share an `effectText(moveOrAbility)` helper in lib/server/api.ts"
+		},
+		{
+			"severity": "low",
+			"location": "app/package.json:31-33",
+			"issue": "Imports use the `#lib/*` package subpath alias instead of SvelteKit's built-in `$lib`, which every SvelteKit contributor expects",
+			"suggestion": "Switch to `$lib/...` imports (or at minimum document the choice); the vite/plugin tooling treats $lib as first-class"
+		},
+		{
+			"severity": "low",
+			"location": "app/src/lib/server/api.ts:127-130",
+			"issue": "Removing the abilities feature leaves dead code behind: Card.hidden (types.ts), the is_hidden propagation in cardsFor, and the 'Hidden ability' span in CardList.svelte:18-20 exist only for it",
+			"suggestion": "When a feature's sole consumer is removed, sweep its supporting fields and component branches in the same change"
+		},
+		{
+			"severity": "low",
+			"location": "app/src/lib/components/MovesTable.svelte:69",
+			"issue": "The keyed each includes the index in the key (`${row.name}-${row.level}-${i}`), so keys are unstable under re-sorting and rows lose DOM identity",
+			"suggestion": "Key on stable row identity (name+level is already unique thanks to the `seen` dedupe in the load); drop the index"
+		},
+		{
+			"severity": "low",
+			"location": "app/src/lib/components/TypeBadge.svelte:3-4",
+			"issue": "Boolean `link` prop duplicated in TypeBadge and TypeList is mild flag-parameter creep",
+			"suggestion": "Acceptable at this size; if a third variant appears, switch to snippet-based or per-variant composition"
+		},
+		{
+			"severity": "low",
+			"location": "app/src/routes/+page.svelte:11-49",
+			"issue": "URL/debounce sync (goto, afterNavigate type check, manual timer) is subtle and confined to inline handlers; future filter changes must respect this dance",
+			"suggestion": "Extract `applyFilters`/`onSearchInput` into a small `filters.svelte.ts` module with the href builder so the sync rules are named and testable"
+		}
+	],
+	"summary": "A cleanly layered SvelteKit app: API access, caching and base-URL knowledge live entirely in one server module, pages receive narrow typed data, and components are small and data-driven, so most bug fixes land in one helper. The main editability costs are the duplicated card construction between the home load and cardsFor, a monolithic home load, and the non-standard `#lib/*` import alias. Extending with an Items section or changing the data source would be easy; sorting and card-shape changes need two coordinated edits.",
+	"scenarios": [
+		{
+			"change": "Remove the Abilities pages and every link to them",
+			"files": ["app/src/routes/abilities/", "app/src/routes/pokemon/[name]/+page.svelte", "app/src/routes/pokemon/[name]/+page.server.ts", "app/src/lib/server/api.ts", "app/src/lib/types.ts", "app/src/lib/components/CardList.svelte"],
+			"difficulty": 4,
+			"notes": "Delete the route dir, one Section and one load mapping; a thorough removal also sweeps the now-dead Card.hidden field, cardsFor's is_hidden handling and CardList's hidden-ability span."
+		},
+		{
+			"change": "Fix wrong sprite for species whose default Pokémon has a different name (e.g. Deoxys)",
+			"files": ["app/src/lib/server/api.ts"],
+			"difficulty": 4,
+			"notes": "spriteUrl (api.ts:86-87) is the single derivation point and both card builders call it, so one fix covers every list; you must still verify both call sites (api.ts:128, +page.server.ts:59) pass the correct id because card construction is duplicated."
+		},
+		{
+			"change": "Add sorting by name to every list of Pokémon cards",
+			"files": ["app/src/lib/server/api.ts", "app/src/routes/+page.server.ts", "app/src/lib/components/CardList.svelte"],
+			"difficulty": 3,
+			"notes": "Ordering is decided in two places — cardsFor's sort (api.ts:132) and the home load's species sort (+page.server.ts:49) — or can be imposed once in CardList.svelte; either way you must find both producers of cards."
+		},
+		{
+			"change": "Add an Items section (/items, /items/:name) shaped like Moves",
+			"files": ["app/src/routes/items/[name]/+page.server.ts", "app/src/routes/items/[name]/+page.svelte", "app/src/lib/server/api.ts"],
+			"difficulty": 4,
+			"notes": "Everything structural is reusable (Section, CardList, TypeBadge, orDash/englishName/cleanText, fetchByName, cardsFor, getTypeLabels); you copy the ~40-line moves page skeleton and add a `item` fetch, since page loads are thin and domain-specific."
+		},
+		{
+			"change": "Change the API base URL and caching rules",
+			"files": ["app/src/env.ts", "app/src/lib/server/api.ts"],
+			"difficulty": 5,
+			"notes": "API_BASE_URL is declared once (env.ts:3-9) and consumed only inside api.ts (resolveUrl :22-23, spriteUrl :87); the cache and TTL are entirely contained in api.ts:8-53. No other file knows about either."
+		}
+	]
+}
+```

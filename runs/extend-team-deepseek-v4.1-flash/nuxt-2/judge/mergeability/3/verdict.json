@@ -1,0 +1,123 @@
+{
+  "dimension": "mergeability",
+  "criteria": {
+    "idiomatic": {
+      "score": 3,
+      "evidence": [
+        "app/nuxt.config.ts:1-21 — correct Nuxt 4 shape: compatibilityDate, css array, runtimeConfig.public with env override (package.json:8 start script maps API_BASE_URL → NUXT_PUBLIC_API_BASE)",
+        "app/app/pages/types/[name].vue:10-15 — reactive URL getter passed to useFetch, matching the docs' dynamic-param example verbatim",
+        "app/app/composables/format.ts:21-23 — usePageData is a custom useFetch wrapper that awaits inside the composable; current docs explicitly warn 'do not await it in the composable' and point at createUseFetch for custom fetchers",
+        "app/app/composables/format.ts:22 — explicit key passed although Nuxt 4 auto-generates keys from URL+options; key is snapshotted at setup while the URL stays reactive",
+        "app/server/utils/pokeapi.ts:39 vs app/app/composables/format.ts:1 — humanize duplicated on both sides instead of Nuxt 4's shared/ directory; same for sprite URL (pokeapi.ts:54 vs app/app/pages/index.vue:48)",
+        "app/app/assets/main.css:1-592 — one global stylesheet for all 29 files rather than Nuxt's favored scoped SFC styles",
+        "app/app/composables/team.ts:22-27 — team state via useState + useCookie is the idiomatic SSR-safe pattern"
+      ],
+      "rationale": "Structure, routing, state and SSR data flow read like the docs' examples, but the central data-loading abstraction is a home-grown wrapper of exactly the shape the current docs warn against (and for which createUseFetch now exists), plus duplicated app/server helpers where shared/ is the framework's answer."
+    },
+    "correctness_risks": {
+      "score": 3,
+      "evidence": [
+        "app/app/composables/format.ts:21-27 — 404/error handling only runs during initial setup; NuxtPage reuses the component instance on param-only navigation, so a client-side hop to a bad name (e.g. /pokemon/pikachu → /pokemon/missingno) refetches, fails, and Nuxt resets data to default (verified in .output asyncData: 'asyncData.data.value = unref(options.default())')",
+        "app/app/pages/pokemon/[name].vue:104-105 — template reads pokemon.artwork unguarded, so a failed param refetch renders against undefined instead of the Not found page",
+        "app/server/utils/pokeapi.ts:8-11,27 — cache TTL is checked but expired entries are never evicted (deleted only on fetch error); the Map grows to the full API surface and stale promises linger",
+        "app/app/pages/index.vue:83-85 — pre-hydration typing workaround casts a fake Event ('as unknown as Event')",
+        "app/server/api/team.get.ts:26-38 — team members fetched sequentially (up to 12 serial round-trips) instead of Promise.all",
+        "app/app/pages/index.vue:75-77 — debounce timer is cleared on unmount; no leaked listeners found; no v-html anywhere, so no unescaped-HTML risk"
+      ],
+      "rationale": "A few minor risks: the most notable is that client-side navigation between same-route params has no error handling after setup, so a missing resource can render a broken page instead of Not found. Caching, escaping and lifecycle cleanup are otherwise handled."
+    },
+    "global_abstractions": {
+      "score": 3,
+      "evidence": [
+        "app/server/utils/pokeapi.ts:39-54 and app/app/composables/format.ts:1-9, app/app/pages/index.vue:28,48 — humanize, sprite-URL construction and the type-label mapping are each implemented twice (server and app)",
+        "app/app/pages/team.vue:2-10 vs app/server/api/team.get.ts:1-7 — TeamMember/TeamData interfaces hand-written twice; every page redeclares its payload shape (105 type lines total), which will drift from the server routes",
+        "app/server/utils/pokeapi.ts:1-11 — the cross-cutting cache is a module-level Map with no size bound; it is documented and TTL'd, so acceptable where it sits",
+        "app/app/components/PokemonCard.vue:1-18, CardList.vue, PageSection.vue:1-11 — small, single-purpose components with clean props; the abstraction set is otherwise lean and earns its keep"
+      ],
+      "rationale": "The server BFF layer and components are well-bounded, but a handful of near-identical helpers and payload interfaces are duplicated across the app/server boundary — exactly the problem Nuxt 4's shared/ directory was introduced for, and the duplication will need untangling as the API shapes evolve."
+    },
+    "readability": {
+      "score": 4,
+      "evidence": [
+        "app/server/utils/pokeapi.ts:1-3 — module header explains the caching contract ('nothing is read or embedded at build time')",
+        "app/app/pages/index.vue:71-72 — comment explains why the debounce exists; app/app/pages/index.vue:82-85 explains the hydration-race fix",
+        "app/app/pages/pokemon/[name].vue:66-94 — the tables computed is dense (method grouping, ordering, dedupe in one block) but commented and named sensibly",
+        "app/app/assets/main.css:88,143,201 — stylesheet organized with clear section comments, though styles live far from their components"
+      ],
+      "rationale": "Naming, file organization and comments are consistent and a new teammate would find their way quickly; the only rough spots are a couple of dense computeds and per-page payload interfaces."
+    },
+    "review_cost": {
+      "score": 3,
+      "evidence": [
+        "app/app/composables/format.ts:21-27 — the one composable every page depends on needs rework to match the documented wrapper pattern (no await inside, error watch for refetches)",
+        "app/server/utils/pokeapi.ts:39,54 — duplicated helpers should move to shared/ before more call sites appear",
+        "app/server/api/team.get.ts:26-38 — team feature (untested by the harness specs) needs manual verification plus parallelized fetches"
+      ],
+      "rationale": "Approvable only after one round of changes: fix the wrapper/refetch-error handling, de-duplicate the shared helpers, and drop the redundant keys. No structural rework needed."
+    }
+  },
+  "overall": 3,
+  "findings": [
+    {
+      "severity": "medium",
+      "location": "app/app/composables/format.ts:21",
+      "issue": "404/error handling only runs at setup; on client-side param-only navigation (e.g. /pokemon/pikachu → /pokemon/missingno) the page instance is reused, the reactive URL refetch fails, and data resets to default — no Not found page, template crashes on undefined",
+      "suggestion": "Watch the returned error (or use a getter-based createError via page-level handling) and throw/showError on refetch failures, or add definePageMeta({ key: route => route.fullPath }) so param changes remount and reuse the existing setup path"
+    },
+    {
+      "severity": "medium",
+      "location": "app/app/composables/format.ts:22",
+      "issue": "Custom useFetch wrapper awaits inside the composable, which the current Nuxt 4.x docs explicitly warn against; a stale static key is also passed while the URL is reactive (charizard data cached under 'pokemon:pikachu')",
+      "suggestion": "Return the unawaited AsyncData (or use createUseFetch) and await it at the call site; drop the explicit keys — Nuxt auto-generates them from URL and options"
+    },
+    {
+      "severity": "low",
+      "location": "app/server/utils/pokeapi.ts:39",
+      "issue": "humanize, sprite-URL construction and type-label mapping are duplicated between server/utils and app/composables (e.g. app/app/pages/index.vue:48)",
+      "suggestion": "Move the shared helpers to Nuxt 4's shared/ directory so both the app and server auto-import one implementation"
+    },
+    {
+      "severity": "low",
+      "location": "app/app/pages/team.vue:2",
+      "issue": "Payload interfaces (TeamMember/TeamData here, MoveInfo/MoveRow on the Pokémon page, all five page interfaces) are hand-duplicated per consumer and will drift from the server routes",
+      "suggestion": "Declare the response shapes once in shared/types/ and import them in both the Nitro handlers and the pages"
+    },
+    {
+      "severity": "low",
+      "location": "app/server/utils/pokeapi.ts:8",
+      "issue": "Cache entries expire after 60s but are never evicted (deleted only on fetch error), so the Map grows to the entire API surface and keeps stale promises",
+      "suggestion": "Delete expired entries on read and/or cap the Map size"
+    },
+    {
+      "severity": "low",
+      "location": "app/server/api/team.get.ts:26",
+      "issue": "Team members are resolved with sequential awaits (2 round-trips each, up to 12 serial requests) inside the for-loop",
+      "suggestion": "Resolve members in parallel with Promise.all and keep the per-name NotFound catch"
+    },
+    {
+      "severity": "low",
+      "location": "app/app/assets/main.css:1",
+      "issue": "All component styling (592 lines) lives in one global stylesheet, so a component's markup and its styles are far apart and class names rely on conventions",
+      "suggestion": "Move each component's rules into scoped <style> blocks (Nuxt's favored approach), keeping tokens/main.css for global rules"
+    },
+    {
+      "severity": "low",
+      "location": "app/app/pages/index.vue:99",
+      "issue": "Selects mix :value on the <select> with :selected on every <option>, two redundant mechanisms for the same thing",
+      "suggestion": "Bind only :value on the select and drop the :selected attributes"
+    },
+    {
+      "severity": "low",
+      "location": "app/app/pages/index.vue:85",
+      "issue": "Pre-hydration typing workaround calls onSearch with a fabricated event object ('as unknown as Event')",
+      "suggestion": "Extract the value handling into a plain function taking a string so both handlers share it without casting"
+    },
+    {
+      "severity": "low",
+      "location": "app/app/error.vue:1",
+      "issue": "Layout (header/main/footer) is duplicated between app.vue and error.vue, so future chrome changes must be made twice",
+      "suggestion": "Move the shared shell into a default layout used by both"
+    }
+  ],
+  "summary": "A tidy, well-commented Nuxt 4 app whose routing, SSR data flow and server-routes/BFF split closely follow the current docs, and a feature that was added additively and conventionally. The main blockers are the central usePageData wrapper — the awaited-wrapper shape the docs now warn against, whose error handling misses client-side param navigation — and small helper/interface duplication across the app/server boundary that shared/ exists to solve. I'd merge after one focused round of changes rather than approve as-is."
+}

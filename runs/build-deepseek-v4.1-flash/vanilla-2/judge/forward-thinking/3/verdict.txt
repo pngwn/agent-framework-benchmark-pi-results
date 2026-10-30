@@ -1,0 +1,116 @@
+I've reviewed the app against the spec and the current Vite release (verified: **Vite 8.3.5 is the latest stable**, released 2026-10-21 — npm registry and vitejs/vite releases; the app pins `^8.3.5`, so it's on the current major, and Vite 8 is the Rolldown-based generation).
+
+```json
+{
+  "dimension": "forward-thinking",
+  "criteria": {
+    "latest_apis": {
+      "score": 4,
+      "evidence": [
+        "app/package.json:11 — vite ^8.3.5 devDependency, which is the current latest stable (v8.3.5, 2026-10-21, per npm and vitejs/vite releases)",
+        "app/src/main.js:1-32 — ES modules throughout, no legacy module formats or bundler-specific globals",
+        "app/server.mjs:1-4 — node: prefixed core imports and ES-module server",
+        "app/src/api.js:83-85 — replaceAll/?? / optional chaining: current language level",
+        "app/server.mjs:6 — path.dirname(fileURLToPath(import.meta.url)) where Node ≥20.11 already offers import.meta.dirname (Node 24 is the runtime per .nvmrc)"
+      ],
+      "rationale": "The toolchain is the current stable release and the code is uniformly modern; there is no legacy-era API surface to migrate away from. The only dated idiom is the fileURLToPath dance where import.meta.dirname is now the simpler stable form."
+    },
+    "platform": {
+      "score": 4,
+      "evidence": [
+        "app/src/api.js:33-47 — fetch with response.ok check and in-memory promise cache; platform-first data loading",
+        "app/src/main.js:117-130 — URL + URLSearchParams for all query handling; no hand-rolled query parsing",
+        "app/src/main.js:895-913 — history.pushState/popstate SPA navigation instead of a router library",
+        "app/src/styles.css:58-61 — :focus-visible; styles.css:344-346 — aspect-ratio; tokens.css custom properties for all theming",
+        "app/src/api.js:33-47 — api() accepts no AbortSignal; stale renders are discarded via a renderToken counter (app/src/main.js:44-46) instead of aborting in-flight fetches",
+        "app/server.mjs:57-61 — fs.existsSync/fs.statSync (sync) on every request instead of fs/promises"
+      ],
+      "rationale": "The app consistently reaches for the platform (fetch, URL/URLSearchParams, history API, custom properties, ES modules) and hand-rolls nothing that the platform provides. It stops short of AbortController, which would cancel the bursts of move-detail fetches on game switches rather than just ignoring their results."
+    },
+    "dependencies": {
+      "score": 5,
+      "evidence": [
+        "app/package.json:10-13 — zero runtime dependencies; single devDependency is vite",
+        "app/src/api.js:56-66 — hand-rolled concurrency limiter instead of pulling a p-limit-style package",
+        "app/server.mjs — ~90-line node:http static server instead of express/serve-static"
+      ],
+      "rationale": "Minimal and modern: nothing ships to the browser but the app's own code, the build tool is the current stable major, and every piece of glue (concurrency limiter, static server, router, escaping) is a small, readable hand-rolled module rather than a dependency."
+    },
+    "churn_resistance": {
+      "score": 4,
+      "evidence": [
+        "app/src/api.js:33-54 — every network call goes through one api() function with a single cache; swapping transport or adding timeouts touches one file",
+        "app/src/data.js:5-90 — species/types/generations shape the raw API responses once, behind named loaders with module-level caching",
+        "app/src/ui.js:7-41 — card/panel rendering isolated from page logic",
+        "app/src/api.js:8-10 — API_BASE_URL resolved in one place from the server-injected global (app/server.mjs:32), so no build-time env coupling",
+        "app/src/main.js:840-875 — route table is one function; adding a route is one branch",
+        "app/src/main.js:147-347 — ~200 lines of inline HTML template strings in main.js; escaping is opt-in per interpolation (~40 call sites), a standing footgun",
+        "app/src/main.js:436-457 — moves panel re-rendered via outerHTML with listeners re-attached on every sort, duplicating the delegation pattern already used at main.js:877"
+      ],
+      "rationale": "Boundaries are genuinely clean: data access, formatting/escaping, UI fragments and routing each live in one module, there is no vite.config and no reliance on Vite internals, so a Vite upgrade (or removal) touches nothing. What it lacks is a safety net: zero type annotations or JSDoc across 130 functions, no app-level tests, and manual escaping discipline at every interpolation."
+    }
+  },
+  "overall": 4,
+  "findings": [
+    {
+      "severity": "medium",
+      "location": "app/src/api.js:33-47",
+      "issue": "api() takes no AbortSignal; stale renders are dropped by a renderToken counter (app/src/main.js:44-46) while the underlying requests keep running — a game switch can fire dozens of uncancellable move-detail fetches (loadRowsForGame, app/src/main.js:460-487).",
+      "suggestion": "Add an optional signal parameter to api() and abort the previous render's requests in renderRoute (AbortController per route render)."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/main.js:150-347",
+      "issue": "Page markup is built from inline template strings where every interpolation must remember escapeHtml/escapeAttr; a new page or a missed escape is a latent XSS bug the team must police by hand.",
+      "suggestion": "Centralize template building (or add a tiny tagged-template helper that escapes by default), so correctness doesn't depend on discipline at ~40 call sites."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/api.js:1-101",
+      "issue": "No JSDoc types and no unit tests anywhere in app/ (0 test LOC, 130 functions); refactoring the shared helpers is unverifiable.",
+      "suggestion": "Add JSDoc @typedef for the API response shapes at the data-access boundary (api.js/data.js) and a handful of vitest cases for humanize, latestEnglishFlavor, sortRows and the filters."
+    },
+    {
+      "severity": "low",
+      "location": "app/server.mjs:6",
+      "issue": "path.dirname(fileURLToPath(import.meta.url)) where import.meta.dirname has been stable since Node 20.11 (runtime here is Node 24).",
+      "suggestion": "Use const DIST = path.join(import.meta.dirname, 'dist')."
+    },
+    {
+      "severity": "low",
+      "location": "app/server.mjs:57-61",
+      "issue": "Synchronous fs.existsSync/fs.statSync run on every request in the hot path.",
+      "suggestion": "Use fs.promises.stat and handle the ENOENT rejection; the stream already uses the async API."
+    },
+    {
+      "severity": "low",
+      "location": "app/server.mjs:89",
+      "issue": "Every unknown path is served index.html with HTTP 200; the spec says a 404 status is encouraged where the architecture allows, and it does (the client already renders Not found).",
+      "suggestion": "For paths that cannot match any client route (e.g. /pokemon/<name>/extra), respond 404; at minimum return 404 for asset-like paths under dist that are missing."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/main.js:436-457",
+      "issue": "Sorting and game-switching rebuild the whole moves panel via outerHTML and re-attach listeners to every header each time, duplicating work the existing global click delegation (main.js:877) already does for links.",
+      "suggestion": "Delegate one click handler on the moves panel keyed by data-sort-key, and replace only the affected table's tbody."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/styles.css:64-73",
+      "issue": "sr-only uses the legacy clip: rect(0,0,0,0) technique.",
+      "suggestion": "clip-path: inset(50%) is the current idiom and behaves better with newer layout."
+    }
+  ],
+  "summary": "A lean vanilla JS + Vite 8 app that is squarely current: zero runtime dependencies, the latest stable Vite, and a platform-first data layer (fetch, URL/URLSearchParams, history API) with genuinely clean module boundaries that would survive a Vite upgrade untouched. The main aging risks are operational rather than architectural: no AbortController so stale work keeps running, manual escaping at every interpolation, and no types or tests to make future refactors safe.",
+  "apis": [
+    { "api": "fetch", "location": "app/src/api.js:34", "status": "current", "replacement": "" },
+    { "api": "URL / URLSearchParams", "location": "app/src/main.js:117", "status": "current", "replacement": "" },
+    { "api": "history.pushState / popstate", "location": "app/src/main.js:901-907", "status": "current", "replacement": "" },
+    { "api": "import.meta.url + fileURLToPath", "location": "app/server.mjs:6", "status": "current", "replacement": "import.meta.dirname is simpler on Node >= 20.11" },
+    { "api": "Vite (build tool, v8.3.5)", "location": "app/package.json:11", "status": "current", "replacement": "" }
+  ],
+  "dependencies": [
+    { "name": "vite", "verdict": "modern", "note": "^8.3.5 is the latest stable release (2026-10-21) of the current, Rolldown-based major; used only as a devDependency with no config file, so there is nothing to churn." }
+  ]
+}
+```

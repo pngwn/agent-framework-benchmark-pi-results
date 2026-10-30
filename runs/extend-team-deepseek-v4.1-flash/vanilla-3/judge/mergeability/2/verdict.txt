@@ -1,0 +1,136 @@
+## Review
+
+This is a well-crafted vanilla TS + Vite SPA. The stack is current (Vite 8.3.5 / TS 7, both current stable), the module boundaries are clean (`api.ts` data access, `dom.ts`/`format.ts` primitives, `components.ts` shared UI, `pages/*` route handlers), and race-condition handling is unusually careful: a navigation token (`main.ts:66-88`), a per-table token in moves (`pokemon.ts:209-215`), detached-container rendering, and in-flight promise dedup with cache eviction on failure (`api.ts:141-155`). No `innerHTML` anywhere — all text goes through text nodes (`dom.ts:11-15`), so no escaping bugs; the server even escapes the injected API origin (`server.mjs:27-28`).
+
+The problems I'd flag before merge:
+
+1. **URL corruption after navigation** — `app/src/pages/home.ts:132` schedules `applyFilters(true)` (which calls `history.replaceState`, `home.ts:123`) with no `ctx.isCurrent()` guard. Type in search, click a card within 150 ms: the Pokémon page's URL is silently replaced with `/?q=…`. Back/forward and reload then land on the wrong page.
+2. **Team page bricks on one stale entry** — `app/src/pages/team.ts:70` does `Promise.all(names.map(loadMember))` with no per-member error handling; one species name in `localStorage` the API no longer has (the spec explicitly says data changes; the test overlay adds a Pokémon) throws `NotFoundError`, and `main.ts:83` renders "Not found" for the whole team page instead of skipping the entry.
+3. **Silently swallowed async errors** — `app/src/main.ts:93` (`result.ready?.catch(() => {})`) means a failed moves fetch leaves an empty, permanently `aria-busy` Moves section with no feedback or retry.
+4. **Duplicated route tables** — `app/server.mjs:31` and `app/src/main.ts:26-34` each encode the route list; adding a route requires touching both (the feature diff proves the authors remembered, but it's a standing trap). Export the list or generate one side from the other.
+5. Smaller nits: dead export `isOnTeam` (`app/src/team.ts:33`, unused), duplicated default-variety resolution (`pages/pokemon.ts:29-31` vs `pages/team.ts:16-19`) and type-label-map building (`pages/types.ts:26`, `pages/team.ts:24`, `api.ts` `typeNames`), `setupMoves` reads `location.href` instead of `ctx.url` (`pokemon.ts:197`), `history.scrollRestoration = 'manual'` (`main.ts:120`) means Back loses scroll position with nothing restoring it, and the `role="status"` count element is replaced wholesale on each update (`home.ts:99`) so screen-reader announcements may not fire.
+
+The feature change itself fits the existing conventions well: `team.ts` is a small, defensive localStorage module (parse-safe, deduped, capped), the Pokémon page button re-renders synchronously from storage, and the team coverage math is correct per the spec (`0` beats `½`/`2` ordering in `pages/team.ts:24-28`, product over both types at `:44`).
+
+```json
+{
+  "dimension": "mergeability",
+  "criteria": {
+    "idiomatic": {
+      "score": 4,
+      "evidence": [
+        "app/package.json:9-11 — Vite 8.3.5 / TypeScript 7, current stable versions; strict mode via tsc --noEmit in build",
+        "app/src/dom.ts:11-15 — text nodes only, no innerHTML; tiny typed h() helper instead of template-string injection",
+        "app/src/api.ts:141-155 — in-flight promise dedup + cache eviction on failure, spec-sanctioned runtime caching",
+        "app/src/main.ts:26-34 — regex route table is home-grown, but routing was explicitly the app's choice with no framework present"
+      ],
+      "rationale": "Uses vanilla TS + Vite the way current docs intend: ES modules, strict tsc, minimal config, DOM APIs directly. Nothing fights the toolchain; the hand-rolled router is expected here."
+    },
+    "correctness_risks": {
+      "score": 3,
+      "evidence": [
+        "app/src/pages/home.ts:132 — debounced applyFilters(true) has no isCurrent() guard; navigating away within 150ms makes home.ts:123 replaceState corrupt the new page's URL to /?q=…",
+        "app/src/pages/team.ts:70 — Promise.all over loadMember; one stale localStorage species 404s and main.ts:83 renders the whole team page as Not found",
+        "app/src/main.ts:93 — result.ready errors are swallowed (catch(() => {})); a failed moves fetch leaves an empty, aria-busy section forever",
+        "app/src/main.ts:120 — scrollRestoration='manual' plus popstate render(false) means Back never restores scroll position",
+        "app/src/pages/home.ts:99 — role=status count element is replaced wholesale each update, so live-region announcements likely won't fire"
+      ],
+      "rationale": "Two genuine user-reachable bugs (URL corruption after fast navigation; team page bricked by one stale stored species) plus a few minor ones; the concurrency plumbing elsewhere is careful, so these stand out."
+    },
+    "global_abstractions": {
+      "score": 4,
+      "evidence": [
+        "app/src/api.ts — single cohesive data-access module: types, cache, get/getByName, aggregate helpers; no grab-bag utils",
+        "app/src/components.ts:41-51 — cardsFromPokemon centralizes the alternate-form/dedupe rule shared by move, ability and type pages",
+        "app/server.mjs:31 vs app/src/main.ts:26-34 — the route list exists twice and must be edited in lockstep (the feature diff updated both, but it's a standing trap)",
+        "app/src/pages/pokemon.ts:29-31 vs app/src/pages/team.ts:16-19 — default-variety resolution duplicated; type-label maps rebuilt three ways (pages/types.ts:26, pages/team.ts:24, api.ts typeNames)"
+      ],
+      "rationale": "Boundaries are clear and each module earns its keep; the duplicated route table and a couple of near-identical helpers are the only things that will need untangling later."
+    },
+    "readability": {
+      "score": 4,
+      "evidence": [
+        "app/src/main.ts:69 — 'Render into a detached container so the previous page stays' explains why, not what",
+        "app/src/pages/pokemon.ts:225-230 — compareValues documents the missing-values-last rule; COLUMNS/METHOD_ORDER tables make the moves section self-describing",
+        "app/src/team.ts:1-3 — doc comments state the storage contract; defensive parsing is obvious on read",
+        "app/src/pages/pokemon.ts:57-58 — stray double blank line; setupMoves reads location.href (pokemon.ts:197) instead of the ctx.url the rest of the page uses"
+      ],
+      "rationale": "A new teammate finds their way in minutes: small files, descriptive names, comments only where they add value. Only trivial rough spots."
+    },
+    "review_cost": {
+      "score": 3,
+      "evidence": [
+        "app/src/pages/home.ts:132 — must add an isCurrent/teardown guard before merge",
+        "app/src/pages/team.ts:70 — must tolerate per-member load failures (skip or drop the entry)",
+        "app/src/main.ts:93 — swallowed ready errors need at least a console.error and a visible fallback",
+        "app/src/team.ts:33 — delete unused isOnTeam export"
+      ],
+      "rationale": "One round of small, localized changes — nothing structural. All fixes are contained in the files that own the behavior."
+    }
+  },
+  "overall": 4,
+  "findings": [
+    {
+      "severity": "high",
+      "location": "app/src/pages/home.ts:132",
+      "issue": "The 150 ms search debounce fires applyFilters(true) even after the user has navigated away, so history.replaceState (home.ts:123) silently rewrites the new page's URL to /?q=…; reload/back then show the wrong page.",
+      "suggestion": "Guard the timer callback with ctx.isCurrent() (or clear the timer when the page is torn down): debounce = setTimeout(() => { if (ctx.isCurrent()) applyFilters(true); }, 150)."
+    },
+    {
+      "severity": "high",
+      "location": "app/src/pages/team.ts:70",
+      "issue": "Promise.all(names.map(loadMember)) has no per-member error handling; a single species name in localStorage that the API 404s (stale data — the spec says data can change) turns the entire team page into 'Not found'.",
+      "suggestion": "Use Promise.allSettled and skip rejected members (optionally dropping them from storage), or catch NotFoundError per member."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/main.ts:93",
+      "issue": "result.ready errors are swallowed with catch(() => {}); a failed moves fetch leaves an empty Moves section stuck at aria-busy with no user feedback.",
+      "suggestion": "Log the error and render a small retry/failed notice in the section, or surface it like renderError."
+    },
+    {
+      "severity": "medium",
+      "location": "app/server.mjs:31",
+      "issue": "The route table is duplicated between the server (ROUTES) and the client router (main.ts:26-34); adding a page requires editing both or the server starts returning 404 for valid URLs.",
+      "suggestion": "Define the route patterns once (e.g. a shared routes module imported by both, or have server.mjs read the client list) — or at minimum leave a comment in each file pointing at its twin."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/main.ts:120",
+      "issue": "history.scrollRestoration = 'manual' plus render(false) on popstate means Back navigation never restores the previous scroll position.",
+      "suggestion": "Either restore 'auto' or record/restore scroll positions keyed by history state."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/pages/home.ts:99",
+      "issue": "The role='status' count <p> is replaced wholesale on each filter update; a live region that is itself replaced generally does not announce.",
+      "suggestion": "Keep one persistent status element in the DOM and update its textContent instead of replacing the node."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/pages/pokemon.ts:29",
+      "issue": "Default-variety resolution (species.varieties.find(is_default) ?? [0] + pokemon fetch) is duplicated in pages/team.ts:16-19, and type-label maps are built three different ways (api.ts typeNames, pages/types.ts:26, pages/team.ts:24).",
+      "suggestion": "Extract a defaultPokemon(species) helper into api.ts and standardise on typeNames() for label lookups."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/team.ts:33",
+      "issue": "isOnTeam is exported but never used anywhere in the app.",
+      "suggestion": "Delete it, or use it in the Pokémon page's team button to make that code read declaratively."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/pages/pokemon.ts:197",
+      "issue": "setupMoves reads new URL(location.href) instead of the ctx.url passed to every page, inconsistent with the rest of the page and subtly racy in principle.",
+      "suggestion": "Use ctx.url (and pass the updated selection through ctx) rather than re-reading location."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/pages/pokemon.ts:57",
+      "issue": "Stray double blank line left after the feature diff's insertion (renderTeamAction() block).",
+      "suggestion": "Delete the extra blank line."
+    }
+  ],
+  "summary": "A genuinely well-structured vanilla TS/Vite SPA on current tooling, with careful concurrency handling, XSS-safe rendering and clean module boundaries; the team-builder feature fits the existing conventions and its coverage math is correct. Merge is blocked on two real bugs — a debounced search that corrupts the URL after fast navigation, and a team page that 404s entirely on one stale localStorage species — plus swallowed async errors and a duplicated client/server route table. All fixes are small and localized; I'd approve after one round."
+}
+```

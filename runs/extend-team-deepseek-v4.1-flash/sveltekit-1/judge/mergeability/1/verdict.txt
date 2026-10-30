@@ -1,0 +1,121 @@
+I've reviewed the whole app against the SvelteKit 3 docs and migration guide (config moved to `vite.config.ts`, `#lib` alias, `$app/state`, server-only directory detection). Verdict: this is a clean, current-idiom SvelteKit 3 + Svelte 5 runes codebase; the main things a reviewer would push on are a few small robustness and duplication nits, plus the somewhat fragile `$effect`-state-sync pattern shared by the two team-stateful pages.
+
+```json
+{
+  "dimension": "mergeability",
+  "criteria": {
+    "idiomatic": {
+      "score": 5,
+      "evidence": [
+        "app/vite.config.ts:5-13 — SvelteKit 3 plugin-style config (adapter + compilerOptions, runes forced except node_modules) exactly as the v3 migration guide prescribes; no svelte.config.js",
+        "app/src/lib/server/api.ts:1 — server-only data layer in #lib/server, imported only from +page.server.ts files",
+        "app/src/routes/pokemon/[name]/+page.server.ts:7 — error(404, ...) from @sveltejs/kit for missing resources; +error.svelte consumes page.status",
+        "app/src/routes/+page.svelte:4-6 — $app/state (page) and $app/navigation (goto, afterNavigate), the current APIs, no legacy $app/stores",
+        "app/src/lib/components/Section.svelte:4-5 — Snippet children + $props/$derived, textbook runes-mode component; components self-import for recursion (Evolution.svelte:4)",
+        "app/src/routes/+page.svelte:31-35 — filter state in URL via goto, keeping load source of truth in +page.server.ts:5-13",
+        "app/src/lib/team.ts:1-36 — cookie read in load (routes/pokemon/[name]/+page.server.ts:8) so SSR shows the right button with no flash"
+      ],
+      "rationale": "Every framework choice matches the current SvelteKit 3 / Svelte 5 docs: runes everywhere, Snippets, typed PageProps/PageServerLoad, server-only module boundary, error() for 404s, URL-driven state. I'd cite this as a reference implementation for the current version."
+    },
+    "correctness_risks": {
+      "score": 4,
+      "evidence": [
+        "app/src/lib/server/api.ts:31-33 — request() has no timeout/AbortSignal; a hung API stalls a page load indefinitely",
+        "app/src/routes/+page.svelte:38-40 — debounced search timer isn't cancelled when a pagination link is clicked first, so a pending update can jump the user back to page 1 mid-click",
+        "app/src/lib/server/api.ts:46-63 — promise-dedup cache correctly evicts on rejection and bounds size (MAX_ENTRIES 5000), so no unbounded growth or poisoned entries",
+        "app/src/lib/team.ts:15-29 — parseTeam fully sanitizes cookie input (JSON.parse guarded, strings filtered, deduped, capped at 6); names go to fetch via encodeURIComponent (pokedex.ts:216)",
+        "app/src/lib/server/pokedex.ts:151-193 — home page load fans out ~30 requests on cold start but everything is cached afterwards; concurrent dedup via shared promises prevents fetch storms",
+        "app/src/routes/pokemon/[name]/+page.svelte:36-42 — toggleTeam writes the cookie and updates local state without invalidation, so no stale-server revert; consistent across reload and navigation"
+      ],
+      "rationale": "Careful defensive work (cookie parsing, cache eviction, null-safe fallbacks, 404 paths) and no SSR/CSR mismatches found; the remaining risks are the missing fetch timeout and a small search/pagination timing race."
+    },
+    "global_abstractions": {
+      "score": 4,
+      "evidence": [
+        "app/src/lib/server/pokedex.ts:1-400 — one 370-line module shaping data for all five page types; cohesive and sectioned, but it's the first split candidate as pages grow",
+        "app/src/lib/server/api.ts:9-10 — module-level in-memory cache is a hidden global, though clearly commented and bounded (TTL 5 min, MAX_ENTRIES)",
+        "app/src/lib/server/pokedex.ts:218 and 359 — default-variety resolution duplicated verbatim in getPokemonPage and getTeamPage",
+        "app/src/lib/components/TypeBadge.svelte:16 and app/src/routes/types/+page.svelte:26 — the dynamic var(--type-<name>) colour trick implemented twice with different CSS instead of a shared variant",
+        "app/src/routes/pokemon/[name]/+page.svelte:24-26 and app/src/routes/team/+page.svelte:13-15 — the same local-$state + $effect data-sync workaround duplicated across two routes rather than extracted into a helper/component",
+        "app/src/lib/types.ts:1-20 — small, purposeful view-model types shared across the boundary; good, not god-typed"
+      ],
+      "rationale": "Boundaries are sensible (server/api, server/pagedata, shared types, components), and the caches earn their keep, but the pokedex god-module, duplicated variety-resolution, and the repeated effect-sync pattern will each need a small untangling later."
+    },
+    "readability": {
+      "score": 5,
+      "evidence": [
+        "app/src/lib/server/api.ts:1-2 — file-top comments state the caching contract before any code",
+        "app/src/routes/+page.svelte:13-14 — comment explains why search uses local state (keystrokes can't be overwritten by in-flight loads)",
+        "app/src/routes/pokemon/[name]/+page.svelte:22-24 — comment explains why the $effect sync exists (component reuse across navigations)",
+        "app/src/lib/server/pokedex.ts:64, 98, 149, 212, 328, 346, 392 — clearly labelled per-page sections make a 400-line file navigable",
+        "app/src/lib/format.ts:1-25 — tiny, single-purpose helpers with humanize/orDash/dexNumber examples in doc comments",
+        "app/src/lib/components/MoveTable.svelte:14-27 — column definitions as data make sorting logic declarative and easy to audit against the spec"
+      ],
+      "rationale": "Naming, file layout, and comment discipline are uniform across every route and component; section banners and why-comments mean a new teammate can find any spec requirement in minutes."
+    },
+    "review_cost": {
+      "score": 4,
+      "evidence": [
+        "app/src/lib/server/api.ts:33 — one-line addition: wrap fetch with AbortSignal.timeout()",
+        "app/src/lib/server/pokedex.ts:218,359 — trivial extract of the default-variety helper",
+        "app/src/routes/+page.svelte:40 — cancel the pending debounce timer on pagination clicks (or ignore stale updates)",
+        "app/src/routes/+layout.svelte:25 — third nav link matches FEATURE.md; team feature additions (CHANGES.diff) are minimal and follow existing conventions",
+        "app/src/app.html:6 — stray non-standard <meta name=\"text-scale\"> to delete or justify"
+      ],
+      "rationale": "I'd approve after one light pass: the nits are a fetch timeout, two tiny dedups, and a debounce cancellation; nothing structural needs rework."
+    }
+  },
+  "overall": 4,
+  "findings": [
+    {
+      "severity": "medium",
+      "location": "app/src/lib/server/api.ts:33",
+      "issue": "fetch has no timeout or AbortSignal, so a slow/hung upstream API hangs page loads with no error surface",
+      "suggestion": "Use AbortSignal.timeout(10_000) (Node 24 supports it) and let the ApiError path render the existing +error.svelte fallback"
+    },
+    {
+      "severity": "low",
+      "location": "app/src/routes/pokemon/[name]/+page.svelte:24",
+      "issue": "Local state synced from load data inside $effect (same pattern at app/src/routes/team/+page.svelte:13) is fragile if data ever refreshes independently of navigation, and it's duplicated across routes",
+      "suggestion": "Wrap the stateful region in a {#key data.pokemon.name} block, or extract a small useRouteState helper shared by both pages"
+    },
+    {
+      "severity": "low",
+      "location": "app/src/lib/server/pokedex.ts:218",
+      "issue": "Default-variety resolution (varieties.find(is_default) plus pokemon/<id> fallback) is duplicated at line 359",
+      "suggestion": "Extract a resolveDefaultPokemon(species) helper next to the ApiSpecies type"
+    },
+    {
+      "severity": "low",
+      "location": "app/src/routes/+page.svelte:40",
+      "issue": "Debounced search timer isn't cancelled when the user clicks a pagination link first, so a pending goto can pull them back to page 1",
+      "suggestion": "Clear the timer in an onbeforenavigate hook or check the current URL/page before applying the pending update"
+    },
+    {
+      "severity": "low",
+      "location": "app/src/lib/team.ts:33",
+      "issue": "Team updates bypass SvelteKit's cookie handling via raw document.cookie (no framework round-trip or progressive enhancement)",
+      "suggestion": "Acceptable as-is, but a form action with cookies.set() would give no-JS support; at minimum note the trade-off in the comment"
+    },
+    {
+      "severity": "low",
+      "location": "app/src/lib/server/pokedex.ts:106",
+      "issue": "Single 370-line module shapes data for all five page types; fine today, but it's the file every future feature will touch",
+      "suggestion": "Split into per-resource modules (species/pokemon, moves, abilities, types) sharing api.ts when the next feature lands"
+    },
+    {
+      "severity": "low",
+      "location": "app/src/routes/types/+page.svelte:26",
+      "issue": "Dynamically-composed var(--type-<name>) colour lookup re-implemented here instead of reusing TypeBadge's variant",
+      "suggestion": "Add a size/variant prop to TypeBadge (or a shared CSS mixin) so the colour-mapping lives in one place"
+    },
+    {
+      "severity": "low",
+      "location": "app/src/app.html:6",
+      "issue": "Non-standard <meta name=\"text-scale\" content=\"scale\"> tag with no consumer",
+      "suggestion": "Remove it, or document why it's needed"
+    }
+  ],
+  "summary": "This is a genuinely current, idiomatic SvelteKit 3 codebase — runes, Snippets, server-only #lib/server boundaries, URL-driven state, and error()-based 404s all read like the framework's own docs, and the team feature slots into the existing conventions with minimal diff. The data layer is defensive (promise-dedup cache, sanitized cookie parsing, bounded caches) with only minor risks: no fetch timeout and a small search/pagination debounce race. I'd merge after a light pass fixing the timeout and two or three small duplications."
+}
+```

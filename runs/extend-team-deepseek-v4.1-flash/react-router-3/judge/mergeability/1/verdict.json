@@ -1,0 +1,110 @@
+{
+  "dimension": "mergeability",
+  "criteria": {
+    "idiomatic": {
+      "score": 5,
+      "evidence": [
+        "app/app/routes.ts:1-10 — manual route config with index/route/splat, current v8 style",
+        "app/app/routes/home.tsx:24 — loader parses URL search params so filter state is shareable, per docs",
+        "app/app/lib/api.server.ts:57 — throw data('Not found', {status: 404}) is the documented missing-record pattern",
+        "app/app/root.tsx:9,43 — Layout export + ErrorBoundary with isRouteErrorResponse, per framework-mode reference",
+        "app/app/routes/home.tsx:96 — <title> element in components matches the current docs recommendation (React 19 title hoisting over meta)",
+        "app/app/components/TeamControls.tsx:10 — fetcher.Form to a cross-route action for a stay-on-page mutation; loaders revalidate automatically",
+        "app/server.mjs:14 — @react-router/express createRequestHandler with Express 5 /{*splat} catch-all",
+        "app/app/lib/team.server.ts:1 — .server.ts naming keeps server-only modules out of the client build"
+      ],
+      "rationale": "Reads like the framework's own examples: framework mode with SSR, generated route types, data() 404s, fetcher mutations, Express custom server. The one hand-rolled area — refs+navigate+debounce for search instead of <Form method=get> — is a reasonable trade-off for the 150 ms debounce requirement and still keeps filter state URL-driven through the loader."
+    },
+    "correctness_risks": {
+      "score": 4,
+      "evidence": [
+        "app/app/lib/api.server.ts:10-17 — cache Map never deletes expired entries, only overwrites on refetch; memory grows with every distinct URL ever touched (~900 moves, 1025 species, chains), bounded only by the fixed dataset",
+        "app/app/routes/team.tsx:46-53 — cookie read-modify-write in the action: two rapid toggles from different pages can both carry the pre-update cookie and lose one write",
+        "app/app/components/MoveTable.tsx:48 — non-null assertion on columns.find(sort.key) is safe only because showLevel never changes per instance",
+        "app/app/routes/pokemon.tsx:115-116 — Promise.all fan-out fetching every move detail for a game (~200+ requests per new Pokémon/game), mitigated by the 60 s cache",
+        "app/app/routes/home.tsx:78-83 — pre-hydration input effect is deliberately dependency-free; guarded and commented, works, but fragile to future refactoring",
+        "app/app/lib/api.server.ts:21 — value.catch(() => cache.delete(key)) correctly prevents caching rejected promises"
+      ],
+      "rationale": "No serious bugs found: 404s handled at every layer, no SSR/CSR mismatch vectors (all state URL- or cookie-derived, rendered from loaderData), leaked listeners absent. A few minor fragilities: unbounded-ish cache, a cookie write race under rapid interaction, and a fetch fan-out that's only saved by the short-TTL cache."
+    },
+    "global_abstractions": {
+      "score": 4,
+      "evidence": [
+        "app/app/lib/api.server.ts:78 — single Index aggregate built from ~70 API calls, one shared data layer for all routes; cohesive and documented",
+        "app/app/lib/api.server.ts:140,154 — view-model helpers (speciesCard, pokemonCards) live inside the server API module; mild concern mixing",
+        "app/app/lib/api.server.ts:10 — module-level cache is a hidden global, but documented with TTL rationale",
+        "app/app/lib/team.server.ts — team state isolated behind readTeam/addTeamMember/teamCookie with a tiny shared constant module; clean boundary",
+        "app/app/routes/team.tsx:20-42 — feature reuses getIndex/speciesCard/PokemonCards instead of duplicating card logic"
+      ],
+      "rationale": "Abstractions are few and earn their keep: one data layer, five small components, no utils grab-bag. The Index/pokemonCards helpers being the universal chokepoint is acceptable for this size but is the one seam that would need untangling if view models diverge from API shapes."
+    },
+    "readability": {
+      "score": 5,
+      "evidence": [
+        "app/app/routes/home.tsx:78 — comment explains why the mount effect exists (pre-hydration input)",
+        "app/app/lib/team.server.ts:1-2 — comment explains the cookie choice (SSR-correct first paint, order preserved)",
+        "app/app/lib/format.ts — small named helpers (humanize, dexNumber, latestFlavorText) with JSDoc, reused everywhere",
+        "app/app/routes/pokemon.tsx:213 — another why-comment for the game-select hydration effect",
+        "consistent route module shape across all 8 routes; files stay under ~250 lines; components are small and single-purpose"
+      ],
+      "rationale": "A new teammate finds their way in minutes: uniform route modules, obvious lib/components split, and comments that explain intent rather than mechanics."
+    },
+    "review_cost": {
+      "score": 4,
+      "evidence": [
+        "app/app/lib/api.server.ts:10 — one real ask: evict expired entries or cap the cache",
+        "app/app/routes/team.tsx:23 — nit: index.species.find per member when speciesById exists",
+        "app/app/components/MoveTable.tsx:48 — nit: defensive lookup instead of ! assertion",
+        "app/app/routes/not-found.tsx:8 — component returns null; 404 UI actually lives in root.tsx:45 — a one-line comment would preempt confusion",
+        "no ESLint config despite intentionally exhaustive-deps-unsafe effects (app/app/routes/home.tsx:77, app/app/routes/pokemon.tsx:212)"
+      ],
+      "rationale": "I'd approve after a round of nits: cache eviction and one or two defensive touches. The design and framework usage themselves need no rework."
+    }
+  },
+  "overall": 4,
+  "findings": [
+    {
+      "severity": "medium",
+      "location": "app/app/lib/api.server.ts:10",
+      "issue": "In-memory cache never removes expired entries; it only overwrites on next request, so every distinct URL ever fetched (up to ~900 move details, 1025 species, evolution chains) is retained for the life of the server process. Bounded by the fixed dataset today, but a long-running server plus a wider API makes this a slow leak.",
+      "suggestion": "Delete entries when they expire (a sweep in cached(), or a simple LRU cap) and keep the promise-dedup semantics."
+    },
+    {
+      "severity": "low",
+      "location": "app/app/routes/team.tsx:46",
+      "issue": "The action performs a cookie read-modify-write; two rapid toggles from different pages (e.g. fast browsing with two tabs, or clicking before the Set-Cookie lands) can both read the same prior cookie and lose one update.",
+      "suggestion": "Accept as a known limitation, or disable the toggle while fetcher.state !== 'idle' in TeamControls to serialize writes per client."
+    },
+    {
+      "severity": "low",
+      "location": "app/app/routes/team.tsx:23",
+      "issue": "Team members resolved with index.species.find (O(n) per member) when index.speciesById exists precisely for this.",
+      "suggestion": "Use index.speciesById.get(id)? — or add a byName map and use it here."
+    },
+    {
+      "severity": "low",
+      "location": "app/app/components/MoveTable.tsx:48",
+      "issue": "Non-null assertion on columns.find(c => c.key === sort.key) is safe only because showLevel is fixed per instance; reusing the component with a dynamic showLevel would crash on a stale 'level' sort.",
+      "suggestion": "Return rows unsorted when the column isn't found, or include columns in the useMemo dependencies."
+    },
+    {
+      "severity": "low",
+      "location": "app/app/routes/pokemon.tsx:115",
+      "issue": "Per-move fetch fan-out (a Promise.all of up to ~200+ individual move-detail requests) on every new Pokémon/game combination; the 60 s cache mitigates but it's a hot path that also refetches everything after each minute.",
+      "suggestion": "Give stable move/species details a longer TTL than list endpoints, or accept the trade-off with a comment."
+    },
+    {
+      "severity": "low",
+      "location": "app/app/routes/not-found.tsx:8",
+      "issue": "The splat route's component returns null while the actual 404 UI lives in the root ErrorBoundary (app/app/root.tsx:45); a reader may look for the not-found page here and be confused.",
+      "suggestion": "Add a comment pointing to root.tsx's NotFound, or re-export it here."
+    },
+    {
+      "severity": "low",
+      "location": "app/app/routes/home.tsx:77",
+      "issue": "Two intentional empty-dependency effects (home search, pokemon game select) exist to apply pre-hydration user input; nothing documents the exhaustive-deps suppression policy, and no ESLint config is present to enforce or annotate it.",
+      "suggestion": "Add eslint + react-hooks with targeted disables and comments so future cleanup doesn't silently break the pre-hydration handling."
+    }
+  ],
+  "summary": "A clean, current-idiom React Router v8 framework-mode app: URL-driven loaders, data() 404s, fetcher-based cookie-backed mutations, and a feature that was added by reusing existing seams rather than bolting on new ones. The only substantive ask is cache eviction in the shared data layer; everything else is nits. I'd merge after one small round."
+}

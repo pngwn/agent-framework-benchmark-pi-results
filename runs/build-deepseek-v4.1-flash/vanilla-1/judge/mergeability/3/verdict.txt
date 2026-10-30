@@ -1,0 +1,77 @@
+I've reviewed the full app. Summary of what I found, then the scored output.
+
+**Structure** (all `app/src/`): `main.ts` (hand-rolled router + global link interception), `api.ts` (typed API client + module-level promise caches + formatters + aggregate loaders), `components.ts` (escaping + card/badge HTML helpers), `pages/{home,pokemon,details}.ts`, plain CSS in `style.css`, plus a tiny static `server.mjs`. Versions are current stable (Vite 8.3.5, TypeScript 7.0.2 — verified against the Vite releases page and the TS 7.0 announcement).
+
+**Strong points**: consistent `escapeHtml` discipline at every interpolation site; real race guards (`renderToken` in `main.ts:26-30`, `gameRequest` in `pokemon.ts:381-394`); self-healing caches that reset on failure (`api.ts:167`, `api.ts:236-240`, etc.); clear naming and file boundaries; SPA fallback server with a path-traversal guard (`server.mjs:47`).
+
+**Main deductions**: the build script is `vite build` alone — Vite never type-checks, and the official `create-vite` vanilla-ts template (which I verified) builds with `tsc && vite build`, so the two `any`s in `pokemon.ts:144,150` would never be caught; all API failures render the "Not found" page, masking real errors; a small amount of duplicated hash-scroll logic between `main.ts` and `pokemon.ts`; `api.ts` is drifting toward a god module (transport + types + formatters + view-model aggregation in one file).
+
+```json
+{
+  "dimension": "mergeability",
+  "criteria": {
+    "idiomatic": {
+      "score": 4,
+      "evidence": [
+        "app/package.json:10 — vite ^8.3.5 and typescript ^7.0.2, both current stable",
+        "app/package.json:8 — build is 'vite build' only; official vanilla-ts template uses 'tsc && vite build', so type errors never run in CI",
+        "app/src/vite-env.d.ts:1 — proper vite/client reference; main.ts:74-92 hand-rolled router is the normal no-framework pattern",
+        "app/src/api.ts:1-5 — runtime-injected window.__API_BASE_URL__ with import.meta.env fallback is a sensible Vite-config approach"
+      ],
+      "rationale": "Recognisably idiomatic vanilla-TS-on-Vite with current versions; the only real deviation is skipping type-checking in the build, which lets the two `any`s slip through."
+    },
+    "correctness_risks": {
+      "score": 4,
+      "evidence": [
+        "app/src/main.ts:64-70 — every API failure (500, network) renders the Not found page, masking real errors",
+        "app/src/pages/pokemon.ts:141-146 — per-move fetch failures are swallowed (catch → null) and rows silently dropped",
+        "app/src/main.ts:26-30 and app/src/pages/pokemon.ts:381-394 — proper stale-render/stale-request guards; no leaked listeners (element listeners die with innerHTML)",
+        "app/src/pages/home.ts:119-121 — page clamped in update() but URL keeps a stale ?page=; also an invalid ?type= value is silently ignored (home.ts:72-73)",
+        "app/src/components.ts:49 — inline onerror handler (CSP-hostile) rather than an event listener"
+      ],
+      "rationale": "No serious bugs: race handling and HTML escaping are consistently right. The remaining risks are error-masking (everything 404s) and silent data loss on partial fetch failure."
+    },
+    "global_abstractions": {
+      "score": 4,
+      "evidence": [
+        "app/src/api.ts:153-169 — single shared promise cache keyed by URL, unbounded but data-fixed and self-healing on failure",
+        "app/src/api.ts:184-215 — view formatters (humanize, formatDex, displayNumber) live in the data module",
+        "app/src/api.ts:330-390 — getHomeData builds an entire page view model inside the data layer",
+        "app/src/components.ts:5-13 — small focused HTML helpers with a single escapeHtml entry point, used everywhere"
+      ],
+      "rationale": "Boundaries are mostly clean (data layer / HTML helpers / pages), but api.ts mixes transport, domain types, formatters and view-model aggregation and will need splitting if it grows further."
+    },
+    "readability": {
+      "score": 4,
+      "evidence": [
+        "app/src/pages/home.ts:53-126 — short, linear, well-named functions; consistent template style across all pages",
+        "app/src/pages/pokemon.ts:246-251 — spec-derived magic values (id > 10000) and METHOD_ORDER with zero explanatory comments; 1 comment line in the whole app",
+        "app/src/pages/details.ts:130-136 — RELATION_TERMS table is a nice data-driven touch"
+      ],
+      "rationale": "A new teammate finds their way quickly; the only gap is that spec-derived rules (alternate-form exclusion, method ordering) are unexplained, and pokemon.ts at ~420 lines is the file that would benefit from comments most and has none."
+    },
+    "review_cost": {
+      "score": 4,
+      "evidence": [
+        "app/package.json:8 — one-line fix: add tsc to the build script",
+        "app/src/pages/pokemon.ts:144,150 — replace apiFetch<any> with the existing MoveRecord interface",
+        "app/src/main.ts:64-70 — separate an error state from the not-found page"
+      ],
+      "rationale": "I'd approve after a round of small changes: add type-checking to the build, type the move fetches, and split real errors from 404s. Nothing structural needs rework."
+    }
+  },
+  "overall": 4,
+  "findings": [
+    { "severity": "medium", "location": "app/package.json:8", "issue": "Build script runs 'vite build' without 'tsc', so the strict-mode type checks are never enforced in CI; the official create-vite vanilla-ts template builds with 'tsc && vite build'.", "suggestion": "Change to \"build\": \"tsc && vite build\" (or add a separate check script) so the strict tsconfig actually gates merges." },
+    { "severity": "medium", "location": "app/src/main.ts:64-70", "issue": "All non-NotFoundError failures (API 500s, network errors) render the Not found page, hiding real failures from users and from on-call debugging.", "suggestion": "Add a distinct error state ('Something went wrong') and keep the 404 page for NotFoundError only." },
+    { "severity": "medium", "location": "app/src/pages/pokemon.ts:141-150", "issue": "Move metadata fetched with apiFetch<any> and typed as any in a strict-mode codebase; per-move fetch failures are swallowed and rows silently dropped from the moves tables.", "suggestion": "Type as MoveRecord (already defined in api.ts) and surface failures instead of dropping rows." },
+    { "severity": "low", "location": "app/src/api.ts:330-390", "issue": "api.ts has become a god module: transport + cache, domain types, view formatters (humanize, formatDex, displayNumber) and page-level view-model aggregation (getHomeData) in one file.", "suggestion": "Split into api/client.ts (fetch+cache), api/types.ts, and shared/format.ts; keep aggregate loaders in their own module." },
+    { "severity": "low", "location": "app/src/components.ts:49", "issue": "Inline onerror attribute on card sprites breaks under a CSP without 'unsafe-inline' and mixes behaviour into an HTML template.", "suggestion": "Delegate error handling via a document-level listener or a data attribute handled by the card list renderer." },
+    { "severity": "low", "location": "app/src/main.ts:57-62", "issue": "Hash-scroll logic duplicated: the router scrolls to the hash after rendering, and renderPokemonPage re-implements the same rAF scroll (pokemon.ts:413-418).", "suggestion": "Keep the scroll in one place — the router — and delete the page-local copy." },
+    { "severity": "low", "location": "app/src/pages/home.ts:119-121", "issue": "update() clamps state.page to totalPages but the URL keeps the stale ?page= value, so URL and view disagree (e.g. /?page=999).", "suggestion": "After clamping, replaceState with buildUrl(state) so the URL matches the rendered page." },
+    { "severity": "low", "location": "app/src/pages/pokemon.ts:141-146", "issue": "Loading a Pokémon page fires up to ~100 parallel move/version-group fetches on first visit (bounded by data, deduped by cache, but a burst).", "suggestion": "Acceptable for this fixed local API; if the API ever grows, batch or lazily fetch move details per visible table." },
+    { "severity": "low", "location": "app/src/pages/pokemon.ts:246-251", "issue": "Spec-derived magic values (id > 10000 alternate-form exclusion, METHOD_ORDER, stat label map) carry no comments explaining where they come from; the whole app has one comment.", "suggestion": "Add one-line comments citing the spec rule for the 10000 cutoff, method ordering and stat labels." }
+  ],
+  "summary": "A small, well-organised vanilla-TS-on-Vite app with current dependencies, disciplined HTML escaping and genuinely good stale-render race guards; I'd approve it after one round of small changes. The must-fix items are adding tsc to the build (type errors are currently invisible, and there are any-typed move fetches to prove it) and separating real API errors from the not-found page. Longer term, api.ts should be split before it becomes a god module, but nothing structural blocks the merge."
+}
+```

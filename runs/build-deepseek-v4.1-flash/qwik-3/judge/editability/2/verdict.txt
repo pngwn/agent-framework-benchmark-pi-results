@@ -1,0 +1,144 @@
+I've reviewed the app against the spec and current Qwik City practices. Here's my assessment.
+
+## Scenario walkthrough
+
+1. **Remove Abilities** — delete `app/src/routes/abilities/`, but then `getAbilityPage`, the `hiddenFor` callback in `cardsFromPokemonRefs`, `PokemonCard.hidden` and the hidden-ability span in `ui.tsx`, plus the Abilities section in the Pokémon page all become dead code. 4 files, scattered but findable.
+2. **Sprite bug (Deoxys)** — every non-home card list flows through one function, `cardsFromPokemonRefs` (`api.ts:193-215`), which is the single place that maps a Pokémon ref → id → `spriteUrl(id)`. Home cards are built separately from species ids (`api.ts:187`), so one fix in that function covers the learned-by/ability/type lists; home needs a glance but is already species-id-based.
+3. **Sort by name** — either two edits in `api.ts` (`cardsFromPokemonRefs` sort at line 215, `loadHomeIndex` card build) or two card components; no flag soup.
+4. **Items section** — route scaffolding, loader pattern and `PokemonCards`/`NotFound`/`displayNumber`/panel CSS reuse, but the Moves page's summary `<dl>` and section markup are inline in the route file, so the body is copied; a new `getItemPage` gets appended to the already-460-line `api.ts`.
+5. **Data source / caching** — `API_BASE` (`api.ts:5`), `spriteUrl` (`api.ts:60`), `apiUrl` (`api.ts:64-68`) and both caches (`api.ts:6`, `api.ts:303`) all live in one file. Trivial.
+
+The one non-idiomatic tangle: `routes/index.tsx` drives the URL with raw `window.history.pushState/replaceState` in five inline handlers plus a `useVisibleTask$` `popstate` re-sync task, bypassing Qwik City's `useNavigate()`/`useLocation()` reactivity, which is why the manual sync exists at all.
+
+```json
+{
+  "dimension": "editability",
+  "criteria": {
+    "removability": {
+      "score": 3,
+      "evidence": [
+        "app/src/routes/abilities/[name]/index.tsx:7-14 — feature route itself is a clean, deletable directory",
+        "app/src/lib/api.ts:218-238 — getAbilityPage stays behind as dead code unless edited",
+        "app/src/lib/api.ts:203-205 — hiddenFor callback / hidden flag exists only for abilities but lives in shared cardsFromPokemonRefs",
+        "app/src/components/ui.tsx:25 — 'Hidden ability' span in the shared PokemonCards component",
+        "app/src/routes/pokemon/[name]/index.tsx:101-112 — Abilities section links into the feature"
+      ],
+      "rationale": "The route directory is self-contained, but the ability concept leaks into the shared card builder, the card component type and the Pokémon page, so removal means a handful of scattered edits to avoid dead code."
+    },
+    "changeability": {
+      "score": 4,
+      "evidence": [
+        "app/src/lib/api.ts:193-215 — every learned-by/ability/type card list is derived in one function, so a sprite or ordering fix lands there once",
+        "app/src/lib/format.ts:1-13 — humanize/dexNumber/displayNumber centralized and shared",
+        "app/src/components/ui.tsx:13-31 vs 34-58 — card markup (sprite, number, name, link) duplicated between PokemonCards and HomeCards, so a card-content fix needs two edits",
+        "app/src/routes/index.tsx:69-74, 84-90, 106-112, 138-143, 155-160 — buildHomeUrl is shared, but each handler repeats the pushState/replaceState + signal-update dance"
+      ],
+      "rationale": "Data bugs concentrate in one well-named module; the main duplication is the two card components and the five near-identical URL-mutation handlers on the home page."
+    },
+    "coupling": {
+      "score": 4,
+      "evidence": [
+        "app/src/lib/api.ts:218-260, 303-460 — each route consumes a narrow, pre-shaped view model from a single server module; server/client boundary is crisp (all fetches server-side, routeLoader$ only)",
+        "app/src/components/ui.tsx:3-10 — components are pure props-driven, no context or shared stores",
+        "app/src/routes/index.tsx:38-50 — useVisibleTask$ popstate listener exists only to compensate for bypassing the router with raw history.pushState instead of useNavigate()",
+        "app/src/components/ui.tsx:60 — dead typeClassName helper while `type-${name}` is re-built inline in 5 files (routes/moves/[name]/index.tsx:28, routes/pokemon/[name]/index.tsx:58, components/MoveTables.tsx:82, routes/types/index.tsx:18)"
+      ],
+      "rationale": "Loose coupling via view-model functions is the app's strong seam; the main tangle is the home page fighting the framework router instead of using navigate()/useLocation()."
+    },
+    "abstraction_design": {
+      "score": 3,
+      "evidence": [
+        "app/src/components/MoveTables.tsx:11-37 — MoveTable is a genuinely stretchable abstraction (declarative COLUMNS, sort keys, per-method level column) and no boolean flags",
+        "app/src/components/ui.tsx:15-30, 37-54 — HomeCards vs PokemonCards is copy-paste of the card body with a types-appendage, not a composed card primitive",
+        "app/src/routes/moves/[name]/index.tsx:23-34, routes/types/[name]/index.tsx:30-47 — section/panel and summary-dl markup hand-rolled per route (~12 aria-labelledby/id pairings), so similar sections are re-copied",
+        "app/src/lib/api.ts:1-460 — one monolithic module holds every resource loader; getPokemonPage alone is ~160 lines, and new resources get appended here"
+      ],
+      "rationale": "The data layer abstracts the real variation well (one card-from-refs builder, one move-table renderer), but presentation abstractions stop at cards and tables, so a Moves-shaped Items page reuses the skeleton but copies the page body."
+    }
+  },
+  "overall": 4,
+  "findings": [
+    {
+      "severity": "medium",
+      "location": "app/src/routes/index.tsx:38-50",
+      "issue": "URL query state is driven by raw window.history.pushState/replaceState in five inline handlers plus a manual popstate sync task, bypassing Qwik City's SPA router (useNavigate/useLocation); any new filter or pagination behaviour must re-implement the same wiring",
+      "suggestion": "Use useNavigate() (nav.path = buildHomeUrl(...)) or Link so the router updates location reactivity, and derive q/type/generation/page signals from a single reactive source"
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/components/ui.tsx:13-58",
+      "issue": "PokemonCards and HomeCards duplicate the card markup (sprite, dex number, name, link) instead of composing a shared PokemonCard component; changes to card content or accessibility need two edits",
+      "suggestion": "Extract a PokemonCard component taking optional children (types/hidden text) and have both list wrappers use it"
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/lib/api.ts:193-238",
+      "issue": "Ability-specific concerns (hiddenFor callback, hidden flag) live inside the shared cardsFromPokemonRefs, entangling a removable feature with shared card generation",
+      "suggestion": "Have getAbilityPage post-process the cards (mark hidden by matching refs) rather than threading a feature-specific callback through the shared builder"
+    },
+    {
+      "severity": "low",
+      "location": "app/src/components/ui.tsx:60",
+      "issue": "typeClassName is exported but never used, while the `type-${name}` class is constructed ad hoc in five files",
+      "suggestion": "Delete the dead export and use the TypeBadge component (or the helper) wherever a type link is rendered"
+    },
+    {
+      "severity": "low",
+      "location": "app/src/routes/index.tsx:61-68",
+      "issue": "Search input updates on every keystroke with no debounce (spec allows up to 300ms) and no input-side memoization, re-filtering 1025 cards per keypress",
+      "suggestion": "Debounce the signal update with a timer in the handler or a small useVisibleTask$ helper"
+    },
+    {
+      "severity": "low",
+      "location": "app/src/lib/api.ts:6, 301-308",
+      "issue": "Two parallel caches with different mechanisms (a global map for fetchJson, a second global keyed map for version groups); changing caching rules means touching both",
+      "suggestion": "Route version-group fetches through fetchJson's existing cache, or extract one createCachedFetcher used by both"
+    },
+    {
+      "severity": "low",
+      "location": "app/src/routes/moves/[name]/index.tsx:23-34",
+      "issue": "The summary description-list and panel/section markup are inline per route with hand-maintained heading-id/aria-labelledby pairs (~12 occurrences), so an Items section must copy them",
+      "suggestion": "Small Section (heading id/name + children) and SummaryList (term/value pairs) components would make new resource pages assembly rather than copy-paste"
+    },
+    {
+      "severity": "low",
+      "location": "app/src/lib/api.ts:1-460",
+      "issue": "Single monolithic module for all resource loaders (species, types, generations, home, move, ability, pokemon) at ~460 lines; fine now but grows linearly with new sections",
+      "suggestion": "Split per-resource (api/pokemon.ts, api/moves.ts, ...) sharing a core fetch/cache module when the next section is added"
+    }
+  ],
+  "summary": "The data layer is the app's best asset: every card list flows through cardsFromPokemonRefs and every route reads a pre-shaped view model, so most bugs and data-source changes land in one file. Presentation is weaker — duplicated card components, hand-rolled section markup, and a home page that manually pushes history state around instead of using Qwik City's navigate()/useLocation(). Features are mostly removable in one directory plus a few known edits, with abilities leaving the most residue in shared code.",
+  "scenarios": [
+    {
+      "change": "Remove the Abilities pages and every link to them",
+      "files": ["app/src/routes/abilities/[name]/index.tsx", "app/src/lib/api.ts", "app/src/components/ui.tsx", "app/src/routes/pokemon/[name]/index.tsx"],
+      "difficulty": 3,
+      "notes": "Delete the route dir, then clean getAbilityPage, the hiddenFor/hidden handling in the shared card builder and card component, and the Abilities section on the Pokémon page; no nav links point here, so nothing else breaks"
+    },
+    {
+      "change": "Fix the wrong-sprite bug for species whose default Pokémon differs (e.g. Deoxys)",
+      "files": ["app/src/lib/api.ts"],
+      "difficulty": 4,
+      "notes": "cardsFromPokemonRefs is the single choke point for learned-by/ability/type lists; home cards already use species ids in loadHomeIndex, and the Pokémon page artwork fallback (api.ts:442) is the only other spot worth checking"
+    },
+    {
+      "change": "Add sorting by name to every list of Pokémon cards",
+      "files": ["app/src/lib/api.ts", "app/src/components/ui.tsx"],
+      "difficulty": 4,
+      "notes": "Either change the sort in cardsFromPokemonRefs (covers the three ref-derived lists) plus loadHomeIndex's ordering, or sort inside the two card components — but the duplicated card markup means the components path is two near-identical edits"
+    },
+    {
+      "change": "Add an Items section (/items, /items/:name) shaped like Moves",
+      "files": ["app/src/routes/items/index.tsx", "app/src/routes/items/[name]/index.tsx", "app/src/lib/api.ts", "app/src/components/ui.tsx"],
+      "difficulty": 3,
+      "notes": "Route scaffolding, loader pattern, PokemonCards, NotFound, displayNumber and panel CSS all reuse cleanly, but the Moves page's summary dl and section markup are inline and get copied, and getItemPage piles into the monolithic api.ts"
+    },
+    {
+      "change": "Change the API base URL and caching rules",
+      "files": ["app/src/lib/api.ts"],
+      "difficulty": 5,
+      "notes": "API_BASE, apiUrl, spriteUrl and both caches live in one file; the only wrinkle is the second version-group cache at api.ts:301-308"
+    }
+  ]
+}
+```

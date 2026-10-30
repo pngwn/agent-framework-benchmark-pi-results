@@ -1,0 +1,128 @@
+{
+  "dimension": "mergeability",
+  "criteria": {
+    "idiomatic": {
+      "score": 4,
+      "evidence": [
+        "app/package.json:10-12 — pins hono 4.13.14, @hono/node-server 2.1.5, htmx.org 2.0.11: all npm 'latest' as of today (v5/4.x are RC/not-latest)",
+        "app/server.mjs:5 — hono/html tagged templates, the official non-JSX rendering helper, so all interpolations are escaped",
+        "app/server.mjs:502 — hx-trigger='input changed delay:200ms, change' with hx-sync='this:replace' is exactly the current htmx pattern for live search",
+        "app/server.mjs:492,582 — HX-Request detection + HX-Push-Url fragment responses, canonical htmx server integration",
+        "app/server.mjs:535 — dedicated fragment endpoint for sorting with hx-target='closest table'",
+        "app/server.mjs:489,493 — c.html(String(results)) wraps every render; docs pattern is c.html(html`…`) directly, a harmless tic repeated 12+ times",
+        "app/server.mjs:51-53 — three hand-enumerated serveStatic routes instead of one static mount is unusual but deliberate and safe"
+      ],
+      "rationale": "Uses Hono 4.x and htmx 2.x exactly the way the current docs and skill prescribe (html helper, inline handlers, notFound/onError, serveStatic from the node adapter, hx-*, HX-* headers). Only small deviations: the String() wrapping tic and per-file static routes."
+    },
+    "correctness_risks": {
+      "score": 4,
+      "evidence": [
+        "app/server.mjs:477-478 — page clamped to totalPages, so ?page=999 renders sensibly",
+        "app/server.mjs:429-437 — type/generation params validated against API lists before use",
+        "app/lib/api.mjs:17-24 — caches in-flight promises, deleting the entry on failure: no duplicate fetches, no poisoned cache",
+        "app/server.mjs:801-806 — app.notFound returns a real 404 page; app.onError returns 500 without leaking stack traces",
+        "app/lib/api.mjs:13 — unbounded process-lifetime Map cache; capped by the fixed snapshot, but would grow unbounded against a genuinely live API",
+        "app/server.mjs:597 — getEvolutionChain(species.evolution_chain.url) assumes the chain exists; a missing field is a TypeError → 500, not a 404 page",
+        "app/server.mjs:502,558 — a select change fires both 'change' and delayed 'input changed', issuing a duplicate htmx request hx-sync only mostly absorbs"
+      ],
+      "rationale": "No serious bugs found: escaping, encoding, 404s, pagination bounds and duplicate-fetch races are all handled deliberately. Remaining risks are minor (unbounded cache, assumed evolution_chain, a duplicated trigger on selects)."
+    },
+    "global_abstractions": {
+      "score": 3,
+      "evidence": [
+        "app/server.mjs — 810 lines: every route plus move-table rendering, sort logic and card-building in one module",
+        "app/server.mjs:87-105, 664-681, 742-752 — three near-identical refs→dedupe(id≤10000)→catalog→sort→cards loops",
+        "app/server.mjs:101-103 — speciesCardsForRefs supports function-valued hiddenBySpecies entries; no caller ever passes one (the ability route builds its own loop instead)",
+        "app/server.mjs:567,599,647,705,796 — the same try/catch NotFoundError→404 boilerplate repeated in five handlers; app.onError already exists",
+        "app/views/layout.mjs:4 — view layer imports spriteUrl from the api module, coupling rendering to the data layer and its module-level API_BASE",
+        "app/lib/format.mjs:63, app/lib/api.mjs:88 — dead exports capitalize and byName"
+      ],
+      "rationale": "The api/format/views split is sound, but the single god route file, three duplicated card-building loops and dead generality will need untangling the first time someone adds a page. Not a structural problem, just accumulated debt."
+    },
+    "readability": {
+      "score": 4,
+      "evidence": [
+        "app/lib/format.mjs — small, pure, well-named helpers (humanize, dexNumber, displayValue)",
+        "app/views/layout.mjs:25-76 — layout and card/badge components read cleanly",
+        "app/server.mjs:117-183 — getPokemonMoveInfo is a coherent 66-line unit with clear phases",
+        "app/server.mjs:421-533 — home handler is ~110 lines mixing filtering, pagination, htmx and full rendering",
+        "app/server.mjs:195-201 — valueForColumn uses methodLabel for damage classes; the name misleads"
+      ],
+      "rationale": "Consistent naming and a linear, predictable layout make this navigable in minutes; rough spots are two long handlers, one misleading helper name and almost no comments explaining why anywhere."
+    },
+    "review_cost": {
+      "score": 4,
+      "evidence": [
+        "app/server.mjs:87-105, 664-681, 742-752 — dedupe the three card loops into speciesCardsForRefs (already half-built for this)",
+        "app/server.mjs:101-103, app/lib/format.mjs:63, app/lib/api.mjs:88 — delete dead generality and dead exports",
+        "app/server.mjs:567 etc. — move NotFoundError handling into app.onError",
+        "app/server.mjs — split into routes/ and a moves module so the file stops growing"
+      ],
+      "rationale": "All requested changes are mechanical cleanups in one file; nothing requires rearchitecting, and correctness/idiom would pass as-is."
+    }
+  },
+  "overall": 4,
+  "findings": [
+    {
+      "severity": "medium",
+      "location": "app/server.mjs:87-105, 664-681, 742-752",
+      "issue": "Three near-identical loops turn species/pokemon refs into cards (dedupe, id≤10000 filter, catalog lookup, sort, map); speciesCardsForRefs also carries dead function-valued hiddenBySpecies support no caller uses.",
+      "suggestion": "Make the ability and type routes reuse speciesCardsForRefs (it already accepts a hiddenBySpecies map) and drop the function-value branch."
+    },
+    {
+      "severity": "medium",
+      "location": "app/server.mjs",
+      "issue": "810-line god file containing every route, the move-table render/sort logic and card helpers; the next feature lands on top of an already large module.",
+      "suggestion": "Split into routes (pokemon/moves/abilities/types) and a moves-table module; keep lib/api, lib/format, views/layout as the boundaries."
+    },
+    {
+      "severity": "low",
+      "location": "app/server.mjs:567, 599, 647, 705, 796",
+      "issue": "The same try/catch NotFoundError → 404-page boilerplate repeats in five handlers.",
+      "suggestion": "Handle NotFoundError once in app.onError (return c.html(notFoundPage(), 404)) and let handlers throw."
+    },
+    {
+      "severity": "low",
+      "location": "app/lib/api.mjs:13",
+      "issue": "Unbounded process-lifetime cache keyed by URL; fine for the fixed snapshot, but unbounded memory growth if the API ever returns live data.",
+      "suggestion": "Add a size cap or TTL, or document the assumption that the dataset is fixed."
+    },
+    {
+      "severity": "low",
+      "location": "app/views/layout.mjs:4",
+      "issue": "View layer imports spriteUrl from the api module, pulling the fetch/cache layer and module-level API_BASE state into rendering.",
+      "suggestion": "Move URL-shaping helpers (mediaUrl/spriteUrl/idFromUrl) into a standalone urls module both layers can import."
+    },
+    {
+      "severity": "low",
+      "location": "app/server.mjs:597",
+      "issue": "getEvolutionChain(species.evolution_chain.url) throws a TypeError (→ 500) if a species has no evolution_chain.",
+      "suggestion": "Guard with optional chaining and render an empty Evolution section."
+    },
+    {
+      "severity": "low",
+      "location": "app/server.mjs:502",
+      "issue": "Selecting a type/generation fires both 'change' (immediate) and 'input changed delay:200ms', causing a duplicate htmx request that hx-sync only partially absorbs.",
+      "suggestion": "Use hx-trigger='input changed delay:200ms from:find [type=search], change from:find select' or add hx-sync handling for the second request."
+    },
+    {
+      "severity": "low",
+      "location": "app/lib/format.mjs:63, app/lib/api.mjs:88",
+      "issue": "Dead exports: capitalize and catalog.byName are never used.",
+      "suggestion": "Delete them."
+    },
+    {
+      "severity": "low",
+      "location": "app/server.mjs:489, 493",
+      "issue": "c.html(String(...)) wrapper around every render; the html tagged template already returns a string/Promise<string> that c.html accepts directly.",
+      "suggestion": "Return c.html(html`...`) directly, matching the docs."
+    },
+    {
+      "severity": "low",
+      "location": "app/server.mjs:195-201",
+      "issue": "valueForColumn uses methodLabel (i.e. humanize) for the damage-class column; the helper's name misleads readers.",
+      "suggestion": "Rename to humanize/damageClassLabel, or route through a shared label helper."
+    }
+  ],
+  "summary": "A well-built Hono 4 + htmx 2 app on current, exactly-pinned stable versions: hono/html rendering, canonical htmx patterns (debounced search, hx-sync replace, fragment endpoints with HX-Push-Url), and deliberate handling of 404s, pagination bounds and fetch dedup. The debts are structural, not behavioral: an 810-line route god-file, three duplicated species→card loops with a bit of dead generality, and repeated NotFoundError boilerplate. I'd merge after one mechanical cleanup pass."
+}

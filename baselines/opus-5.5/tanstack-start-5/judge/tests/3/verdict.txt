@@ -1,0 +1,163 @@
+## Review: Test quality
+
+**No tests exist in `app/`.** Confirmed three ways: `grep` for `*.{test,spec}.*` files returns nothing, `app/package.json:5-8` has no `test` script, and no test runner (vitest/playwright) appears in dependencies. The static analysis agrees (`testLoc: 0`, `tests.files: 0`). The app's behaviour is currently guarded *only* by the acceptance suite in `tests/`, which the team doesn't own — the moment someone refactors `pokedex.server.ts`, nothing in-repo will catch regressions.
+
+That's a shame, because this app has an unusually high ratio of pure, easily-testable logic to glue code, and almost all of it sits in files that are trivially unit-testable:
+
+- `app/src/lib/format.ts:3-19` — `humanize`, `dexNumber`, `orDash` are pure functions with spec'd edge cases (`mr-mime` → `Mr Mime`, `#0025`, `—` for missing power).
+- `app/src/lib/pokedex.server.ts:161-175` — the list filtering (search substring against humanized name, type/generation membership) and pagination math (clamp, `slice((page-1)*48, page*48)`), which is exactly the code the acceptance tests exercise least directly.
+- `app/src/lib/pokedex.server.ts:66-79` — `latestFlavorText` (last English entry, whitespace collapse) and `englishEffect` (`$effect_chance` substitution), both full of format edge cases.
+- `app/src/lib/pokedex.server.ts:130-144` — alternate-form exclusion (`id < 10000`) and card dedupe, which three different pages depend on for correctness.
+- `app/src/routes/pokemon.$name.tsx:139-152` — the sortable move table comparator, including the "missing values last in *both* directions" rule, which is a classic silent-breakage spot.
+- `app/src/routes/index.tsx:10-24` — `cleanFilters` (URL state serialization, "omit empty/default params") is a pure function begging for tests.
+
+Per the scoring rules: `coverage_of_risk` and `regression_power` are 1 (nothing would be caught), `behaviour_not_implementation` is 1 (no tests), and `signal_to_noise` gets the anchor's 3 for the no-tests case. The `untested` list below is where the real value of this review lives.
+
+Notably, even the debounce timer logic (`app/src/routes/index.tsx:66-77`) and the in-memory fetch cache (`app/src/lib/pokedex.server.ts:30-52` — promise caching, TTL, eviction-on-error) would benefit from tests, since they're stateful and the acceptance suite only exercises happy paths.
+
+```json
+{
+  "dimension": "tests",
+  "criteria": {
+    "coverage_of_risk": {
+      "score": 1,
+      "evidence": [
+        "app/package.json:5-8 — no test script, no test dependencies",
+        "app/src/lib/pokedex.server.ts:161-175 — filtering and pagination logic entirely untested",
+        "app/src/routes/pokemon.$name.tsx:139-152 — sortable-table comparator untested"
+      ],
+      "rationale": "There are zero tests in app/, so none of the risky logic — filtering, pagination, sorting, text extraction — is covered by anything the team owns."
+    },
+    "behaviour_not_implementation": {
+      "score": 1,
+      "evidence": [
+        "app/ — no *.test.* or *.spec.* files exist anywhere in the app"
+      ],
+      "rationale": "No tests exist, so there are no behavioural (or implementation-detail) assertions."
+    },
+    "regression_power": {
+      "score": 1,
+      "evidence": [
+        "app/src/lib/format.ts:3-19 — humanize/dexNumber regressions would pass undetected",
+        "app/src/routes/index.tsx:10-24 — URL filter serialization (reset-to-page-1, default omission) unguarded"
+      ],
+      "rationale": "Any regression in the data layer or URL state would be invisible; the only safety net is the external acceptance suite."
+    },
+    "signal_to_noise": {
+      "score": 3,
+      "evidence": [
+        "app/ — no low-value tests because there are no tests at all"
+      ],
+      "rationale": "Anchor assigns 3 when there are no tests; there is no noise, but also no signal."
+    }
+  },
+  "overall": 1,
+  "findings": [
+    {
+      "severity": "high",
+      "location": "app/package.json:5-8",
+      "issue": "No test suite of any kind: no test script, no runner dependency, no test files; all regression protection lives in the externally-owned acceptance tests.",
+      "suggestion": "Add vitest and start with unit tests for the pure logic in src/lib/format.ts and the transformation functions in src/lib/pokedex.server.ts."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/lib/pokedex.server.ts:161-175",
+      "issue": "The riskiest logic — multi-filter combination, search matching against humanized names, page clamping and 48-per-page slicing — is completely untested; a refactor of loadList could silently break filter combination or introduce off-by-one pagination.",
+      "suggestion": "Extract the filter/paginate step into a pure function over fixture data and test: empty query, type+generation combined, page beyond range, 48/49 boundary counts."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/routes/pokemon.$name.tsx:139-152",
+      "issue": "Sortable move-table comparator untested: the missing-values-last-in-both-directions rule (null handling at lines 144-146) and the ascending-then-descending toggle are easy to break silently.",
+      "suggestion": "Extract the comparator to lib and unit-test null-vs-null, null-first-ascending, null-last-descending, and the tie-break by move name."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/routes/index.tsx:10-24",
+      "issue": "cleanFilters drives all URL state (omitting defaults, dropping page) and is a pure function with no tests; a change here breaks deep links like /?type=fire&generation=generation-i that the acceptance suite only samples lightly.",
+      "suggestion": "Unit-test cleanFilters: empty input, page=1 omitted, q with only whitespace dropped, non-numeric page dropped."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/lib/pokedex.server.ts:66-79",
+      "issue": "latestFlavorText (last English entry, \\n/\\f collapsing) and englishEffect ($effect_chance substitution) are untested text-extraction rules with many edge cases; wrong index or a lost replaceAll would corrupt every page's prose.",
+      "suggestion": "Unit-test both against small fixture arrays, including non-English entries interleaved and $effect_chance present/absent."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/lib/pokedex.server.ts:130-144",
+      "issue": "Alternate-form exclusion (id < 10000), card dedupe and dex-number ordering in cardsFor are untested; a refactor of the id-parsing or the species mapping could re-introduce Mega forms into the Move/Ability/Type pages or scramble card order.",
+      "suggestion": "Test cardsFor with refs containing IDs above 10000, duplicate Pokémon, and out-of-order input."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/lib/pokedex.server.ts:30-52",
+      "issue": "The promise-caching layer (TTL, eviction on rejection, 5000-entry sweep) is stateful and untested; a refactor could cache rejected promises or never expire entries, degrading the app subtly at runtime.",
+      "suggestion": "Test that a rejected fetch is not served on the next call and that expired entries refetch; consider a fake fetch injected via parameter."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/routes/index.tsx:66-77",
+      "issue": "Debounce timer logic (search input local state vs URL, cleanup on unmount) is untested stateful behavior; a leak here causes double navigation or stale filter updates after the acceptance suite stops covering typing patterns.",
+      "suggestion": "Cover with a component test using fake timers: typing quickly issues one URL update; unmount cancels the pending one."
+    }
+  ],
+  "summary": "The app contains no tests at all — no script, no runner, no test files — leaving the external acceptance suite as the only regression guard for a data layer dense with pure, easily testable logic. The highest-value immediate step is unit tests for filtering/pagination (pokedex.server.ts), URL-state serialization (index.tsx), and the sortable-table comparator, plus the pure formatters in format.ts. Until then, any refactor of the data layer risks shipping silent breakage in exactly the behaviours the spec cares most about.",
+  "wroteTests": false,
+  "testCount": 0,
+  "valuableTests": [],
+  "lowValueTests": [],
+  "untested": [
+    {
+      "area": "List filtering and search (app/src/lib/pokedex.server.ts:161-166): case-insensitive substring against humanized name, type/generation membership, combined filters",
+      "risk": "high",
+      "likelyBug": "A refactor breaks filter combination or search matching (e.g. matching raw names instead of humanized), and filtered views silently show wrong or empty results."
+    },
+    {
+      "area": "Pagination (app/src/lib/pokedex.server.ts:167-175): 48-per-page slice, page clamping to pageCount",
+      "risk": "high",
+      "likelyBug": "Off-by-one in the slice or removal of the clamp makes page 22 of the unfiltered list render empty or duplicate the last full page."
+    },
+    {
+      "area": "URL state (app/src/routes/index.tsx:10-24, 60): cleanFilters serialization, filter change resetting to page 1, omitting defaults",
+      "risk": "high",
+      "likelyBug": "Changing a filter no longer returns to page 1, or page=1 leaks into URLs, breaking deep links and back/forward behaviour."
+    },
+    {
+      "area": "Sortable move tables (app/src/routes/pokemon.$name.tsx:139-152): comparator, missing-values-last in both directions, aria-sort state",
+      "risk": "high",
+      "likelyBug": "Null power/accuracy starts sorting first in one direction, or the second click no longer flips direction — invisible without careful manual re-testing."
+    },
+    {
+      "area": "Move-table default ordering (app/src/lib/pokedex.server.ts:184-216): method rank order, level-up by level then name, game default = highest order",
+      "risk": "medium",
+      "likelyBug": "Tables come out alphabetical by method instead of Level Up/Machine/Egg/Tutor, or the wrong default game is selected when ?game= is absent."
+    },
+    {
+      "area": "Text extraction (app/src/lib/pokedex.server.ts:66-79): latest English flavor text with whitespace collapse, effect-chance substitution",
+      "risk": "medium",
+      "likelyBug": "First English entry used instead of last, or $effect_chance shown literally in ability/move effects."
+    },
+    {
+      "area": "Alternate-form exclusion and card building (app/src/lib/pokedex.server.ts:113-144): id < 10000 filter, dedupe, species mapping, dex ordering",
+      "risk": "medium",
+      "likelyBug": "Mega forms reappear in Learned by/Pokémon lists or cards dedupe by species and drop legitimate entries; ordering by insertion instead of dex number."
+    },
+    {
+      "area": "Type slot ordering (app/src/lib/pokedex.server.ts:97-107): pokemonTypes built per-slot, sorted by slot",
+      "risk": "medium",
+      "likelyBug": "Card type badges swap order (Water/Fighting vs Fighting/Water) when slot sort is lost during a refactor of the index."
+    },
+    {
+      "area": "Not-found paths (app/src/lib/pokedex.server.ts:26, app/src/routes/pokemon.$name.tsx:28-31, app/src/routes/__root.tsx:14-18): validName gate, loader null → notFound(), root title logic",
+      "risk": "medium",
+      "likelyBug": "Invalid names reach the API unguarded, or the root not-found title regresses to plain 'Pokédex' when a loader throws notFound()."
+    },
+    {
+      "area": "Fetch cache (app/src/lib/pokedex.server.ts:30-52): TTL expiry, rejection eviction, promise reuse across concurrent requests",
+      "risk": "low",
+      "likelyBug": "A rejected or 404 response gets cached and served for up to 60s, or entries never expire under the 5000-entry sweep condition."
+    }
+  ]
+}
+```

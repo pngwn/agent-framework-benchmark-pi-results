@@ -1,0 +1,151 @@
+# Review — Editability of `app/` (Astro 7.4.2, current stable)
+
+The app is on the current stable stack: `astro@^7.4.2` with `@astrojs/node@^11.1.9` (`app/package.json:11,10`), and the config uses up-to-date Astro 7 idioms — `output: 'server'` with the standalone node adapter, `session: false` (the opt-out added in Astro 7.2), and `security.checkOrigin: false`, all still valid in the current configuration reference (`app/astro.config.mjs:4-9`). There's no legacy or experimental-flag debt. Two small libs (`app/src/lib/api.ts`, `app/src/lib/pokedex.ts`) own all data access; pages are thin; components take narrow props. This is an easy codebase to change, with a few duplicated seams noted below.
+
+**Scenario walkthrough**
+
+1. **Remove Abilities** — delete `app/src/pages/abilities/[name].astro`; then the Abilities section and `page.abilities` on the Pokémon page (`app/src/pages/pokemon/[name].astro:170-180`, `:63`), the `hidden` flag on `Card` (`app/src/lib/pokedex.ts:117`) and its rendering (`app/src/components/PokemonCard.astro:29`). Nav has no Abilities link, so no `Layout` change. A handful of scattered edits — mostly clean, small residue.
+2. **Sprite bug (Deoxys)** — one render point, `spriteUrl(card.id)` (`app/src/components/PokemonCard.astro:17`), fed by every list via `CardGrid`; card construction happens in two places though (`cardsForPokemon`, `app/src/lib/pokedex.ts:135`, and the home page's species entries via `getSpeciesIndex`), so an ID-mapping fix could touch both.
+3. **Sort cards by name** — `CardGrid.astro:14` is the single render seam, but the home page slices/paginates before it (`app/src/pages/index.astro:25,70`) and default dex ordering lives in `cardsForPokemon` (`pokedex.ts:135`), so a URL-persisted sort control means edits in four pages + the component.
+4. **Add Items shaped like Moves** — Layout, Section, NotFound, CardGrid/PokemonCard, `api.ts` helpers and all the text helpers (`englishName`, `englishShortEffect`, `latestFlavorText`, `humanize`) are resource-agnostic and reusable; the new pages would copy the skeleton of `moves/[name].astro` (there's no `/moves` index, so `/items` would be modeled on `types/index.astro`). Mostly reuse, one page-copy.
+5. **Change API base URL / caching** — everything lives in `app/src/lib/api.ts:4` (base URL), `:6-8` (freshness/entry caps), `:75` (sprite URL base). One file, period.
+
+```json
+{
+  "dimension": "editability",
+  "criteria": {
+    "removability": {
+      "score": 4,
+      "evidence": [
+        "app/src/pages/abilities/[name].astro — the entire Abilities feature is one route file; deleting the directory removes the pages",
+        "app/src/layouts/Layout.astro:27-32 — nav lists only Pokémon and Types, so no nav edit is needed",
+        "app/src/pages/pokemon/[name].astro:170-180 — the Abilities section and its link list live inside the Pokémon page and must be edited by hand",
+        "app/src/lib/pokedex.ts:117 — 'hidden?: boolean' on Card, and app/src/components/PokemonCard.astro:29 ('Hidden ability' note), exist only for the Abilities feature and would be dead code after removal"
+      ],
+      "rationale": "Route-level removal is a directory delete with no nav changes, but the feature leaves small traces on the Pokémon page, the Card type and PokemonCard, so it's not quite delete-and-done."
+    },
+    "changeability": {
+      "score": 4,
+      "evidence": [
+        "app/src/components/PokemonCard.astro:17 — every card sprite is rendered in one place (spriteUrl(card.id)), so a sprite fix covers all four lists",
+        "app/src/pages/index.astro:103-112 and app/src/pages/pokemon/[name].astro:228-235 — the fetch-and-DOMParser-swap enhancement logic is duplicated in two inline scripts; a change to error handling or focus management must land twice",
+        "app/src/pages/index.astro:26 and app/src/pages/types/[name].astro:23 — the type-label map is hand-built here even though pokedex.ts:53 exports typeLabels() for it",
+        "app/src/pages/moves/[name].astro:25 and app/src/pages/abilities/[name].astro:14 — the short-effect/flavor-text fallback chain is duplicated verbatim"
+      ],
+      "rationale": "Most fixes have one obvious home (PokemonCard, api.ts, cardsForPokemon), but two client-enhancement scripts and a couple of small helper chains are copy-pasted, pushing shared changes to N edits."
+    },
+    "coupling": {
+      "score": 4,
+      "evidence": [
+        "app/src/lib/api.ts:4-75 — all knowledge of the API base URL, caching rules, concurrency and sprite URL patterns is confined to one module; pages never see it",
+        "app/src/components/CardGrid.astro:7-14 and app/src/components/MovesTable.astro:8-13 — components depend on narrow prop interfaces (Card[], Map<string,string>, MoveRow[]), not page internals",
+        "app/src/lib/pokedex.ts:122-135 — cardsForPokemon exposes an 'extra' callback so the ability page supplies its 'hidden' flag without the helper knowing about abilities",
+        "app/src/pages/pokemon/[name].astro:55-95 — one monolithic frontmatter assembles game selection, method grouping and row ordering inline; the moves logic is not separable from the page"
+      ],
+      "rationale": "Server data access, templates and client scripts are cleanly separated with prop-driven seams; the main tangle is the 330-line Pokémon page doing its own data shaping."
+    },
+    "abstraction_design": {
+      "score": 4,
+      "evidence": [
+        "app/src/lib/pokedex.ts:17-36 — humanize/englishName/latestFlavorText/englishShortEffect are resource-agnostic, so an Items section reuses them unchanged",
+        "app/src/components/PokemonCard.astro:5-9 and app/src/components/CardGrid.astro:5-8 — the Card type models the real variation (optional types, optional hidden note) without flag-parameter creep",
+        "app/src/components/MovesTable.astro:19-27 — columns are a data-driven list derived from the method (level column only for level-up), so the table stretches to similar tables without booleans",
+        "app/src/components/TypeBadge.astro:3-13 — a single 'link?' flag covers the only real variation (badge vs. link); acceptable but the start of flag creep"
+      ],
+      "rationale": "Abstractions track the app's genuine variation (cards, sections, sortable tables, localized text) and would stretch to an Items feature with mostly reuse; the Moves data shaping itself stayed inline rather than becoming a reusable module, and the tiny TypeBadge link flag is the only flag creep."
+    }
+  },
+  "overall": 4,
+  "findings": [
+    {
+      "severity": "medium",
+      "location": "app/src/pages/index.astro:103-112 and app/src/pages/pokemon/[name].astro:228-235",
+      "issue": "The progressive-enhancement pattern (fetch the URL, parse with DOMParser, swap a [data-*] region, guard against stale requests) is implemented twice as inline scripts; behavior changes like adding a loading state, error banner or focus management must be made in both places.",
+      "suggestion": "Extract a shared helper in app/src/scripts (e.g. swapOnNavigate(url, selector)) and call it from both pages, like sortable.ts already does."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/pages/index.astro:26 and app/src/pages/types/[name].astro:23",
+      "issue": "The type-API-name → English-label map is built by hand in two pages even though pokedex.ts:53 already exports typeLabels() for exactly this.",
+      "suggestion": "Use the existing typeLabels() helper in both pages so label resolution has one implementation."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/pages/moves/[name].astro:25 and app/src/pages/abilities/[name].astro:14",
+      "issue": "The 'short_effect ?? latest flavor text ?? —' fallback chain is duplicated verbatim on two detail pages.",
+      "suggestion": "Add an effectText(record) helper to pokedex.ts next to the two helpers it composes."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/lib/pokedex.ts:117 and app/src/components/PokemonCard.astro:29",
+      "issue": "The Card.hidden field and its 'Hidden ability' rendering exist solely for the Abilities feature, so removing Abilities leaves dead code in a shared component and type.",
+      "suggestion": "When Abilities is removed, drop the field, the note markup and the .note style together with the route."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/pages/pokemon/[name].astro:55-95",
+      "issue": "Game selection, move grouping, method ordering and default row ordering are assembled inline in one 330-line page; a similar-but-different page (e.g. Items lists) cannot reuse any of it.",
+      "suggestion": "Move the move-table shaping into pokedex.ts (a buildMoveTables(pokemon) function) so the page template is the only Pokémon-page-specific part."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/lib/pokedex.ts:135 and app/src/lib/pokedex.ts:66-86",
+      "issue": "Card.id is populated from two different sources (pokemon-ref IDs in cardsForPokemon, species IDs via getSpeciesIndex) that happen to coincide; a change to the species/default-pokemon ID assumption would need edits in both construction sites plus the comment documenting it.",
+      "suggestion": "Have cardsForPokemon resolve the card through the species index entry only (it already looks it up) so the ID mapping has a single source of truth."
+    }
+  ],
+  "summary": "This is a well-factored, current-generation Astro 7 app: all API and caching knowledge sits in one module, components are prop-driven, and the shared card/table abstractions mean most changes land in one obvious place. Editability friction is minor and localized: two duplicated client-enhancement scripts, a few copy-pasted helper chains, and one monolithic Pokémon page that inlines its moves-table shaping. I'd approve it with a note to extract the shared fetch-swap helper before the pattern spreads further.",
+  "scenarios": [
+    {
+      "change": "Remove the Abilities pages and every link to them",
+      "files": [
+        "app/src/pages/abilities/[name].astro",
+        "app/src/pages/pokemon/[name].astro",
+        "app/src/lib/pokedex.ts",
+        "app/src/components/PokemonCard.astro"
+      ],
+      "difficulty": 3,
+      "notes": "The pages themselves are a single route file to delete and the nav doesn't link to them, but the Pokémon page's Abilities section, the Card.hidden field and PokemonCard's 'Hidden ability' note must each be trimmed by hand to avoid dead code."
+    },
+    {
+      "change": "Fix the wrong-sprite bug on cards (species whose default Pokémon has a different name)",
+      "files": [
+        "app/src/components/PokemonCard.astro",
+        "app/src/lib/pokedex.ts"
+      ],
+      "difficulty": 4,
+      "notes": "All four card lists render through one PokemonCard (spriteUrl(card.id) at line 17), so one fix covers every list; the only wrinkle is that card IDs are assembled in two places (cardsForPokemon and the species index) that currently coincide by spec assumption."
+    },
+    {
+      "change": "Add sorting by name to every list of Pokémon cards",
+      "files": [
+        "app/src/components/CardGrid.astro",
+        "app/src/pages/index.astro",
+        "app/src/pages/moves/[name].astro",
+        "app/src/pages/abilities/[name].astro",
+        "app/src/pages/types/[name].astro",
+        "app/src/lib/pokedex.ts"
+      ],
+      "difficulty": 3,
+      "notes": "CardGrid is a single render seam, so a default sort is nearly one file; but making it a user-visible, URL-persisted sort means touching all four pages, the home page's pagination slicing (which happens before CardGrid), and the dex-order rule baked into cardsForPokemon."
+    },
+    {
+      "change": "Add an Items section (/items, /items/:name) shaped like Moves",
+      "files": [
+        "app/src/pages/items/index.astro",
+        "app/src/pages/items/[name].astro"
+      ],
+      "difficulty": 4,
+      "notes": "Layout, Section, NotFound, CardGrid/PokemonCard, api.ts helpers and all the localization helpers in pokedex.ts are resource-agnostic and reused as-is; the work is copying one detail-page skeleton (there's no /moves index to mirror, so the list page follows types/index.astro) — real copy-paste of a page, but small."
+    },
+    {
+      "change": "Change the API base URL and caching rules",
+      "files": [
+        "app/src/lib/api.ts"
+      ],
+      "difficulty": 5,
+      "notes": "API_BASE_URL (line 4), FRESH_MS/MAX_ENTRIES (lines 6-8), request shape and the sprite URL base (line 75) all live in this one module; no page or component knows any of it."
+    }
+  ]
+}
+```

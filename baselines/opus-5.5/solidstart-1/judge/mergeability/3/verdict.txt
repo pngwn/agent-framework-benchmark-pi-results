@@ -1,0 +1,116 @@
+SolidStart v2 is the current stable (Aug 2026), and this app is built on exactly that stack — `vite.config.ts` with `solidStart()` + `nitro()/vite` (app/vite.config.ts:5-10), Node ≥ 24 engines (app/package.json:13-15), `query` + `"use server"` inside the function body (app/src/lib/queries.ts:3-6), `createAsync`/`preload` per route (app/src/routes/index.tsx:35-39), `MetaProvider` + `Title` (app/src/app.tsx:5, 20), and `HttpStatusCode` with `mode: "async"` — the documented workaround for the v2 404-status bug (app/src/entry-server.tsx:6, 20; confirmed against solidjs/solid-start#1868). I verified `setSearchParams`'s `{ scroll: false }` option, the `query`/`createAsync`/`preload` idioms, and the Nitro v3 beta being the required deployment plugin in the current docs. My review is complete.
+
+```json
+{
+  "dimension": "mergeability",
+  "criteria": {
+    "idiomatic": {
+      "score": 4,
+      "evidence": [
+        "app/vite.config.ts:5-10 — current SolidStart v2 stable setup: solidStart() + nitro() plugins in vite.config.ts",
+        "app/src/lib/queries.ts:3-6 — query with \"use server\" inside the function body, exactly as the v2 reference prescribes",
+        "app/src/routes/index.tsx:35-39 — route-level preload warming the same query the component reads",
+        "app/src/entry-server.tsx:19-20 — mode: \"async\" so HttpStatusCode 404 actually takes effect (documented v2 bug workaround)",
+        "app/src/components/PokemonCard.tsx:11 — plain <a> for all in-app links instead of router <A>",
+        "app/src/app.tsx:15 — brand link is <a> while nav at app.tsx:21-26 uses <A>; navigation model is inconsistent"
+      ],
+      "rationale": "Data loading, routing, metadata and 404 status follow the current v2 docs almost to the letter; the one real gap is using plain <a> for every in-app link (cards, pagination, badges, evolution), which turns the app into an MPA and forfeits client-side navigation and preload-on-hover."
+    },
+    "correctness_risks": {
+      "score": 3,
+      "evidence": [
+        "app/src/lib/server/pokeapi.ts:36 — non-404 upstream failure throws raw Error; no ErrorBoundary anywhere in the app (grep: zero matches), so a transient API hiccup renders an unhandled crash page",
+        "app/src/routes/index.tsx:60-66 — pending debounce timer is not cleared when q changes from the URL (back/forward inside the 150 ms window gets overwritten by the stale timer)",
+        "app/src/lib/server/pokeapi.ts:24-40 — cache Map never prunes expired entries (no size cap or sweep); bounded only by the API's URL surface, values can hold tens of MB of JSON",
+        "app/src/routes/pokemon/[name].tsx:64-67 — Show-when-fallback-Show-when-null pattern correctly distinguishes pending from not-found, and NotFound carries HttpStatusCode 404 (app/src/components/NotFound.tsx:10)",
+        "app/src/lib/server/pokeapi.ts:41-49 — concurrent requests share one fetch and rejections are evicted from the cache, good hygiene"
+      ],
+      "rationale": "The happy paths are solid (shared in-flight fetches, 404 handled everywhere, SSR-stable query-derived UI), but there are a few minor, genuine risks: no error boundary for upstream failures, a back-navigation race in the search debounce, and an unpruned server cache."
+    },
+    "global_abstractions": {
+      "score": 4,
+      "evidence": [
+        "app/src/lib/queries.ts — thin, uniform \"use server\" boundary; server code only reachable through these RPC wrappers",
+        "app/src/lib/types.ts:1-71 — shared, serializable view models keep server and client honest at the boundary",
+        "app/src/lib/server/model.ts:104-116 — cardsFor/typeLabels/speciesNames are shared across pages where duplication would otherwise occur",
+        "app/src/lib/server/model.ts:13-17 — PAGE_SIZE, EXCLUDED_TYPES, MAX_SPECIES_POKEMON_ID as named constants, not buried magic numbers",
+        "app/src/routes/index.tsx:11 and app/src/routes/pokemon/[name].tsx:9 — near-identical param/gameParam helpers duplicated across routes"
+      ],
+      "rationale": "The server/client split (queries.ts → model.ts → pokeapi.ts) is clean and well-bounded, and shared helpers earn their keep; the deductions are model.ts being a single large data module and small duplicated param helpers that belong in one place."
+    },
+    "readability": {
+      "score": 4,
+      "evidence": [
+        "app/src/lib/format.ts:1-20 — small, well-named pure helpers (humanize, dexNumber, display) with doc comments",
+        "app/src/entry-server.tsx:4-5 — comment explains *why* async mode is used, not what it does",
+        "app/src/lib/server/model.ts:184-187 — dense casts like typeRef(labels, t.type.name) among pervasive any (e.g. model.ts:175-179, 195-205)",
+        "app/src/components/MoveTable.tsx:13-21 vs 78-95 — declarative COLUMNS but hand-rolled tbody cells; the two can drift apart",
+        "app/src/components/TypeBadge.tsx:11 — size prop accepted but never passed by any caller"
+      ],
+      "rationale": "Naming, file layout and why-comments are genuinely good; the rough spots are heavy any usage for API payloads under an otherwise strict tsconfig, the header/table duplication in MoveTable, and a couple of dead props."
+    },
+    "review_cost": {
+      "score": 4,
+      "evidence": [
+        "app/src/components/PokemonCard.tsx:11, app/src/routes/index.tsx:117-122 — mechanical swap of <a> to <A> is the main change I'd request",
+        "app/src/app.tsx — one-line addition of an ErrorBoundary in the root",
+        "app/src/lib/server/model.ts — a pass to type API payloads instead of any",
+        "app/src/lib/server/pokeapi.ts:1-2 — cache design and concurrency limiter are commented and easy to reason about on first read"
+      ],
+      "rationale": "Nothing needs rework; I'd approve after one round of small, mostly mechanical changes (router links, error boundary, payload typing) or even with them as immediate follow-ups."
+    }
+  },
+  "overall": 4,
+  "findings": [
+    {
+      "severity": "medium",
+      "location": "app/src/lib/server/pokeapi.ts:36",
+      "issue": "A non-404 upstream failure (5xx, timeout) rejects the server query with no ErrorBoundary anywhere in the tree, so the user gets an unhandled error page.",
+      "suggestion": "Add an ErrorBoundary in the router root (app/src/app.tsx) with a friendly fallback, and consider mapping upstream failures to a retryable error state."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/routes/index.tsx:60",
+      "issue": "The pending debounce timer isn't cleared when q changes via history navigation, so a back/forward within the 150 ms window gets clobbered by the stale typed value.",
+      "suggestion": "Call clearTimeout(timer) inside the on(filters().q) effect before syncing the search signal."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/lib/server/pokeapi.ts:23",
+      "issue": "The in-memory cache Map is never pruned: expired entries linger until re-requested or rejection-evicted, and there's no size bound; full JSON payloads for ~2k unique resources can accumulate.",
+      "suggestion": "Delete expired entries on miss, and/or add a periodic sweep or LRU cap on top of the TTL."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/components/PokemonCard.tsx:11",
+      "issue": "All in-app links (cards, type badges, pagination, evolution, move/ability lists) are plain <a>, causing full page reloads and losing client-side navigation and preload-on-hover; inconsistent with the <A> used in the header nav (app/src/app.tsx:21-26).",
+      "suggestion": "Use <A> from @solidjs/router for internal links (or document the MPA choice in one place and apply it consistently, including the header)."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/lib/server/model.ts:175",
+      "issue": "Pervasive any for API payloads (model.ts:175-179, 195-205; pokeapi.ts:31 api<T = any>) under a strict tsconfig weakens the otherwise strong typing of the view models.",
+      "suggestion": "Define minimal response types for the resources actually consumed (species, pokemon, move, type) in types.ts or a separate api-types file."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/components/MoveTable.tsx:78",
+      "issue": "Table cells are hand-rolled next to a declarative COLUMNS definition; adding/removing a column requires two coordinated edits and the header can silently drift from the body.",
+      "suggestion": "Render tbody cells by mapping the same columns() array (a small renderer per key) so headers and cells stay in lockstep."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/routes/pokemon/[name].tsx:9",
+      "issue": "gameParam duplicates the param helper in app/src/routes/index.tsx:11 with only a null-vs-empty-string difference.",
+      "suggestion": "Move a single firstParam(value, fallback) helper into lib/format.ts (or a small router-utils module) and use it in both routes."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/components/TypeBadge.tsx:11",
+      "issue": "The size prop is supported but never used by any caller (grep shows no size= in src), leaving dead branching in cls().",
+      "suggestion": "Remove the size prop until a variant actually needs it."
+    }
+  ],
+  "summary": "This is a well-executed SolidStart v2 app: the setup, query/use-server boundary, preloading, metadata and 404 handling all match the framework's current stable docs, and the server-only data layer has clean, commented boundaries. The notable gaps are all minor: plain <a> links instead of router <A> everywhere but the header, no ErrorBoundary for upstream API failures, an unpruned server cache, a small back-navigation race in the search debounce, and heavy any-typing of API payloads. I'd merge it after one round of small, mostly mechanical changes."
+}
+```

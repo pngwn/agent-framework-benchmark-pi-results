@@ -1,0 +1,145 @@
+# Review: Pokédex SvelteKit app (mergeability)
+
+## Verification of framework-version claims
+
+The app targets **SvelteKit 3** (`@sveltejs/kit ^3.0.0`, Svelte 5.57, Vite 8 — `app/package.json:12-19`). I checked the current docs before judging:
+
+- Config in `vite.config.js` with `sveltekit({ adapter, compilerOptions })` and `runes: ({filename}) => …` is exactly the Kit 3 pattern (`app/vite.config.js:5-12`); `svelte.config.js` is correctly absent, and the `#lib` subpath-import alias is declared per the migration guide (`app/package.json:23-26`). `$app/state`, `error()`-throws, `+page.server.js` loaders, snippets, keyed each-blocks — all current idioms.
+- **But**: the Kit 3 migration guide states `goto` options changed — "`keepFocus: true` and `noScroll: true` have been combined as `reset: false`" and "`replaceState` is now `replace`". PR sveltejs/kit#16558 *removed* `noScroll`/`keepFocus`. The app uses the removed/renamed names in two places: `app/src/routes/+page.svelte:34-37` and `app/src/routes/pokemon/[name]/+page.svelte:12-15`. On the app's own pinned version these options are ignored, so every debounced search commit and game change falls back to defaults: a **pushed** history entry per keystroke-group and a **scroll+focus reset** — the user loses focus in the search box 200 ms after typing. The acceptance tests (`tests/specs/home.spec.mjs:85-93`) fill and assert URL/content only, so they can't see this.
+- Kit 3 deprecates `$env/*` in favour of explicit declarations: "Add a `src/env.ts` … exports a `variables` object" consumed via `$app/env/private`. The app instead reads `process.env.API_BASE_URL` directly at module scope (`app/src/lib/server/pokeapi.js:3`). Works under `adapter-node`, but it's off-doc for the pinned version.
+- The tutorial's canonical `+error.svelte` branches on `page.status` (`$app/state`); this app's `+error.svelte` hardcodes "Not found" for every error (`app/src/routes/+error.svelte:6,9`), so an API 500 renders a 404-titled page.
+
+## Scores
+
+- **idiomatic: 3** — Setup is impressively current (Kit 3 config, `#lib` alias, runes, `$app/state`), but the two `goto` calls use Kit 2 option names removed in Kit 3 (`app/src/routes/+page.svelte:35-37`, `app/src/routes/pokemon/[name]/+page.svelte:13-15`), env access bypasses `src/env.js` (`app/src/lib/server/pokeapi.js:3`), and `#lib/format` imports omit the module extensions the Kit 3 docs call for (`app/package.json:25`).
+- **correctness_risks: 3** — The dead `goto` options cause real misbehaviour (history pollution, focus/scroll loss) invisible to tests; all non-404 errors surface as "Not found" (`app/src/routes/+error.svelte:9`); level-up moves keep only the first detail per move/game (`app/src/routes/pokemon/[name]/+page.server.js:118-121`), an edge the snapshot may or may not exercise; the home load rebuilds two large lookup maps per request (`app/src/routes/+page.server.js:17-48`).
+- **global_abstractions: 4** — The server/client boundary is exemplary (`src/lib/server/` is the only place touching the API, with a bounded, rejection-evicting cache at `app/src/lib/server/pokeapi.js:7-14`); `format.js` is small and pure. Minor duplication: the sprite URL pattern exists twice (`app/src/lib/server/pokeapi.js:147`, `app/src/routes/+page.server.js:79`) and `buildCard`/`hiddenCard` differ by one field (`app/src/lib/server/pokeapi.js:152-166`).
+- **readability: 4** — Consistent route layout, clear names, keyed each-blocks, accessible section/labelling discipline throughout; dents: one comment in the whole app, the phantom `item.hidden` read (`app/src/lib/server/pokeapi.js:135`) that matches no API shape, `PokemonCard`'s dual "hidden" channels (prop vs `pokemon.hidden`, `app/src/lib/components/PokemonCard.svelte:5`), and home's title hardcoded while the server returns one (`app/src/routes/+page.svelte:26` vs `app/src/routes/+page.server.js:104`).
+- **review_cost: 3** — Approvable only after a round: fix the two `goto` calls, branch the error page on `page.status`, declare env vars per Kit 3, then nits (dedupe sprite URL, drop the redundant `hidden` prop, memoize the home lookup maps).
+
+```json
+{
+  "dimension": "mergeability",
+  "criteria": {
+    "idiomatic": {
+      "score": 3,
+      "evidence": [
+        "app/vite.config.js:5-12 — correctly on Kit 3 vite-plugin config with adapter and runes-mode fn",
+        "app/package.json:23-26 — #lib subpath imports declared exactly as Kit 3 docs",
+        "app/src/routes/+page.svelte:34-37 — goto with removed Kit 2 options keepFocus/noScroll/replaceState",
+        "app/src/routes/pokemon/[name]/+page.svelte:12-15 — same removed options; Kit 3 wants { reset: false, replace: true }",
+        "app/src/lib/server/pokeapi.js:3 — process.env.API_BASE_URL instead of src/env.js + $app/env/private",
+        "app/package.json:25 — extensionless '#lib/*' mapping; Kit 3 docs say imports must include module extensions"
+      ],
+      "rationale": "The project skeleton is fully current (Kit 3 config, #lib alias, runes, $app/state), but the two programmatic navigations use goto option names that Kit 3 removed/renamed on the exact version pinned, and env access skips the documented explicit-env mechanism."
+    },
+    "correctness_risks": {
+      "score": 3,
+      "evidence": [
+        "app/src/routes/+page.svelte:35-37 — dead options mean every debounced search pushes history and resets scroll+focus mid-typing",
+        "app/src/routes/+error.svelte:6-9 — all errors, including 500s from app/src/lib/server/pokeapi.js:29 fetchJson throw, render 'Not found' title/h1",
+        "app/src/routes/pokemon/[name]/+page.server.js:118-121 — only the first version_group_detail per move/method is kept; multi-detail level-up edge",
+        "app/src/routes/+page.server.js:17-48 — typesByPokemon and generationBySpecies maps rebuilt from scratch on every request despite cached source data",
+        "app/src/lib/server/pokeapi.js:9-11 — cache promise evicts on rejection, good; unbounded growth bounded by API size, acceptable per spec"
+      ],
+      "rationale": "No data-corrupting bug, but the stale goto options cause user-visible misbehaviour (history pollution, focus/scroll loss) that the URL-based acceptance tests cannot catch, and 500s are mislabeled as 404s."
+    },
+    "global_abstractions": {
+      "score": 4,
+      "evidence": [
+        "app/src/lib/server/pokeapi.js — single, well-bounded server-only data module; nothing outside it fetches",
+        "app/src/lib/format.js — small, pure, shared helpers",
+        "app/src/lib/server/pokeapi.js:147 vs app/src/routes/+page.server.js:79 — sprite URL pattern duplicated in two places",
+        "app/src/lib/server/pokeapi.js:152-166 — buildCard/hiddenCard are near-identical twins differing by one field",
+        "app/src/app.css:1-708 — one 700-line global stylesheet instead of scoped component styles"
+      ],
+      "rationale": "Boundaries are clean and the server cache is properly confined to src/lib/server; only minor duplication (sprite URL, card builders, centralised CSS) would need light untangling later."
+    },
+    "readability": {
+      "score": 4,
+      "evidence": [
+        "app/src/routes/* — uniform +page.server.js/+page.svelte pairs per route, easy to survey",
+        "app/src/lib/components/MoveTable.svelte:63-68 — sort logic in a $derived, clearly structured",
+        "app/src/lib/server/pokeapi.js:135 — reads item.hidden, a property no API shape has (phantom defensiveness)",
+        "app/src/lib/components/PokemonCard.svelte:5 — 'hidden' prop duplicates pokemon.hidden data channel; abilities page passes both (app/src/routes/abilities/[name]/+page.svelte:19)",
+        "app/src/routes/+page.svelte:8 — untrack unnecessary for an init-time snapshot; only one comment exists in the whole app (app/vite.config.js:8)"
+      ],
+      "rationale": "A new teammate would find their way quickly thanks to consistent structure and naming; rough spots are small: phantom property reads, a redundant prop path, and an almost total absence of explanatory comments."
+    },
+    "review_cost": {
+      "score": 3,
+      "evidence": [
+        "app/src/routes/+page.svelte:34-37 and app/src/routes/pokemon/[name]/+page.svelte:12-15 — must be rewritten to { reset: false, replace: true }",
+        "app/src/routes/+error.svelte:2-9 — needs page.status branching for 500s",
+        "app/src/lib/server/pokeapi.js:3 — env declaration to move to src/env.js per Kit 3",
+        "app/src/lib/server/pokeapi.js:147-166 — dedupe sprite URL and card builders"
+      ],
+      "rationale": "The required changes are small and mechanical but real: a reviewer would block on the goto option fix and the error-page status handling before approving, plus a handful of nits."
+    }
+  },
+  "overall": 3,
+  "findings": [
+    {
+      "severity": "high",
+      "location": "app/src/routes/+page.svelte:34-37 (also app/src/routes/pokemon/[name]/+page.svelte:12-15)",
+      "issue": "goto() is called with Kit 2 option names (keepFocus, noScroll, replaceState) that SvelteKit 3 removed/renamed to reset and replace; on the pinned @sveltejs/kit ^3 they are ignored, so every search/type/game change pushes a history entry and resets scroll and focus (the search input loses focus 200ms after typing).",
+      "suggestion": "Replace both call sites with goto(url, { reset: false, replace: true }) and verify focus and history behaviour manually."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/routes/+error.svelte:6-9",
+      "issue": "Every error, including 500s from a failed PokeAPI fetch (app/src/lib/server/pokeapi.js:29 throws on non-ok), renders a page titled and headed 'Not found'.",
+      "suggestion": "Import page from $app/state and branch on page.status: show 'Not found' for 404s and a distinct internal-error message otherwise, per the current Kit error-page docs."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/lib/server/pokeapi.js:3",
+      "issue": "API_BASE_URL is read straight from process.env at module scope; SvelteKit 3's documented pattern is declaring it in src/env.js with defineEnvVars and consuming it via $app/env/private, which also gives validation.",
+      "suggestion": "Add src/env.js declaring API_BASE_URL (with default and URL validation) and import it in the server module."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/lib/server/pokeapi.js:147-166",
+      "issue": "The sprite URL pattern is duplicated (also built inline at app/src/routes/+page.server.js:79), and buildCard/hiddenCard are identical except the hidden flag.",
+      "suggestion": "Export one spriteUrl(id) helper and collapse buildCard/hiddenCard into buildCard(id, name, hidden = false)."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/lib/components/PokemonCard.svelte:5",
+      "issue": "Hiddenness reaches the card through two channels: the hidden prop (explicitly forwarded at app/src/routes/abilities/[name]/+page.svelte:19) and pokemon.hidden in the data; pokeapi.js:135 also reads a phantom item.hidden that no API shape has.",
+      "suggestion": "Drop the hidden prop and let the component read pokemon.hidden; remove the item.hidden fallback in buildCards."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/routes/pokemon/[name]/+page.svelte:37",
+      "issue": "The spec requires dex number, genus, types, artwork, height/weight and flavor text 'near the top (not in a section)', but they are wrapped in <section aria-label=\"Overview\">, a named region the tests don't check for absence.",
+      "suggestion": "Use a plain <div> (or section without an accessible name) for the summary block."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/routes/+page.server.js:17-48",
+      "issue": "The typesByPokemon and generationBySpecies maps (thousands of entries) are rebuilt on every request even though the underlying lists are cached in the server module.",
+      "suggestion": "Memoize the derived maps alongside getAllTypes/getAllGenerations in lib/server."
+    },
+    {
+      "severity": "low",
+      "location": "app/package.json:25",
+      "issue": "The '#lib/*' subpath-import mapping is used without module extensions (e.g. '#lib/format', '#lib/server/pokeapi'), while the SvelteKit 3 migration guide says such imports must include extensions; this relies on Vite's leniency rather than standard Node resolution.",
+      "suggestion": "Write '#lib/format.js' etc. (or keep a '#lib/x' convention consistently) so plain Node resolution also works."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/routes/+page.svelte:8,26",
+      "issue": "untrack is unnecessary for an init-time snapshot (top-level reads aren't tracked), and the home title is hardcoded in the component while the server load already returns it (app/src/routes/+page.server.js:104), an inconsistency with the other pages that render data.title.",
+      "suggestion": "Drop untrack and render <title>{data.title}</title> like every other route."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/app.css:1-708",
+      "issue": "All 700 lines of styling are global (no component has a <style> block), bypassing Svelte's scoped styles; classes are well-namespaced today but nothing enforces it as components grow.",
+      "suggestion": "Acceptable as a deliberate convention if documented in the README; otherwise move component-specific rules (card, move table) into scoped blocks."
+    }
+  ],
+  "summary": "A genuinely modern SvelteKit 3 codebase — vite-plugin config, #lib alias, runes, clean server/client boundary, solid data loading and a11y structure — that would merge after one round of fixes. The blocking issue is that both programmatic goto() calls use option names Kit 3 removed, silently degrading search UX (focus/scroll loss, history pollution) in ways the URL-based tests can't see. Secondary asks: make +error.svelte status-aware, declare API_BASE_URL via src/env.js, and trim small duplications."
+}
+```

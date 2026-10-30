@@ -1,0 +1,122 @@
+I've read the full app, the feature diff, the spec, the official React Router skill files, and verified current-release facts (the app targets React Router v8.x, whose current stable removes `react-router-dom` and the deprecated `meta` `data` args — this app already conforms). Here's my review.
+
+## Review
+
+**Framework usage.** This is a textbook Framework Mode app: `routes.ts` route config, route modules with typed `loader`/`ComponentProps` from `./+types/*`, SSR via `react-router.config.ts`, `Layout` export in root, `data("Not found", { status: 404 })` thrown from loaders and rendered by the root `ErrorBoundary` (exactly the pattern the skill recommends), and `@react-router/express` + `createRequestHandler` in `server.mjs` with immutable asset caching. The team feature uses the framework well: cookie parsed in the root loader for SSR-accurate initial state (no label flash), client context for instant updates, and the `/team` loader re-reads the cookie at request time so data stays live.
+
+**Deviations from the recommended path.** The home-page filters (`app/app/routes/home.tsx:67-97`) use uncontrolled refs + two effects + manual `navigate()` instead of the `<Form method="get">` / `useSearchParams` pattern the docs point to; it's justified (debounce + replace instead of push) but adds the two most fragile pieces in the codebase, including a pre-hydration re-apply effect (`home.tsx:76-81`, same trick in `pokemon.tsx:150-153`). Unused `isbot` and `@react-router/node` deps suggest the default entries were kept "just in case."
+
+**Abstractions.** `lib/api.server.ts` is the one module everything depends on, but it's cohesive, correctly server-gated via the `.server` naming convention, with promise-level cache dedupe and failure eviction, and the `Index` derived structure it builds is shared cleanly as a plain-object `Card` view model rather than leaking Maps to the client. The feature diff extended these seams rather than duplicating them (an `action` prop on `PokemonCards` instead of a second card grid).
+
+**Risks.** No serious bugs found: page clamping, invalid filter validation, 404 on unknown types, hash-preserving game navigation, unmount cleanup of the debounce, and deduped cached fetches all handled. Nits: the cache never evicts expired entries (bounded by API surface, process-scoped), "of 6" is hardcoded, `MoveTable` keys include an array index, and `not-found.tsx`'s default component is dead code (its loader always throws).
+
+```json
+{
+  "dimension": "mergeability",
+  "criteria": {
+    "idiomatic": {
+      "score": 4,
+      "evidence": [
+        "app/app/routes.ts:1-12 — manual route config with index/route helpers, per current framework-mode docs",
+        "app/app/routes/type.tsx:25 — throws data(\"Not found\", { status: 404 }) exactly as the skill prescribes for missing records",
+        "app/app/root.tsx:1-45 — Layout export, Links/Meta/Scripts/ScrollRestoration, NavLink; all v8-style imports from react-router",
+        "app/app/root.tsx:47-55 — root loader parses the team cookie so SSR renders the correct team-button state (no flash)",
+        "app/server.mjs:10-16 — createRequestHandler from @react-router/express with immutable asset caching, matching deployment docs",
+        "app/app/routes/home.tsx:67-97 — hand-rolled ref-syncing filter form + manual navigate instead of <Form method=\"get\">/useSearchParams",
+        "app/package.json:16-18 — isbot and @react-router/node declared but never imported (default entries need neither)"
+      ],
+      "rationale": "Recognisably the framework's own shape throughout (typed loaders, data() 404s, SSR config, express adapter); the only fight-the-tool spot is the manually synchronized filter controls."
+    },
+    "correctness_risks": {
+      "score": 4,
+      "evidence": [
+        "app/app/routes/home.tsx:41-46 — page clamped to total pages, invalid type/generation params silently dropped",
+        "app/app/lib/api.server.ts:17-26 — cache dedupes concurrent fetches and evicts on rejection, so failures don't poison",
+        "app/app/routes/pokemon.tsx:144-146 — selectGame preserves location.hash (#moves) and preventScrollReset",
+        "app/app/routes/home.tsx:80-81 — debounce timer cleared on unmount, no stray navigations",
+        "app/app/lib/api.server.ts:14-16 — expired cache entries are never evicted, Map grows to the API's resource space",
+        "app/app/routes/home.tsx:76-81 — pre-hydration input re-apply effect is clever but fragile and hard to test"
+      ],
+      "rationale": "Careful edge handling (clamping, 404s, hash preservation, cleanup); the only risks are a never-evicting in-memory cache and the subtle hydration-timing effects."
+    },
+    "global_abstractions": {
+      "score": 4,
+      "evidence": [
+        "app/app/lib/api.server.ts:14-16 — single server-only data layer behind a .server filename the compiler enforces",
+        "app/app/lib/api.server.ts:129-149 — Card view-model keeps Maps and raw API records server-side; clients get plain objects",
+        "app/app/lib/team.tsx:30-76 — cookie parsing, React context and coverage math share one small file; boundaries are clear if slightly mixed",
+        "app/app/components/PokemonCards.tsx:9-27 — feature extended the shared card grid with an action prop instead of duplicating it"
+      ],
+      "rationale": "One central data module, but it is cohesive, correctly gated server-only, and the feature diff grew existing seams rather than adding a parallel layer."
+    },
+    "readability": {
+      "score": 5,
+      "evidence": [
+        "app/app/routes/* — one file per spec page with matching names (home, pokemon, move, ability, types, type, team, not-found)",
+        "app/app/routes/home.tsx:14-16 — comment explains queryString's omit-defaults contract",
+        "app/app/routes/home.tsx:77 — comment explains why the pre-hydration effect exists",
+        "app/app/lib/format.ts — small, documented, single-purpose helpers (humanize, latestFlavorText, orMissing)",
+        "app/app/components/Section.tsx — aria-labelledby via useId; the section convention from the spec encoded once"
+      ],
+      "rationale": "Files mirror the spec's pages, helpers are tiny and documented, and the few non-obvious effects carry why-comments; a new teammate can navigate in minutes."
+    },
+    "review_cost": {
+      "score": 4,
+      "evidence": [
+        "app/package.json:16-18 — unused dependencies to remove",
+        "app/app/routes/team.tsx:53 — \"of 6\" hardcoded instead of TEAM_SIZE",
+        "app/app/components/MoveTable.tsx:60 — row key embeds array index",
+        "app/app/routes/not-found.tsx:5-10 — default component is dead code (loader always throws)",
+        "app/app/routes/home.tsx:76-97 — the ref/effect filter sync needs a reviewer's full attention before sign-off"
+      ],
+      "rationale": "Nits plus one design conversation about the filter-sync effects; nothing requiring rework."
+    }
+  },
+  "overall": 4,
+  "findings": [
+    {
+      "severity": "medium",
+      "location": "app/app/routes/home.tsx:67-97",
+      "issue": "Filter controls are uncontrolled refs synced to loader data via two effects, including a mount effect that replays pre-hydration input (same pattern at pokemon.tsx:150-153); fragile and fights the documented Form/useSearchParams approach.",
+      "suggestion": "Drive the controls from useSearchParams (or a debounced controlled state) and keep only one well-tested sync path; document or drop the pre-hydration replay if tests show it is unnecessary."
+    },
+    {
+      "severity": "low",
+      "location": "app/app/lib/api.server.ts:14-16",
+      "issue": "Module-level cache stores expired entries forever (they are only overwritten on next access), so memory is bounded only by the API's resource space.",
+      "suggestion": "Sweep expired entries on insert or cap the map size (e.g., LRU); at minimum note the bound relies on the fixed API snapshot."
+    },
+    {
+      "severity": "low",
+      "location": "app/package.json:16-18",
+      "issue": "isbot and @react-router/node are declared but never imported; the default entries don't need them.",
+      "suggestion": "Remove both dependencies."
+    },
+    {
+      "severity": "low",
+      "location": "app/app/routes/team.tsx:53",
+      "issue": "\"<n> of 6\" hardcodes the team size that TEAM_SIZE already defines.",
+      "suggestion": "Render `members.length} of {TEAM_SIZE}` and keep the constant as the single source."
+    },
+    {
+      "severity": "low",
+      "location": "app/app/components/MoveTable.tsx:60",
+      "issue": "Row key appends the array index (\"name-level-i\"), which can cause needless remounts if rows reorder after sorting.",
+      "suggestion": "Key by name plus level (and method when needed), which is unique within a table."
+    },
+    {
+      "severity": "low",
+      "location": "app/app/routes/not-found.tsx:5-10",
+      "issue": "The catch-all route's default component renders null and is effectively dead code; the 404 UI lives in root.tsx's ErrorBoundary via the exported NotFound helper.",
+      "suggestion": "Render the NotFound UI directly in this component (or delete the null component) so the 404 flow has one home."
+    },
+    {
+      "severity": "low",
+      "location": "app/app/routes/pokemon.tsx:62-66",
+      "issue": "versionGroupOrders() rebuilds its Map on every Pokémon page load, relying on the per-URL cache instead of caching the assembled result like getIndex does.",
+      "suggestion": "Wrap it in the same cached() helper under a stable key."
+    }
+  ],
+  "summary": "A clean, current-idiom React Router v8 framework-mode app: typed loaders, data() 404s, SSR with a cookie-fed root loader that makes the team feature flash-free, and a well-bounded server-only data layer. The only real design conversation is the hand-rolled filter-control synchronization in home.tsx, which a reviewer should understand before approving. I'd merge after one round of nits."
+}
+```

@@ -1,0 +1,123 @@
+I've reviewed the app end-to-end and checked it against Gracile 0.11 (the current stable) docs, its own source (`packages/engine/src/routes/render.ts` — which confirms the `http://gracile-static` build-render stub the app keys off), and the official Express starter.
+
+```json
+{
+  "dimension": "mergeability",
+  "criteria": {
+    "idiomatic": {
+      "score": 4,
+      "evidence": [
+        "app/src/routes/(home).ts:6 — defineRoute with handler/template/document, exactly the shape in Gracile's annotated example",
+        "app/src/document.ts:1,28 — server-html `html` + <route-template-outlet>, matching the framework's documented document pattern",
+        "app/src/routes/types/(types).ts:1 — parenthesised route group and [name].ts params, the framework's own file conventions",
+        "app/src/client/pokemon-browser.ts:4 — plain HTMLElement 'progressively enhanced' island, the documented interactivity layer 3/4",
+        "app/server.js:14,17 — express + gracile.nodeAdapter(handler) + getClientBuildPath, same as the official 'Minimal server (Express)' starter",
+        "app/vite.config.ts:5, app/tsconfig.json:2 — gracile({ output: 'server' }) and @gracile/gracile/tsconfigs/strictest",
+        "app/src/lib/api.ts:80 — isBuildRender keys off the undocumented internal stub host 'gracile-static' (verified in engine/src/routes/render.ts) because the framework exposes no build-time hook"
+      ],
+      "rationale": "Routing, rendering, data loading and state all use the framework's recommended primitives, and even the file names mirror the docs' own site. The one non-idiomatic seam is the reliance on an internal build-render hostname, plus a hand-rolled fragment-fetch layer where the (experimental) page-premises mechanism exists."
+    },
+    "correctness_risks": {
+      "score": 3,
+      "evidence": [
+        "app/src/client/fragments.ts:3-8 — a single module-global AbortController shared by all three islands; two concurrent island fetches would cancel each other (only safe because no page currently has two fetching islands)",
+        "app/src/lib/data.ts:157-161 — apiRequired throws on missing resources and no route or helper catches it, so any API hiccup or transient 500 becomes an unhandled rejection and a framework error page",
+        "app/src/lib/api.ts:20,47-53 — cache entries are only expired-on-read, never evicted; the Map grows for the process lifetime with every distinct URL ever requested",
+        "app/src/client/pokemon-browser.ts:22 — window 'popstate' listener added in connectedCallback with no disconnectedCallback cleanup",
+        "app/src/client/pokemon-browser.ts:19-27 — the pending debounce timer is not cleared when a select changes, so a select change triggers a second redundant fragment fetch 150 ms later"
+      ],
+      "rationale": "Several genuine but minor fragilities: shared global abort state, zero error handling around API failures, and an append-only cache. None of them bites under the current page topology, but all are the kind of thing a team trips over later."
+    },
+    "global_abstractions": {
+      "score": 4,
+      "evidence": [
+        "app/src/lib/data.ts:1-370 — one large domain module (API shapes + all derived views) but cleanly banner-sectioned and the single place routes get data",
+        "app/src/lib/api.ts — transport (fetch, cache, concurrency) kept separate from data.ts, a clean boundary",
+        "app/src/lib/team.ts:1-4 — cookie logic shared verbatim by server (routes) and client (team-store) with no server-only imports leaking into the client bundle",
+        "app/src/client/fragments.ts:3 — the one hidden global that spans modules and islands",
+        "app/src/document.client.ts:1-5 — one eager client entry importing all islands; no lazy/idle loading strategy despite the app shipping all five elements to every page"
+      ],
+      "rationale": "Abstractions are few and mostly earn their keep: transport/domain/presentation are separated, the client-server boundary is respected, and shared partials remove real duplication. The module-global abort controller in fragments.ts and the slightly monolithic data.ts are the only things that will need untangling."
+    },
+    "readability": {
+      "score": 5,
+      "evidence": [
+        "app/src/lib/api.ts:1-4, app/src/lib/team.ts:1-3 — header comments explain the *why* (in-memory TTL cache, cookie chosen so the server renders first paint)",
+        "app/src/lib/data.ts — section banners and typed API shapes make a 370-line module navigable",
+        "app/src/routes/abilities/[name].ts:14-28, app/src/routes/types/[name].ts:13-33 — every detail route follows the same load()/handler/document/template shape",
+        "app/src/client/sortable-table.ts:1-8 — JSDoc documents the data-sort/data-numeric contract between server template and client island",
+        "app/src/lib/format.ts — small, single-purpose named helpers (humanize, orDash, latestEnglishFlavor) reused everywhere"
+      ],
+      "rationale": "Naming, organisation and comments are consistently good; a new teammate can find any page's data flow and markup in minutes, and the comments explain intent rather than restating code."
+    },
+    "review_cost": {
+      "score": 4,
+      "evidence": [
+        "app/src/client/fragments.ts:3 — small structural fix (per-island controller) requestable in review",
+        "app/src/lib/api.ts:49-53 — cache eviction is a few lines",
+        "app/src/client/team-store.ts:16-20 — toggleTeamMember is dead code; app/src/routes/pokemon/[name].ts:123 — moveTables exported but only used locally",
+        "app/src/document.ts:10-17 — new URL(..., import.meta.url).pathname asset hrefs work (verified against dist) but are unusual vs. the documented plain-path form"
+      ],
+      "rationale": "Approve after a nits pass: dead exports, cache eviction, per-island aborting, and an error path for API failures. Nothing requires rearchitecting."
+    }
+  },
+  "overall": 4,
+  "findings": [
+    {
+      "severity": "medium",
+      "location": "app/src/client/fragments.ts:3",
+      "issue": "A single module-global AbortController is shared by pokemon-browser, moves-panel and team-page; any two in-flight fragment fetches abort each other. It only works today because no page has two fetching islands.",
+      "suggestion": "Give each island (or each selector) its own controller, e.g. a small Map keyed by the fragment selector, or pass the controller in from the caller."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/lib/api.ts:80",
+      "issue": "isBuildRender compares url.hostname to the undocumented internal stub host 'gracile-static'. If a Gracile release changes the build-render URL, every route silently starts fetching API data at build time, breaking the 'no build-time data' requirement and the build itself.",
+      "suggestion": "Keep the check but defend it: also treat empty params (the build context passes params: {}) or a dedicated env/flag as build renders, and assert the hostname in a comment with a link to the framework source so it is re-verified on upgrades."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/lib/data.ts:157",
+      "issue": "apiRequired throws when a resource is missing and nothing catches it: a single failed or non-OK API response turns any page into an unhandled rejection and a framework 500 page, with no retry or degradation.",
+      "suggestion": "Wrap route loads (or the api() transport) so a failed sub-resource degrades — render the sections that did load, or fall back to a styled error/404 page instead of the raw framework error."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/lib/api.ts:20",
+      "issue": "The TTL cache only skips expired entries; it never removes them, so the Map grows monotonically with every distinct API URL requested over the server's lifetime.",
+      "suggestion": "Purge expired entries opportunistically (e.g. when a lookup misses, or cap the Map size with an LRU)."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/client/pokemon-browser.ts:19-27",
+      "issue": "The debounce timer set by 'input' is not cleared on 'change', so changing a select fires an extra, redundant fragment fetch 150 ms later; the window 'popstate' listener is also never removed in disconnectedCallback.",
+      "suggestion": "clearTimeout(this.#timer) at the top of the change handler, and add a disconnectedCallback that removes the popstate listener."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/client/team-page.ts:26",
+      "issue": "Removing a team member replaces the entire <team-page> subtree — including the h1 and the '<n> of 6' text — which can disturb scroll and focus if the user was focused elsewhere in the page.",
+      "suggestion": "Refresh only the card list and coverage section (give them ids and swap those nodes), leaving the page chrome intact."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/client/team-store.ts:16",
+      "issue": "toggleTeamMember is dead code — team-toggle.ts implements its own toggle logic inline and nothing imports it.",
+      "suggestion": "Delete it, or have team-toggle use it so the team mutation rules live in exactly one place."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/routes/pokemon/[name].ts:123",
+      "issue": "moveTables is exported from the route module but only used inside it, adding a stray public surface to a file whose default export is the route.",
+      "suggestion": "Drop the export keyword; the template partial belongs next to the route that renders it."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/document.ts:10-17",
+      "issue": "Asset hrefs are built with new URL('./styles/app.css', import.meta.url).pathname — it works (Gracile's html-routes build rewrites them) but differs from the documented plain '/src/...' form and yields OS-dependent path separators in principle.",
+      "suggestion": "Use plain root-relative source paths like the framework's own document example, and let the build pipeline do the resolving."
+    }
+  ],
+  "summary": "This is a disciplined, genuinely idiomatic Gracile app: the route/document/island structure mirrors the framework's own examples, the server–client boundary is clean, and the shared partials and helpers make it easy to read. The concerns are robustness rather than structure — a shared global abort controller, an undocumented build-render hostname the whole app depends on, an append-only cache, and no error path for API failures. I would merge after a nits pass fixing those and removing the dead exports."
+}
+```

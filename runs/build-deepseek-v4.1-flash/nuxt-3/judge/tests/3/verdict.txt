@@ -1,0 +1,161 @@
+## Review: test quality
+
+The facts say it, and I confirmed it on the ground: `app/` contains **zero tests** — no test files (`grep` for `describe(|it(|test(|vitest|playwright|cypress` matches nothing), no runner or `test` script in `app/package.json:6-8` (only `build`/`start`), no test config. The only dependency is `nuxt` itself. Everything the acceptance suite covers works today; nothing the acceptance suite *doesn't* cover has any guard, and the app is dense with exactly the logic that breaks under refactor.
+
+The riskiest untested logic, read in full:
+
+- **Index build / data transformation** — `app/server/utils/pokeapi.ts:141-201` (`buildIndex`): 18-type filtering (`:105` exclusion set), species→generation mapping (`:181-188`), alternate-form exclusion `id > 10000` (`:193`, `:263`), slot ordering (`:196`), dex-number sort (`:200`). A refactor that flips one predicate silently corrupts every list page.
+- **Name/text rules** — `humanize` (`:32-38`), `latestEnglishFlavor` (`:76-81`, "last" English entry — easy to break into "first"), `englishName` (`:67-71`). The humanized-vs-English-name distinction (`Mr Mime` cards vs `Mr. Mime` headings) is a one-character class of bug.
+- **Card assembly** — `cardsFromRefs` dedup + dex sort (`:276-287`), hidden-ability aggregation (`:394-400`, `hidden.set(id, Boolean(hidden.get(id) || item.is_hidden))` — the OR-accumulate here is exactly what a careless rewrite to `item.is_hidden` would break).
+- **Filter/pagination/URL state** — `app/pages/index.vue:82-98` (case-insensitive substring, type-slot match, generation match, 48/page math, page clamping), `:100-118` (`queryObject` omitting empty/default params, hand-rolled `searchString`), `:126-131` (200 ms debounce). URL-state code is triplicated between `pageUrl`, `replaceUrl` and the route watcher (`:142-156`) — prime refactor bait with no net.
+- **Sortable tables** — `app/components/MoveMethodTable.vue:73-97`: missing-values-last in both directions, `aria-sort` flip, default Level-Up ordering (level then name) — pure comparator logic, the textbook candidate for unit tests, untested.
+- **Move-section coupling** — `app/pages/pokemon/[name].vue:129-131` assumes `data.games` is sorted ascending by `order` (sorted server-side at `pokeapi.ts:319`) to pick "highest order" as default; method ordering `level-up/machine/egg/tutor` then alphabetical at `:145-156`. Cross-layer invariants like this are the first casualty of a data-layer refactor.
+- **Not-found paths** — `{ notFound: true }` returns at `pokeapi.ts:261`, `:383`, `:408`, `:434` and their consumption at `app/pages/pokemon/[name].vue:2` / `app/pages/moves/[name].vue:2` etc.; a changed return shape would render empty pages instead of 404s.
+
+I also spotted a live latent bug that a single URL-state test would have caught: `app/pages/index.vue:150-152` clamps `pageValue` when `totalPages` shrinks but never rewrites the URL, so loading `/?page=999&q=z` displays page 1 while the URL still claims page 999 — a spec violation ("Filter state lives in the URL query") with no guard.
+
+Per the dimension instructions: no tests in `app/` ⇒ `coverage_of_risk` and `regression_power` score 1, `wroteTests` false; `signal_to_noise` gets the no-tests default of 3; effort goes to enumerating the untested risk above.
+
+```json
+{
+  "dimension": "tests",
+  "criteria": {
+    "coverage_of_risk": {
+      "score": 1,
+      "evidence": [
+        "app/package.json:6-8 — only build/start scripts; no test runner, test script, or test dependency anywhere in app/",
+        "app/server/utils/pokeapi.ts:141-201 — buildIndex (type filtering, generation mapping, id>10000 exclusion, slot sort) fully untested",
+        "app/pages/index.vue:82-98 — filtering, 48/page pagination and clamping logic untested",
+        "app/components/MoveMethodTable.vue:73-97 — column sorting, missing-last and default ordering untested"
+      ],
+      "rationale": "No tests exist at all; the app's riskiest logic (data transformation, URL state, sorting, pagination) is completely uncovered."
+    },
+    "behaviour_not_implementation": {
+      "score": 1,
+      "evidence": [
+        "app/ — grep for describe(/it(/test(/vitest/playwright/cypress returns zero matches; tests.files = 0"
+      ],
+      "rationale": "There are no tests to evaluate; per the scale, no tests maps to the lowest score."
+    },
+    "regression_power": {
+      "score": 1,
+      "evidence": [
+        "app/pages/index.vue:150-152 — live bug already present: page clamp on shrinking totalPages never rewrites the URL, so ?page=999 renders page 1 with a stale URL; nothing would fail",
+        "app/server/utils/pokeapi.ts:394-400 — OR-accumulate for hidden abilities; a refactor to plain item.is_hidden would silently drop '(hidden)' with no failing test"
+      ],
+      "rationale": "With zero tests, any regression — including one that exists right now — passes unnoticed."
+    },
+    "signal_to_noise": {
+      "score": 3,
+      "evidence": [
+        "app/ — no test files, so no low-value tests to maintain"
+      ],
+      "rationale": "No tests means no noise, but also no signal; the no-tests default of 3 applies."
+    }
+  },
+  "overall": 1,
+  "findings": [
+    {
+      "severity": "high",
+      "location": "app/",
+      "issue": "The app ships with zero tests of its own: no test runner, no test script, no test files; the acceptance suite is the only guard.",
+      "suggestion": "Add vitest plus @nuxt/test-utils; start with unit tests for server/utils/pokeapi.ts (humanize, latestEnglishFlavor, cardsFromRefs, buildIndex output) and component tests for MoveMethodTable sorting."
+    },
+    {
+      "severity": "high",
+      "location": "app/server/utils/pokeapi.ts:141-201",
+      "issue": "buildIndex performs the app's core data transformation (18-type filter, generation mapping, alternate-form exclusion, slot ordering) with no coverage; a refactor of the data layer would corrupt every list silently.",
+      "suggestion": "Unit-test buildIndex against a small fixture payload: excluded types absent, forms >10000 filtered, types sorted by slot, species sorted by dex id, generation assignment correct."
+    },
+    {
+      "severity": "high",
+      "location": "app/pages/index.vue:82-131",
+      "issue": "Filtering, pagination math, URL query serialization (omit empty/default params) and the 200 ms debounce are all untested; a one-line change to queryObject or parsePage breaks deep links like /?type=fire&generation=generation-i.",
+      "suggestion": "Mount the page and test: URL-driven filters, count text, page slice, Previous/Next presence, and that changing a filter resets page and rewrites the URL without defaults."
+    },
+    {
+      "severity": "medium",
+      "location": "app/components/MoveMethodTable.vue:73-97",
+      "issue": "Comparator logic (ascending-first toggle, missing-values-last in both directions, aria-sort, default level-then-name order) is untested.",
+      "suggestion": "Pure-function tests over the sort behavior via rendered table order and aria-sort attributes."
+    },
+    {
+      "severity": "medium",
+      "location": "app/pages/index.vue:150-152",
+      "issue": "totalPages watcher clamps pageValue but never syncs the URL, so out-of-range ?page= renders a different page than the URL claims — a spec violation no test catches.",
+      "suggestion": "Replace the URL with the clamped page (or validate on load), and add a test asserting rendered page always matches the URL."
+    },
+    {
+      "severity": "medium",
+      "location": "app/pages/pokemon/[name].vue:129-156",
+      "issue": "Default game selection assumes the server sorts version groups ascending by order (pokeapi.ts:319), and method ordering (level-up/machine/egg/tutor then alphabetical) is enforced only client-side — cross-layer invariants with no test.",
+      "suggestion": "Test that the selected game defaults to the highest order, honours ?game=, and that method tables render in the specified order."
+    },
+    {
+      "severity": "medium",
+      "location": "app/server/utils/pokeapi.ts:394-400",
+      "issue": "Hidden-ability aggregation accumulates via Boolean(hidden.get(id) || item.is_hidden); a naive refactor loses the (hidden) marker for Pokémon with mixed entries, and no test would fail.",
+      "suggestion": "Unit test getAbilityPageData against a fixture with a Pokémon listed both hidden and normal."
+    },
+    {
+      "severity": "low",
+      "location": "app/server/utils/pokeapi.ts:261,383,408,434",
+      "issue": "notFound return shapes and their consumption in pages (e.g. app/pages/pokemon/[name].vue:2) are untested; a shape change would render empty pages instead of 404 content.",
+      "suggestion": "Component/mount tests asserting NotFoundContent renders for unknown names and unknown types."
+    },
+    {
+      "severity": "low",
+      "location": "app/server/utils/pokeapi.ts:32-38",
+      "issue": "humanize is the display backbone everywhere (cards, methods, generations); regressions like lowercasing or double spaces would break dozens of acceptance-visible labels with no unit net.",
+      "suggestion": "Trivial but cheap: a table-driven test for mr-mime → Mr Mime, thunder-punch → Thunder Punch."
+    }
+  ],
+  "summary": "The app contains no tests of its own — no runner, no script, no test files — leaving roughly 700 lines of filtering, pagination, URL-state, sorting and data-transformation logic guarded only by the acceptance suite. At least one latent spec bug (stale ?page= in the URL after clamping) already exists and nothing would catch it. The first PR against this codebase should add unit tests for server/utils/pokeapi.ts and component tests for the list page and move tables before touching the data layer.",
+  "wroteTests": false,
+  "testCount": 0,
+  "valuableTests": [],
+  "lowValueTests": [],
+  "untested": [
+    {
+      "area": "Index build in app/server/utils/pokeapi.ts:141-201 (type filtering, generation mapping, alternate-form exclusion, slot ordering)",
+      "risk": "high",
+      "likelyBug": "A refactor of buildIndex that stops excluding ids >10000 or drops slot sorting would put Mega forms in every list and mis-order type badges with no failing test."
+    },
+    {
+      "area": "List-page filtering and URL state in app/pages/index.vue:82-131 (search substring, type/generation match, page clamp, query serialization, debounce)",
+      "risk": "high",
+      "likelyBug": "Deep links like /?type=fire&generation=generation-i&page=2 breaking, or default params leaking into the URL after a change to queryObject."
+    },
+    {
+      "area": "Sortable move tables in app/components/MoveMethodTable.vue:73-97 (ascending-first toggle, missing-values-last, aria-sort, default level-then-name order)",
+      "risk": "high",
+      "likelyBug": "A comparator edit that sorts missing values first in descending mode, or breaks the tie-break by level, passes silently."
+    },
+    {
+      "area": "Game select and method ordering in app/pages/pokemon/[name].vue:129-156 (default = highest order via cross-layer sort assumption, preferred method order)",
+      "risk": "medium",
+      "likelyBug": "Changing the server-side version-group sort breaks the client's 'last entry is default game' assumption, selecting the wrong default game."
+    },
+    {
+      "area": "Hidden-ability aggregation in app/server/utils/pokeapi.ts:394-400",
+      "risk": "medium",
+      "likelyBug": "A Pokémon with both normal and hidden ability entries losing its '(hidden)' marker after a refactor of the OR-accumulate."
+    },
+    {
+      "area": "Text rules: humanize (pokeapi.ts:32-38), latestEnglishFlavor (:76-81), englishName (:67-71)",
+      "risk": "medium",
+      "likelyBug": "latestEnglishFlavor returning the first English entry instead of the last, or humanize mangling names — both acceptance-visible and unguarded."
+    },
+    {
+      "area": "Not-found paths: { notFound: true } at pokeapi.ts:261/383/408/434 and their page consumers",
+      "risk": "medium",
+      "likelyBug": "A changed return shape rendering an empty page (or a 404 shell without the contentinfo landmark) instead of the not-found content."
+    },
+    {
+      "area": "Pagination clamp ↔ URL sync in app/pages/index.vue:150-152",
+      "risk": "low",
+      "likelyBug": "Out-of-range ?page= renders a different page than the URL states — already occurring, and guaranteed to survive any refactor unnoticed."
+    }
+  ]
+}
+```

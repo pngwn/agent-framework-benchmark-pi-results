@@ -1,0 +1,179 @@
+I've reviewed the app end-to-end. Here's what I found for the **test quality** dimension.
+
+## The headline: there are no tests at all
+
+Confirmed both by the measured facts (`tests.files: 0, cases: 0, runner: []`) and by inspection: `app/package.json:5-10` defines only `build`, `dev`, `start`, `typecheck` — no test script, and no `vitest`/`playwright`/`jest` anywhere in the dependency tree. There is a `typecheck` script, which is a genuine (small) safety net for the loader/`lib` code, but it asserts nothing about behaviour.
+
+The frustrating part is that the riskiest logic in this app is almost entirely **pure functions and loaders that would be trivially unit-testable**: `humanize`/`dexNumber`/`idFromUrl`/`orDash` (`app/app/lib/format.ts`), the localization and card transforms (`app/app/lib/api.server.ts:201-257`), the home loader's filter+paginate pipeline (`app/app/routes/home.tsx:41-69`), and the move-table comparator (`app/app/components/move-tables.tsx:36-53`). None of it is covered.
+
+## Where bugs will hide once the acceptance suite stops guarding
+
+1. **Home filtering + pagination** (`app/app/routes/home.tsx:41-69`) — combining `q`/`type`/`generation`, the 48-per-page slice, and page clamping (`Math.min(Math.max(1, requested), pageCount)`). Classic off-by-one territory; a data-layer refactor that changes how `typesById` is built would silently break type filtering, and nothing would fail.
+2. **URL state serialization** (`app/app/routes/home.tsx:76-86`) — `queryFor` must omit empty/default params and `page<=1`. A regression here breaks deep links like `/?type=fire&generation=generation-i` and the "omit default params" requirement.
+3. **Move-table sorting** (`app/app/components/move-tables.tsx:36-53`) — missing-values-last in *both* directions, tie-break by name, default level-up ordering. The null-handling branch (`va === null ? 1 : -1`) is exactly the kind of comparator that inverts under refactor with no test to catch it.
+4. **Move grouping on the Pokémon page** (`app/app/routes/pokemon.tsx:55-100`) — method ordering (`METHOD_ORDER` then alphabetical), dedup key `move|method|level`, default game = highest `order`, level column only for level-up, invalid `?game=` fallback. Lots of spec-critical ordering rules, zero coverage.
+5. **`cardsFromPokemon`** (`app/app/lib/api.server.ts:237-257`) — alternate-form exclusion (`id > 10000`), dedup, dex-number sort, and the `deoxys-normal → deoxys` mapping via the species index. The hidden-ability `extra` callback (`app/app/routes/ability.tsx:22-29`) is only applied to the *first* ref per id — fine today, but a silent behaviour if the data ever lists a Pokémon twice.
+6. **`idFromUrl` returning `NaN`** (`app/app/lib/format.ts:19-22`) — malformed URLs silently drop cards rather than failing loudly; a data change could make entries vanish with no signal.
+7. **Localisation helpers** (`app/app/lib/api.server.ts:203-222`) — "latest" English flavor text (last entry) vs. `englishShortEffect` (first entry) and the `\n`/`\f` whitespace collapse. A refactor that flips last→first would pass typecheck and no test would notice.
+8. **Debounced search ↔ URL sync** (`app/app/routes/home.tsx:96-124`) — the `lastPushed` ref dance is the most fragile client logic in the app (back/forward, race with debounce timer). Only the acceptance tests touch it.
+9. **Error/404 classification** (`app/app/lib/api.server.ts:44-52`, `app/app/root.tsx:50-60`) — `NotFoundError` → `data(null, 404)` → `isRouteErrorResponse` → "Not found" heading. A regression makes missing Pokémon render "Something went wrong" — nothing would catch it.
+10. **In-memory cache** (`app/app/lib/api.server.ts:19-39`) — 60 s TTL with failure eviction; the acceptance harness's live-data overlay (extra Pokémon) already skirts staleness. Cache behaviour is entirely unguarded.
+
+The one positive: the risky logic is cleanly factored into `lib/` and loader functions with explicit types, so adding tests later would be cheap — the agent just didn't.
+
+```json
+{
+  "dimension": "tests",
+  "criteria": {
+    "coverage_of_risk": {
+      "score": 1,
+      "evidence": [
+        "app/package.json:5-10 — no test script or test runner dependency anywhere",
+        "app/app/routes/home.tsx:41-69 — filter/pagination pipeline completely untested",
+        "app/app/components/move-tables.tsx:36-53 — sort comparator with null-handling untested",
+        "app/app/lib/api.server.ts:237-257 — cardsFromPokemon (dedup, alternate-form exclusion) untested"
+      ],
+      "rationale": "Zero tests of any kind; the app's riskiest logic (filtering, pagination, sorting, data transformation, URL state) is entirely uncovered."
+    },
+    "behaviour_not_implementation": {
+      "score": 1,
+      "evidence": ["app/ — no test files exist (measured tests.files: 0)"],
+      "rationale": "No tests, so nothing asserts behaviour; per the rubric this scores 1."
+    },
+    "regression_power": {
+      "score": 1,
+      "evidence": [
+        "app/app/routes/pokemon.tsx:55-100 — method ordering, dedup key, default-game selection have no failing signal",
+        "app/app/lib/format.ts:19-22 — idFromUrl silently returns NaN, dropping cards with no error",
+        "app/package.json:9 — only 'typecheck' exists as a safety net; it catches type changes, not behaviour changes"
+      ],
+      "rationale": "A refactor of the data layer or sort comparators would pass CI; only the external acceptance suite (which the team doesn't own) would catch regressions."
+    },
+    "signal_to_noise": {
+      "score": 3,
+      "evidence": ["app/ — no tests, hence no noise to evaluate"],
+      "rationale": "No tests means no low-value tests; neutral 3 per the rubric, not a merit of the app."
+    }
+  },
+  "overall": 1,
+  "findings": [
+    {
+      "severity": "high",
+      "location": "app/package.json:5-10",
+      "issue": "The app ships with no test suite at all — no runner, no test script, no test files — despite the riskiest logic being pure functions that would be cheap to test.",
+      "suggestion": "Add vitest and cover app/lib/format.ts, the transform helpers and card builder in app/lib/api.server.ts, and the loaders' filter/sort logic with a stubbed fetch."
+    },
+    {
+      "severity": "high",
+      "location": "app/app/routes/home.tsx:41-69",
+      "issue": "Search/type/generation filtering, 48-per-page slicing and page clamping are untested; a data-layer refactor (e.g. how typesById is built) would silently break filter results and pagination.",
+      "suggestion": "Extract the filtering/pagination into a pure function and test combined filters, empty results, page out of range, and boundary slices."
+    },
+    {
+      "severity": "high",
+      "location": "app/app/components/move-tables.tsx:36-53",
+      "issue": "Sort comparator's missing-values-last-in-both-directions branch and name tie-break have no coverage; null ordering is the classic thing that inverts under refactor.",
+      "suggestion": "Unit-test sortRows against fixtures with null power/accuracy/category in ascending and descending directions, plus default level-up ordering."
+    },
+    {
+      "severity": "high",
+      "location": "app/app/routes/pokemon.tsx:55-100",
+      "issue": "Move grouping (method ordering, dedup key, default game = highest order, level column only for level-up, invalid ?game= fallback) is spec-critical and untested.",
+      "suggestion": "Test the loader against a small canned ApiPokemon/ApiMove fixture asserting table order, method ordering (Level Up, Machine, Egg, Tutor, then alphabetical) and game fallback."
+    },
+    {
+      "severity": "high",
+      "location": "app/app/lib/api.server.ts:237-257",
+      "issue": "cardsFromPokemon's alternate-form exclusion (id > 10000), dedup and dex-number sort — including the deoxys-normal → deoxys species mapping — have no failing signal.",
+      "suggestion": "Unit-test with refs for species, forms above 10000, duplicates and a non-species id, including the ability-page hidden flag."
+    },
+    {
+      "severity": "medium",
+      "location": "app/app/routes/home.tsx:76-86",
+      "issue": "queryFor's URL-state serialization (omit empty/default, omit page<=1) is untested; a regression breaks deep links and the 'omit default parameters' requirement.",
+      "suggestion": "Table-driven tests over queryFor: empty filters, page 1, combined filters, all-defaults."
+    },
+    {
+      "severity": "medium",
+      "location": "app/app/lib/api.server.ts:203-222",
+      "issue": "Localization helpers untested: latest-English flavor text takes the LAST en entry while short_effect takes the FIRST, plus the \\n/\\f whitespace collapse — flipping last/first would pass typecheck.",
+      "suggestion": "Test latestEnglishFlavorText and englishShortEffect with mixed-language entries and embedded newlines/form feeds."
+    },
+    {
+      "severity": "medium",
+      "location": "app/app/routes/home.tsx:96-124",
+      "issue": "Debounced-search/URL-sync logic (lastPushed ref, timer race, back/forward resync) is the most fragile client code and is only exercised by the acceptance suite.",
+      "suggestion": "A Playwright component/E2E test typing in the search box asserting the URL updates after debounce and that back/forward restores the input."
+    },
+    {
+      "severity": "medium",
+      "location": "app/app/lib/api.server.ts:44-52",
+      "issue": "404 classification (NotFoundError → data(null, 404) → root ErrorBoundary 'Not found' heading) is unguarded; a refactor could render 'Something went wrong' for missing Pokémon or vice versa.",
+      "suggestion": "Test getRecord with a 404 response and the root errorHeading with a 404 vs 500 response."
+    },
+    {
+      "severity": "low",
+      "location": "app/app/lib/api.server.ts:19-39",
+      "issue": "The 60s in-memory cache (TTL, failure eviction) is untested; the acceptance harness's live-data overlay already runs close to staleness, and stale-data bugs would be intermittent and hard to reproduce.",
+      "suggestion": "Test that a rejected fetch evicts the entry and that expiry refetches, using an injectable clock."
+    }
+  ],
+  "summary": "The app contains zero tests — no runner, no script, no test files — and its riskiest logic (filtering, pagination, sorting, URL state, data transforms) is entirely uncovered. The one mitigation is that the risky logic is cleanly factored into pure functions in app/lib and route loaders, so tests would be cheap to add. Until then, only the external acceptance suite stands between refactors and silent regressions.",
+  "wroteTests": false,
+  "testCount": 0,
+  "valuableTests": [],
+  "lowValueTests": [],
+  "untested": [
+    {
+      "area": "Home filtering + pagination (search substring, type/generation filters, 48/page slicing, page clamping) — app/app/routes/home.tsx:41-69",
+      "risk": "high",
+      "likelyBug": "Off-by-one in page slices, broken filter combination, or type filter matching the wrong Pokémon set after a typesById refactor; results silently wrong with no failing test."
+    },
+    {
+      "area": "Move table sorting incl. missing-values-last and aria-sort state — app/app/components/move-tables.tsx:36-53",
+      "risk": "high",
+      "likelyBug": "Null rows jumping to the top in one sort direction, inverted comparator, or broken tie-break by name."
+    },
+    {
+      "area": "Pokémon move grouping: method ordering, dedup, default game selection, level column presence, invalid ?game fallback — app/app/routes/pokemon.tsx:55-100",
+      "risk": "high",
+      "likelyBug": "Tables in wrong order (spec mandates Level Up, Machine, Egg, Tutor, then alphabetical), duplicate move rows, or wrong default version group."
+    },
+    {
+      "area": "cardsFromPokemon: alternate-form exclusion (id > 10000), dedup, dex ordering, species mapping (deoxys-normal → deoxys), hidden-ability flag — app/app/lib/api.server.ts:237-257",
+      "risk": "high",
+      "likelyBug": "Mega/forms leaking into lists, duplicate cards, cards linking to the wrong species URL, or hidden flag lost on dedup."
+    },
+    {
+      "area": "URL state serialization (omit empty/default params, page<=1) — app/app/routes/home.tsx:76-86",
+      "risk": "medium",
+      "likelyBug": "Deep links like /?type=fire&generation=generation-i breaking, or default params polluting the URL."
+    },
+    {
+      "area": "Debounced search ↔ URL synchronization (back/forward, timer race, lastPushed ref) — app/app/routes/home.tsx:96-124",
+      "risk": "medium",
+      "likelyBug": "Stale search results, URL not updating after typing, or search input desyncing on back/forward navigation."
+    },
+    {
+      "area": "Localization helpers: last-English flavor text vs first-English short_effect, whitespace collapse — app/app/lib/api.server.ts:203-222",
+      "risk": "medium",
+      "likelyBug": "Flavor text picking the wrong entry (first vs last) or raw \\n/\\f leaking into descriptions after a refactor."
+    },
+    {
+      "area": "404/error classification: NotFoundError → data(404) → root ErrorBoundary 'Not found' heading — app/app/lib/api.server.ts:44-52, app/app/root.tsx:50-60",
+      "risk": "medium",
+      "likelyBug": "Missing Pokémon rendering 'Something went wrong' instead of 'Not found', or 404s swallowed into 500s."
+    },
+    {
+      "area": "In-memory API cache: 60s TTL, failure eviction, stale data across API data changes — app/app/lib/api.server.ts:19-39",
+      "risk": "medium",
+      "likelyBug": "Rejected promises cached and served forever, or stale records after the backing API changes (intermittent, hard-to-reproduce)."
+    },
+    {
+      "area": "Formatting helpers: humanize, dexNumber padding, idFromUrl NaN behaviour, height/weight toFixed — app/app/lib/format.ts, app/app/routes/pokemon.tsx:113-114",
+      "risk": "low",
+      "likelyBug": "Wrong padding (#25 instead of #0025), NaN ids silently dropping cards, or height/weight off by a decimal."
+    }
+  ]
+}
+```

@@ -1,0 +1,100 @@
+I've reviewed the app thoroughly and verified the framework state (Astro 7.4.x is current; the app pins `^7.4.2` and `@astrojs/node@^11.1.9`, both current). Here's my review.
+
+## Review
+
+**Stack & structure.** The app is pure Astro: file-based routing under `src/pages/` (`[name].astro` dynamic routes), SSR with `output: 'server'` + the Node standalone adapter (`app/astro.config.mjs:1-6`), data fetched in frontmatter, interactivity via bundled `<script>` blocks. No UI library, no hydration framework — appropriate and idiomatic for this app.
+
+**What's good**
+
+- Data layer is a small, well-commented module with a stale-while-revalidate cache and a concurrency limiter (`app/src/lib/api.ts:27-41`), with 404 → `null` semantics that every page handles uniformly (`app/src/lib/api.ts:30-33`).
+- The team feature (FEATURE.md) was integrated the way I'd want: a server-side cookie read so the button renders correct on first paint (`app/src/pages/pokemon/[name].astro:56-57`), a self-contained `lib/team.ts`, and reuse of the existing `CardList` via an optional `note`/`removable` prop (`app/src/components/CardList.astro:10-11`) rather than a parallel card implementation.
+- Careful client work: debounced search with `AbortController` and DOMParser partial replacement (`app/src/pages/index.astro:96-120`), document-level event delegation so scripts survive DOM replacement (`app/src/components/MovesSection.astro:170-176`), a `<noscript>` fallback for the game picker, and a stable-sort implementation with correct missing-values-last handling (`app/src/components/MovesSection.astro:145-163`).
+- `Astro.self` recursion for evolution chains (`app/src/components/Evolution.astro:23`) is exactly the framework-blessed pattern.
+
+**What I'd ask about before merging**
+
+- The team cookie protocol is implemented twice — server (`app/src/lib/team.ts:26-40`) and client (`app/src/layouts/Base.astro:41-80`) — with different validation, and `MAX_TEAM_SIZE` is duplicated. This is the kind of hidden duplication that drifts. Astro scripts can import shared modules; use one source of truth.
+- `process.env.API_BASE_URL` (`app/src/lib/api.ts:4`) works, but since Astro 5 the docs recommend `astro:env` (`getSecret()`); a team codebase on Astro 7 should use it.
+- The module-level cache is unbounded (`app/src/lib/api.ts:11`) and `load()` has no timeout (`app/src/lib/api.ts:29`); with a global concurrency cap shared across all requests, one hung endpoint can stall every in-flight request.
+- `any` props throughout (`app/src/components/MovesSection.astro:10`, `app/src/pages/pokemon/[name].astro:22`) undercut the `astro/tsconfigs/strict` tsconfig, and no `astro check` runs in the build script.
+- Small duplication: `show()` twice (`app/src/pages/moves/[name].astro:29` vs `app/src/components/MovesSection.astro:85`), `--badge-bg` style logic in two places (`app/src/components/TypeBadge.astro:8`, `app/src/pages/types/index.astro:12`).
+
+None of this blocks the merge for me; it's a solid, well-organized Astro app with a few nits and two small untangling tasks.
+
+```json
+{
+  "dimension": "mergeability",
+  "criteria": {
+    "idiomatic": {
+      "score": 4,
+      "evidence": [
+        "app/astro.config.mjs:3-6 — current output:'server' + @astrojs/node standalone, matching Astro 7.4 / adapter 11.1.x",
+        "app/src/pages/pokemon/[name].astro:21-28 — data awaited in frontmatter, the documented Astro data-loading pattern",
+        "app/src/components/Evolution.astro:23 — Astro.self recursion, the framework's own pattern",
+        "app/src/pages/pokemon/[name].astro:56 — Astro.cookies used as documented",
+        "app/src/lib/api.ts:4 — process.env instead of astro:env/getSecret, recommended since Astro 5"
+      ],
+      "rationale": "Reads like the framework's own examples: file-based routes, frontmatter data loading, Astro.cookies, Astro.self, bundled script islands. The only non-current choice is process.env over astro:env, plus a global stylesheet where Astro favors scoped component styles."
+    },
+    "correctness_risks": {
+      "score": 4,
+      "evidence": [
+        "app/src/lib/api.ts:30-33 — 404 mapped to null; every page renders NotFound and sets status 404",
+        "app/src/pages/index.astro:100-115 — debounced search with AbortController and DOMParser swap, falls back to full navigation",
+        "app/src/components/MovesSection.astro:151-163 — stable sort, missing values last in both directions, no listener leaks (document-level, deduped script)",
+        "app/src/lib/api.ts:11 — cache Map never evicts entries",
+        "app/src/lib/api.ts:17-29 — no fetch timeout; the global 24-slot limiter is shared by all requests, so a hung endpoint stalls every page",
+        "app/src/lib/api.ts:50-55 — a failed background revalidate is swallowed and the entry is marked fresh for another 60s",
+        "app/src/pages/team.astro:18 — '<n> of 6' uses the raw cookie length while the card list comes from members filtered against the live API; they can disagree"
+      ],
+      "rationale": "Careful work: 404 handling, abortable fetches, SSR-rendered team state with no hydration mismatch. Remaining risks are real but bounded: an unbounded cache, no fetch timeout feeding a shared limiter, and one count-vs-list drift edge on the team page."
+    },
+    "global_abstractions": {
+      "score": 4,
+      "evidence": [
+        "app/src/lib/api.ts — small, single-purpose transport layer with clear boundary",
+        "app/src/lib/pokedex.ts:9-33 — display helpers mixed with data loaders in one 185-line module; cohesive today but the obvious growth point",
+        "app/src/lib/team.ts:26-40 vs app/src/layouts/Base.astro:41-80 — the same cookie protocol implemented twice with different validation; MAX_TEAM_SIZE duplicated",
+        "app/src/layouts/Base.astro:63-82 — the shared layout owns team-specific click handling for every page",
+        "app/src/pages/moves/[name].astro:29 and app/src/components/MovesSection.astro:85 — near-identical show()/dash helpers"
+      ],
+      "rationale": "Abstractions are few and mostly earn their keep (api/pokedex/team with clear roles), but the duplicated team-cookie protocol across server and client, and team behavior living in the Base layout, are the two things that will need untangling."
+    },
+    "readability": {
+      "score": 4,
+      "evidence": [
+        "app/src/lib/api.ts:1-3 and app/src/lib/team.ts:1-2 — comments explain the caching and no-flash design intent",
+        "app/src/lib/pokedex.ts:37,48,96,140 — section banners make a long module navigable",
+        "app/src/components/Section.astro:1-12 — small, self-explanatory primitives used consistently",
+        "app/src/components/MovesSection.astro:10 — 'pokemon: any' props undermine the strict tsconfig; pervasive any types",
+        "app/src/pages/pokemon/[name].astro:21-57 — dense but linear frontmatter, easy to follow"
+      ],
+      "rationale": "A new teammate would find their way quickly: consistent naming, organized pages/components/lib, comments that explain why. The main rough spot is pervasive 'any' where the app declares strict typing."
+    },
+    "review_cost": {
+      "score": 4,
+      "evidence": [
+        "app/package.json:6-7 — clean build/start scripts, current deps (astro ^7.4.2, @astrojs/node ^11.1.9)",
+        "app/src/pages/team.astro — feature added without disturbing existing pages, reusing CardList",
+        "app/src/lib/team.ts:26-40 — server/client cookie duplication is the main thing I'd ask to change",
+        "app/src/lib/api.ts:11 — second ask: bound the cache / add a fetch timeout"
+      ],
+      "rationale": "I'd approve after one round of nits: share the team-cookie module, move to astro:env, bound the cache, and tighten the anys. Nothing needs structural rework."
+    }
+  },
+  "overall": 4,
+  "findings": [
+    { "severity": "medium", "location": "app/src/layouts/Base.astro:41-80", "issue": "The team cookie protocol is implemented twice (server in lib/team.ts, client here) with different validation, and MAX_TEAM_SIZE is duplicated; the two can drift", "suggestion": "Extract a single shared module (validation, size limit, encode/decode) imported by both lib/team.ts and the Base script — Astro scripts can import the same module" },
+    { "severity": "medium", "location": "app/src/lib/api.ts:11", "issue": "Module-level cache never evicts; it grows with every distinct path ever requested (species, pokemon, moves, abilities…)", "suggestion": "Cap the cache (LRU by size or entries) or accept stale-and-replace with a bounded key set" },
+    { "severity": "medium", "location": "app/src/lib/api.ts:17-29", "issue": "No fetch timeout, and the 24-slot concurrency limiter is global: one hung API endpoint stalls all in-flight page renders", "suggestion": "Add AbortSignal.timeout() to load(), and consider a per-request rather than process-global limiter" },
+    { "severity": "medium", "location": "app/src/lib/api.ts:4", "issue": "API_BASE_URL read from process.env; Astro has recommended astro:env/getSecret since v5", "suggestion": "Define the variable in astro.config.mjs's env schema and import from astro:env/server" },
+    { "severity": "low", "location": "app/src/lib/api.ts:50-55", "issue": "A failed background revalidate is swallowed and the entry is marked fresh for another 60s, delaying pickup of live data changes", "suggestion": "Only update hit.at on successful refresh, or retry sooner on failure" },
+    { "severity": "low", "location": "app/src/pages/team.astro:18", "issue": "'<n> of 6' is derived from the raw cookie while the card list and coverage come from members filtered against the live API, so they can disagree if a name 404s", "suggestion": "Count from the resolved members list, or drop unresolved names from the cookie on render" },
+    { "severity": "low", "location": "app/src/components/MovesSection.astro:10", "issue": "Pervasive 'any' props and locals across components contradict the astro/tsconfigs/strict tsconfig; no astro check in the build", "suggestion": "Type the API payload shapes once in lib, and add @astrojs/check (astro check) to the build or CI" },
+    { "severity": "low", "location": "app/src/pages/moves/[name].astro:29", "issue": "The show()/dash formatting helper is duplicated in MovesSection.astro:85", "suggestion": "Move show/sortValue into lib/pokedex.ts next to DASH" },
+    { "severity": "low", "location": "app/src/layouts/Base.astro:63-82", "issue": "The shared layout carries team-specific behavior (cookie writes and reload) for every page, including ones with no team UI", "suggestion": "Move the delegated click handler into a small dedicated script module (or TeamControls component) so the layout stays generic" },
+    { "severity": "low", "location": "app/src/lib/pokedex.ts:9-33", "issue": "Display helpers (humanize, dexNumber, DASH) share a module with data loaders; it will become the dumping ground as pages grow", "suggestion": "Split formatting helpers into lib/format.ts so the data layer stays about fetching" }
+  ],
+  "summary": "A clean, current-idiom Astro 7 SSR app: file-based routes, frontmatter data loading, Astro.cookies, Astro.self recursion, and thoughtful client scripts with abort controllers and correct 404 handling. The team feature was integrated the way I'd want, reusing existing components and rendering state server-side from a cookie with no flash. I'd merge after one round of nits: deduplicate the team-cookie protocol between server and client, adopt astro:env, bound the cache, add a fetch timeout, and tighten the pervasive anys."
+}
+```

@@ -1,0 +1,137 @@
+## Review — Test quality
+
+**The app contains zero tests of its own.** There is no test runner in `app/package.json` (scripts at `app/package.json:6-25` are build/serve/lint/fmt only), no `vitest`/`playwright`/`@builder.io/qwik/testing` anywhere in `app/`'s devDependencies, and no `*.spec.*` / `*.test.*` files under `app/src/`. The measured facts agree (`tests: { files: 0, cases: 0 }`). This is not a Qwik limitation: the framework's current guidance is `npm run qwik add vitest` with `@builder.io/qwik/testing`'s `createDOM` for component tests (qwik.dev/docs/integrations/vitest), and the pure-logic modules here (`src/lib/format.ts`, `src/lib/api.ts` helpers, `MoveTables.tsx` comparator) are trivially unit-testable.
+
+That's a real gap, because the risky surface is large: this app is mostly data transformation over raw PokeAPI payloads, plus URL-state and a hand-rolled sortable table. Once the acceptance suite in `tests/` is no longer the only guard, any refactor of `src/lib/api.ts` is flying blind.
+
+### What isn't tested, and what bugs that could hide
+
+- **Filtering/search/pagination math** — `app/src/routes/index.tsx:53-61`: case-insensitive substring match on the *humanized* name, type/generation filters, page clamp (`Math.min(Math.max(1, page.value), totalPages)`) and slice at `:62-63`. A refactor that matches against the raw API name (`mr-mime` vs `Mr Mime`) or forgets the clamp (empty results → `page=999`) would slip through.
+- **URL state building** — `app/src/routes/index.tsx:20-29` `buildHomeUrl` omits defaults/`page=1`; the popstate re-sync task at `:35-46`. Regressions: query params leaking into every link (`/?page=1&…`), back/forward desyncing the selects from the URL.
+- **`latestFlavor`** — `app/src/lib/api.ts:51-58`: "last English entry" + whitespace collapse (`\n`, `\f`). It returns `null` if the *last* English entry has empty `flavor_text` even when earlier English entries have text — a plausible latent bug no test would currently catch. Same pattern for species, moves, and the move/ability effect fallback chain at `:226-228`.
+- **Alternate-form exclusion** — the `id > 10000` / `species.byId.has(id)` guard is repeated in three places (`app/src/lib/api.ts:162`, `:171`, `:209`), not centralized. Dropping or weakening one copy re-admits Mega Evolutions to exactly one list — a silent data bug.
+- **Table sort comparator** — `app/src/components/MoveTables.tsx:24-35`: the "missing values sort last in *both* directions" rule is encoded by returning before applying `factor`; anyone "simplifying" that comparator breaks spec-mandated behaviour with no failing test. Default ordering (level-then-name, `:47-52`) likewise.
+- **Move-method ordering comparator** — `app/src/lib/api.ts:414-421`: the `if (ai !== -1 || bi !== -1)` branch with the `999` sentinel is subtle and easy to break; spec mandates `Level Up, Machine, Egg, Tutor, then alphabetical`.
+- **Level-up min-level merge** — `app/src/lib/api.ts:373-381`: picking the lowest `level_learned_at` per move/method. Swapping `<` for `>` shows the wrong level on every Pokémon page.
+- **`fetchJson` caching/error semantics** — `app/src/lib/api.ts:64-80`: 404→`null` is cached forever, non-OK throws and the cache entry is evicted on rejection. A refactor that caches the rejected promise (or stops deleting on error) turns one transient API hiccup into a permanently broken page.
+- **Evolution tree recursion** — `app/src/lib/api.ts:324-328`: branching chains (Eevee) are rendered from this nested structure; an infinite-depth or malformed chain currently has no guard and no test.
+- **Number formatting** — `app/src/lib/format.ts:1-17` (`humanize`, `dexNumber` `#0025`, `displayNumber` `—`), height/weight division at `app/src/lib/api.ts:436-437`, stat total at `:448`.
+
+The only thing standing between these and production is the acceptance suite, which lives outside `app/` and exercises rendered pages against live data — it will not catch a unit-level regression introduced mid-refactor before CI, and it isn't owned by this PR.
+
+```json
+{
+  "dimension": "tests",
+  "criteria": {
+    "coverage_of_risk": {
+      "score": 1,
+      "evidence": [
+        "app/package.json:6-25 — no test script, no test runner installed",
+        "app/src/routes/index.tsx:53-63 — filter/search/pagination math untested",
+        "app/src/components/MoveTables.tsx:24-52 — sort comparator and default ordering untested",
+        "app/src/lib/api.ts:51-58 — latestFlavor whitespace/'last English entry' logic untested"
+      ],
+      "rationale": "No tests exist at all, and the riskiest logic (data transformation, sorting, URL state, 404/error paths) is precisely what's unguarded."
+    },
+    "behaviour_not_implementation": {
+      "score": 1,
+      "evidence": ["app/src — zero test files (measured: tests.files 0)"],
+      "rationale": "There are no tests to assess; per the rubric this scores at the bottom."
+    },
+    "regression_power": {
+      "score": 1,
+      "evidence": [
+        "app/src/lib/api.ts:414-421 — METHOD_ORDER comparator with 999 sentinel, untested",
+        "app/src/lib/api.ts:373-381 — min-level merge per move/method, untested",
+        "app/src/lib/api.ts:64-80 — cache of 404-null and error eviction, untested"
+      ],
+      "rationale": "Any behavioural break in the data layer passes; the only guard is the external acceptance suite."
+    },
+    "signal_to_noise": {
+      "score": 3,
+      "evidence": ["app/src — no low-value tests because no tests were written"],
+      "rationale": "No noise, but no signal either; per the rubric, no tests scores 3."
+    }
+  },
+  "overall": 1,
+  "findings": [
+    {
+      "severity": "high",
+      "location": "app/package.json:6-25",
+      "issue": "No test infrastructure whatsoever — no test script, no vitest/@builder.io/qwik/testing in devDependencies, despite Qwik's documented `qwik add vitest` workflow being a one-liner.",
+      "suggestion": "Add vitest via `npm run qwik add vitest`; the pure functions in src/lib and the MoveTables comparator need no DOM and are the cheapest, highest-value starts."
+    },
+    {
+      "severity": "high",
+      "location": "app/src/routes/index.tsx:53-63",
+      "issue": "Search/type/generation filtering, page clamping and 48-per-page slicing are client-side logic with no coverage; bugs like matching raw API names instead of humanized ones, or an unclamped page on empty results, would ship silently.",
+      "suggestion": "Extract the filter/paginate computation into a pure function and unit-test it: empty filters → 1025, humanized-name matching, page clamp at totalPages, last-page slicing."
+    },
+    {
+      "severity": "high",
+      "location": "app/src/components/MoveTables.tsx:24-52",
+      "issue": "The sort comparator encodes 'missing values sort last in both directions' via an early return before the direction factor; the default level-then-name ordering is also custom. Both are silent-breakage magnets.",
+      "suggestion": "Unit-test compareRows and the default-order branch directly with rows containing null power/accuracy and null level."
+    },
+    {
+      "severity": "high",
+      "location": "app/src/lib/api.ts:51-58",
+      "issue": "latestFlavor returns null when the last English entry has empty flavor_text even if earlier English entries have text — a plausible latent bug with no test to expose it.",
+      "suggestion": "Add unit tests with \\n/\\f whitespace runs, non-English entries last, and the empty-last-entry edge case; fix the function to skip empty entries."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/lib/api.ts:162,171,209",
+      "issue": "The alternate-form exclusion rule (id > 10000, known species) is duplicated in three places; weakening one copy re-admits Mega Evolutions to a single list.",
+      "suggestion": "Centralize into one isDefaultForm(id) helper and test it; then test that a card list never contains an id > 10000."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/lib/api.ts:64-80",
+      "issue": "fetchJson caches 404 as null forever and evicts cache entries on rejection; a refactor that caches rejected promises turns one transient API error into a permanently broken page.",
+      "suggestion": "Test cache semantics: 404 → null and cached; rejection → entry removed and retried on next call."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/lib/api.ts:414-421",
+      "issue": "The method-ordering comparator (LEVEL_UP/MACHINE/EGG/TUTOR then alphabetical) uses an asymmetric branch with a 999 sentinel — subtle and untested.",
+      "suggestion": "Feed tables named level-up/machine/egg/tutor/light-screen/zen-headbutt through the sort and assert the spec order."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/lib/api.ts:373-381",
+      "issue": "Lowest-level-learned merge per move/method is untested; an inverted comparison changes every level-up table on the site.",
+      "suggestion": "Unit-test the merge with a move learned at levels 37 and 1 in the same version group, and with null levels."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/routes/index.tsx:20-46",
+      "issue": "buildHomeUrl's omit-defaults rule and the popstate re-sync listener are the app's URL-state contract with the acceptance tests; regressions (leaked ?page=1, back-button desync) would only surface as end-to-end failures.",
+      "suggestion": "Test buildHomeUrl for defaults and combined filters; component-test the popstate sync with @builder.io/qwik/testing's createDOM if practical."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/lib/api.ts:324-328",
+      "issue": "Recursion over evolves_to has no depth guard and no tests for branching chains (Eevee) or missing species nodes.",
+      "suggestion": "Test evolutionTree with a branching chain fixture and assert the nested structure."
+    }
+  ],
+  "summary": "The app shipped with zero tests and no test infrastructure, even though Qwik's current recommended Vitest setup is a one-liner and the highest-risk code (filtering, pagination, table sorting, flavor-text extraction, caching) is pure, easily testable logic. Several spots — latestFlavor's empty-last-entry behavior, the duplicated alternate-form exclusion, and the move-method comparator — are exactly the kind of subtle code that hides latent bugs and breaks under refactor. The first PR into this codebase should add vitest and cover the five pure-logic seams called out above.",
+  "wroteTests": false,
+  "testCount": 0,
+  "valuableTests": [],
+  "lowValueTests": [],
+  "untested": [
+    { "area": "Home filtering/search/pagination (src/routes/index.tsx:53-63)", "risk": "high", "likelyBug": "Matching raw API names instead of humanized ones; unclamped page on empty results; off-by-one in the 48-per-page slice" },
+    { "area": "Move table sorting incl. missing-values-last (src/components/MoveTables.tsx:24-52)", "risk": "high", "likelyBug": "Nulls jumping to the top in descending sort; default level-then-name order lost; aria-sort flipping incorrectly" },
+    { "area": "latestFlavor / effect fallback chain (src/lib/api.ts:51-58, 226-228)", "risk": "high", "likelyBug": "Wrong (non-English or non-latest) flavor text shown; empty last English entry yields '—' instead of the previous entry" },
+    { "area": "Alternate-form exclusion, duplicated 3x (src/lib/api.ts:162,171,209)", "risk": "high", "likelyBug": "Mega Evolutions silently reappearing in one list after a refactor" },
+    { "area": "fetchJson caching and error eviction (src/lib/api.ts:64-80)", "risk": "high", "likelyBug": "Rejected promise cached, so one transient API error permanently breaks a page until server restart" },
+    { "area": "Move-method ordering and min-level merge (src/lib/api.ts:368-421)", "risk": "medium", "likelyBug": "Tables in wrong order after comparator tweak; wrong level shown per move after comparison inverted" },
+    { "area": "URL query state: buildHomeUrl defaults and popstate sync (src/routes/index.tsx:20-46)", "risk": "medium", "likelyBug": "Links carrying redundant ?page=1; back/forward leaving the selects and the list out of sync" },
+    { "area": "Evolution chain recursion (src/lib/api.ts:324-328)", "risk": "medium", "likelyBug": "Branching chains (Eevee) flattened or dropped; no depth guard on malformed data" },
+    { "area": "Pure formatters: humanize, dexNumber, displayNumber, height/weight, stat total (src/lib/format.ts:1-17; src/lib/api.ts:436-448)", "risk": "low", "likelyBug": "Zero-padding or em-dash regressions ('#25' instead of '#0025'); height/weight not converted to one decimal" },
+    { "area": "404/not-found paths (src/routes/*/index.tsx status(404) + [...slug])", "risk": "low", "likelyBug": "A resource the API lacks rendering an empty page instead of the Not found layout" }
+  ]
+}
+```

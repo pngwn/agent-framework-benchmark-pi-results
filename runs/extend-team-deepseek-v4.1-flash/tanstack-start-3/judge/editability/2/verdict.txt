@@ -1,0 +1,172 @@
+I've reviewed the full app. Here's my assessment.
+
+## Review notes
+
+**Architecture** (very clean for a TanStack Start app): `routes/` → thin loaders calling per-page server functions in `server/functions.ts` → a single `server/pokeapi.ts` module that owns all API access and caching. `lib/` holds isomorphic helpers (`format.ts`, `types.ts`, `team.ts`), and components depend only on `lib/types.ts` shapes. The server/client seam is real: nothing in `components/` imports the API module, and sprite origin reaches the client only through the root loader (`functions.ts:41-44` → `lib/config.ts:5`).
+
+**Framework currency**: `.validator()` on server functions is the *canonical* API as of the current stable release (`inputValidator()` was deprecated and removed — PR #7566, June 2026), and `getCookie` from `@tanstack/react-start/server` is the documented way to read cookies in a server function. No outdated APIs found. One internal-API usage: `matches.some((m) => m._notFound)` in `__root.tsx:17` leans on a private field alongside the public `m.status === 'notFound'`.
+
+**Weakest spot**: `CardData` (the shared card shape) has grown an abilities-specific `hidden` field that the generic `PokemonCard` renders as "Hidden ability" — a feature leaking into a shared abstraction. Also, the effect-fallback rule is duplicated verbatim between the move and ability server functions, and type-slot sorting appears three times in `functions.ts`.
+
+```json
+{
+  "dimension": "editability",
+  "criteria": {
+    "removability": {
+      "score": 3,
+      "evidence": [
+        "app/src/routes/abilities.$name.tsx:1-37 — the whole page is one self-contained file; deleting it regenerates routeTree.gen.ts automatically",
+        "app/src/server/functions.ts:192-203 — getAbilityPage must also be deleted; the only import of it is the route file",
+        "app/src/server/pokeapi.ts:300-311 — getAbility/RawAbility become dead code after removal",
+        "app/src/routes/pokemon.$name.tsx:112-123 — the Abilities section (the only links to /abilities) must be removed",
+        "app/src/components/PokemonCard.tsx:43 — 'Hidden ability' note in the shared card is abilities-specific",
+        "app/src/lib/types.ts:10 — CardData.hidden exists only for abilities; strict TS flags leftovers, but you still touch ~5 files"
+      ],
+      "rationale": "Route deletion is trivial and links live in only two places, but the feature leaves traces across the data layer, the shared card type and the card component, so removal is a handful of scattered (if findable, type-checker-guided) edits rather than delete-a-directory."
+    },
+    "changeability": {
+      "score": 4,
+      "evidence": [
+        "app/src/components/PokemonCard.tsx:25 — the only place a card sprite is computed; every one of the five card lists renders through this component, so a sprite fix covers all of them",
+        "app/src/lib/format.ts:23-24 — spriteUrl pattern lives in exactly one function",
+        "app/src/server/pokeapi.ts:120-135 — toCards is the single server-side assembly point for reference-based card lists",
+        "app/src/lib/format.ts:4-11,20-25 and pokeapi.ts:66-77 — humanize, dexNumber, display, englishName, latestEnglish, collapse each have exactly one definition",
+        "app/src/server/functions.ts:184 vs 197 — the effect-fallback rule is duplicated verbatim between getMovePage and getAbilityPage; changing it means two edits",
+        "app/src/server/functions.ts:90,121,148 — pokemon-type slot sorting repeated three times",
+        "app/src/routes/index.tsx:44-63 — the search/URL debounce state machine is subtle enough that behavior changes there need care"
+      ],
+      "rationale": "Most rules (sprite URL, naming, dex numbers, missing-value rendering) are single-definition and the shared card render point means one fix covers every list; the duplicated effect-fallback and slot-sorting logic, plus a delicate home-page query state machine, keep it below excellent."
+    },
+    "coupling": {
+      "score": 4,
+      "evidence": [
+        "app/src/server/pokeapi.ts:19-33 — all knowledge of the API origin and paths is behind apiBase()/fetchJson; components never import it",
+        "app/src/lib/types.ts:1-40 — components depend on narrow DTO shapes, not on server internals",
+        "app/src/lib/config.ts:5 — useMediaBase reaches into the root loader's return shape by string route id ('__root__'), a hidden cross-route dependency",
+        "app/src/routes/__root.tsx:17 — head() reads the private m._notFound field (public m.status === 'notFound' is already checked)",
+        "app/src/routes/team.tsx:21,46 — team page reconciles server-derived members/coverage with client team state and needs router.invalidate() after a removal: two sources of truth for one concept",
+        "app/src/lib/team.ts:1-18 — the cookie codec is shared by server (functions.ts getTeamPage) and client (TeamProvider), so the format has one definition"
+      ],
+      "rationale": "Layering is genuinely loose: routes → per-page server functions → one API module, with strict TS at every seam and a real server/client boundary. The tangles are small and local (root-loader shape coupling, a private router field, the team page's dual state)."
+    },
+    "abstraction_design": {
+      "score": 4,
+      "evidence": [
+        "app/src/server/pokeapi.ts:120-135 — toCards(refs, extra) absorbs the real variation across move/ability/type Pokémon lists via a callback instead of being copied three times",
+        "app/src/components/PokemonCard.tsx:5-13 — PokemonCardList serves five different lists (home, move, ability, type, team) with optional typeLabels and a renderAction render-prop rather than boolean flags",
+        "app/src/components/MoveTable.tsx:44-64 — sorting logic is column-generic with one place defining default order and null-handling",
+        "app/src/components/TypeBadge.tsx:4 — a small link=true boolean flag; harmless but the only flag creep",
+        "app/src/routes/types.index.tsx:24-31 and types.$name.tsx:46-55 — simple link lists are each hand-rolled rather than shared; a third copy would be a smell",
+        "app/src/lib/types.ts:5-10 — CardData grows one optional field per feature (types, hidden), a mild grab-bag"
+      ],
+      "rationale": "The two abstractions that matter (card lists, reference→card conversion) are designed around the app's actual variation and stretch to new cases without copying; the residual duplication is confined to trivial link lists and a slowly-widening card DTO."
+    }
+  },
+  "overall": 4,
+  "findings": [
+    {
+      "severity": "medium",
+      "location": "app/src/lib/types.ts:10 / app/src/components/PokemonCard.tsx:43",
+      "issue": "The abilities-only 'hidden' concept is threaded through the shared CardData type and rendered by the generic Pokémon card, so one feature leaks into an abstraction used by all five lists.",
+      "suggestion": "Give PokemonCardList an optional note/footer render-prop (like the existing renderAction) and let the ability page pass the 'Hidden ability' text, keeping CardData generic."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/server/functions.ts:184 and :197",
+      "issue": "The 'short_effect, else latest flavor text, else —' fallback rule is duplicated verbatim between getMovePage and getAbilityPage; a spec change to the rule needs two edits.",
+      "suggestion": "Extract a shared effectText(entries, flavorEntries) helper next to latestEnglish/collapse in pokeapi.ts."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/routes/team.tsx:21,46",
+      "issue": "The team page mixes server-derived data (members, coverage computed from the cookie at request time) with client team state, filtering by name and calling router.invalidate() on removal — two sources of truth that must be kept in sync by hand.",
+      "suggestion": "Either compute coverage on the client from the shared type data (types change rarely) or drive the member list from the client team and only use the server fn for coverage, making the reconciliation explicit in one place."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/routes/__root.tsx:17",
+      "issue": "head() checks the private match field m._notFound in addition to the public m.status === 'notFound'.",
+      "suggestion": "Drop m._notFound and rely on the public status; private fields can disappear without notice."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/lib/config.ts:5",
+      "issue": "useMediaBase couples every sprite-rendering component to the root loader's return shape via a string route id; renaming or reshaping the root loader breaks cards at a distance.",
+      "suggestion": "Pass mediaBase through a small context provider in __root.tsx (like TeamProvider) or make the root loader's type a named exported interface both sides import."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/server/functions.ts:90,121,148",
+      "issue": "Pokémon-type slot sorting ([...x].sort((a,b)=>a.slot-b.slot)) is repeated three times across two server functions.",
+      "suggestion": "Add a typesInSlotOrder(pokemon) helper in pokeapi.ts next to the other projection helpers."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/server/functions.ts:41-44",
+      "issue": "getConfig bundles unrelated concerns (env-derived mediaBase and the team cookie), so removing the team feature later means editing the root config path.",
+      "suggestion": "Acceptable for now; if more page-independent config appears, split into dedicated small server functions."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/components/TypeBadge.tsx:4",
+      "issue": "The link=true|false boolean flag is mild flag creep in the one shared badge component.",
+      "suggestion": "Fine at this size; if a third variant appears (e.g. plain text with a count), switch to a variant prop or two small components."
+    }
+  ],
+  "summary": "This is a well-layered TanStack Start app: routes are thin, all API access and caching live behind one server module, and the two load-bearing abstractions (PokemonCardList, toCards) genuinely absorb the app's variation so the five Pokémon-card lists share one implementation and one sprite logic. Editing it is mostly a matter of touching one obvious place, with strict TypeScript catching leftovers. The main debt is small: an abilities-specific field leaking into the shared card type, a duplicated effect-fallback rule, and a team page that reconciles server and client state by hand.",
+  "scenarios": [
+    {
+      "change": "Remove the Abilities pages and every link to them",
+      "files": [
+        "app/src/routes/abilities.$name.tsx",
+        "app/src/routes/pokemon.$name.tsx",
+        "app/src/server/functions.ts",
+        "app/src/server/pokeapi.ts",
+        "app/src/components/PokemonCard.tsx",
+        "app/src/lib/types.ts"
+      ],
+      "difficulty": 3,
+      "notes": "Route deletion is one file (routeTree.gen.ts regenerates) and nav is untouched, but the feature also touches the Pokémon page's Abilities section, getAbilityPage/getAbility, and the hidden flag woven into CardData and the shared card. Strict TS makes each leftover a compile error, so nothing dead survives silently — but it's ~6 files, not 2."
+    },
+    {
+      "change": "Fix the sprite for species whose default Pokémon has a different name (Deoxys)",
+      "files": [
+        "app/src/components/PokemonCard.tsx",
+        "app/src/lib/format.ts",
+        "app/src/server/pokeapi.ts"
+      ],
+      "difficulty": 4,
+      "notes": "One fix covers every list: all five card lists render through PokemonCardList, whose single img uses spriteUrl(mediaBase, card.id) — the only sprite call site in the app. If the fix needs a per-species field (e.g. the default Pokémon's own id/name), it must be populated in both card-assembly paths (speciesIndex and toCards), but they live in the same file, pokeapi.ts."
+    },
+    {
+      "change": "Add sorting by name to every list of Pokémon cards",
+      "files": [
+        "app/src/components/PokemonCard.tsx"
+      ],
+      "difficulty": 4,
+      "notes": "PokemonCardList is the single choke point for all five lists, so a name sort added there (or via a sortBy prop) covers everything at once. The wrinkle is the team page, which must keep insertion order per FEATURE.md, so in practice you add a sort prop and pass it from the four non-team call sites — still one component plus one-line changes."
+    },
+    {
+      "change": "Add an Items section (/items, /items/:name) shaped like Moves",
+      "files": [
+        "app/src/routes/items.$name.tsx",
+        "app/src/server/functions.ts",
+        "app/src/server/pokeapi.ts",
+        "app/src/lib/types.ts"
+      ],
+      "difficulty": 4,
+      "notes": "High reuse: Section, PokemonCardList, toCards, display/humanize/pageTitle and all the existing page CSS classes apply unchanged; the server layer needs one getItem+RawItem in pokeapi.ts and one getItemPage alongside getMovePage. The only real copying is the route file boilerplate, which is inherent to file-based routing, plus a small summary type in types.ts."
+    },
+    {
+      "change": "Change the API base URL and caching rules",
+      "files": [
+        "app/src/server/pokeapi.ts",
+        "app/src/server/functions.ts",
+        "app/src/lib/config.ts"
+      ],
+      "difficulty": 5,
+      "notes": "apiBase() and the fetchJson path template are the only places the API origin is known; TTL_MS/memo is the only place caching rules live; the browser learns the media origin once via getConfig and useMediaBase. Two files do the real work (pokeapi.ts plus publishing mediaBase through getConfig), with no per-page URL knowledge anywhere."
+    }
+  ]
+}
+```

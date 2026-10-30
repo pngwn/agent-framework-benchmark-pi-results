@@ -1,0 +1,126 @@
+{
+  "dimension": "mergeability",
+  "criteria": {
+    "idiomatic": {
+      "score": 5,
+      "evidence": [
+        "app/src/index.tsx:20 — raw('<!DOCTYPE html>') with hono/jsx, the documented pattern",
+        "app/src/pages/details.tsx:22 — async server components, an officially supported hono/jsx primitive",
+        "app/src/index.tsx:14 — HX-Request / HX-History-Restore-Request detection for partials vs full pages",
+        "app/src/index.tsx:44 — HX-Push-Url keeps filter state in the URL, as htmx docs recommend",
+        "app/src/index.tsx:45 — Vary: HX-Request on the dual-personality route",
+        "app/src/index.tsx:92-103 — app.notFound / app.onError with real 404 and 500 pages"
+      ],
+      "rationale": "Uses current-stable Hono and htmx the way their docs teach: async JSX components, adapter serveStatic, htmx partial responses with server-set URL push, history-restore handling, hx-sync race suppression and noscript fallbacks. No reimplementation or warned-against patterns."
+    },
+    "correctness_risks": {
+      "score": 4,
+      "evidence": [
+        "app/src/api.ts:41-48 — in-flight dedupe via shared pending promise; no duplicate fetches under concurrency",
+        "app/src/api.ts:62-67 — stale-while-revalidate with background errors swallowed and retried next request",
+        "app/src/index.tsx:52,70,76,85 — null checks per resource yield real 404s; app.onError covers API failures",
+        "app/src/api.ts:27-29 — semaphore frees a slot before handing it to a waiter, so MAX_CONCURRENT can be exceeded",
+        "app/src/pages/pokemon.tsx:229 — hx-swap outerHTML replaces the game <select>, dropping keyboard focus",
+        "app/src/pages/home.tsx:61 — aria-live=polite on the whole results region re-announces ~48 cards per filter change",
+        "app/src/index.tsx:34-36 — max-age=3600 on /static with no cache-busting, so deploys can serve stale CSS/JS"
+      ],
+      "rationale": "The serious categories (fetch fan-out via a 16-slot semaphore, unbounded caching, duplicate in-flight requests, missing 404/error paths, htmx request races) are all handled deliberately; what remains are small UX/a11y/deployment nits, not bugs."
+    },
+    "global_abstractions": {
+      "score": 4,
+      "evidence": [
+        "app/src/api.ts:62-75 — single get() entry point; every page goes through one cache with one TTL/limit policy",
+        "app/src/api.ts:154-172 — humanize/dexNumber/spriteUrl presentation helpers exported from the HTTP data module",
+        "app/src/pages/details.tsx:193-196 — speciesForPokemon is the one shared list-mapping primitive, used by three pages",
+        "app/src/pages/home.tsx:29-38 — URL state is a pure function (homeUrl), no hidden global state",
+        "app/src/api.ts:10 — module-global Map cache: justified and documented, but global mutable state shared by all requests"
+      ],
+      "rationale": "Abstractions are few and load-bearing (cache, Section/CardList, speciesForPokemon) with a clean server/client boundary. The only tangles: formatting utilities living inside the API module, and data loading split between route handlers and components."
+    },
+    "readability": {
+      "score": 4,
+      "evidence": [
+        "app/src/api.ts:1-5 — header comment explains the caching strategy and why",
+        "app/public/app.js:1-2 — comment explains the event-delegation choice for htmx swaps",
+        "app/src/pages/details.tsx:27-37 — flat, declarative page components with obvious structure",
+        "app/src/pages/pokemon.tsx:150-186 — MovesBody mixes group resolution, dedupe and rendering in one dense function",
+        "app/src/api.ts:189 — mapAll is just Promise.all(items.map(fn)) behind a new name",
+        "app/src/pages/home.tsx:29 — homeUrl takes page both on the query object and as a second argument, easy to misuse"
+      ],
+      "rationale": "Names, comments and file organisation are consistently good; a new teammate would find their way quickly. Rough spots: two coexisting data-loading styles (handler vs component) and the dense MovesBody."
+    },
+    "review_cost": {
+      "score": 4,
+      "evidence": [
+        "app/src/pages/home.tsx:96-107 — hx-trigger/hx-sync wiring is exactly what the spec needs, no reviewer pushback",
+        "app/src/pages/pokemon.tsx:214-229 — game select fragment route keeps sorting and 404 behaviour coherent",
+        "app/src/api.ts:8-9 — cache policy as named constants at the top, easy to question and tune"
+      ],
+      "rationale": "Approve with nits: a couple of structural suggestions (move formatting helpers out of api.ts, memoise getDex) and small fixes (focus preservation, aria-live scope) that don't block the merge."
+    }
+  },
+  "overall": 4,
+  "findings": [
+    {
+      "severity": "medium",
+      "location": "app/src/api.ts:242",
+      "issue": "getDex() re-derives the full 1,025-entry dex (species index, ~2k type slots, generation map, sort) on every home request; only the underlying HTTP fetches are cached.",
+      "suggestion": "Memoise the derived DexEntry[] alongside the cache with the same FRESH_MS policy, so each request is a filter over a reused array."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/index.tsx:52",
+      "issue": "Two data-loading styles coexist: /pokemon/:name loads via loadPokemon in the route handler (where 404 is decided), while Move/Ability/Type pages receive their primary resource from the handler but load supplementary data inside async components (details.tsx:22, 116).",
+      "suggestion": "Pick one convention — either load everything in handlers and pass plain props to (synchronous) components, or commit to async-component loading everywhere — so 404 decisions and error handling live in one place."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/pages/pokemon.tsx:229",
+      "issue": "hx-swap=\"outerHTML\" on #moves-body replaces the game <select> itself, so keyboard focus is lost after changing the game.",
+      "suggestion": "Mark the select with hx-preserve, or split the form out of the swapped fragment and target only the tables."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/pages/home.tsx:61",
+      "issue": "aria-live=\"polite\" wraps the entire results region, so every debounced filter change re-announces up to 48 card names to screen-reader users.",
+      "suggestion": "Scope the live region to a small status node (e.g. the 'N Pokémon' count) and leave the card list outside it."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/api.ts:27-29",
+      "issue": "withSlot decrements active and wakes a queued waiter, but a concurrently arriving request can take the freed slot first, so MAX_CONCURRENT can be exceeded (harmless, but the invariant is silently soft).",
+      "suggestion": "Hand the slot directly to the waiter (increment active before resolving) or note the overshoot in a comment."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/api.ts:154-172",
+      "issue": "Presentation helpers (humanize, dexNumber, spriteUrl, cleanText) live in the HTTP/data layer, so components import formatting from the API module.",
+      "suggestion": "Move name/number formatting into components.tsx (or a small format.ts) and keep api.ts about fetching and API shapes."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/index.tsx:34-36",
+      "issue": "Static assets are served with Cache-Control max-age=3600 but have no versioned filenames or ETag, so post-deploy visitors can get stale CSS/JS for up to an hour.",
+      "suggestion": "Fingerprint filenames at build time (copy-assets.mjs is the natural place) or use a content-hash query string."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/api.ts:189",
+      "issue": "mapAll is an alias for Promise.all(items.map(fn)); the comment claims a concurrency limit that actually comes from get()'s semaphore, so the indirection misleads readers.",
+      "suggestion": "Delete mapAll and call Promise.all directly, or make it genuinely enforce the limit."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/pages/home.tsx:29",
+      "issue": "homeUrl accepts page both on the query object and as a second parameter (index.tsx:44 passes both), which is easy to misuse.",
+      "suggestion": "Take only the override parameter, or only the query object."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/pages/details.tsx:34",
+      "issue": "The fallback pattern typeLabels.get(x) ?? humanize(x) is repeated in five places (details.tsx:34,132; pokemon.tsx:69,260; home.tsx:72).",
+      "suggestion": "Add a single labelFor(typeLabels, name) helper next to TypeBadge."
+    }
+  ],
+  "summary": "A genuinely idiomatic current-stable Hono + htmx app: async JSX server components, server-chosen partials with HX-Push-Url, history-restore handling, hx-sync race suppression, noscript fallbacks, and a carefully engineered stale-while-revalidate cache with bounded size and concurrency. Remaining work is nits — one data-loading convention instead of two, a memoised getDex, focus/live-region polish and asset cache-busting — none of which would hold up a merge."
+}

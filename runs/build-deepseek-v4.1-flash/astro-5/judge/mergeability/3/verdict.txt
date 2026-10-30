@@ -1,0 +1,133 @@
+I've reviewed the app against Astro 7.4.4 (the current stable, released 2026-10-28) and the v7 docs. Here is my review.
+
+**Framework currency check:** `app/package.json:14` pins `astro@7.4.4` / `@astrojs/node@11.1.9` — current stable. `output: 'server'` + `node({ mode: 'standalone' })` is the documented SSR setup; the 404 pattern (`Astro.response.status = 404` in `[name].astro:30`) is lifted almost verbatim from the on-demand rendering guide. Nothing deprecated or removed in v7 is used. The docs explicitly note `export const prerender = false` is "Not needed in 'server' mode", and the app repeats it in all 8 pages anyway — harmless noise.
+
+**Main structural concern:** `src/lib/pokeapi.ts` is a 370-line god module that mixes three concerns — pure formatting (`humanize`, `dash`, `idFromUrl`), URL resolution, and a server-only promise cache plus five module-level singletons (`pokeapi.ts:17`, `pokeapi.ts:117-121`). Because the pure helpers live next to `process.env` and `fetch` code, the client script on the home page cannot import them, so `pages/index.astro` re-implements `humanize` (`index.astro:146`), the filter predicate (`index.astro:228`), pagination link building, and the whole Pokémon card (`index.astro:188`, duplicating `components/PokemonCard.astro`) inside an inline `<script>`. The duplication has already drifted: the server renders `<span id="page-status">` / `<a id="previous-page">` (`index.astro:118-120`) but the client re-render (`index.astro:246-262`) rebuilds the pagination without those ids. Astro's bundled `<script>` tags support `import` from `src/`, so a `format.ts` shared by frontmatter and script was available and is the fix I'd ask for.
+
+**Correctness:** mostly solid. Rejected promises are evicted from the cache (`pokeapi.ts:41-44`), query params are validated against real option lists on both sides, 404s are handled with the documented pattern, and a catch-all plus `404.astro` cover unknown URLs. Risks I'd flag: the Pokémon page fires unbounded parallel fan-out (every version group resource plus every move of the selected game, `pokeapi.ts:300`, `pokeapi.ts:317`) with no error isolation and no custom `500.astro`, so one 5xx from the API produces an unstyled framework error page; `set:html={JSON.stringify(payload)}` (`index.astro:124`) doesn't escape `<`, so a `</script>` in API data would break the document; and the home page serialises all ~1,025 species (with absolute sprite URLs) into every response and then re-renders the server-rendered list on load — wasteful and a standing SSR/CSR-mismatch hazard.
+
+```json
+{
+  "dimension": "mergeability",
+  "criteria": {
+    "idiomatic": {
+      "score": 4,
+      "evidence": [
+        "app/package.json:14 — pins astro@7.4.4, the current stable (v7.4.4 released 2026-10-28)",
+        "app/astro.config.mjs:3-5 — output:'server' + @astrojs/node standalone, exactly the documented SSR setup",
+        "app/src/pages/pokemon/[name].astro:30 — Astro.response.status = 404, the pattern straight from the on-demand rendering docs",
+        "app/src/pages/[name].astro:16 — export const prerender = false repeated in all 8 pages; docs annotate it \"Not needed in 'server' mode\"",
+        "app/src/styles/global.css:1 — 650-line global stylesheet instead of Astro's scoped per-component styles (all styles unscoped)"
+      ],
+      "rationale": "Current stable version, correct SSR/adapter/routing/404 usage per the v7 docs, with only mild non-idiomatic touches (redundant prerender exports, global instead of scoped styles)."
+    },
+    "correctness_risks": {
+      "score": 3,
+      "evidence": [
+        "app/src/lib/pokeapi.ts:41-44 — rejected promises evicted from the cache (good)",
+        "app/src/lib/pokeapi.ts:300 — unbounded Promise.all over every version group plus every move of the selected game, no per-fetch error isolation",
+        "app/src/pages/pokemon/[name].astro:26-27 — non-404 API errors are rethrown; no src/pages/500.astro exists, so users get the raw framework error page",
+        "app/src/pages/index.astro:244 — client render() rebuilds the server-rendered list and pagination on every load, discarding the server's ids (page-status/previous-page) — drift already visible",
+        "app/src/pages/index.astro:124 — set:html with JSON.stringify(payload); a '</script>' sequence in API data would terminate the script block"
+      ],
+      "rationale": "Careful handling of 404s, cache poisoning and param validation, but a few minor fragilities: unisolated fetch fan-out, no custom 500, an unescaped JSON-in-script payload, and a doubled server/client render that is a standing mismatch hazard."
+    },
+    "global_abstractions": {
+      "score": 3,
+      "evidence": [
+        "app/src/lib/pokeapi.ts:1-109 — pure helpers (humanize, dash, idFromUrl) share a file with process.env base URL and the fetch cache, so client code cannot import them",
+        "app/src/lib/pokeapi.ts:117-121 — five module-level promise singletons (hidden process-lifetime global state)",
+        "app/src/pages/index.astro:146 — humanize re-implemented in the client script because the shared one is server-coupled",
+        "app/src/pages/index.astro:188-224 — createCard duplicates components/PokemonCard.astro markup by hand",
+        "app/src/pages/index.astro:228-241 — filter/pagination logic duplicated from the frontmatter at index.astro:31-50"
+      ],
+      "rationale": "The lib module is locally reasonable but its server/client boundary leaks: mixing pure helpers with server-only caching forces the home page to duplicate filter, card and pagination logic, which will need untangling before the next feature."
+    },
+    "readability": {
+      "score": 3,
+      "evidence": [
+        "app/src/pages/index.astro:1-311 — 300-line page containing a second, parallel implementation of itself",
+        "app/src/lib/pokeapi.ts — consistent naming and a few good doc comments (lines 18, 60, 249)",
+        "app/tsconfig.json:6 — strict:false with pervasive any for API payloads throughout the pages",
+        "app/src/components/EvolutionNode.astro:9 — unused `children` const (dead code)",
+        "app/src/styles/global.css:112-192 — clear section banners keep a large stylesheet navigable"
+      ],
+      "rationale": "File layout mirrors the URLs, components are small and obvious, and CSS is well organised; the rough spots are the duplicated home-page logic, the loose any-typing and a couple of dead/redundant files."
+    },
+    "review_cost": {
+      "score": 3,
+      "evidence": [
+        "app/src/pages/index.astro:146-309 — the change I'd insist on: extract shared pure helpers and card rendering so frontmatter and script use one implementation",
+        "app/src/pages/[...path].astro:1-10 — byte-identical to 404.astro; delete one",
+        "app/src/lib/pokeapi.ts:300-317 — add a guard/limit and error isolation for the move fan-out",
+        "app/tsconfig.json:6 — tighten types on the API responses"
+      ],
+      "rationale": "Mergeable after one round of moderate changes (de-duplicating the home page, splitting the lib module, error handling) plus a handful of trivial deletions; nothing needs architectural rework."
+    }
+  },
+  "overall": 3,
+  "findings": [
+    {
+      "severity": "medium",
+      "location": "app/src/pages/index.astro:146-309",
+      "issue": "The inline client script re-implements humanize, filtering, pagination-link building and the Pokémon card that already exist server-side, and the two copies have already drifted (client re-render drops the server's page-status/previous-page/next-page ids).",
+      "suggestion": "Extract pure helpers (humanize, filter, paginate, buildQuery) into src/lib/pokedex.ts and import them from both the frontmatter and the bundled <script>; Astro client scripts support module imports."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/lib/pokeapi.ts:1-109",
+      "issue": "Pure formatting helpers live in the same module as process.env base-URL resolution and the fetch cache, which is why the client duplicates them — a leaky server/client boundary.",
+      "suggestion": "Split into src/lib/format.ts (pure, importable client-side) and src/lib/server/pokeapi.ts (fetch + cache), keeping the API surface the pages already use."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/lib/pokeapi.ts:300",
+      "issue": "A Pokémon page request fans out unbounded parallel fetches (all version groups plus every move in the selected game) with no error isolation, and non-404 failures bubble up to an unstyled framework 500 page.",
+      "suggestion": "Add src/pages/500.astro for a branded error page, and either tolerate individual move failures (render a dash) or bound concurrency of the fan-out."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/pages/index.astro:124",
+      "issue": "set:html={JSON.stringify(payload)} does not escape '<', so a '</script>' sequence in API data would break out of the JSON script block.",
+      "suggestion": "Use JSON.stringify(payload).replace(/</g, '\\u003c') before set:html."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/pages/index.astro:53-57",
+      "issue": "The full species list (~1,025 entries with absolute sprite/API URLs) is serialised into every home-page response, and the client then re-renders the identical list the server just produced.",
+      "suggestion": "Skip the client re-render when the parsed state matches the server-rendered page, and consider trimming per-card sprite URLs from the payload."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/pages/[...path].astro:1-10",
+      "issue": "Byte-identical duplicate of 404.astro; in server output Astro already renders 404.astro for unmatched routes, so one of the two files is dead.",
+      "suggestion": "Delete the catch-all and keep 404.astro (or vice versa), so future maintainers only update one."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/pages/*:6",
+      "issue": "export const prerender = false is repeated in all eight pages although output:'server' already makes it the default (docs annotate it \"Not needed in 'server' mode\").",
+      "suggestion": "Drop the exports, or keep exactly one comment noting the app is fully on-demand."
+    },
+    {
+      "severity": "low",
+      "location": "app/tsconfig.json:6",
+      "issue": "strict:false combined with pervasive any for API payloads means typos in field names (e.g. move.damage_class) fail silently at request time.",
+      "suggestion": "Enable strict and define interfaces for the API responses the pages actually read (the lib already has good interfaces for MoveDetailRow etc. to build on)."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/styles/global.css:429",
+      "issue": "One hardcoded color (#edf0f3) in .moves-table td instead of a design token, unlike every other color in the file.",
+      "suggestion": "Add or reuse a --color-border token for the row divider."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/components/EvolutionNode.astro:9",
+      "issue": "Unused `children` const (dead code) beside the actual recursive template.",
+      "suggestion": "Delete it; the recursion is otherwise a clean use of <Astro.self>."
+    }
+  ],
+  "summary": "A competent, current-stable Astro 7 SSR app: correct adapter/routing/404 usage per the v7 docs, sensible components and clean CSS. Its one real liability is the server-coupled god data module in src/lib/pokeapi.ts, which forces the home page to duplicate filter, card and pagination logic in an inline client script that has already drifted from the server markup. I'd merge after one round: split the module, share the helpers, add error isolation and delete the redundant catch-all and prerender exports."
+}
+```

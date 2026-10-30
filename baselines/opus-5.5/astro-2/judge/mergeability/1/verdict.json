@@ -1,0 +1,118 @@
+{
+  "dimension": "mergeability",
+  "criteria": {
+    "idiomatic": {
+      "score": 4,
+      "evidence": [
+        "app/astro.config.mjs:1-6 — output 'server' + @astrojs/node standalone, correct Astro 7 SSR setup, deps current (astro@^7.4.2 matches the 7.4 stable line)",
+        "app/src/pages/pokemon/[name].astro:13 — top-level await data loading in frontmatter, the documented pattern for on-demand pages",
+        "app/src/components/EvolutionTree.astro:13-21 — recursive Astro.self, idiomatic",
+        "app/src/components/Section.astro:12 — class:list directive",
+        "app/src/pages/pokemon/[name].astro:30 — Astro.response.status = 404, the exact pattern shown in Astro's render-context docs",
+        "app/src/lib/api.ts:14 — hand-rolled module-level promise cache where Astro 7 stabilized route caching/cache providers (though route caching doesn't fit this per-key data use)",
+        "app/src/styles/global.css:1 — all styles global instead of Astro's favored colocated scoped styles"
+      ],
+      "rationale": "Reads like Astro's own SSR examples: file-based routing, frontmatter data loading, documented 404 handling, Astro.self recursion and current dependency versions. Only mild deviations — a hand-rolled cache next to Astro 7's new caching APIs and all-global CSS."
+    },
+    "correctness_risks": {
+      "score": 3,
+      "evidence": [
+        "app/src/lib/api.ts:14,32 — module-level cache never evicts entries; CACHE_TTL_MS only marks staleness, so the Map grows unboundedly for the life of the process",
+        "app/src/components/MoveTables.astro:149-156 — popstate only syncs the select when ?game= exists; back to a game-less URL leaves the select stale while tables show the default game",
+        "app/src/pages/index.astro:130-132 — innerHTML swap silently no-ops when the fetched doc lacks [data-results] (e.g., API-down 500 page) with no fallback",
+        "app/src/pages/index.astro:87 — aria-live=polite on a container holding all 48 cards announces the whole list on every debounced keystroke",
+        "app/src/pages/index.astro:124-127, app/src/components/MoveTables.astro:127 — abort races handled correctly via AbortController; no XSS (no set:html, query params encoded via URLSearchParams)"
+      ],
+      "rationale": "No injection, race, or SSR/CSR mismatch issues, but a genuine slow memory leak in the never-evicting cache plus two minor behavioral bugs the acceptance tests don't cover."
+    },
+    "global_abstractions": {
+      "score": 3,
+      "evidence": [
+        "app/src/lib/api.ts:1-140 — single module mixes HTTP cache, formatting helpers and precomputed indexes (getPokemonIndex, getTypes); every page imports from it",
+        "app/src/lib/api.ts:106 — TypeInfo carries the raw API record as data: any, leaking an untyped boundary into shared code",
+        "app/src/pages/index.astro:124-133 and app/src/components/MoveTables.astro:119-128 — two near-identical fetch→DOMParser→swap helpers that should be one shared client module",
+        "app/src/lib/api.ts:166-196 — getPokemonIndex rebuilds a full 1,025-species index on each home-page request (cache mitigates, 60s TTL)"
+      ],
+      "rationale": "The data-access module is defensible but grab-bag, the raw-record-in-TypeInfo leak and the duplicated client swap helpers are the two things that will need untangling as the app grows."
+    },
+    "readability": {
+      "score": 4,
+      "evidence": [
+        "app/src/lib/api.ts:1-5,20 — comments explain why (request-time fetching, cache rationale)",
+        "app/src/components/MoveTables.astro:81-82 — comment documents sort contract (missing values last)",
+        "app/src/pages/pokemon/[name].astro:33,36,42,108 — pervasive (x: any) casts defeat the strict tsconfig (app/tsconfig.json:2)",
+        "app/src/pages/moves/[name].astro:28-55 — entire template wrapped in a {!move ? <NotFound/> : <Layout>…} ternary, duplicated in 4 pages, nesting everything one level deep",
+        "app/src/styles/global.css — ~545 lines of well-commented but non-colocated CSS; card styles live far from app/src/components/PokemonCard.astro"
+      ],
+      "rationale": "Consistent, well-named, intent-commented code a teammate can follow in minutes; the main rough spots are the any-casts and the not-found ternary wrapping every detail-page template."
+    },
+    "review_cost": {
+      "score": 3,
+      "evidence": [
+        "app/src/lib/api.ts:14,32 — I'd block on cache bounds/eviction before merge",
+        "app/src/components/MoveTables.astro:152 — popstate select desync needs a fix",
+        "app/src/pages/index.astro:124-133 — extract the shared fetch/swap helper used twice",
+        "app/src/pages/types/[name].astro:22,28 and app/src/pages/abilities/[name].astro:13 — a lib/types.ts of API resource shapes instead of any-casts"
+      ],
+      "rationale": "One round of concrete, bounded changes (cache eviction, popstate sync, dedupe the swap helper, type the API records); nothing needs rework and nothing is architectural."
+    }
+  },
+  "overall": 4,
+  "findings": [
+    {
+      "severity": "medium",
+      "location": "app/src/lib/api.ts:14",
+      "issue": "Module-level cache never evicts: CACHE_TTL_MS only marks entries stale, and successful promises stay in the Map forever, so a long-lived server accumulates every distinct API URL (thousands of species/move/version-group records) for the process lifetime.",
+      "suggestion": "Evict expired entries on read (cache.delete on miss-after-expiry) and cap the map with an LRU bound, or clear entries older than the TTL periodically."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/components/MoveTables.astro:149",
+      "issue": "On popstate to a URL without a ?game= param, the select keeps its current value while the tables are re-rendered for the default game, so the control and the content disagree.",
+      "suggestion": "Sync the select to the resolved default game when the param is absent, mirroring the server-side default selection."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/pages/index.astro:124",
+      "issue": "index.astro:124-133 and MoveTables.astro:119-128 duplicate the same fetch→DOMParser→abort→swap client-side helper with the same failure fallback; two copies of an error-prone, hand-rolled navigation layer.",
+      "suggestion": "Extract one shared module (e.g. src/lib/partialNavigation.ts) with the AbortController lifecycle, DOMParser swap and error fallback, used by both scripts."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/lib/api.ts:106",
+      "issue": "TypeInfo.data leaks the raw API record as any, forcing (x: any) casts throughout the pages (app/src/pages/types/[name].astro:22,28; app/src/pages/abilities/[name].astro:13; app/src/pages/pokemon/[name].astro:33-45) despite the strict tsconfig.",
+      "suggestion": "Add a lib/types.ts with the API resource shapes (species, pokemon, move, ability, type) and type the accessors, letting the casts disappear."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/pages/index.astro:130",
+      "issue": "When the fetched document lacks [data-results] (e.g., the API is down and the server returns a 500 error page), the innerHTML swap silently no-ops and the UI shows stale results with no error surfaced.",
+      "suggestion": "Fall back to location.assign(url) (as the catch branch already does) when the expected fragment is missing."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/pages/index.astro:87",
+      "issue": "aria-live=polite on the container holding the count plus 48 cards makes screen readers announce the entire list on every debounced keystroke; the swap also loses focus when focus was on a pagination link.",
+      "suggestion": "Narrow the live region to the '<count> Pokémon' line and restore focus after swapping."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/pages/moves/[name].astro:28",
+      "issue": "All four detail pages wrap their entire template in a {!resource ? <NotFound/> : <Layout>…} ternary (also abilities/[name].astro:20, types/[name].astro:33, pokemon/[name].astro:49), duplicating the not-found branch and nesting the real content.",
+      "suggestion": "Use 'return Astro.rewrite('/404')' in the frontmatter (or a small shared guard) so the template renders unconditionally on the happy path."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/lib/api.ts:28",
+      "issue": "getJson throws a raw Error on non-404 API failures, and there is no custom 500 page (supported as src/pages/500.astro in current Astro), so an API outage yields Astro's generic error page with no in-app recovery link.",
+      "suggestion": "Add a src/pages/500.astro so outages render the app shell with a retry link."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/styles/global.css:1",
+      "issue": "All ~545 lines of styling are global rather than colocated scoped styles in the components they belong to (Astro's recommended organization), so e.g. .card rules live far from PokemonCard.astro and class names risk silent collisions.",
+      "suggestion": "Move component-specific blocks (card, type-badge, move-tables) into scoped <style> in their components, keeping tokens and layout global."
+    }
+  ],
+  "summary": "A small, near-idiomatic Astro 7 SSR app: correct routing, documented 404 handling, sensible components and no dependency bloat. Merge is held back by a never-evicting module cache, a couple of minor client-side bugs the acceptance tests miss, duplicated fetch/swap helpers and pervasive any-casts. One focused review round of bounded fixes, no rework required."
+}

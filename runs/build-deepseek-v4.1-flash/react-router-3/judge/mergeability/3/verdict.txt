@@ -1,0 +1,88 @@
+## Review
+
+**Structure and idiom.** This is a recognizable, well-organized React Router framework-mode app: `app/routes.ts` config (`app/routes.ts:1-11`), route modules with `loader`/`meta`, a root route that correctly exports `Layout` separately so `ErrorBoundary` renders inside the document shell (`app/app/root.tsx:10-30`), a server-only data layer correctly named with the `.server` convention (`app/app/lib/data.server.ts:1`), SSR on with `@react-router/serve` for production. Data loading lives in loaders, filters live in the URL as the docs recommend. That part reads like the framework's own examples.
+
+Three things pull it away from a 5 on idiom:
+
+1. **404 handling is a home-grown pattern, not the documented one.** The official guidance (skill `references/framework-mode.md:136`) says: "Missing record in a loader: throw `data("Not Found", { status: 404 })` and render the route `ErrorBoundary`." Instead, all four resource loaders return `{ notFound: true }` (`app/app/routes/pokemon.tsx:144`, `move.tsx:27`, `type.tsx:31`, `ability.tsx:20`) and components branch on it, with a duplicated `meta` guard in each file (`pokemon.tsx:26`, `move.tsx:20`, `ability.tsx:12`, `type.tsx:12`). Consequence: missing resources serve HTTP 200 (the spec calls 404 "encouraged", so not a spec failure, but it's the exact case the framework feature exists for), and the "not found" concept now exists in three shapes: the flag, the shared `NotFound` component, and a second hand-rolled page in the root `ErrorBoundary` (`root.tsx:70-90`).
+
+2. **Type safety is configured but unused.** `tsconfig.json:13` sets `"strict": true` and `rootDirs` for generated `.react-router/types`, yet there is not a single `+types` import in the app; every loader arg and component prop is `any` (`home.tsx:21`, `pokemon.tsx:142`, `Home({ loaderData }: any)` at `home.tsx:109`). For a v8 TypeScript app this throws away the framework's flagship DX (generated `Route.LoaderArgs`/`ComponentProps` catch param typos and missing-404 regressions).
+
+3. **`HashScroller` re-implements router behavior** (`root.tsx:30-49`): `ScrollRestoration` already scrolls to `location.hash` on navigation, and the double-schedule (`setTimeout(scroll, 0)` plus a 100 ms retry, `root.tsx:37-40`) is a timing hack to paper over hydration/layout shift rather than a documented technique. It works, but it's the kind of local workaround that lingers for years.
+
+**Correctness.** One real race in the search flow: the input is synced from the URL with `setQ(qFromUrl)` whenever the loader result arrives (`home.tsx:125-128`). If the user keeps typing while a debounced navigation is in flight, the effect fires with the *older* committed `q` and clobbers the in-flight keystrokes; the debounce effect then sees `q === qFromUrl` and never commits them. Fast local API masks it; a slow connection makes search visibly revert. Minor items: the root `ErrorBoundary` renders raw `error.message` (`root.tsx:78-82`), which can leak internal details; an unknown `?type=` value yields an empty result set but leaves the `<select>` with a value matching no option (`home.tsx:193-204`). Caching is bounded by API cardinality and correctly self-evicts on rejection (`data.server.ts:11-19`); the per-page fan-out (48 `getResource("pokemon", …)` per home render, `home.tsx:80-96`) is cached and acceptable. `EvolutionList` keys, sort-state handling in `MoveTable`, and page clamping (`home.tsx:41`, `home.tsx:68-69`) are all sound.
+
+**Abstractions and readability.** The layering is genuinely good: `data.server.ts` is the single API boundary (cache, id parsing, typed card/entry interfaces), `format.ts` is pure helpers, `components/ui.tsx` holds the three shared visual primitives. Nothing is a god module at this size. Small duplication: `ability.tsx:19-26` re-implements the dedup/exclusion loop of `cardsFromRefs` (`data.server.ts:96-106`) to add the `hidden` flag, instead of extending the shared helper. Zero comments and the `any` typing mean a reviewer must read loader bodies to learn data shapes; `pokemon.tsx`'s loader runs ~110 lines across six distinct concerns (`pokemon.tsx:142-290`).
+
+**Verdict.** I'd approve the architecture, but I'd want a round of changes before merge: the documented `data(..., { status: 404 })` 404 pattern, generated `Route` types instead of `any`, the search race fixed, and `HashScroller` either removed or justified. All are contained changes — the foundation is worth building on.
+
+```json
+{
+  "dimension": "mergeability",
+  "criteria": {
+    "idiomatic": {
+      "score": 3,
+      "evidence": [
+        "app/app/routes.ts:1-11 — manual route config with index/route, exactly framework-mode shape",
+        "app/app/root.tsx:10-30 — correct Layout/App split so ErrorBoundary stays inside the document shell",
+        "app/app/lib/data.server.ts:1 — proper *.server module convention for the API layer",
+        "app/app/routes/pokemon.tsx:144 — returns { notFound: true } instead of the documented throw data(\"Not Found\", { status: 404 }) + ErrorBoundary (skill framework-mode.md:136)",
+        "app/app/routes/home.tsx:21 — loader({ request }: any); no generated Route.LoaderArgs/+types anywhere despite tsconfig strict mode",
+        "app/app/root.tsx:30-49 — hand-rolled HashScroller duplicates ScrollRestoration's built-in hash scrolling, with double setTimeout hack"
+      ],
+      "rationale": "Recognisably idiomatic framework-mode app with correct structure and server-only data layer, but it uses a home-grown notFound flag where the documented 404/error-boundary feature exists, skips generated route types entirely, and re-implements hash scrolling."
+    },
+    "correctness_risks": {
+      "score": 3,
+      "evidence": [
+        "app/app/routes/home.tsx:125-128 — setQ(qFromUrl) on every loader arrival can clobber in-flight typed search text mid-navigation",
+        "app/app/root.tsx:78-82 — ErrorBoundary renders raw error.message, leaking internal details",
+        "app/app/routes/home.tsx:193-204 — unknown ?type= value leaves the select with a value matching no option (blank display)",
+        "app/app/routes/pokemon.tsx:144 — no loader ever throws 404, so missing resources return HTTP 200",
+        "app/app/lib/data.server.ts:11-19 — cache self-evicts failed promises; fan-out is bounded and cached"
+      ],
+      "rationale": "One real (narrow) race in the debounced search sync plus a few minor leaks and edge cases; nothing serious, and error handling is otherwise careful."
+    },
+    "global_abstractions": {
+      "score": 4,
+      "evidence": [
+        "app/app/lib/data.server.ts:1-170 — single API boundary with cache, ref-id parsing and typed entries; earns its keep",
+        "app/app/lib/format.ts:1-66 — pure, well-named helpers shared across routes",
+        "app/app/routes/ability.tsx:19-26 — re-implements cardsFromRefs dedup (data.server.ts:96-106) to add the hidden flag instead of extending it",
+        "app/app/routes/pokemon.tsx:26 — the notFound meta guard is copy-pasted in four route files plus a second hand-rolled 404 page in root.tsx:70-90"
+      ],
+      "rationale": "Layering is clean with few, well-bounded abstractions; only small duplication (card dedup, repeated notFound plumbing) that the documented 404 pattern would remove."
+    },
+    "readability": {
+      "score": 3,
+      "evidence": [
+        "app/app/lib/format.ts:4-11 — humanize/orDash/latestEnglishFlavorText: clear naming",
+        "app/app/routes/pokemon.tsx:142-290 — ~110-line loader spanning six concerns (species, moves, games, sorting, stats, render payload)",
+        "app/app/routes/home.tsx:109 — Home({ loaderData }: any): data shapes only discoverable by reading loader bodies",
+        "app/app/routes/* — zero comments anywhere; structure is consistent across all seven routes"
+      ],
+      "rationale": "Consistent, well-named code that is easy to navigate, but pervasive any-typing, silent loaders and one very long loader make the new-teammay-cost higher than it should be."
+    },
+    "review_cost": {
+      "score": 3,
+      "evidence": [
+        "app/app/routes/pokemon.tsx:144 — four loaders + four meta guards need switching to the documented data(..., {status:404}) pattern",
+        "app/app/routes/home.tsx:125-132 — search race needs a rework of URL/input sync",
+        "app/app/root.tsx:30-49 — HashScroller should be removed or justified against ScrollRestoration"
+      ],
+      "rationale": "A real round of changes before approving: 404 pattern, generated Route types replacing any, and the search race fix; all contained, no structural rework."
+    }
+  },
+  "overall": 3,
+  "findings": [
+    { "severity": "medium", "location": "app/app/routes/home.tsx:125", "issue": "URL→input sync effect can clobber search text the user is still typing when a debounced navigation resolves", "suggestion": "Only sync from qFromUrl when the input is not focused (or compare against navigation state) so in-flight keystrokes survive" },
+    { "severity": "medium", "location": "app/app/routes/pokemon.tsx:144", "issue": "Home-grown notFound flag in four loaders instead of the documented data(\"Not Found\", { status: 404 }) + ErrorBoundary; missing resources serve HTTP 200", "suggestion": "Throw data with status 404 and render a route ErrorBoundary/NotFound component; the framework then sets the response status and removes the per-route flag and meta guards" },
+    { "severity": "medium", "location": "app/app/routes/home.tsx:21", "issue": "No generated Route types despite strict tsconfig with .react-router/types rootDirs; loaders and components are all any", "suggestion": "Import Route.LoaderArgs/Route.ComponentProps from ./+types/<route> and type the shared card/entry interfaces through components" },
+    { "severity": "low", "location": "app/app/root.tsx:30", "issue": "HashScroller duplicates ScrollRestoration's hash scrolling and uses a 0ms+100ms double-timer hack", "suggestion": "Rely on ScrollRestoration (which scrolls to location.hash) and delete the component, or document why the retry is needed" },
+    { "severity": "low", "location": "app/app/root.tsx:78", "issue": "Root ErrorBoundary renders raw error.message to users", "suggestion": "Show a generic message and log the detail server-side" },
+    { "severity": "low", "location": "app/app/routes/ability.tsx:19", "issue": "Re-implements cardsFromRefs dedup/exclusion loop to attach the hidden flag", "suggestion": "Extend cardsFromRefs in data.server.ts to carry is_hidden instead of duplicating the loop" },
+    { "severity": "low", "location": "app/app/routes/home.tsx:193", "issue": "An unknown ?type= query filters to empty but leaves the select showing no matching option", "suggestion": "Treat an unknown type/generation value like the not-found case or reset the control to the default option" }
+  ],
+  "summary": "A cleanly layered, recognisably idiomatic React Router framework-mode app whose architecture I'd happily own. The blockers are contained: a home-grown notFound pattern where the framework's 404/error-boundary feature exists, generated route types configured but never used (everything is any), a search input race, and a redundant hand-rolled hash scroller. One round of review changes, not a structural rework."
+}
+```

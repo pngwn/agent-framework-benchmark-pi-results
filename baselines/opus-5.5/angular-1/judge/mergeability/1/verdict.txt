@@ -1,0 +1,90 @@
+## Review
+
+A well-built Angular 22 app: standalone components throughout, `@Service()` DI, `resource()` for data loading with `hasValue()` guards, signal `input()`s bound from route params via `withComponentInputBinding`, modern control flow (`@if/@for/@let`), lazy routes, and the `Title` service for document titles. Naming follows the current suffixless "intent over role" style consistently. The load/transform logic is factored out of components into pure, unit-tested modules (`home-data.ts`, `pokemon-data.ts`, `moves-data.ts`, `format.ts`), and comments consistently explain *why* rather than *what*.
+
+The main issues a reviewer would push on:
+
+1. **Layering inversion** — `shared/load-state.ts:2` imports a page component (`pages/not-found`), so the "shared" toolkit depends on the pages layer, while pages depend on shared. Works today, but it inverts the intended direction of dependency.
+2. **`PokeApi` is drifting toward a god service** — beyond HTTP + cache it now builds card view-models (`core/poke-api.ts:143` `cardsFor` resolves species names, dedupes, sorts), fetches type labels for presentation, and constructs sprite URLs (`core/poke-api.ts:158`). Locally convenient, but it mixes data access with view-model construction that three different pages each shape differently.
+3. **No fetch timeout/abort and no pruning of expired cache entries** — `core/poke-api.ts:64` fetches without a timeout or `abortSignal` (the docs say to always pass `abortSignal`), so a hung API leaves a `resource()` stuck loading forever with no retry affordance despite "Please try again" copy (`pages/home/home.html:4`); expired entries in the cache Map (`core/poke-api.ts:69`) are only dropped when the same URL is requested again, so the cache grows without bound over a long session.
+4. **Hand-rolled scroll management** — `app.ts:33-37` and `pages/home/home.ts:68` re-implement what `withInMemoryScrolling({scrollPositionRestoration, anchorScrolling})` provides, with the logic split across two files. The `#moves` fragment workaround in `pokemon-page.ts:53-61` is justified (async content) and well-commented, but the rest could be router config.
+5. Small nits: fake `NamedResource` with `url: ''` (`pages/pokemon/moves-data.ts:50`), `PokeApi` injected into `PokemonCardList` only to compute a sprite URL in the template (`shared/pokemon-card-list.ts:18`), and `$any($event.target)` (`pages/home/home.html:18`).
+
+I found no serious correctness bugs: 404s map to a typed `NotFoundError` and a shared not-found view, rejected fetches evict their cache entry and surface in the UI, sort comparators handle missing-values-last in both directions, the debounce/URL-sync dance in `home.ts` carefully avoids feedback loops, and CSR-only rendering rules out SSR mismatches.
+
+```json
+{
+  "dimension": "mergeability",
+  "criteria": {
+    "idiomatic": {
+      "score": 4,
+      "evidence": [
+        "app/src/app/core/poke-api.ts:43 — @Service() decorator, current recommended DI style",
+        "app/src/app/pages/pokemon/pokemon-page.ts:42-48 — resource({params, loader}) with hasValue() guards, exactly the documented pattern",
+        "app/src/app/app.config.ts:6 — provideRouter(routes, withComponentInputBinding()) for query/route params as signal inputs",
+        "app/src/app/app.routes.ts:4-9 — per-route lazy loadComponent and route titles",
+        "app/src/app/app.ts:33-37 — hand-rolled scroll restoration where withInMemoryScrolling exists",
+        "app/src/app/core/poke-api.ts:64 — fetch() without the abortSignal the resource docs say to always pass"
+      ],
+      "rationale": "Reads like current Angular docs almost everywhere (signals, resource, control flow, naming); docked for re-implementing router scroll behavior and ignoring abortSignal, both places a framework feature exists."
+    },
+    "correctness_risks": {
+      "score": 4,
+      "evidence": [
+        "app/src/app/core/poke-api.ts:64-67 — no timeout/abort: a hung request leaves resource() loading forever",
+        "app/src/app/core/poke-api.ts:69 — expired cache entries only evicted on next access of the same URL; slow unbounded growth",
+        "app/src/app/pages/home/home.html:4 — 'Please try again' with no retry control wired to resource.reload()",
+        "app/src/app/pages/pokemon/moves-table.ts:52-58 — missing values correctly sort last in both directions",
+        "app/src/app/core/poke-api.ts:57-60 — 404s become a typed NotFoundError rendered as the not-found page"
+      ],
+      "rationale": "Error paths, 404 handling, debounce/URL races and sorting edge cases are all handled deliberately; the remaining risks (no fetch timeout, unpruned cache, no retry affordance) are minor and low-likelihood."
+    },
+    "global_abstractions": {
+      "score": 4,
+      "evidence": [
+        "app/src/app/shared/load-state.ts:2 — shared component importing a page component (pages/not-found): inverted layering",
+        "app/src/app/core/poke-api.ts:143-157 — cardsFor builds sorted/deduped view models inside the API client",
+        "app/src/app/pages/pokemon/moves-data.ts:50 — fake NamedResource {name, url: ''} to satisfy typeLabels' signature",
+        "app/src/app/shared/pokemon-card-list.ts:18 — presentational component injects the API client just for spriteUrl",
+        "app/src/app/core/format.ts — small, pure, well-tested helpers with no hidden state"
+      ],
+      "rationale": "Boundaries are mostly clean and earned, but the shared→pages dependency and view-model construction creeping into PokeApi will need untangling as the app grows."
+    },
+    "readability": {
+      "score": 5,
+      "evidence": [
+        "app/src/app/core/poke-api.ts:48-49 — comments explain cache TTL and request-dedup rationale",
+        "app/src/app/pages/pokemon/pokemon-page.ts:50-52 — comment explains why #moves jumps wait for moves data",
+        "app/README.md:16-23 — accurate architecture map in five bullets",
+        "app/src/app/core/format.spec.ts — pure helpers unit-tested with meaningful cases",
+        "app/src/app/pages/home/home-data.ts — filtering logic extracted and tested independent of the component"
+      ],
+      "rationale": "Consistent naming (suffixless v20+ style applied uniformly), small single-purpose modules, and comments that explain why; a new teammate could navigate this in minutes."
+    },
+    "review_cost": {
+      "score": 4,
+      "evidence": [
+        "app/src/app/shared/load-state.ts:2 — the one structural change I'd ask for (direction of dependency)",
+        "app/src/app/core/poke-api.ts:64 — add a timeout/AbortSignal to fetch",
+        "app/src/app/app.ts:33-37 — move scroll handling to router config",
+        "app/src/app/pages/home/home.html:4 — wire a retry to resource.reload()"
+      ],
+      "rationale": "Approvable after one round of small, well-localized changes; nothing requires rework of architecture or behavior."
+    }
+  },
+  "overall": 4,
+  "findings": [
+    { "severity": "medium", "location": "app/src/app/shared/load-state.ts:2", "issue": "Shared component imports a page component (pages/not-found), inverting the shared/pages layering so both layers depend on each other", "suggestion": "Move the NotFound body into shared/ (or render the not-found markup inline in LoadState) so shared has no dependency on pages" },
+    { "severity": "medium", "location": "app/src/app/core/poke-api.ts:64", "issue": "fetch() has no timeout or abort signal; a hung API request leaves the page's resource() stuck in loading state indefinitely", "suggestion": "Pass an AbortSignal (e.g. AbortSignal.timeout or the resource loader's abortSignal, with shared-cache awareness) and surface a retry via resource.reload()" },
+    { "severity": "medium", "location": "app/src/app/core/poke-api.ts:69", "issue": "Expired cache entries are never pruned, only overwritten when the same URL is requested again, so the Map grows without bound in a long-lived session", "suggestion": "Sweep expired entries on insertion (or keep a small LRU bound) so memory is independent of pages visited" },
+    { "severity": "low", "location": "app/src/app/core/poke-api.ts:143-157", "issue": "cardsFor embeds view-model construction (species-name resolution, dedup, sort, extras) in the HTTP client, mixing data access with presentation concerns", "suggestion": "Return raw refs from the client and build CardData in per-page data modules (or a dedicated cards builder) that already own view shaping" },
+    { "severity": "low", "location": "app/src/app/app.ts:33-37", "issue": "Scroll restoration is hand-rolled in App and duplicated in home.ts:68, where withInMemoryScrolling({scrollPositionRestoration: 'top'}) is the framework feature for this", "suggestion": "Move the common scroll-to-top behavior into router config, keeping only the fragment-jump workaround in the Pokémon page" },
+    { "severity": "low", "location": "app/src/app/pages/home/home.html:4", "issue": "Error copy says 'Please try again' but no retry control is provided on any page", "suggestion": "Add a retry button/button calling data.reload() on home, types and the LoadState error branch" },
+    { "severity": "low", "location": "app/src/app/pages/pokemon/moves-data.ts:50", "issue": "Constructs fake NamedResource objects ({name, url: ''}) to reuse typeLabels, a signature-driven hack", "suggestion": "Give typeLabels an overload taking string names (or a labelsFor(names) helper) instead of faking resource refs" },
+    { "severity": "low", "location": "app/src/app/shared/pokemon-card-list.ts:18", "issue": "Presentational card component injects the PokeApi service solely to compute sprite URLs in its template", "suggestion": "Compute the sprite URL when CardData is built (e.g. in cardsFor) so the list component stays purely presentational" },
+    { "severity": "low", "location": "app/src/app/pages/home/home.html:18", "issue": "$any($event.target).value cast in the template", "suggestion": "Handle the cast in the component (onSearch(event) reading event.target as HTMLInputElement), keeping the template type-clean" },
+    { "severity": "low", "location": "app/src/app/core/poke-api.ts:155", "issue": "Species-name fallback uses the raw Pokémon name (e.g. a missing species-index entry would render an alternate-form name)", "suggestion": "Treat a speciesIndex miss as data corruption and skip or flag the card rather than silently showing the API Pokémon name" }
+  ],
+  "summary": "This is a high-quality, current-Angular codebase I'd merge after one round of small changes: idiomatic signals/resource/data loading, clear module boundaries, deliberate error and edge-case handling, and comments that explain why. The real asks are the shared→pages layering inversion, fetch timeouts plus cache pruning, and moving scroll handling into router config. Everything else is nit-level."
+}
+```

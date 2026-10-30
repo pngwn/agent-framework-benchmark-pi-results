@@ -1,0 +1,81 @@
+I've reviewed the full app, the spec, the acceptance tests, and checked Astro's current release (7.4.4, released 2026-10-28 — the app is on exactly the current stable version) and docs (SSR data loading, custom 404 page, page partials).
+
+## Assessment
+
+**What's good.** The stack is current and correctly chosen: `output: 'server'` with the standalone Node adapter (`app/astro.config.mjs:3-9`) is the right fit for "fetch all data at request time", `npm start` runs the built server, and pinning `astro@7.4.4` / `@astrojs/node@11.1.9` (the day-old stable release) means the app isn't built against stale knowledge. Routing is pure file-based routing (`[name].astro` × 4, `404.astro`), data loading lives in frontmatter, not-found handling is implemented on every dynamic route via a `NotFoundError` → `Astro.response.status = 404` pattern (`app/src/pages/moves/[name].astro:18-28`), and the client-side scripts are small, hand-written progressive enhancements — the framework's own philosophy. The two `lib/` modules have clear boundaries (API client vs. derived indexes), and the promise-caching design (`app/src/lib/pokeapi.ts:29-43`) correctly evicts failed promises so a transient API error doesn't poison the cache.
+
+**Main concerns.** The home page's filter script (`app/src/pages/index.astro:91-145`) is a home-grown mini-framework: it fetches the *entire* page, parses it with `DOMParser`, and splices `#results` into the live DOM — Astro has a documented feature for exactly this (page partials, `export const partial = true`), which would give a cleaner server contract. Worse, `pushState` at `index.astro:120` has no `popstate` listener, so pressing Back/Forward changes the URL but leaves stale results on screen — a real bug the tests never exercise (they don't touch history). Second, maintainability is thinner than it looks: `strict: false` (`app/tsconfig.json:4`) plus pervasive `any` typing means the "TypeScript" is largely cosmetic, `pokemon/[name].astro` has a ~250-line frontmatter doing fetch, shaping, ordering and grouping all inline, and the NotFound try/catch block is copy-pasted across four routes. Styling is one 657-line global stylesheet rather than Astro's scoped styles — defensible per spec, but page-specific selectors live far from their markup.
+
+```json
+{
+  "dimension": "mergeability",
+  "criteria": {
+    "idiomatic": {
+      "score": 4,
+      "evidence": [
+        "app/astro.config.mjs:3-9 — output:'server' + @astrojs/node standalone, the correct choice for request-time API data",
+        "app/package.json:11-12 — astro 7.4.4 / @astrojs/node 11.1.9, the current stable releases",
+        "app/src/pages/404.astro:1-5 — Astro's documented custom 404 page, with status set",
+        "app/src/pages/index.astro:116-120 — home-grown full-page fetch + DOMParser innerHTML swap where Astro page partials exist for exactly this",
+        "app/src/styles/global.css:1-657 — all styling in one global sheet instead of Astro scoped styles (spec permits, but not the framework's favored idiom)"
+      ],
+      "rationale": "Routing, SSR data loading, 404 handling and progressive enhancement all read like Astro's own docs; the one real deviation is the hand-rolled partial-HTML mechanism on the home page instead of Astro's page-partials feature."
+    },
+    "correctness_risks": {
+      "score": 3,
+      "evidence": [
+        "app/src/pages/index.astro:120 — pushState with no popstate listener: Back/Forward changes URL but leaves stale DOM",
+        "app/src/lib/pokeapi.ts:10 — unbounded module-level Map cache, no eviction or TTL (spec-sanctioned, but unbounded for process lifetime)",
+        "app/src/pages/index.astro:36-38 — ?page=999 is clamped for display but URL stays non-canonical",
+        "app/src/lib/pokeapi.ts:33-38 — failed fetches correctly evicted from the cache, race guard at index.astro:103-123"
+      ],
+      "rationale": "One genuine user-facing bug (history navigation desyncs the filter UI) plus a few minor nits; everything else — race guarding, 404 handling, missing-value formatting — is handled carefully."
+    },
+    "global_abstractions": {
+      "score": 4,
+      "evidence": [
+        "app/src/lib/pokeapi.ts:1-140 — single cohesive API client (fetch, cache, humanize, formatters); boundaries clear",
+        "app/src/lib/data.ts:93-175 — getHomeIndex builds all-species index from type/generation details; reasonable and memoized, though hidden module-global state",
+        "app/src/lib/data.ts:22-125 — the same promise-memoization boilerplate repeated seven times by hand",
+        "app/src/lib/data.ts:128-130 — dead code: getSpeciesById is never called"
+      ],
+      "rationale": "Only two lib modules and four components, each earning its keep; deductions for the duplicated memoization pattern, dead exports and the page-scoped logic embedded in pages rather than the data layer."
+    },
+    "readability": {
+      "score": 3,
+      "evidence": [
+        "app/src/pages/pokemon/[name].astro:19-254 — ~250-line frontmatter mixing fetching, shaping, ordering and method grouping inline",
+        "app/tsconfig.json:3-6 — strict:false and pervasive 'any' props make the TS largely cosmetic (e.g. pokemon/[name].astro:24 'let pokemon: any')",
+        "app/src/lib/pokeapi.ts:130-140 — well-named small formatters, good",
+        "app/src/pages/moves/[name].astro:16-28 — identical try/catch NotFound block duplicated in four dynamic routes",
+        "one comment in the whole codebase (app/src/pages/index.astro:127)"
+      ],
+      "rationale": "Naming and file layout are clear and a teammate could find their way quickly, but the fat Pokémon frontmatter, copy-pasted not-found blocks and disabled strictness add drag."
+    },
+    "review_cost": {
+      "score": 3,
+      "evidence": [
+        "app/src/pages/index.astro:110-120 — needs popstate handling or conversion to Astro partials before merge",
+        "app/src/pages/pokemon/[name].astro:19-254 — data logic to extract into lib/ and type",
+        "app/tsconfig.json:4 — strict:false should be reverted",
+        "app/src/lib/data.ts:128 — dead export to remove"
+      ],
+      "rationale": "A real round of changes — history handling, extracting the Pokémon page's data logic, restoring strict types, removing duplication — but nothing structural or risky; approve after one iteration."
+    }
+  },
+  "overall": 3,
+  "findings": [
+    { "severity": "medium", "location": "app/src/pages/index.astro:120", "issue": "Search/filter navigation uses history.pushState but there is no popstate listener, so browser Back/Forward changes the URL while the results DOM (and the select/search values) stay stale", "suggestion": "Add a popstate handler that re-fetches/renders the results for the new URL, or navigate to the URL so the browser renders it" },
+    { "severity": "medium", "location": "app/src/pages/index.astro:110-120", "issue": "The filter script fetches the entire rendered page and splices out #results via DOMParser — a home-grown partial-rendering mechanism, with the cost of a full server render per keystroke", "suggestion": "Use Astro's documented page partials (export const partial = true) for a results route, or Astro's client router / view transitions, instead of parsing the full document" },
+    { "severity": "medium", "location": "app/tsconfig.json:4", "issue": "strict:false, combined with 'any' for most page-level data (e.g. app/src/pages/pokemon/[name].astro:24), removes most of the benefit of TypeScript that Astro's base config would give", "suggestion": "Re-enable strict mode and type the API payloads at the lib boundary (pokeapi.ts/data.ts), letting pages consume typed shapes" },
+    { "severity": "medium", "location": "app/src/pages/pokemon/[name].astro:19-254", "issue": "~250 lines of frontmatter inline data loading, shaping, method prioritization and row sorting; hard to review and untestable as written", "suggestion": "Extract move-table grouping/ordering and version-group selection into src/lib (e.g. moves.ts), leaving the page with render-only logic" },
+    { "severity": "low", "location": "app/src/pages/moves/[name].astro:16-28", "issue": "The same NotFoundError try/catch + Astro.response.status = 404 block is duplicated verbatim across the four dynamic routes (also pokemon/[name].astro:29-42, abilities/[name].astro:16-27, types/[name].astro:12-23)", "suggestion": "Add a shared helper (e.g. withNotFound(async () => data)) or use Astro.rewrite('/404') from a small wrapper" },
+    { "severity": "low", "location": "app/src/lib/data.ts:22-125", "issue": "Seven near-identical hand-rolled promise-memoization blocks (promise var, assign, catch-and-reset)", "suggestion": "A ~5-line memoize(fn) helper would replace all of them" },
+    { "severity": "low", "location": "app/src/lib/data.ts:128-130", "issue": "getSpeciesById is dead code", "suggestion": "Delete it" },
+    { "severity": "low", "location": "app/src/lib/pokeapi.ts:10", "issue": "Module-level cache Map is unbounded for the process lifetime (spec allows in-memory caching, so acceptable, but ~1025 species + ~900 moves + versions never expire)", "suggestion": "Fine for this dataset; if the API were truly 'live', consider a size cap or TTL" },
+    { "severity": "low", "location": "app/src/pages/index.astro:36-38", "issue": "?page=999 is clamped for display but the URL remains non-canonical, so pagination links and address bar disagree", "suggestion": "Redirect (301/308) to the clamped page when the page parameter is out of range" },
+    { "severity": "low", "location": "app/src/components/PokemonCard.astro:9", "issue": "Card sprites are built from a hardcoded pattern rather than API-provided sprite URLs, coupling the app to the media layout (the spec documents the pattern, so this is a pragmatic choice, but a missing sprite yields a broken image with no fallback)", "suggestion": "Add loading/decoding hints and an onerror fallback, or a small inline placeholder for broken sprites" }
+  ],
+  "summary": "A competent, current-stack Astro 7.4.4 SSR app with genuinely idiomatic routing, data loading and not-found handling, and well-bounded lib modules. The home page's hand-rolled partial-HTML swap (with a Back/Forward staleness bug) is the main thing to fix before merge, followed by restoring strict types and extracting the 250-line Pokémon page frontmatter. I'd request one round of changes and approve."
+}
+```

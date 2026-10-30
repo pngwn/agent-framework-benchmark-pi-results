@@ -1,0 +1,112 @@
+{
+  "dimension": "mergeability",
+  "criteria": {
+    "idiomatic": {
+      "score": 4,
+      "evidence": [
+        "app/src/routes/pokemon/[name]/index.tsx:9-14 — routeLoader$ with params/status/url is exactly the documented server-side data-loading pattern",
+        "app/src/routes/pokemon/[name]/index.tsx:157-160 — head export using resolveValue(loader) matches the docs for head-from-loader",
+        "app/src/routes/pokemon/[name]/index.tsx:142-149 — game select uses useNavigate() for SPA navigation with query + hash, the documented programmatic-navigation API",
+        "app/src/routes/index.tsx:87-97 and 119-146 — filters/pagination mutate window.history.pushState/replaceState directly instead of the router's navigation primitives, then patch it up with a hand-rolled popstate listener (routes/index.tsx:31-40)",
+        "app/src/routes/moves/[name]/index.tsx:9-13 — uses status(404) + {notFound:true} sentinel where current docs recommend requestEvent.fail(404, {errorMessage})",
+        "app/src/routes/[...slug]/index.tsx:5-8 — routeLoader$ that returns null and is called only for its status(404) side effect"
+      ],
+      "rationale": "Recognisably the framework's own starter shape: routeLoader$/head/resolveValue/useNavigate/component$/useSignal are all used the way current docs show. The home route's manual history API plus popstate listener works but is a home-grown workaround around Qwik City's client router, and 404s use status() rather than the documented fail()."
+    },
+    "correctness_risks": {
+      "score": 4,
+      "evidence": [
+        "app/src/lib/api.ts:67-80 — fetchJson caches the promise, maps 404 to null, and evicts the cache entry on rejection so failures aren't stuck; errors from Promise.all fan-outs are handled with null filtering",
+        "app/src/components/MoveTables.tsx:19-29 — missing-value sort-last logic is correct in both directions (null check happens before the direction factor is applied)",
+        "app/src/routes/index.tsx:31-40 — popstate listener has proper cleanup(), so no leaked listeners",
+        "app/src/routes/index.tsx:87-97 — replaceState/pushState mutate URL and signals without informing Qwik City's router, leaving useLocation().url stale for the home route (routes/index.tsx:33 re-reads it manually); currently harmless but a latent desync",
+        "app/src/lib/api.ts:348-355 — one parallel fetch per move of the selected game (~100-200 concurrent requests per uncached pokemon page); bounded only by the process-level cache",
+        "app/src/lib/api.ts:180-186 — alternate forms (>10000) and non-species refs excluded consistently in every list builder"
+      ],
+      "rationale": "No serious bugs found: 404 handling, error eviction, alternate-form exclusion and null-sort semantics are all careful. The deductions are the router/URL desync on the home route and the un-memoised per-move fetch fan-out, both mitigated by the cache but worth tightening."
+    },
+    "global_abstractions": {
+      "score": 3,
+      "evidence": [
+        "app/src/lib/api.ts:1-462 — a single 460-line data module every route funnels through; page DTO shaping for home, moves, abilities, types and pokemon all live in one file",
+        "app/src/lib/api.ts:297-305 — a second, redundant per-name cache layer (globalThis.__pokedexVersionGroups) on top of the fetchJson promise cache in the same module",
+        "app/src/lib/api.ts:17-18 — module-level globalThis cache with a clear header comment and a server-only boundary; components only receive typed DTOs",
+        "app/src/components/ui.tsx:60 — dead export typeClassName, unused anywhere (grep confirms only its definition)"
+      ],
+      "rationale": "Boundaries are otherwise clean (server-only api.ts, tiny focused format.ts, components consume serialisable DTOs), but api.ts is already a god data module that all five route families share; it will be the single choke point for future changes and should be split per domain before it grows."
+    },
+    "readability": {
+      "score": 4,
+      "evidence": [
+        "app/src/lib/format.ts:1-13 — small, well-named helpers with consistent em-dash/null semantics reused everywhere",
+        "app/src/routes/layout.tsx:1-26 — landmark structure reads cleanly and matches the spec's banner/navigation/main/contentinfo requirements",
+        "app/src/routes/index.tsx:30 — comment explains why the popstate listener exists ('Keep the controls in sync with browser back/forward navigation')",
+        "app/src/lib/api.ts:1-4 — header comment states the server-only, request-time, in-memory-cache contract",
+        "app/src/lib/api.ts:22-58 — typed DTOs (HomeCard, PokemonCard, MoveRow, MoveTable) but the underlying API payloads are pervasive `any`"
+      ],
+      "rationale": "A new teammate finds their way quickly: consistent qwik-city file layout, descriptive names, comments where the why matters. The only rough spot is the wall of `any` in api.ts, which hides the API's real shape behind casts."
+    },
+    "review_cost": {
+      "score": 4,
+      "evidence": [
+        "app/src/routes/index.tsx:119-146 — pagination handlers repeat the same pushState+signal dance four times; would be nits to factor",
+        "app/src/lib/api.ts:297-305 — duplicated cache layer is a small ask",
+        "app/src/components/ui.tsx:60 — dead code ask",
+        "app/src/routes/moves/[name]/index.tsx:9-13 — swap status(404) sentinel for fail(404, ...) per current docs"
+      ],
+      "rationale": "Approve after nits. Nothing structural needs rework; the asks are small consistency and dead-code cleanups plus the status()/fail() and caching-layer tweaks."
+    }
+  },
+  "overall": 4,
+  "findings": [
+    {
+      "severity": "medium",
+      "location": "app/src/routes/index.tsx:87-97",
+      "issue": "Filters and pagination mutate URL via raw window.history.pushState/replaceState and hand-rolled signal sync, bypassing Qwik City's client router; useLocation().url becomes stale relative to the real URL and a manual popstate listener (index.tsx:31-40) duplicates work the router already does.",
+      "suggestion": "Drive URL state through useNavigate() (it supports replace semantics) or keep the current client-only filtering but isolate it in a dedicated hook and document the router desync; at minimum note that location.url must not be trusted on this route."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/lib/api.ts:1-462",
+      "issue": "Single god data module shaping every page's DTOs; all five route families depend on it, making it the choke point for any future schema change.",
+      "suggestion": "Split per domain (species/home, pokemon, moves, abilities, types) while keeping the shared fetchJson cache and the Ref/idFromUrl helpers in a small core module."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/routes/moves/[name]/index.tsx:9-13",
+      "issue": "404 handled via status(404) plus a {notFound:true} sentinel object rather than the documented requestEvent.fail(404, {...}) pattern, which types the failed value and keeps consumers checking a discriminant.",
+      "suggestion": "Use requestEvent.fail(404, { errorMessage }) and branch on the failed value, matching the current route-loader docs. Same pattern in pokemon/[name], abilities/[name], types/[name]."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/lib/api.ts:297-305",
+      "issue": "getVersionGroup adds a second globalThis-scoped cache keyed by name on top of fetchJson's promise cache for the same URLs.",
+      "suggestion": "Drop the extra map and call fetchJson directly (it already caches)."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/routes/[...slug]/index.tsx:5-8",
+      "issue": "A routeLoader$ that returns null and exists only for its status(404) side effect is an unusual way to set the 404 status for a catch-all page.",
+      "suggestion": "Consider a route-level onRequest handler that sets the status, or keep it but add a comment explaining the intent."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/components/ui.tsx:60",
+      "issue": "Dead export typeClassName is unused across the codebase.",
+      "suggestion": "Delete it."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/lib/api.ts:30-42",
+      "issue": "API responses are typed as pervasive `any` (englishName(names: any[]...), detail: any), so payload-shape mistakes surface only at runtime.",
+      "suggestion": "Define minimal response interfaces for the endpoints consumed (names arrays, flavor entries, type detail) to get compile-time checks on the mapping layer."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/routes/index.tsx:72-73",
+      "issue": "Selects set both a value prop on <select> and a selected attribute on every <option>, duplicating controlled state.",
+      "suggestion": "Rely on the select value alone (Qwik renders the selected option), keeping the markup consistent with the pokemon page's game select."
+    }
+  ],
+  "summary": "A well-built, recognisably idiomatic Qwik City app on the current stable version: loaders, head resolution, 404 status handling and resumable components all follow the documented patterns, and the correctness details (cache eviction, alternate-form exclusion, null-sort semantics, listener cleanup) are done carefully. The main merge frictions are the home route's hand-rolled history/signal sync that bypasses the client router, and a 460-line god data module every route depends on. I'd merge after a nits-and-cleanup round."
+}

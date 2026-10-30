@@ -1,0 +1,114 @@
+{
+  "dimension": "mergeability",
+  "criteria": {
+    "idiomatic": {
+      "score": 5,
+      "evidence": [
+        "app/vite.config.ts:1-9 — exactly the documented SolidStart v2 config (solidStart() + nitro()), no legacy app.config.ts",
+        "app/src/lib/queries.ts:4-45 — query() + \"use server\" per data loader, the current v2 data-fetching recipe",
+        "app/src/routes/pokemon/[name].tsx:21-22 — route preload(({ params }) => getPokemon(...)), docs' preload idiom",
+        "app/src/routes/index.tsx:11-18 — preload parses location.search and warms both queries before render",
+        "app/src/entry-server.tsx:23 — createHandler(..., { mode: \"async\" }) so HttpStatusCode actually sends 404",
+        "app/src/components/NotFound.tsx:6 — HttpStatusCode code={404} used for both catch-all and null data",
+        "app/src/app.tsx:6-12 — Router root + FileRoutes with shared layout in Suspense; MetaProvider/Title for titles",
+        "app/src/routes/index.tsx:22-23 — useSearchParams for filter state in URL, undefined to clear keys per docs"
+      ],
+      "rationale": "Every framework touchpoint matches the v2 docs' own examples: config, queries, preloads, routing, meta and status codes. Nothing is hand-rolled where a primitive exists."
+    },
+    "correctness_risks": {
+      "score": 3,
+      "evidence": [
+        "app/src/lib/server/pokeapi.ts:45-46 — non-404 fetch errors throw out of the server function; no ErrorBoundary exists anywhere in src/",
+        "app/src/lib/server/pokeapi.ts:49 — value.catch(() => cache.delete(url)) deletes by URL, so a slow rejected fetch can evict a newer, still-valid entry after TTL rollover",
+        "app/src/routes/index.tsx:49-57 — each debounced keystroke makes a new getHomeList arg tuple; the router query cache grows without expiry",
+        "app/src/routes/pokemon/[name].tsx:61-66 — re-implements the array-params handling that routes/index.tsx:7 extracts as first(); drift risk",
+        "app/src/lib/server/pokeapi.ts:275-286 — per-move fetch fan-out (~90 requests at concurrency 24) per pokemon/game, mitigated only by the 60s TTL cache",
+        "app/src/routes/index.tsx:40-47 — debounce timer is cleaned up with onCleanup; URL/search race handled via on(q, ...) with defer"
+      ],
+      "rationale": "The happy paths are careful (out-of-order handled by createAsync, timer cleanup, in-flight dedup, 404→NotFound), but there is no failure path at all: a 5xx from the API surface rejects unhandled into a blank page, and a couple of cache/typing nits remain."
+    },
+    "global_abstractions": {
+      "score": 4,
+      "evidence": [
+        "app/src/lib/queries.ts:1-46 — a single, small seam between server and client; the only place server code is reachable from routes",
+        "app/src/lib/server/pokeapi.ts:1-90 — all 8 data loaders plus the cache live in one 383-line module, though it is banner-sectioned per resource",
+        "app/src/lib/types.ts:1-53 — shared Card/Named types reused across home, move, ability and type pages",
+        "app/src/lib/format.ts:1-14 — tiny, dependency-free helpers; no utils grab-bag"
+      ],
+      "rationale": "Boundaries are unusually clean (queries.ts is the only server boundary, types are shared deliberately), but pokeapi.ts is one module away from being a god data module that four route files all lean on."
+    },
+    "readability": {
+      "score": 4,
+      "evidence": [
+        "app/src/routes/index.tsx:25-26 — comment explains why the search box keeps its own signal",
+        "app/src/entry-server.tsx:3-4 — comment explains the async-mode choice",
+        "app/src/components/Section.tsx:5 — Section encapsulates the region-landmark pattern once",
+        "app/src/lib/server/pokeapi.ts:98,136,233,335 — as any[] / (p: any) casts undermine the strict tsconfig against hand-shaped API data",
+        "app/src/components/MoveTable.tsx:36-38 — comment states the missing-values-last invariant next to the code that enforces it"
+      ],
+      "rationale": "A new teammate finds their way quickly: predictable file layout, small components, good why-comments. The main rough spot is the any-typed server module in an otherwise strict codebase."
+    },
+    "review_cost": {
+      "score": 4,
+      "evidence": [
+        "app/src/lib/server/pokeapi.ts:45 — one round of review will ask for an ErrorBoundary/fallback for API failures",
+        "app/src/lib/server/pokeapi.ts:1 — reviewers will ask to split per-resource modules before the file grows further",
+        "app/package.json:8-15 — start script correctly serves the nitro output on $PORT; build/dev match the v2 scripts",
+        "app/src/ — zero first-party tests for 720 significant LOC of pure mapping/sorting logic"
+      ],
+      "rationale": "Approve-with-nits: the asks are an error boundary, a module split, and a handful of unit tests for format.ts and the sort rules — nothing structural."
+    }
+  },
+  "overall": 4,
+  "findings": [
+    {
+      "severity": "medium",
+      "location": "app/src/lib/server/pokeapi.ts:45",
+      "issue": "Non-404 API failures throw from the server function and nothing catches them; there is no ErrorBoundary or error route in the app, so an API hiccup renders a blank/500 page on client-side navigation.",
+      "suggestion": "Wrap route content (or the Router root) in an ErrorBoundary with a small retry page, or catch in the loaders and render a 'data unavailable' state."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/lib/server/pokeapi.ts:49",
+      "issue": "Rejected promises delete their cache entry by URL rather than by identity, so an old slow rejection can evict a newer entry created after TTL rollover.",
+      "suggestion": "Compare the entry object before deleting: cache.get(url) === entry && cache.delete(url)."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/lib/server/pokeapi.ts:98",
+      "issue": "API responses are handled as any (records.filter(Boolean) as any[], (m: any), (p: any)) in an otherwise strict-TS codebase, hiding typos in field names.",
+      "suggestion": "Define minimal API payload types (type, move, pokemon, ability, generation) and type the api<T> helper properly."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/lib/server/pokeapi.ts:1",
+      "issue": "One 383-line module owns fetching, caching and view-shaping for all eight queries; four route files all depend on it.",
+      "suggestion": "Split into per-resource modules (pokemon.ts, moves.ts, types.ts, home.ts) sharing a small fetch/cache core."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/routes/pokemon/[name].tsx:61",
+      "issue": "Duplicated array-params handling: first() exists in routes/index.tsx:7 but the game param inlines its own Array.isArray check.",
+      "suggestion": "Move first() into lib/format (or use the router's string|string[] typing helper) and use it in both files."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/lib/server/pokeapi.ts:172",
+      "issue": "homeList always builds the full type index (18 type records) and generation index (10 records) even when neither filter is active.",
+      "suggestion": "Fetch the type/generation indexes only when type or generation is set, falling back to cached lists for labels."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/",
+      "issue": "No first-party tests despite substantial pure logic (humanize, dexNumber, missing-values-last sorting, cache TTL/sweep, page clamping).",
+      "suggestion": "Add a few vitest cases for format.ts, MoveTable's comparator and homeList's pagination/clamping."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/routes/index.tsx:49-57",
+      "issue": "Every debounced keystroke creates a new query-cache entry for getHomeList that never expires on the client.",
+      "suggestion": "Acceptable for this app size; if it grows, cap or revalidate the query cache, or debounce to a coarser key."
+    }
+  ],
+  "summary": "A textbook SolidStart v2 app: current config, query/\"use server\"/createAsync/preload data loading, and an entry-server async mode that makes the 404 status code actually work. Data shaping and caching are thoughtful (in-flight dedup, missing-values-last sort, timer cleanup, array-param handling). I'd approve after one round: add an error boundary, split the monolithic server data module, and tighten the any-typed API layer."
+}

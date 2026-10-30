@@ -1,0 +1,125 @@
+I've reviewed the full app against the SPEC/FEATURE and Angular 22 (current stable: `@Service` stable, zoneless default, signal inputs, resolvers + `withComponentInputBinding` as the documented SSR data-loading path). This is a disciplined, deliberately-architected SSR+BFF app; the feature change is cleanly integrated (cookie-backed `TeamStore` for SSR parity, shared pure `coverageRows` used on both sides).
+
+```json
+{
+  "dimension": "mergeability",
+  "criteria": {
+    "idiomatic": {
+      "score": 5,
+      "evidence": [
+        "app/src/app/app.routes.ts:20 — ResolveFn + withComponentInputBinding (app.config.ts:21) is the documented SSR data-loading pattern",
+        "app/src/app/data/team-store.ts:33 — @Service() (stable in v22) with signal state and asReadonly() exposure, exactly per current docs",
+        "app/src/app/pages/pokemon/move-table.ts:55 — linkedSignal for resettable user sort state, the recommended dependent-state primitive",
+        "app/src/app/pages/home/home.ts:18 — signal inputs, computed, toSignal(queryParamMap, {requireSync}) — fully zoneless-friendly signal code",
+        "app/src/app/app.config.ts:13 — provideBrowserGlobalErrorListeners, provideClientHydration(withEventReplay), custom TitleStrategy: current scaffold idioms",
+        "app/src/app/app.routes.server.ts:5 — RenderMode.Server + withRoutes via provideServerRendering; app/src/app/app.config.server.ts:10 — provideAppInitializer publishing API base into TransferState",
+        "app/src/app/pages/not-found/not-found.ts:7 — RESPONSE_INIT for the 404 status (the current non-deprecated token)",
+        "app/src/app/pages/home/home.ts — modern file/class naming (no .component.ts suffixes), default standalone, @if/@for control flow throughout"
+      ],
+      "rationale": "Reads like current Angular docs: signals everywhere, resolvers feeding input-bound VMs, @Service, TransferState, SSR route config. The one hand-rolled piece (scroll handling in app.ts) deviates from withInMemoryScrolling but is justified and commented: the built-in options can't keep scroll position for filter-only changes."
+    },
+    "correctness_risks": {
+      "score": 4,
+      "evidence": [
+        "app/src/app/data/page-data.ts:24-40 — client page-data cache stores TTL'd entries but never evicts expired ones (delete only on fetch error), so it grows per distinct path visited",
+        "app/src/app/pages/home/home.ts:53-56 — a pending debounce timer can fire after browser Back, re-pushing the typed q over the restored URL",
+        "app/src/app/data/page-data.ts:29-33 — a failed /_data fetch rejects the resolver; Angular cancels the navigation with no user-visible error state",
+        "app/src/server/api-client.ts:70-77 — good: bounded server cache (MAX_ENTRIES 4000) with recency refresh and error cleanup",
+        "app/src/app/shared/pokemon-card.ts:22 — sprite 404 handled via (error) → placeholder; no unescaped HTML anywhere (all interpolation)",
+        "app/src/app/data/team-store.ts:62-66 — cookie read on both platforms gives SSR/hydration parity for the team button (no flash of the wrong label)"
+      ],
+      "rationale": "Careful handling of 404s, missing sprites, cache bounds and SSR/CSR parity; the few gaps are minor: unbounded-in-practice client cache, a debounce/back-navigation race, and silent failure when a client-side resolve rejects."
+    },
+    "global_abstractions": {
+      "score": 4,
+      "evidence": [
+        "app/src/server/loaders.ts:431-452 — stringly-typed path contract ('/home', '/pokemon/...', '/team?member=') shared with app.routes.ts:12-27; a typo silently becomes Not Found at runtime",
+        "app/src/server/loaders.ts:403 vs app/src/app/pages/team/team-page.ts:29 — TeamVM.coverage is computed server-side but never consumed; the client recomputes from attackTypes+members, so it's dead payload and duplicated work",
+        "app/src/app/data/page-data.ts:17 — module-level clientCache is hidden global state in the browser",
+        "app/src/app/app.config.server.ts:8-14 — the server/client boundary is nonetheless clean: loaders are only provided in the server config, so no server code leaks into the client bundle",
+        "app/src/app/shared/models.ts — one small, shared VM module; app/src/app/shared/team.ts — pure functions reused verbatim on server (loaders.ts:361) and client"
+      ],
+      "rationale": "The BFF layer is a deliberate abstraction with a clear, enforced boundary and a README that explains it; the warts are the runtime-only string contract between routes and loaders, one dead VM field, and module-scope caches — all small but real cross-file coupling."
+    },
+    "readability": {
+      "score": 4,
+      "evidence": [
+        "app/src/app/pages/home/home.ts:38-45 — searchText linkedSignal reading mutable this.pushedQ inside the computation is genuinely hard to verify; a plain signal plus a comment on the intent would be simpler",
+        "app/src/app/app.ts:24-44 — hand-rolled scroll logic with previous-URL diffing is the densest code in the app, though it carries a good why-comment",
+        "app/src/server/loaders.ts — file mirrors the page structure, helpers are small pure functions, every tricky choice (EXCLUDED_TYPES, METHOD_ORDER, STAT_LABELS) is a named constant",
+        "app/src/styles.css — all component styles live in one 641-line global file with section comments; fine, but style discovery isn't local to components",
+        "app/README.md:17-22 — architecture and the /_data endpoint are documented for newcomers"
+      ],
+      "rationale": "Consistent naming, tiny files mirroring routes, and why-comments make this easy to navigate; the search-sync trick and global stylesheet are the rough spots a new teammate will puzzle over."
+    },
+    "review_cost": {
+      "score": 4,
+      "evidence": [
+        "app/tsconfig.json:8-17 — no \"strict\": true and no strictTemplates in angularCompilerOptions; the CLI default strict flags were removed, so template/type errors the compiler would catch are reviewable-only",
+        "app/src/server/loaders.ts:403 — ask: drop the unused TeamVM.coverage (or consume it)",
+        "app/src/app/data/page-data.ts:24-33 — ask: evict expired entries",
+        "app/src/app/page-title-strategy.ts:9 — @Injectable() while the rest of the app uses @Service() (fine for a manually-provided class, but inconsistent)"
+      ],
+      "rationale": "I'd approve after one small round: restore strict/strictTemplates, evict the client cache, drop the dead coverage field. Everything else is nits."
+    }
+  },
+  "overall": 4,
+  "findings": [
+    {
+      "severity": "medium",
+      "location": "app/tsconfig.json:8",
+      "issue": "The CLI's default \"strict\": true is missing, and angularCompilerOptions lacks strictTemplates, so template and type errors compile silently.",
+      "suggestion": "Re-enable strict mode and strictTemplates; the code is already written in a strict-friendly style, so this should be cheap."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/app/data/page-data.ts:29",
+      "issue": "A rejected /_data fetch fails the route resolver, which cancels client-side navigation with no user-visible error state.",
+      "suggestion": "Either catch and render an error/not-found view, or add a router-level error handler that surfaces the failure."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/app/data/page-data.ts:24",
+      "issue": "The browser page-data cache checks TTL on read but never evicts expired entries, so it grows unbounded over a long session (one entry per distinct path, including per-game Pokémon pages).",
+      "suggestion": "Delete expired entries on read, or cap the map like the server's api-client does."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/app/pages/home/home.ts:38",
+      "issue": "linkedSignal computation reads mutable instance state (this.pushedQ), a non-reactive dependency; and a pending debounce timer can fire after browser Back and re-push the typed q over the restored URL.",
+      "suggestion": "Track the pushed value in the signal itself (e.g. store {q, pushed} in one linkedSignal) and cancel the timer when the URL changes externally."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/server/loaders.ts:403",
+      "issue": "TeamVM.coverage is computed server-side and shipped in every /_data/team response, but the client never reads it (team-page recomputes from attackTypes + members).",
+      "suggestion": "Remove coverage from TeamVM, or have the component use vm.coverage and recompute only after local mutations."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/app/app.routes.ts:12",
+      "issue": "Routes and loaders are coupled by stringly-typed page-data paths ('/home', '/pokemon/<name>?game=...'); a typo or drift fails only at runtime as Not Found.",
+      "suggestion": "Derive the path strings from a single shared constant/union type, or unit-test the resolver-to-loader mapping (the format.spec.ts suite is the only test today)."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/app/app.ts:24",
+      "issue": "Hand-rolled scroll restoration via Scroll events, previous-URL diffing and afterNextRender reimplements router functionality; subtle behavior (popstate position, anchor, page-change top) lives in one subscription.",
+      "suggestion": "Keep it, but extract the previous/changedPage logic into a named helper or add the one focused test this file most deserves."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/styles.css:1",
+      "issue": "All 641 lines of CSS, including per-component styles (pokemon-card, move-table, team-list), live in one global stylesheet.",
+      "suggestion": "Consider component-scoped styles for the shared components at least; the anyComponentStyle budget in angular.json already anticipates them."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/app/page-title-strategy.ts:9",
+      "issue": "Uses @Injectable() while the rest of the app uses the now-stable @Service().",
+      "suggestion": "Either switch to @Service({autoProvided: false}) for consistency, or note why the classic decorator is kept for manually-provided classes."
+    }
+  ],
+  "summary": "A notably well-architected Angular 22 SSR app: resolvers feeding input-bound view models, a clean server-only BFF with TransferState hydration parity, stable v22 idioms (@Service, linkedSignal, zoneless-friendly signals) throughout. The team feature integrates cleanly via a cookie-backed store that both the server renderer and the browser read. I'd merge after one small round: restore strict/strictTemplates, evict the client cache, remove the dead TeamVM.coverage field, and simplify the search-input sync trick."
+}
+```

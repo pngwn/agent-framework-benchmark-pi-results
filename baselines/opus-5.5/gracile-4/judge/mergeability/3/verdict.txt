@@ -1,0 +1,118 @@
+I've reviewed the app, the spec, the acceptance tests, and verified the framework's current stable release and documented idioms (Gracile `0.11.0` is latest stable; the app pins `^0.11.0`). I cross-checked the app's usage against gracile.js.org's current docs (defining routes, working with assets/styles, progressive interactivity, deployment, server-runtime API) and the engine source to confirm non-obvious behaviors.
+
+Key verification notes:
+- `new URL('./document.css', import.meta.url).pathname` (`app/src/document.ts:10`) is verbatim the documented idiom ("Working with assets").
+- Per-route `.client.ts` sibling scripts and invisible custom elements are the documented "progressively enhanced" strategy (docs layer 4); the experimental client-router/hydration paths are correctly avoided.
+- `404.ts` works as fallback because Gracile's request pipeline looks up `/404/` when no route matches (`packages/engine/src/server/request.ts`), and `responseInit.status = 404` propagates — both idiomatic.
+- The `isBuildRender` guard (`app/src/lib/build.ts`) is a necessary workaround: Gracile's build genuinely calls every route handler with a stub `http://gracile-static` URL to collect assets (`packages/engine/src/routes/render.ts`), so without the guard the app would fetch API data at build time, violating the spec.
+
+```json
+{
+  "dimension": "mergeability",
+  "criteria": {
+    "idiomatic": {
+      "score": 5,
+      "evidence": [
+        "app/src/routes/(home).ts:9 — defineRoute with the documented handler/document/template trio; props flow into template context exactly as in the docs",
+        "app/src/document.ts:10 — stylesheet via new URL('./document.css', import.meta.url).pathname, the canonical pattern from the 'Working with assets' guide",
+        "app/src/routes/404.ts:4 — matches Gracile's built-in /404/ fallback lookup (verified in engine request pipeline)",
+        "app/src/server.js:15-21 — hono adapter + getClientBuildPath + immutable Cache-Control on hashed assets, mirroring the deployment guide",
+        "app/src/routes/(home).client.ts:2-88 — 'progressively enhanced' invisible custom element (documented interactivity layer 4), with noscript form fallback at app/src/routes/(home).ts:82",
+        "app/src/routes/pokemon/[name].ts:268 — responseInit.status = 404, the documented handler API for status codes"
+      ],
+      "rationale": "Reads like the framework's own examples: routing, documents, per-route client siblings, 404 convention, adapter and asset wiring all match the current 0.11 docs; the only home-grown bit (gracile-static hostname sniff) is a necessary workaround for a documented-but-unnamed build behavior."
+    },
+    "correctness_risks": {
+      "score": 4,
+      "evidence": [
+        "app/src/lib/api.ts:36-52 — TTL + LRU cache with in-flight promise dedup, failure eviction, and bounded size: unbounded-cache and duplicate-fetch risks handled",
+        "app/src/routes/(home).client.ts:70-80 — AbortController-guarded fetch-and-swap; stale responses can't win the race; non-abort errors fall back to full navigation",
+        "app/src/lib/api.ts:12-27 — concurrency limiter is correct (one waiter released per completion)",
+        "app/src/routes/(home).client.ts:28 — window popstate listener (and #timer) never removed; no disconnectedCallback — a leak if the element is ever reused/replaced",
+        "app/src/routes/(home).ts:89 — the element carrying aria-live=\"polite\" is itself replaced on every filter update, which can suppress screen-reader announcements",
+        "app/src/routes/pokemon/[name].ts:120-127 — cold-cache Pokémon page fans out one fetch per learned move (hundreds for popular Pokémon), mitigated by the 24-slot limiter and 60s cache"
+      ],
+      "rationale": "Careful handling of the usual MPA-enhancement races (aborts, dedup, bounded caches, 404 status propagation); remaining issues are minor: a never-removed global listener, a self-replacing live region, and latency-only fan-out."
+    },
+    "global_abstractions": {
+      "score": 4,
+      "evidence": [
+        "app/src/lib/api.ts — single transport+cache module with a clear server-only boundary; client files import only pure helpers (app/src/routes/(home).client.ts:1 imports home-url only)",
+        "app/src/lib/data.ts — focused domain module for shared species/type/generation lookups reused by four routes",
+        "app/src/lib/templates.ts — small shared card/section/notFound helpers with no hidden state",
+        "app/src/lib/build.ts:6 — the isBuildRender guard is cross-cutting magic duplicated conceptually in every route handler (app/src/routes/(home).ts:12, app/src/routes/pokemon/[name].ts:267, app/src/routes/moves/[name].ts:33) and coupled to an internal framework constant",
+        "app/src/routes/pokemon/[name].ts:90-186 — ~100-line domain loader lives in the route file while all other domain loading is in src/lib/data.ts, splitting domain logic across layers",
+        "app/src/routes/pokemon/[name].ts:51 and app/src/routes/moves/[name].ts:21 — near-duplicate Move type/shape definitions in two route files"
+      ],
+      "rationale": "Abstractions are few, small and earn their keep with clean server/client boundaries; the deductions are the framework-internals sniff that every handler must remember to call, and Pokémon-domain logic duplicated in a route instead of the shared data layer."
+    },
+    "readability": {
+      "score": 5,
+      "evidence": [
+        "app/src/lib/api.ts:1-2, app/src/lib/build.ts:1-5, app/src/routes/pokemon/[name].client.ts:1-4 — comments explain *why* (cache rationale, build-render trick, sort semantics), not what",
+        "app/src/lib/format.ts — small, well-named pure helpers (humanize, dexNumber, latestEnglishFlavorText, orDash) with doc comments",
+        "app/src/lib/data.ts:14, 57, 88 — MARK section comments and per-domain grouping make navigation trivial",
+        "app/src/document.css — MARK-commented sections, all values from design tokens (app/src/tokens.css)",
+        "app/src/routes/pokemon/[name].ts:90 — loadPokemonPage is long (~100 lines) but linear, well-typed and commented"
+      ],
+      "rationale": "Consistent naming, file layout mirroring routes, and genuinely explanatory comments; a new teammate would find their way in minutes."
+    },
+    "review_cost": {
+      "score": 4,
+      "evidence": [
+        "app/src/routes/(home).client.ts:28 — add disconnectedCallback cleanup",
+        "app/src/routes/(home).ts:89 — move aria-live to a stable wrapper",
+        "app/src/routes/pokemon/[name].ts:90 — move the Pokémon loader into src/lib/data.ts and share the Move type with app/src/routes/moves/[name].ts:21",
+        "app/src/lib/build.ts:6 — add a defensive comment/pin against the internal 'gracile-static' constant"
+      ],
+      "rationale": "Everything else is mergeable as-is; the remaining items are a single round of small, localized changes I'd ask for before approving."
+    }
+  },
+  "overall": 4,
+  "findings": [
+    {
+      "severity": "medium",
+      "location": "app/src/lib/build.ts:6",
+      "issue": "Build-render detection relies on the undocumented internal hostname 'gracile-static'; a framework update that changes the stub origin would silently re-enable API fetches at build time (a spec violation) rather than fail loudly.",
+      "suggestion": "Keep the guard but make the assumption explicit and defensive: assert the hostname matches and fall back to a second signal (e.g. empty params on dynamic routes), and add a comment naming the engine file/version this depends on."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/routes/(home).client.ts:28",
+      "issue": "The window 'popstate' listener and debounce timer are never removed (no disconnectedCallback); harmless for a page-lifetime element but a leak pattern that will be copied.",
+      "suggestion": "Store the bound handler and add disconnectedCallback to removeEventListener and clearTimeout."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/routes/(home).ts:89",
+      "issue": "The element carrying aria-live=\"polite\" (#results) is the node that gets replaced on every filter update, so live-region announcements may be dropped.",
+      "suggestion": "Put aria-live on a stable parent wrapper and replace only its inner content."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/routes/pokemon/[name].ts:90",
+      "issue": "A ~100-line domain loader (species, variety, evolution chain, version groups, move tables) lives inside the route module, while all other domain loading is centralized in src/lib/data.ts.",
+      "suggestion": "Move loadPokemonPage's data assembly into src/lib/data.ts so all PokeAPI domain logic has one home and can be reused."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/routes/pokemon/[name].ts:51",
+      "issue": "Near-duplicate Move type and move-detail handling also exist in app/src/routes/moves/[name].ts:21, so an API shape change needs edits in two route files.",
+      "suggestion": "Hoist the shared Move type (and a loadMove helper) into src/lib/data.ts."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/routes/pokemon/[name].ts:120",
+      "issue": "A cold-cache Pokémon page issues one move-detail fetch per learned move for the selected game (hundreds for popular Pokémon), only bounded by the 24-slot limiter and a short 60s TTL.",
+      "suggestion": "Give immutable move data a longer TTL than list endpoints, and consider prewarming the species/type/generation lists on boot."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/routes/(home).client.ts:47",
+      "issue": "Search input replaces the history entry while selects push; both are spec-legal but the asymmetry is unexplained, so a future reader may 'fix' it.",
+      "suggestion": "Add a one-line comment stating the push/replace intent."
+    }
+  ],
+  "summary": "This is a well-executed, idiomatic Gracile 0.11 MPA: routing, documents, asset wiring, the 404 convention and progressive enhancement all match the current docs, and the data layer is careful about caching, dedup and races. The main merge concerns are a framework-internals sniff that every handler depends on, and Pokémon domain logic duplicated inside a route file instead of the shared data module. I'd merge after one round of small, localized fixes."
+}
+```

@@ -1,0 +1,127 @@
+{
+  "dimension": "mergeability",
+  "criteria": {
+    "idiomatic": {
+      "score": 4,
+      "evidence": [
+        "app/src/app/app.routes.ts:7-40 — lazy loadComponent per route, wildcard 404 route",
+        "app/src/app/core/poke-api.ts:11 — @Service() decorator, current DI idiom",
+        "app/src/app/app.config.ts:9-13 — provideHttpClient(withFetch()), withComponentInputBinding()",
+        "app/src/app/pages/home-page.ts:200-228 — filters live purely in URL query, navigate-driven state",
+        "app/src/app/pages/home-page.ts:196-197 — effect copying resource value into a signal; official guidance says use computed/linkedSignal, and v22 documents linkedSignal over resource.snapshot() for retaining previous value",
+        "app/src/app/pages/pokemon-page.ts:345-352 — plain effect + setTimeout DOM manipulation instead of afterRenderEffect",
+        "app/src/app/core/poke-api.ts:16-20 — hand-rolled promise cache instead of httpResource for reads"
+      ],
+      "rationale": "Genuinely current Angular 22 idiom throughout (signals, resource, service decorator, route input binding, v20+ naming), marred by an effect-to-signal copy that the official skills explicitly label an anti-pattern and a couple of home-grown layers where the framework now provides the feature."
+    },
+    "correctness_risks": {
+      "score": 3,
+      "evidence": [
+        "app/src/app/core/poke-api.ts:17-18 — rejected promise is cached forever; one transient network failure permanently breaks that resource until page reload",
+        "app/src/app/pages/pokemon-page.ts:223-227 — loader fans out dozens of getMove calls without honoring abortSignal; stale requests continue after navigation (mitigated only by the shared cache)",
+        "app/src/app/pages/pokemon-page.ts:349-352 — setTimeout never cleaned up in the scroll effect; can fire on a destroyed component",
+        "app/src/app/pages/home-page.ts:196-197 — once view has a value, the data.error() branch is unreachable, so a failed refetch silently keeps showing stale list data",
+        "app/src/app/pages/pokemon-page.ts:68 — type badges labeled humanize(name) instead of English type names; correct only because the 18 type names coincide"
+      ],
+      "rationale": "No serious bugs found — resource params/hasValue guards are correct and route-reuse races are avoided — but permanent caching of rejected promises, unbounded abort-free fan-out, and stale-view-after-error are real fragilities a reviewer would want fixed."
+    },
+    "global_abstractions": {
+      "score": 4,
+      "evidence": [
+        "app/src/app/core/poke-api.ts — narrow HTTP+cache layer",
+        "app/src/app/core/pokedex-data.ts — single domain aggregation service over the API, consumed by all pages",
+        "app/src/app/core/helpers.ts — small, pure, well-named helper set (humanize, englishName, latestEnglishFlavor)",
+        "app/src/app/shared/pokemon-card.ts:16-35 — one reusable card component used by four pages",
+        "app/src/app/core/runtime-config.ts:11-15 — window global for runtime config, injected before bootstrap; hidden but contained",
+        "app/src/app/core/pokedex-data.ts:119-153 — app-lifetime promise singletons for species/types/generations, never invalidated (permitted by spec, but a fixed choice buried in code)"
+      ],
+      "rationale": "Layering is clean and each module earns its keep; the only watch item is PokedexData becoming the inevitable fat data module with never-invalidating caches, which is fine at this size but is the seam future features will hit."
+    },
+    "readability": {
+      "score": 4,
+      "evidence": [
+        "app/src/app/pages/* — one file per route, consistently structured resource/loader/template",
+        "app/src/app/pages/pokemon-page.ts:71-84 — @let for the base view keeps a 200-line template navigable",
+        "app/src/app/pages/move-page.ts:28-60 — data.value() called ~10 times in the template where @let was used elsewhere",
+        "app/src/app/pages/home-page.ts:141 — the view/data double-signal indirection is the only page that needs explaining, and there is not a single comment in the codebase",
+        "app/src/app/shared/move-table.ts:32-38 — duplicated (click) handlers on both th and nested button"
+      ],
+      "rationale": "A new teammate finds their way in minutes — names, structure and helper extraction are excellent; the rough spots are one inconsistent view indirection, template-level repetition on the move page, and zero comments on the few genuinely tricky spots."
+    },
+    "review_cost": {
+      "score": 3,
+      "evidence": [
+        "app/src/app/core/poke-api.ts:17-18 — must add rejection eviction before merge",
+        "app/src/app/pages/home-page.ts:196-197 — must swap effect workaround for linkedSignal/snapshot pattern",
+        "app/src/app/pages/pokemon-page.ts:345-352 — must move hash scroll to afterRenderEffect with cleanup",
+        "app/package.json:11 — ng test configured but zero specs exist (skipTests everywhere in app/angular.json) for sorting/filtering logic like app/src/app/shared/move-table.ts:86-117",
+        "app/package.json:18 — @angular/forms is an unused dependency"
+      ],
+      "rationale": "Approve-adjacent structure, but there is a concrete round of changes I'd require before merging: fix the promise-cache poisoning, replace the effect anti-pattern, clean up the scroll hack, and add at least a few unit tests for the pure logic — all bounded, none structural."
+    }
+  },
+  "overall": 4,
+  "findings": [
+    {
+      "severity": "medium",
+      "location": "app/src/app/core/poke-api.ts:17-18",
+      "issue": "Rejected promises are cached permanently, so a transient network failure makes every later request for that URL fail with the same stale rejection until a full page reload.",
+      "suggestion": "Evict the cache entry on rejection (request.catch(() => this.cache.delete(url))), or distinguish 404s from transient errors, or move reads to httpResource which handles this correctly."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/app/pages/home-page.ts:196-197",
+      "issue": "effect() copies resource value into a separate view signal to avoid the loading flicker — the state-propagation-in-effects anti-pattern the official guidance warns against, and inconsistent with every other page that uses resource.value() directly.",
+      "suggestion": "Use the v22-documented pattern: linkedSignal over resource.snapshot() to retain the previous value while loading, or at minimum explain the workaround in a comment."
+    },
+    {
+      "severity": "medium",
+      "location": "app/package.json:11",
+      "issue": "The app ships zero unit tests (skipTests set in angular.json schematics) despite nontrivial pure logic in move-table sorting, filter matching and evolution recursion.",
+      "suggestion": "Add spec files for MoveTable sorting/aria-sort behavior, the helpers, and PokedexData filtering; the acceptance tests alone won't protect refactors."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/app/pages/pokemon-page.ts:345-352",
+      "issue": "Hash-anchor scroll implemented as a plain effect reading window.location.hash with a setTimeout that is never cleaned up, doing manual DOM manipulation.",
+      "suggestion": "Use afterRenderEffect (the documented tool for post-render DOM work) with onCleanup for the timer, or a router scroll event; remove the redundant moveTables.hasValue() dependency-tracking read."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/app/pages/pokemon-page.ts:223-227",
+      "issue": "Loader fans out one HTTP request per move via Promise.all without honoring the loader's abortSignal, so navigating away mid-load leaves dozens of in-flight requests running.",
+      "suggestion": "Thread the abortSignal through PokeApi (e.g. takeUntil(fromSignal(signal)) on the observable) so stale loads are cancelled, as the resource docs recommend."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/app/pages/pokemon-page.ts:68",
+      "issue": "Type badges are labeled with humanize(apiName) instead of the English type name the spec asks for; only correct because all 18 type names coincide with their humanized form.",
+      "suggestion": "Resolve English names from the cached type records (already available via getAllTypes) the way home-page.ts:170 does for cards."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/app/pages/move-page.ts:28-60",
+      "issue": "Template calls data.value() about ten times instead of binding once, unlike pokemon-page.ts:71 which uses @let.",
+      "suggestion": "Use @let view = data.value(); for consistency and cheaper change detection."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/app/shared/move-table.ts:32-38",
+      "issue": "Each sortable column has duplicated click handlers on both the th and the nested button with stopPropagation juggling.",
+      "suggestion": "Keep a single handler on the button and make it fill the th (width/height 100%) for styling."
+    },
+    {
+      "severity": "low",
+      "location": "app/package.json:18",
+      "issue": "@angular/forms is listed as a dependency but never imported anywhere in src.",
+      "suggestion": "Remove the unused dependency."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/app/pages/home-page.ts:141",
+      "issue": "Once view() is non-null the data.error() branch is unreachable, so a failed refetch (API down, bad generation param after a good load) keeps rendering the stale list with no indication of failure.",
+      "suggestion": "Include error status in the retained snapshot so a failed reload can surface a message or the not-found view."
+    }
+  ],
+  "summary": "A genuinely modern Angular 22 codebase: signal inputs, resource()-based loading, URL-driven state, current DI and naming conventions, and clean layering that a reviewer can navigate in minutes. The main merge blockers are a promise cache that permanently poisons failed requests, an effect-to-signal workaround where v22 now documents a proper linkedSignal/snapshot pattern, and the total absence of app-owned unit tests. All required changes are localized — I'd merge after one focused round of fixes."
+}

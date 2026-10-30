@@ -1,0 +1,130 @@
+I've reviewed the full app against TanStack Start's current stable APIs (verified `createServerFn().validator()` is the canonical API since 1.168.25, srvx-based prod server matches official examples, `HeadContent`/`Scripts`/`notFound`/`loaderDeps` are current). This is a well-organized, genuinely idiomatic app with a few boundary and robustness nits.
+
+```json
+{
+  "dimension": "mergeability",
+  "criteria": {
+    "idiomatic": {
+      "score": 5,
+      "evidence": [
+        "app/src/routes/__root.tsx:7-12 — createRootRoute with loader/head/component plus HeadContent/Scripts, exactly the current Start pattern",
+        "app/src/routes/pokemon.$name.tsx:20-30 — validateSearch + loaderDeps({search}) + notFound() thrown in loader, the documented way to do query-keyed loading and 404s",
+        "app/src/server/functions.ts:55-57,179-181 — createServerFn({method:'GET'}).validator(...).handler(...) using the current canonical .validator() API (post-1.168.25)",
+        "app/src/routes/__root.tsx:10-11,24-25 — CSS imported with '?url' and linked via head links, matching the Start docs' styling recipe",
+        "app/src/server/functions.ts:41-43 — getCookie from '@tanstack/react-start/server' used in the root loader to SSR the team, no first-paint flash",
+        "app/server.mjs:11-24 — srvx/node + staticMiddleware serving dist/client, the same shape as the framework's own production-start examples",
+        "app/src/router.tsx:8-12 — createRouter with scrollRestoration and defaultPreload:'intent' in an exported getRouter()"
+      ],
+      "rationale": "Reads like the framework's own examples: file routes, server functions as loaders with the current validator API, head/meta for titles, notFound for missing resources, and an srvx production server identical in spirit to the official start scripts."
+    },
+    "correctness_risks": {
+      "score": 4,
+      "evidence": [
+        "app/src/server/functions.ts:60 — getPokemonById(species.id) is not wrapped in orNull, unlike every other resource fetch; a species whose default Pokémon is missing crashes the loader instead of 404ing",
+        "app/src/server/pokeapi.ts:36-42 — fetchJson has no timeout/AbortSignal and no errorComponent is defined anywhere (grep confirms), so an upstream failure surfaces as the default error page",
+        "app/src/components/TeamProvider.tsx:19,28 — writeTeamCookie (a side effect) called inside the setState updater, which React may invoke twice in dev; updaters must be pure",
+        "app/src/components/MoveTable.tsx:107 — row key `${row.move}-${row.level}` can collide when a move appears twice for a version group/method",
+        "app/src/routes/index.tsx:44-59 — the two-effect query/URL sync is race-free on back/forward (lastPushed ref) and cleans up its timer, so no leak or loop",
+        "app/src/server/pokeapi.ts:17-31 — cache entries share a promise and evict on rejection, so a failed upstream isn't pinned for 60s"
+      ],
+      "rationale": "Careful look found only minor risks: one unwrapped fetch, no custom error boundary, an impure setState updater, and a possible React key collision. No races, mismatches, leaks or unbounded fan-out of consequence."
+    },
+    "global_abstractions": {
+      "score": 4,
+      "evidence": [
+        "app/src/server/pokeapi.ts:1,44-53 — the data layer is a single server module, but it also houses pure helpers (idFromUrl, englishName, collapse, humanize re-export) that a future client import would happily resolve",
+        "app/src/server/pokeapi.ts:11-13,16 — module-level env read and a hidden global cache Map, correctly server-only only by convention (file is not named *.server.ts, so import protection's default rule won't catch a cross-boundary import)",
+        "app/src/routes/index.tsx:63 and app/src/routes/team.tsx:20 — the same `new Map(types.map(...))` label-map built twice",
+        "app/src/server/functions.ts:55-128 — getPokemonPage is a ~75-line view-model builder mixing game selection, method ranking and table assembly; locally fine, the first thing to split if it grows",
+        "app/src/components/PokemonCard.tsx:8-15 — one card component serves home/team/move/ability/type lists via props instead of five near-duplicates"
+      ],
+      "rationale": "Abstractions are few and mostly earn their keep (Section, TypeBadge, PokemonCardList are tight), but the server data module doubles as a utility module and isn't named to match the framework's import-protection convention, so the client/server boundary is guarded only by discipline."
+    },
+    "readability": {
+      "score": 4,
+      "evidence": [
+        "app/src/routes/ — file layout mirrors the URLs one-to-one, each route file is a loader plus a component of <90 lines",
+        "app/src/server/pokeapi.ts:3-6,20-23 — comments explain *why* (TTL choice, failure eviction), not restating code",
+        "app/src/lib/config.ts:1-5 — misnamed: 'config' is actually a single useMediaBase hook",
+        "app/src/routes/__root.tsx:14 — reaches into the private `m._notFound` field to title the not-found page, a fragile undocumented API",
+        "app/src/routes/index.tsx:38-59 — the debounce/URL-sync dance with a lastPushed ref takes two reads to trust"
+      ],
+      "rationale": "A new teammate finds their way quickly: routes mirror URLs, components are small and consistently named, comments explain intent. Rough spots are local — the misnamed config module, the private-field sniff, and one dense server-fn builder."
+    },
+    "review_cost": {
+      "score": 4,
+      "evidence": [
+        "app/src/server/pokeapi.ts:11-53 — the only structural request: rename to pokeapi.server.ts and hoist pure helpers to lib/",
+        "app/src/components/TeamProvider.tsx:19,28 — move the cookie write out of the updater: a one-line fix",
+        "app/src/server/functions.ts:60 — wrap in orNull for consistency with the file's own pattern",
+        "app/src/routes/index.tsx:20-35 — search/filter/pagination logic matches the spec exactly and needed no correctness questions"
+      ],
+      "rationale": "Approve after a round of nits: none are architectural, and each has an obvious in-place fix. The spec-sensitive parts (URL state, sort semantics, coverage math) are correct and well-factored."
+    }
+  },
+  "overall": 4,
+  "findings": [
+    {
+      "severity": "medium",
+      "location": "app/src/server/pokeapi.ts:11",
+      "issue": "The server-only data module (env access, fetch, global cache) is not named *.server.ts, so TanStack Start's import protection can't block a future client-side import; pure helpers like englishName/idFromUrl/collapse live in it and are tempting to reuse from components.",
+      "suggestion": "Rename to pokeapi.server.ts (matches the default '**/*.server.*' rule) and move pure helpers into lib/format.ts so the boundary is enforced by the build."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/server/pokeapi.ts:41",
+      "issue": "No route defines an errorComponent, so any non-404 upstream failure (e.g. 500 from the API) surfaces as the router's default error UI, and fetchJson has no timeout, letting a hung upstream block SSR indefinitely.",
+      "suggestion": "Add a defaultErrorComponent to createRouter and an AbortSignal/timeout in fetchJson."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/server/functions.ts:60",
+      "issue": "getPokemonById(species.id) is the only resource fetch not wrapped in orNull; a species with no default Pokémon yields an unhandled loader error instead of the Not found page the rest of the app produces.",
+      "suggestion": "Use `const pokemon = await orNull(getPokemonById(species.id)); if (!pokemon) return null`."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/components/TeamProvider.tsx:19",
+      "issue": "writeTeamCookie is called inside the setState updater, making the updater impure; React StrictMode double-invokes it and any future refactor (logging, batching) could double-apply side effects.",
+      "suggestion": "Compute the next team outside the updater (or write the cookie in an effect keyed on `team`)."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/routes/__root.tsx:14",
+      "issue": "The root head sniffs the private `m._notFound` field to render the not-found title, which is undocumented and can break on upgrades.",
+      "suggestion": "Rely on `m.status === 'notFound'` only, or set the title from the notFoundComponent side via a dedicated not-found route head."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/components/MoveTable.tsx:107",
+      "issue": "Row keys `${row.move}-${row.level}` collide when a move appears more than once for the same version group and method (PokeAPI does contain such duplicates).",
+      "suggestion": "Key on the row's index within the built rows array."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/routes/team.tsx:20",
+      "issue": "The type-label Map construction is duplicated verbatim in routes/index.tsx:63 and routes/team.tsx:20.",
+      "suggestion": "Extract a small `useTypeLabels(types)` helper next to PokemonCardList."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/routes/index.tsx:38",
+      "issue": "The home page ships the entire 1,025-entry species index (with types and generation) through the loader into the SSR/hydration payload (~100 KB of JSON per page load) — justified by the instant-search requirement, but worth being deliberate about.",
+      "suggestion": "Keep the approach but note the payload cost in a comment, or gate future growth (e.g. more per-entry fields) behind a server-filtered variant."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/server/functions.ts:96-99",
+      "issue": "A Pokémon page fans out one move fetch per learnable move (~90-150 requests, all cached for 60s) plus one per version group, which is inherent to PokeAPI's shape but makes page latency depend on cache warmth.",
+      "suggestion": "Acceptable as-is given the snapshot API and the shared TTL cache; consider longer TTLs for immutable data if it becomes hot."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/lib/config.ts:1",
+      "issue": "'config.ts' contains a single useMediaBase hook, not configuration; the name misleads when searching for app settings.",
+      "suggestion": "Rename to lib/useMediaBase.ts (or merge into lib/format's callers)."
+    }
+  ],
+  "summary": "A textbook TanStack Start app: current APIs (validator-based server functions, head/meta, notFound, srvx prod server), clean file-based routes, and a server layer that reads like a BFF. The risks are minor and mostly at the edges: an under-enforced server/client boundary (pokeapi.ts not *.server.ts), no custom error handling, and one impure setState updater. I'd merge after a round of small fixes."
+}
+```

@@ -1,0 +1,396 @@
+---
+import BaseLayout from '../../layouts/BaseLayout.astro';
+import NotFound from '../../components/NotFound.astro';
+import EvolutionNode from '../../components/EvolutionNode.astro';
+import {
+  NotFoundError,
+  englishName,
+  englishGenus,
+  formatHeight,
+  formatMissing,
+  formatWeight,
+  getJson,
+  humanize,
+  latestEnglishFlavorText,
+  mapLimit,
+  mediaUrl,
+} from '../../lib/pokeapi';
+import { getMove, getTypeDetail, getVersionGroup } from '../../lib/data';
+
+const name = Astro.params.name;
+let notFound = false;
+let species: any = null;
+let pokemon: any = null;
+let evolutionChain: any = null;
+
+try {
+  species = await getJson(`pokemon-species/${encodeURIComponent(name)}`);
+  const defaultVariety = (species.varieties || []).find((variety) => variety.is_default) || species.varieties?.[0];
+  if (!defaultVariety?.pokemon?.url) throw new NotFoundError();
+  pokemon = await getJson(defaultVariety.pokemon.url);
+} catch (error) {
+  if (error instanceof NotFoundError) {
+    notFound = true;
+    Astro.response.status = 404;
+  } else {
+    throw error;
+  }
+}
+
+let displayName = '';
+let genus = '';
+let flavorText = '';
+let artwork: string | null = null;
+let heightText = '';
+let weightText = '';
+let pokemonTypes: any[] = [];
+let stats: any[] = [];
+let totalStats = 0;
+let abilities: any[] = [];
+let gameGroups: any[] = [];
+let selectedGame: any = null;
+let methodGroups: any[] = [];
+let typeEnglishByName = new Map<string, string>();
+
+if (!notFound) {
+  displayName = englishName(species, species.name);
+  genus = englishGenus(species);
+  flavorText = latestEnglishFlavorText(species.flavor_text_entries);
+  heightText = formatHeight(pokemon.height);
+  weightText = formatWeight(pokemon.weight);
+  artwork = mediaUrl(
+    pokemon.sprites?.other?.['official-artwork']?.front_default ||
+      pokemon.sprites?.other?.home?.front_default ||
+      pokemon.sprites?.front_default,
+  );
+
+  pokemonTypes = [...(pokemon.types || [])].sort((a, b) => a.slot - b.slot);
+  stats = pokemon.stats || [];
+  totalStats = stats.reduce((sum, stat) => sum + (Number(stat.base_stat) || 0), 0);
+  abilities = [...(pokemon.abilities || [])].sort((a, b) => a.slot - b.slot);
+
+  if (species.evolution_chain?.url) {
+    try {
+      evolutionChain = await getJson(species.evolution_chain.url);
+    } catch (error) {
+      if (!(error instanceof NotFoundError)) throw error;
+    }
+  }
+
+  const groupRefs = new Map<string, any>();
+  for (const move of pokemon.moves || []) {
+    for (const detail of move.version_group_details || []) {
+      const group = detail.version_group;
+      if (group?.name) groupRefs.set(group.name, group);
+    }
+  }
+
+  const groups = await mapLimit([...groupRefs.values()], 8, (group) => getVersionGroup(group.url || group.name));
+  gameGroups = groups.sort((a, b) => (a.order ?? 0) - (b.order ?? 0));
+
+  const requestedGame = Astro.url.searchParams.get('game') || '';
+  selectedGame =
+    gameGroups.find((group) => group.name === requestedGame) || gameGroups[gameGroups.length - 1] || null;
+
+  if (selectedGame) {
+    const basicRows: any[] = [];
+    for (const move of pokemon.moves || []) {
+      for (const detail of move.version_group_details || []) {
+        if (detail.version_group?.name === selectedGame.name) {
+          basicRows.push({
+            moveName: move.move.name,
+            moveUrl: move.move.url,
+            level: detail.level_learned_at ?? 0,
+            method: detail.move_learn_method?.name || '',
+          });
+        }
+      }
+    }
+
+    const uniqueMoveNames = [...new Set(basicRows.map((row) => row.moveName))];
+    const moveDetails = await mapLimit(uniqueMoveNames, 24, (moveName) => getMove(moveName));
+    const moveByName = new Map<string, any>(moveDetails.map((detail) => [detail.name, detail]));
+
+    const moveTypeNames = [
+      ...new Set(moveDetails.map((detail) => detail.type?.name).filter((value): value is string => Boolean(value))),
+    ];
+    const typeNames = [...new Set([...pokemonTypes.map((entry) => entry.type.name), ...moveTypeNames])];
+    const typeDetails = await mapLimit(typeNames, 8, (typeName) => getTypeDetail(typeName));
+    typeEnglishByName = new Map(typeDetails.map((detail) => [detail.name, englishName(detail, detail.name)]));
+
+    const enrichedRows = basicRows.map((row) => {
+      const detail = moveByName.get(row.moveName);
+      const typeName = detail?.type?.name || '';
+      return {
+        ...row,
+        english: detail ? englishName(detail, detail.name) : humanize(row.moveName),
+        typeName,
+        typeEnglish: typeEnglishByName.get(typeName) || humanize(typeName),
+        category: detail?.damage_class?.name ? humanize(detail.damage_class.name) : '—',
+        power: detail?.power ?? null,
+        accuracy: detail?.accuracy ?? null,
+        pp: detail?.pp ?? null,
+      };
+    });
+
+    const methodsByName = new Map<string, any>();
+    for (const row of enrichedRows) {
+      if (!methodsByName.has(row.method)) {
+        methodsByName.set(row.method, {
+          name: row.method,
+          label: humanize(row.method),
+          rows: [],
+        });
+      }
+      methodsByName.get(row.method).rows.push(row);
+    }
+
+    const priorities = new Map([
+      ['level-up', 0],
+      ['machine', 1],
+      ['egg', 2],
+      ['tutor', 3],
+    ]);
+
+    methodGroups = [...methodsByName.values()]
+      .sort((a, b) => {
+        const priorityA = priorities.get(a.name) ?? 4;
+        const priorityB = priorities.get(b.name) ?? 4;
+        if (priorityA !== priorityB) return priorityA - priorityB;
+        return a.label.localeCompare(b.label);
+      })
+      .map((method) => {
+        const isLevelUp = method.name === 'level-up';
+        method.rows.sort((a: any, b: any) => {
+          if (isLevelUp && a.level !== b.level) return a.level - b.level;
+          return a.english.localeCompare(b.english, undefined, { sensitivity: 'base' });
+        });
+        return { ...method, isLevelUp };
+      });
+  } else {
+    const typeDetails = await mapLimit(
+      [...new Set(pokemonTypes.map((entry) => entry.type.name))],
+      8,
+      (typeName) => getTypeDetail(typeName),
+    );
+    typeEnglishByName = new Map(typeDetails.map((detail) => [detail.name, englishName(detail, detail.name)]));
+  }
+}
+
+const statLabels: Record<string, string> = {
+  hp: 'HP',
+  attack: 'Attack',
+  defense: 'Defense',
+  'special-attack': 'Sp. Atk',
+  'special-defense': 'Sp. Def',
+  speed: 'Speed',
+};
+---
+{notFound ? (
+  <NotFound />
+) : (
+  <BaseLayout title={`${displayName} – Pokédex`}>
+    <div class="pokemon-summary">
+      <div class="artwork-frame">
+        {artwork && <img src={artwork} alt={displayName} width="288" height="288" />}
+      </div>
+      <div class="summary-info">
+        <p class="pokemon-dex">#{String(species.id).padStart(4, '0')}</p>
+        <h1>{displayName}</h1>
+        {genus && <p class="pokemon-genus">{genus}</p>}
+        <div class="summary-types">
+          {pokemonTypes.map((entry) => (
+            <a
+              class="type-badge"
+              data-type={entry.type.name}
+              href={`/types/${entry.type.name}`}
+            >{typeEnglishByName.get(entry.type.name) || humanize(entry.type.name)}</a>
+          ))}
+        </div>
+        <dl class="measurements">
+          <div>
+            <dt>Height</dt>
+            <dd>{heightText}</dd>
+          </div>
+          <div>
+            <dt>Weight</dt>
+            <dd>{weightText}</dd>
+          </div>
+        </dl>
+        {flavorText && <p class="flavor-text">{flavorText}</p>}
+      </div>
+    </div>
+
+    <section class="section" aria-labelledby="stats-heading">
+      <h2 id="stats-heading">Base stats</h2>
+      <table class="stats-table">
+        <tbody>
+          {stats.map((stat) => (
+            <tr>
+              <th scope="row">{statLabels[stat.stat.name] || humanize(stat.stat.name)}</th>
+              <td class="stat-value">{stat.base_stat}</td>
+              <td class="stat-bar-cell">
+                <div class="stat-track">
+                  <div class="stat-fill" style={`width: ${Math.min(100, Math.max(0, (Number(stat.base_stat) / 180) * 100))}%`}></div>
+                </div>
+              </td>
+            </tr>
+          ))}
+          <tr class="total-row">
+            <th scope="row">Total</th>
+            <td class="stat-value">{totalStats}</td>
+            <td class="stat-bar-cell"></td>
+          </tr>
+        </tbody>
+      </table>
+    </section>
+
+    <section class="section" aria-labelledby="abilities-heading">
+      <h2 id="abilities-heading">Abilities</h2>
+      <ul class="link-list">
+        {abilities.map((entry) => (
+          <li>
+            <a href={`/abilities/${entry.ability.name}`}>{humanize(entry.ability.name)}</a>
+            {entry.is_hidden && <span> (hidden)</span>}
+          </li>
+        ))}
+      </ul>
+    </section>
+
+    <section class="section" aria-labelledby="evolution-heading">
+      <h2 id="evolution-heading">Evolution</h2>
+      {evolutionChain?.chain ? (
+        <ul class="evolution-tree">
+          <EvolutionNode node={evolutionChain.chain} />
+        </ul>
+      ) : (
+        <ul class="link-list">
+          <li><a href={`/pokemon/${species.name}`}>{humanize(species.name)}</a></li>
+        </ul>
+      )}
+    </section>
+
+    <section class="section" id="moves" aria-labelledby="moves-heading">
+      <h2 id="moves-heading">Moves</h2>
+      {gameGroups.length > 0 && (
+        <div class="moves-controls">
+          <label for="game-select">Game</label>
+          <select id="game-select" name="game">
+            {gameGroups.map((group) => (
+              <option value={group.name} selected={selectedGame?.name === group.name}>{humanize(group.name)}</option>
+            ))}
+          </select>
+        </div>
+      )}
+      {methodGroups.map((method) => (
+        <div class="move-table-scroll">
+        <table class="move-table" data-sortable>
+          <caption>{method.label}</caption>
+          <colgroup>
+            {method.isLevelUp ? (
+              <>
+                <col style="width: 12%" />
+                <col style="width: 23%" />
+                <col style="width: 15.5%" />
+                <col style="width: 15%" />
+                <col style="width: 12%" />
+                <col style="width: 14.5%" />
+                <col style="width: 8%" />
+              </>
+            ) : (
+              <>
+                <col style="width: 27%" />
+                <col style="width: 17%" />
+                <col style="width: 17%" />
+                <col style="width: 13%" />
+                <col style="width: 16%" />
+                <col style="width: 10%" />
+              </>
+            )}
+          </colgroup>
+          <thead>
+            <tr>
+              {method.isLevelUp && (
+                <th scope="col" data-sort-key="level"><button type="button">Level</button></th>
+              )}
+              <th scope="col" data-sort-key="move"><button type="button">Move</button></th>
+              <th scope="col" data-sort-key="type"><button type="button">Type</button></th>
+              <th scope="col" data-sort-key="category"><button type="button">Category</button></th>
+              <th scope="col" data-sort-key="power"><button type="button">Power</button></th>
+              <th scope="col" data-sort-key="accuracy"><button type="button">Accuracy</button></th>
+              <th scope="col" data-sort-key="pp"><button type="button">PP</button></th>
+            </tr>
+          </thead>
+          <tbody>
+            {method.rows.map((row) => (
+              <tr
+                data-level={method.isLevelUp ? row.level : ''}
+                data-move={row.english}
+                data-type={row.typeEnglish}
+                data-category={row.category}
+                data-power={row.power ?? ''}
+                data-accuracy={row.accuracy ?? ''}
+                data-pp={row.pp ?? ''}
+              >
+                {method.isLevelUp && <td class="numeric">{row.level}</td>}
+                <td><a href={`/moves/${row.moveName}`}>{row.english}</a></td>
+                <td><a class="type-badge" data-type={row.typeName} href={`/types/${row.typeName}`}>{row.typeEnglish}</a></td>
+                <td>{row.category}</td>
+                <td class="numeric">{formatMissing(row.power)}</td>
+                <td class="numeric">{formatMissing(row.accuracy)}</td>
+                <td class="numeric">{formatMissing(row.pp)}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+        </div>
+      ))}
+    </section>
+  </BaseLayout>
+)}
+
+<script>
+  const gameSelect = document.getElementById('game-select') as HTMLSelectElement | null;
+  gameSelect?.addEventListener('change', () => {
+    const url = new URL(window.location.href);
+    url.searchParams.set('game', gameSelect.value);
+    window.location.assign(url.toString());
+  });
+
+  const numericKeys = new Set(['level', 'power', 'accuracy', 'pp']);
+
+  document.querySelectorAll<HTMLTableElement>('table[data-sortable]').forEach((table) => {
+    const tbody = table.tBodies[0];
+    if (!tbody) return;
+    const headers = Array.from(table.querySelectorAll<HTMLTableCellElement>('thead th[data-sort-key]'));
+
+    const compare = (a: HTMLTableRowElement, b: HTMLTableRowElement, key: string, direction: string) => {
+      const aValue = a.dataset[key] ?? '';
+      const bValue = b.dataset[key] ?? '';
+      const direct = direction === 'ascending' ? 1 : -1;
+
+      if (numericKeys.has(key)) {
+        const aMissing = aValue === '';
+        const bMissing = bValue === '';
+        if (aMissing && bMissing) return 0;
+        if (aMissing) return 1;
+        if (bMissing) return -1;
+        return (Number(aValue) - Number(bValue)) * direct;
+      }
+
+      return aValue.localeCompare(bValue, undefined, { numeric: true, sensitivity: 'base' }) * direct;
+    };
+
+    headers.forEach((header) => {
+      header.querySelector('button')?.addEventListener('click', () => {
+        const direction = header.getAttribute('aria-sort') === 'ascending' ? 'descending' : 'ascending';
+        headers.forEach((other) => other.removeAttribute('aria-sort'));
+        header.setAttribute('aria-sort', direction);
+        const key = header.dataset.sortKey || '';
+        const rows = Array.from(tbody.rows);
+        rows.sort((a, b) => compare(a, b, key, direction));
+        rows.forEach((row) => tbody.appendChild(row));
+      });
+    });
+  });
+</script>

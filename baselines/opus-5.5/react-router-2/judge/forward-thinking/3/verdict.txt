@@ -1,0 +1,155 @@
+# Review — Pokédex app (forward-thinking)
+
+I read `SPEC.md`, all of `app/` (17 source files), the React Router skill's framework-mode reference, the React Router 8.5.0 docs shipped on unpkg (route-module, error-boundary, error-reporting, meta), and verified version currency against npm and the React Router changelog.
+
+## Version currency (verified)
+
+- `react-router` 8.5.0 is the current generation — npm shows 8.5.1 published 2026-10-27; the changelog's `v8.5.0` (2026-10-19) deprecates the `viewTransition` APIs, which this app correctly doesn't use.
+- `vite` 8.3.5, `typescript` 7.0.2 (native port, announced 2026-07-08), `react` 19.3.1, `express` 5.3 — all current stable lines.
+- The app uses the *newest* idioms, not just the newest version: React Router's v8 route-module doc explicitly says "Since React 19, using the built-in `<title>` element is recommended over the use of the route module's `meta` export" — the app renders `<title>` inline (`app/app/routes/types.tsx:14`, `home.tsx:96`), which is exactly the recommended move, not an outdated shortcut. Typed `Route.LoaderArgs`/`Route.ComponentProps`/`Route.ErrorBoundaryProps`, `data()`-thrown 404s, the root `Layout` export — all current, all used.
+
+## What ages well
+
+- **Data access is behind one boundary.** Every PokeAPI call funnels through `app/app/lib/api.server.ts:22` (`api`, `apiOr404`, `getIndex`, `pokemonCards`); routes never construct fetch URLs themselves. The `.server.ts` suffix keeps it out of the client bundle — the right convention.
+- **Lean dependency set** (7 runtime deps) on a custom Express server rather than a bloated adapter stack; `server.mjs:12` correctly uses the Express 5 wildcard `/{*splat}` and top-level `await import`.
+- **Graceful degradation**: the filter form is a real native GET form (`home.tsx:101-106`) whose input names match the URL params, so it works even if JS never attaches.
+- **No reliance on framework internals or unstable APIs.** `react-router.config.ts` sets only `ssr: true`; no future flags to chase, no `unstable_*` surface adopted.
+
+## What will churn / hurt later
+
+1. **No error reporting in production.** `root.tsx:53` only logs in `import.meta.env.DEV`, and there is no `handleError` in a revealed `entry.server.tsx` or `onError` on `HydratedRouter` — the current documented API for this (RR 8.5 `docs/how-to/error-reporting.md`). Server failures are silent in prod.
+2. **Unbounded fetch fan-out with no timeout.** `pokemon.tsx:112` fires one fetch per unique move URL in a game (often 100–300 requests) with no concurrency cap and no `AbortSignal.timeout`; since the cache TTL is 60 s (`api.server.ts:8`), this repeats. Same for the index build (18 type + 9 generation records).
+3. **API response types are duplicated across route modules.** `Move` is defined twice with different shapes (`pokemon.tsx:43`, `move.tsx:8`), and `Species`/`Pokemon`/`TypeRecord` live in the route files or `api.server.ts` piecemeal. An API shape change ripples through every route — the opposite of what the otherwise-clean `lib/api.server.ts` boundary promises.
+4. **Hand-rolled hydration-compensation, duplicated.** `home.tsx:78-84` and `pokemon.tsx:206-213` both reimplement "apply the value the user picked before hydration" via refs, `document.activeElement` checks and mount-time `navigate`. It's thoughtful (it solves a real SSR race), but it's imperative, subtle, and copy-pasted between two routes — a candidate for one shared hook or a `useSearchParams`-driven controlled input.
+
+## Minor
+
+- `isbot` (`package.json:18`) and `@react-router/node` (`package.json:16`) are not imported anywhere; `@react-router/dev` and `@react-router/express` already pull them in transitively (package-lock).
+- `routes/not-found.tsx` renders `null` and exists only to convert splat matches into 404 throws; unmatched URLs already land in the root `ErrorBoundary` with a 404, so the route is dead weight with a confusing empty component.
+- `spriteUrl` (`api.server.ts:39`) hard-codes the media path pattern instead of the sprite URLs the API itself returns — spec-documented, but a silent breakage point if the layout moves.
+
+```json
+{
+  "dimension": "forward-thinking",
+  "criteria": {
+    "latest_apis": {
+      "score": 5,
+      "evidence": [
+        "app/package.json:12 — react-router ^8.5.0, the current major (npm: 8.5.1 published 2026-10-27)",
+        "app/app/routes/types.tsx:14 — <title> rendered in the route component, which RR 8.5's route-module docs explicitly recommend over the meta export since React 19",
+        "app/app/root.tsx:51 — typed Route.ErrorBoundaryProps with isRouteErrorResponse, the current framework-mode error-boundary shape",
+        "app/app/lib/api.server.ts:41 — throws data(\"Not found\", { status: 404 }) instead of hand-built Responses",
+        "app/app/root.tsx:7 — root Layout export keeps the shell present on error-boundary renders",
+        "app/app/routes.ts:1-10 — current RouteConfig/index/route helpers; no deprecated viewTransition usage (deprecated in v8.5.0, removed in v9)"
+      ],
+      "rationale": "Consistently on the current generation, including the React-19 <title> recommendation and typed route props that most training data would predate; no legacy or deprecated APIs anywhere."
+    },
+    "platform": {
+      "score": 4,
+      "evidence": [
+        "app/app/lib/api.server.ts:25 — native fetch with no polyfill",
+        "app/app/routes/home.tsx:13,39 — URL / URLSearchParams for filter state",
+        "app/server.mjs:12 — top-level await import of the server build",
+        "app/app/routes/move.tsx:28 — replaceAll; app.css:160,177 — CSS grid + custom properties from tokens.css",
+        "app/app/components/PokemonCards.tsx:19-21 — lazy loading with explicit width/height (no CLS)",
+        "app/app/lib/api.server.ts:25 — fetch with no AbortSignal/timeout, so a hung upstream call hangs the request",
+        "app/app/app.css — flat selectors throughout; no CSS nesting despite a Chromium-only target"
+      ],
+      "rationale": "Reaches for the platform first (fetch, URLSearchParams, TLA, grid, custom properties, no-JS form fallback), but misses the one platform tool the data layer clearly wants: AbortSignal/timeout on upstream fetches."
+    },
+    "dependencies": {
+      "score": 4,
+      "evidence": [
+        "app/package.json:11-24 — 7 runtime deps, all current major lines (RR 8.5, express 5, react 19.3)",
+        "app/package.json:18 — isbot is never imported; only a custom entry.server would need it, and @react-router/dev bundles its own copy",
+        "app/package.json:16 — @react-router/node is never imported; it is already a transitive dep of @react-router/express",
+        "app/server.mjs:1-14 — express 5 chosen deliberately for the custom server; no compression/HTTPS (left to the proxy per spec)"
+      ],
+      "rationale": "Genuinely lean and modern; the only blemishes are two template leftovers that are unused as direct dependencies."
+    },
+    "churn_resistance": {
+      "score": 4,
+      "evidence": [
+        "app/app/lib/api.server.ts:22 — every upstream call behind api/apiOr404/getIndex; routes never build fetch URLs",
+        "app/app/lib/format.ts:4-38 — humanize/dexNumber/englishName/orMissing centralized for reuse",
+        "app/app/routes/pokemon.tsx:43 vs app/app/routes/move.tsx:8 — Move type defined twice with different shapes; Species/Pokemon types local to pokemon.tsx",
+        "app/app/routes/home.tsx:78-84 and app/app/routes/pokemon.tsx:206-213 — duplicated hand-rolled pre-hydration compensation effects",
+        "app/app/root.tsx:53 — no handleError/onError wired, so errors vanish in production",
+        "app/app/routes/not-found.tsx:7 — null-rendering splat route duplicating the framework's built-in unmatched-URL 404"
+      ],
+      "rationale": "Upgrading the framework would touch almost nothing, and data access is properly walled off; the friction lives in duplicated API type definitions, copy-pasted hydration plumbing, and missing error reporting that a future maintainer will have to retrofit."
+    }
+  },
+  "overall": 4,
+  "findings": [
+    {
+      "severity": "medium",
+      "location": "app/app/root.tsx:53",
+      "issue": "Errors are logged only in import.meta.env.DEV and there is no handleError export in a revealed entry.server.tsx or onError on HydratedRouter, so production failures are silent",
+      "suggestion": "Follow RR 8.5's error-reporting doc: reveal the entries and add handleError (checking request.signal.aborted) plus a client onError hook"
+    },
+    {
+      "severity": "medium",
+      "location": "app/app/routes/pokemon.tsx:112",
+      "issue": "One parallel fetch per unique move URL (hundreds per game), no concurrency cap and no timeout; the 60s cache TTL in api.server.ts:8 means the fan-out repeats",
+      "suggestion": "Add AbortSignal.timeout to api(), cap concurrent fetches, and give immutable move data a longer TTL or fold it into the index build"
+    },
+    {
+      "severity": "medium",
+      "location": "app/app/routes/pokemon.tsx:43",
+      "issue": "PokeAPI response types are duplicated across route modules (Move in pokemon.tsx and move.tsx; Species/Pokemon only in pokemon.tsx; TypeRecord in api.server.ts), so an API shape change ripples through every route",
+      "suggestion": "Centralize all API response shapes in lib/api.server.ts (or a lib/pokeapi-types.ts) so the data module owns the boundary"
+    },
+    {
+      "severity": "low",
+      "location": "app/app/routes/home.tsx:78-84",
+      "issue": "Hand-rolled pre-hydration compensation (refs + activeElement checks + mount-time navigate), duplicated in pokemon.tsx:206-213",
+      "suggestion": "Extract one shared hook (or drive the search input from useSearchParams) instead of maintaining two copies of subtle hydration logic"
+    },
+    {
+      "severity": "low",
+      "location": "app/app/lib/api.server.ts:25",
+      "issue": "fetch() has no AbortSignal/timeout, so a hung PokeAPI request hangs page rendering indefinitely",
+      "suggestion": "fetch(url, { signal: AbortSignal.timeout(10_000) }) and map timeouts to a 503-style error"
+    },
+    {
+      "severity": "low",
+      "location": "app/package.json:16-18",
+      "issue": "isbot and @react-router/node are declared as direct dependencies but never imported; @react-router/dev and @react-router/express provide them transitively",
+      "suggestion": "Drop both from dependencies unless a custom entry.server (which would need isbot) is added"
+    },
+    {
+      "severity": "low",
+      "location": "app/app/routes/not-found.tsx:7",
+      "issue": "Splat route renders null and exists only to convert matches into 404 throws; the framework already routes unmatched URLs to the root ErrorBoundary with a 404",
+      "suggestion": "Either delete the route and let the built-in 404 flow reach the root boundary, or give it a real component instead of returning null"
+    },
+    {
+      "severity": "low",
+      "location": "app/app/lib/api.server.ts:39",
+      "issue": "spriteUrl hard-codes the /media/sprites/pokemon/<id>.png pattern rather than using the sprite URLs the API returns",
+      "suggestion": "Keep the derivation (species-level cards would need a per-species fetch otherwise) but comment the spec dependency so a media-layout change is caught"
+    }
+  ],
+  "summary": "This app is squarely on the framework's current generation — React Router 8.5 with the React-19 <title> convention, typed route props, and data()-thrown 404s — and its dependency set is lean and modern. Data access is cleanly isolated behind one server-only module, so framework or API upgrades would touch very few files. The remaining age-well risks are duplicated PokeAPI type definitions, copy-pasted hydration compensation, and the absence of production error reporting or timeouts on upstream fetches.",
+  "apis": [
+    { "api": "createRequestHandler (@react-router/express)", "location": "app/server.mjs:5", "status": "current", "replacement": "" },
+    { "api": "data() thrown with { status: 404 }", "location": "app/app/lib/api.server.ts:41", "status": "current", "replacement": "" },
+    { "api": "isRouteErrorResponse / Route.ErrorBoundaryProps", "location": "app/app/root.tsx:51", "status": "current", "replacement": "" },
+    { "api": "root Layout export", "location": "app/app/root.tsx:7", "status": "current", "replacement": "" },
+    { "api": "<title> rendered in route components (instead of meta export)", "location": "app/app/routes/types.tsx:14", "status": "current", "replacement": "Recommended over meta per RR 8.5 route-module docs" },
+    { "api": "RouteConfig / index / route helpers", "location": "app/app/routes.ts:1", "status": "current", "replacement": "" },
+    { "api": "Link / NavLink / Outlet / Scripts / ScrollRestoration", "location": "app/app/root.tsx:1", "status": "current", "replacement": "" },
+    { "api": "express app.all(\"/{*splat}\")", "location": "app/server.mjs:12", "status": "current", "replacement": "Express 5 wildcard syntax (old '*' route paths are the legacy form)" }
+  ],
+  "dependencies": [
+    { "name": "react-router / @react-router/*", "verdict": "modern", "note": "8.5.0, days from the current 8.5.1; no deprecated or unstable APIs in use" },
+    { "name": "react / react-dom", "verdict": "modern", "note": "19.3.1, current stable line; enables the <title> hoisting convention the app uses" },
+    { "name": "express", "verdict": "modern", "note": "v5 with correct wildcard routing in the custom server" },
+    { "name": "vite", "verdict": "modern", "note": "8.3.5 is the current stable" },
+    { "name": "typescript", "verdict": "modern", "note": "7.0.2 native compiler, current stable" },
+    { "name": "isbot", "verdict": "unnecessary", "note": "Never imported; only a custom entry.server would need it, and @react-router/dev depends on its own copy" },
+    { "name": "@react-router/node", "verdict": "unnecessary", "note": "Never imported directly; already a dependency of @react-router/express" }
+  ]
+}
+```

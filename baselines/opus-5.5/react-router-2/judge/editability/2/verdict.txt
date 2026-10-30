@@ -1,0 +1,146 @@
+I have a complete picture now. Let me compile the review.
+
+## Review: Pokédex app (React Router 8 framework mode)
+
+**Framework currency check:** The app targets `react-router@^8.5.0` — the current stable line (8.5.1 shipped 2026‑10‑27). Its idioms match v8: manual `app/routes.ts` config, `./+types/<route>` generated types, `loader`/`Route.ComponentProps`, `data()` thrown for 404s, inline `<title>` elements (explicitly recommended over the `meta` export since React 19, per the v8 route-module doc), `@react-router/express` `createRequestHandler` with Express 5 splat syntax, and the `.server.ts` module convention (docs confirm server-only modules are excluded from client bundles). Nothing here is stale.
+
+**Architecture:** All data access (fetch, base URL, cache, sprite URLs) lives behind `app/app/lib/api.server.ts`, with a single derived `Index` shared by every loader. Loaders hand narrow view models (`Card`, `TypeInfo`, `MoveRow`) to four presentational components. Card lists on four different pages all funnel through `speciesCard`/`pokemonCards`. That's a strong changeability story: the sprite fix, the data-source change, and an Items section all land in well-marked seams.
+
+The main editability risks are the two imperative hydration-compensation/URL-sync `useEffect` blocks (`home.tsx:79-93`, `pokemon.tsx:206-213`) — correct, but subtle and enumerated per filter; adding a fourth home filter means ~6 coordinated edits including a comparison in the mount effect. Secondary: the "short_effect → flavor text → —" fallback rule is implemented twice (`move.tsx:27-31`, `ability.tsx:20-23`), the `Move` API shape is declared in two route files, `MoveTable`'s column config only drives headers/sorting while `<td>`s are hardcoded, and the 404 UI lives in `root.tsx` while `not-found.tsx` renders `null` — an indirection that will confuse the next editor of that file.
+
+```json
+{
+  "dimension": "editability",
+  "criteria": {
+    "removability": {
+      "score": 5,
+      "evidence": [
+        "app/app/routes.ts:7 — abilities is a single route() line; deleting it removes the URL",
+        "app/app/routes/ability.tsx:1-39 — self-contained route module, no exports used elsewhere",
+        "app/app/root.tsx:25-30 — nav has no Abilities link, so nothing to remove there",
+        "app/app/routes/pokemon.tsx:264-273 — the only inbound links, one deletable Section block",
+        "app/app/components/PokemonCards.tsx:23 — residual 'Hidden ability' note is conditionally rendered and inert after removal"
+      ],
+      "rationale": "Dropping Abilities means deleting one route file, one routes.ts line and one Section block in pokemon.tsx; only trivial optional cleanups (Card.hidden, .card__note CSS) would be left behind."
+    },
+    "changeability": {
+      "score": 4,
+      "evidence": [
+        "app/app/lib/api.server.ts:39,119-122 — sprite URL built in one helper used by every card list (home.tsx:45, and move/type/ability via pokemonCards), so a sprite fix covers all lists in one place",
+        "app/app/routes/move.tsx:27-31 — short_effect→flavor-text→— fallback rule duplicated",
+        "app/app/routes/ability.tsx:20-23 — same fallback rule re-implemented independently",
+        "app/app/routes/move.tsx:8-19 — Move API type declared here",
+        "app/app/routes/pokemon.tsx:43-52 — and again here, so an API shape change means editing two route files",
+        "app/app/routes/home.tsx:79-93 — behavior changes to filtering must account for three interacting mechanisms (debounce ref, navigate replace/push, DOM-sync effect)"
+      ],
+      "rationale": "The hard cross-cutting logic (cards, formatting, data access) fixes in one obvious place, but the effect-fallback rule and Move type are duplicated, and the imperative filter effects make behaviour changes in home.tsx subtle."
+    },
+    "coupling": {
+      "score": 4,
+      "evidence": [
+        "app/app/lib/api.server.ts:7-39 — base URL, TTL, cache and fetch confined to a .server.ts module (documented framework convention keeps it out of client bundles)",
+        "app/app/lib/types.ts:1-9 — components consume narrow Card/TypeInfo view models, not API records",
+        "app/app/components/Section.tsx:1-12, app/app/components/TypeBadge.tsx:1-19 — presentational components take props only, zero API knowledge",
+        "app/app/routes/not-found.tsx:7-9 — renders null and relies on root.tsx:51,66 ErrorBoundary/NotFound, an indirection that couples route config to root",
+        "app/app/lib/api.server.ts:93-158 — transport and view-model shaping (speciesCard/pokemonCards/typeInfo) share one module"
+      ],
+      "rationale": "Server/client separation is exemplary and components depend on narrow interfaces; deductions for view-model helpers living inside the transport module and the roundabout 404 wiring."
+    },
+    "abstraction_design": {
+      "score": 4,
+      "evidence": [
+        "app/app/lib/api.server.ts:136-147 — pokemonCards generic over refs with an extra() extension point, reused by type/move/ability with and without the hidden-ability variant",
+        "app/app/routes/ability.tsx:24-28 — the extension point absorbs a real variation without a flag",
+        "app/app/components/MoveTable.tsx:24-31,88-96 — COLUMNS drives headers and sorting, but tbody cells are hardcoded, so a new column needs three in-file edits plus the showLevel flag",
+        "app/app/routes/home.tsx:15-25,35-37,67-72,80-81 — adding a fourth filter touches the Filters type, queryString, loader parsing, currentFilters, the mount-effect comparison and JSX — flag-creep in one file",
+        "app/app/routes/move.tsx:53-77 — facts <dl> block has no shared abstraction, so an Items page would copy it"
+      ],
+      "rationale": "The genuinely shared, high-variation pieces (cards across four pages, move tables across methods, sections) are well abstracted; the creep is confined to per-filter wiring in home.tsx, MoveTable internals, and the page-shell markup that an Items page would duplicate."
+    }
+  },
+  "overall": 4,
+  "findings": [
+    {
+      "severity": "medium",
+      "location": "app/app/routes/home.tsx:79-93",
+      "issue": "Filters are uncontrolled inputs reconciled with the URL through two imperative effects (a mount-time pre-hydration catch-up that enumerates each filter by name, plus a DOM-sync effect); a new filter needs ~6 coordinated edits in one file and a missed one fails silently.",
+      "suggestion": "Drive the controls from a single declarative filter spec (key → param name, parse/serialize) and render controlled inputs, so adding a filter is one entry in one table."
+    },
+    {
+      "severity": "medium",
+      "location": "app/app/routes/pokemon.tsx:206-213",
+      "issue": "Same ref-plus-two-effects pattern for the Game select (pre-hydration catch-up plus manual value syncing); the select's state is implicitly shared between React and the DOM.",
+      "suggestion": "Make the select controlled from loaderData and navigate on change only; or extract the home/pokemon URL-syncing into one shared hook so the pattern is documented once."
+    },
+    {
+      "severity": "medium",
+      "location": "app/app/routes/move.tsx:27-31",
+      "issue": "The 'English short_effect, else latest English flavor text, else —' fallback is duplicated in ability.tsx:20-23; a spec change to the fallback rule lands twice.",
+      "suggestion": "Add effectOrFlavor(entries: {short_effect, language}[], flavorTexts) to app/app/lib/format.ts and use it from both loaders."
+    },
+    {
+      "severity": "low",
+      "location": "app/app/components/MoveTable.tsx:88-96",
+      "issue": "The COLUMNS abstraction (line 24) only drives headers/aria-sort; tbody cells are hardcoded in the same order with a showLevel flag, so adding/removing a column requires three coordinated edits in one file.",
+      "suggestion": "Render tbody cells from the same column config (cell renderers per column) so headers, sorting and body stay in lockstep."
+    },
+    {
+      "severity": "low",
+      "location": "app/app/routes/not-found.tsx:7-9",
+      "issue": "The catch-all route's component renders null; the actual 'Not found' UI lives in root.tsx:51-66, so editing routes/not-found.tsx visibly changes nothing — a trap for the next maintainer.",
+      "suggestion": "Render the not-found UI directly in the catch-all route module (keeping the 404 throw for unmatched resource names), and keep root's ErrorBoundary for errors only."
+    },
+    {
+      "severity": "low",
+      "location": "app/app/routes/pokemon.tsx:43-52",
+      "issue": "The Move API response shape is declared both here and in move.tsx:8-19; a change to how moves are read from the API means editing each route's local type.",
+      "suggestion": "Move shared API record types (Move, NamedResource-derived shapes) into app/app/lib/types.ts."
+    },
+    {
+      "severity": "low",
+      "location": "app/app/lib/api.server.ts:119-158",
+      "issue": "Transport concerns (base URL, cache, fetch) and view-model shaping (speciesCard/pokemonCards/typeInfo) share one module, so data-presentation changes and data-source changes both churn the same file.",
+      "suggestion": "Split the derived card/type helpers into app/app/lib/cards.ts, leaving api.server.ts as pure transport plus the raw index."
+    },
+    {
+      "severity": "low",
+      "location": "app/app/routes/pokemon.tsx:81-85",
+      "issue": "versionGroupOrders() fetches every version-group record per Pokémon page and lives inside a route module, so a second consumer (e.g. an Items page with game data) would copy it.",
+      "suggestion": "Move it into api.server.ts alongside getIndex so the cache and fetch conventions are shared."
+    }
+  ],
+  "summary": "A well-shaped framework-mode app on the current stable React Router: all data access sits behind one server-only module, and the hard cross-cutting pieces (Pokémon cards, move tables, sections, the derived index) are genuinely reusable, so most fixes and the data-source change land in one obvious place. The main editability costs are the two imperative URL/DOM-sync effects that make filter changes subtle and per-filter wiring flag-heavy, plus small duplications (effect fallback, Move type) and a confusing not-found indirection. Every scenario below touches only a small, findable set of files.",
+  "scenarios": [
+    {
+      "change": "Remove the Abilities pages and every link to them",
+      "files": ["app/app/routes.ts", "app/app/routes/ability.tsx", "app/app/routes/pokemon.tsx"],
+      "difficulty": 5,
+      "notes": "Delete the route file, one routes.ts line, and the Abilities Section block in pokemon.tsx:264-273; there is no nav link. Optional cleanup: Card.hidden (lib/types.ts:8) and the conditional note in PokemonCards.tsx:23 — inert if left."
+    },
+    {
+      "change": "Fix the card sprite for species whose default Pokémon has a different name (e.g. Deoxys)",
+      "files": ["app/app/lib/api.server.ts"],
+      "difficulty": 4,
+      "notes": "Every card on every page flows through speciesCard (api.server.ts:119-122; home.tsx:45, move/ability/type via pokemonCards), so one fix covers all lists, and the Pokémon page artwork already comes from API data (pokemon.tsx:156). The catch: the fix needs the default Pokémon's identity, which the Index doesn't currently hold, so it's one module but some new index plumbing."
+    },
+    {
+      "change": "Add sorting by name to every list of Pokémon cards",
+      "files": ["app/app/components/PokemonCards.tsx"],
+      "difficulty": 4,
+      "notes": "Sorting inside the shared PokemonCards component is a true single seam covering home, move, ability and type lists. Sorting in the loaders instead means two places: pokemonCards (api.server.ts:148) and home's species order (home.tsx:41-45), since home builds cards directly from the index."
+    },
+    {
+      "change": "Add an Items section (/items, /items/:name) shaped like Moves",
+      "files": ["app/app/routes.ts", "app/app/routes/item.tsx"],
+      "difficulty": 4,
+      "notes": "High reuse: Section, TypeBadges, PokemonCards, pokemonCards, apiOr404/getIndex, and all of lib/format serve as-is — you copy move.tsx's ~100-line page skeleton (including its duplicated effect-fallback and facts <dl> markup) into a new route module and add two route() lines."
+    },
+    {
+      "change": "Change the API base URL and caching rules",
+      "files": ["app/app/lib/api.server.ts"],
+      "difficulty": 5,
+      "notes": "One file knows everything: API_BASE_URL (line 7, also feeding spriteUrl line 39), TTL_MS (line 8), the cache Map (lines 10-21) and the single api() entry point. Absolute and relative URLs from API payloads are both handled (line 23), so no route needs touching."
+    }
+  ]
+}
+```

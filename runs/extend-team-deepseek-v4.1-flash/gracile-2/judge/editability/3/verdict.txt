@@ -1,0 +1,142 @@
+I've reviewed the whole app. Structure at a glance: `src/routes/` (Gracile file routes), `src/lib/` (`api.ts` fetch/cache client, `data.ts` API shapes + lookups, `format.ts` pure helpers, `team.ts` shared team codec), `src/components/partials.ts` (server partials), `src/client/` (vanilla custom-element islands), `src/document.ts` (shell). The app is on `@gracile/gracile@^0.11.0`, which is the current stable release, and uses its conventions correctly (`defineRoute`/`server-html`/`route-template-outlet`, parenthesized `(home).ts`/`(types).ts` route files, `gracile.nodeAdapter`). The server/client split is clean, and the team feature was added along existing seams rather than by rewriting shared code.
+
+Judging the requested scenarios against the code:
+
+1. **Remove Abilities**: delete `app/src/routes/abilities/[name].ts`; the only inbound link is the Abilities section at `app/src/routes/pokemon/[name].ts:233-243`; nothing in `document.ts` nav links there; unmatched URLs fall to `routes/404.ts`. Leftover: `getAbility`/`ApiAbility` in `app/src/lib/data.ts:334` and `:87-93` become dead.
+2. **Sprite bug**: every card on all five lists renders through `cardLink` (`app/src/components/partials.ts:20-31`) via `spriteUrl` (`app/src/lib/api.ts:73-74`) — one fix covers everything. The `Card.id` values themselves are produced in three places (`data.ts` cardsForPokemon/getPokemonIndex, `team.ts` member), so a data-shape fix would touch all three.
+3. **Sort by name**: `cardList` (`partials.ts:55`) is the single render path for the home, move, ability and type lists; the team list goes through `teamCard`, so its order-added invariant is naturally untouched.
+4. **Items section**: you can reuse `document()`, `section()`, `count(n, noun)`, `notFound()`, `orDash`/`englishName`, and the whole `api`/`apiRequired`/`idFromUrl` layer, but the resource-route scaffolding (load → null → 404 → title) exists as four copies, so a new resource means copying a route file's boilerplate.
+5. **Data source**: `API_BASE_URL`, `TTL_MS`, the cache, concurrency limiter and sprite URL all live in `app/src/lib/api.ts` only — one file.
+
+```json
+{
+  "dimension": "editability",
+  "criteria": {
+    "removability": {
+      "score": 4,
+      "evidence": [
+        "app/src/routes/abilities/[name].ts — the entire feature is one route file; deleting the directory removes the page",
+        "app/src/routes/pokemon/[name].ts:233 — the only inbound link to /abilities/ lives in the pokemon page's Abilities section, one block to delete",
+        "app/src/document.ts:26-30 — nav links are centralized here; no Abilities link exists, so nothing to scrub",
+        "app/src/routes/404.ts — unmatched URLs fall through to the catch-all automatically after removal",
+        "app/src/lib/data.ts:334 — getAbility (and ApiType-adjacent ApiAbility at :87) would be left dead in the data layer after route deletion"
+      ],
+      "rationale": "Deleting the Abilities feature is a directory delete plus one section in the pokemon route — nearly the ideal case. The half-step down is that the data layer keeps dead helpers (getAbility/ApiAbility) that a careful remover must also grep for."
+    },
+    "changeability": {
+      "score": 4,
+      "evidence": [
+        "app/src/components/partials.ts:20-31 — cardLink is the single sprite render point for every card list (home, moves, abilities, types, team)",
+        "app/src/lib/api.ts:73-74 — spriteUrl derives the URL in one place",
+        "app/src/components/partials.ts:55 — cardList is the single place a sort could be added for all lists",
+        "app/src/lib/api.ts:5-9 — API base URL and cache TTL are defined in exactly one file",
+        "app/src/routes/pokemon/[name].ts:168 — the isBuildRender guard is copy-pasted into all 7 route handlers (also (home).ts:18, moves/[name].ts:45, abilities/[name].ts:35, types/[name].ts:50, (types).ts:10, team.ts:89)",
+        "app/src/lib/data.ts:198 — card ids are produced in three places (cardsForPokemon :198, getPokemonIndex :236, routes/team.ts member :31), so a data-shape fix touches all three"
+      ],
+      "rationale": "Presentation-level bug fixes land in one obvious place (cardLink/spriteUrl/cardList/api.ts), which is the common case. Data-level fixes and any change to the build-render guard ripple across several files, which keeps this off the top score."
+    },
+    "coupling": {
+      "score": 4,
+      "evidence": [
+        "app/src/lib/data.ts — routes import narrow named functions (getMove, cardsForPokemon, getTypeLabels) rather than reaching into internals",
+        "app/src/lib/team.ts:3 — team state is one shared codec used by both server routes (routes/team.ts:91, routes/pokemon/[name].ts:170) and client store (client/team-store.ts:1), so server/client stay separated",
+        "app/src/document.ts:7-14 — the shell knows nothing about routes; CSS and client entry are wired in one place",
+        "app/src/client/pokemon-browser.ts:73 — island fetches the server template's '#results' by string selector, duplicated at routes/(home).ts:65; mismatch fails silently (fresh && current guard)",
+        "app/src/client/moves-panel.ts:24 — same stringly '#move-tables' contract with routes/pokemon/[name].ts:272",
+        "app/src/client/fragments.ts:4 — one module-level AbortController shared by all islands; two islands on one page would abort each other"
+      ],
+      "rationale": "Clean seams: routes depend on narrow lib exports, the server templates and client islands live in separate trees, and shared state flows through one module. The tangles are the untyped DOM-id contracts between islands and server templates, which break silently if renamed, and the global abort controller in fragments.ts."
+    },
+    "abstraction_design": {
+      "score": 4,
+      "evidence": [
+        "app/src/lib/data.ts:198-213 — cardsForPokemon(items, ref, extra) is a genuinely generic helper reused by the move (:moves/[name].ts:19), ability (:abilities/[name].ts:18) and type (:types/[name].ts:52) routes",
+        "app/src/components/partials.ts:67 — count(n, noun) models the real Pokémon/moves variation without flags",
+        "app/src/components/partials.ts:20-52 — Card with optional types/hidden fields and cardLink/teamCard variants stretch to home, ability and team cases without duplication",
+        "app/src/lib/format.ts:5-15 — pure humanize/dexNumber/orDash helpers reused across all routes",
+        "app/src/routes/moves/[name].ts:43-47 — load→null→404→title scaffolding is a fourth copy of the same pattern (also abilities :33, types :48, pokemon :166)",
+        "app/src/routes/pokemon/[name].ts:123 — the moveTables renderer plus its COLUMNS are embedded in (and exported from) the pokemon route rather than being a shared partial"
+      ],
+      "rationale": "The abstractions (Card, cardsForPokemon, section/count partials, format helpers) were designed around the app's real variation and stretch well — an Items section would reuse most of them. The gap is the repeated resource-route boilerplate and the moves-table renderer living inside a route file instead of components."
+    }
+  },
+  "overall": 4,
+  "findings": [
+    {
+      "severity": "medium",
+      "location": "app/src/client/pokemon-browser.ts:73",
+      "issue": "Islands couple to server templates via duplicated string selectors ('#results' at routes/(home).ts:65, '#move-tables' at routes/pokemon/[name].ts:272 vs client/moves-panel.ts:24, 'data-remove-member' at components/partials.ts:50 vs client/team-list.ts:12); a rename breaks the island silently because fetchFragment consumers no-op when the element is missing.",
+      "suggestion": "Put the shared element ids/attributes in one constants module imported by both the route template and the island, and log a warning in fetchFragment when the selector doesn't match."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/lib/api.ts:80",
+      "issue": "The isBuildRender(url) guard is duplicated in all seven route handlers; a framework change to the build-stub hostname or a decision to prerender real data means seven edits.",
+      "suggestion": "Centralize it, e.g. a tiny withRouteData(load) wrapper each handler calls, or skip data loading in the shared api layer keyed off the same check."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/client/fragments.ts:4",
+      "issue": "A single module-level AbortController is shared by every island, so two fragment-fetching islands on one page would cancel each other's requests.",
+      "suggestion": "Create an AbortController per island (per custom element instance) and pass it to fetchFragment."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/routes/moves/[name].ts:43",
+      "issue": "The load → null → responseInit.status = 404 → document title fallback pattern is copy-pasted across four resource routes, so a fix to 404 handling (e.g. also setting a header) lands in four places.",
+      "suggestion": "Extract a small resourceRoute(name, load, render) helper in components/ or lib/ and let each of the four routes delegate to it."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/lib/data.ts:198",
+      "issue": "Card.id (used directly for the sprite URL) is produced in three places — cardsForPokemon (:198), getPokemonIndex (:236) and routes/team.ts member (:31) — and conflates species id with default-pokémon id; a sprite or id-semantics fix must keep all three in sync.",
+      "suggestion": "Have all three go through one card constructor (or at least one id-normalizing helper) so the species↔pokémon mapping has a single definition with a comment."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/routes/pokemon/[name].ts:123",
+      "issue": "moveTables (plus its COLUMNS at :113) is exported from the route file but never imported anywhere; it's dead API surface in a route module.",
+      "suggestion": "Drop the export (or move the renderer into components/partials.ts where the other shared renderers live)."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/styles/app.css:47",
+      "issue": "One 630-line global stylesheet holds every page's styles; well bannered by feature (Site chrome :47, Pokémon cards :173, Team :230, Home :293, Pokémon page :351, Move page :537, Types :549) so it's navigable, but removing a feature requires scanning for its section and there's no scoping guarantee.",
+      "suggestion": "Acceptable as-is given the plain-CSS choice; if it grows, split per-route CSS files imported by the routes that use them."
+    }
+  ],
+  "summary": "This is a well-factored codebase for its size: routes are thin, all cross-route logic lives behind narrow exports in lib/ and components/partials.ts, and the client islands reuse server templates via fragments instead of duplicating rendering. The recurring weaknesses are duplicated route-level boilerplate (the build-render guard and the 404 pattern) and stringly-typed DOM-id contracts between islands and templates that fail silently. Every requested change lands in one to three obvious places, which is what a maintainer actually experiences day to day.",
+  "scenarios": [
+    {
+      "change": "Remove the Abilities pages and every link to them",
+      "files": ["app/src/routes/abilities/[name].ts", "app/src/routes/pokemon/[name].ts", "app/src/lib/data.ts"],
+      "difficulty": 5,
+      "notes": "Delete the route directory, remove the one Abilities section in the pokemon template (:233), and (optionally, for zero dead code) drop getAbility/ApiAbility from data.ts. Nav in document.ts never links there and 404 catches stale URLs automatically."
+    },
+    {
+      "change": "Fix the card sprite for species whose default Pokémon has a different name (e.g. Deoxys)",
+      "files": ["app/src/components/partials.ts", "app/src/lib/api.ts"],
+      "difficulty": 4,
+      "notes": "All five card lists render through cardLink (partials.ts:20) calling spriteUrl (api.ts:73), so a URL-derivation fix covers everything at once. It's not a 5 because card.id is computed in three producers (data.ts cardsForPokemon/getPokemonIndex, team.ts member) — if the fix is in the data rather than the URL, you must edit all three and keep them consistent."
+    },
+    {
+      "change": "Add sorting by name to every list of Pokémon cards",
+      "files": ["app/src/components/partials.ts"],
+      "difficulty": 5,
+      "notes": "cardList (partials.ts:55) is the single render path for the home, move, ability and type lists, and the home page's client-side refresh re-fetches the same server fragment, so no client changes are needed. The team list intentionally keeps insertion order and bypasses cardList via teamCard, so it is naturally excluded."
+    },
+    {
+      "change": "Add an Items section (/items, /items/:name) shaped like Moves",
+      "files": ["app/src/routes/items/(items).ts", "app/src/routes/items/[name].ts", "app/src/lib/data.ts", "app/src/styles/app.css"],
+      "difficulty": 3,
+      "notes": "The presentation layer (document, section, count, notFound, orDash, englishName) and the api client (api/apiRequired/idFromUrl) are all directly reusable, but there is no shared resource-route abstraction: you copy the ~25-line load→404→title scaffolding from moves/[name].ts, add an ApiItem type + getItem to the already-large data.ts, and write the item-detail template from scratch. Roughly the useful half of Moves is reused, the rest is copied."
+    },
+    {
+      "change": "Change the API base URL and caching rules",
+      "files": ["app/src/lib/api.ts"],
+      "difficulty": 5,
+      "notes": "API_BASE_URL (:5), TTL_MS (:9), the cache map and the concurrency limiter all live in one file, and spriteUrl derives from the same constant, so media and data URLs change together. No route or component hardcodes the API origin (verified by grep)."
+    }
+  ]
+}
+```

@@ -1,0 +1,106 @@
+{
+  "dimension": "mergeability",
+  "criteria": {
+    "idiomatic": {
+      "score": 5,
+      "evidence": [
+        "app/vite.config.ts:5-13 — SvelteKit 3 style: adapter and compilerOptions in the sveltekit() vite plugin, no svelte.config.js",
+        "app/package.json:15-17 — exact current minimums (svelte ^5.57.1, vite ^8, TS ^6, node >=22.17) and #lib subpath-import alias, all matching the Kit 3 migration guide",
+        "app/src/routes/pokemon/[name]/+page.server.ts:6 — `if (!pokemon) error(404, ...)` throw-style error() as current docs prescribe",
+        "app/src/routes/+page.svelte:4 — $app/state page instead of the legacy $app/stores",
+        "app/src/routes/+layout.svelte:9-11 — PageProps/LayoutProps from $types, Snippet children prop, class with $state field for shared reactive state (team) via context",
+        "app/src/lib/server/ — all fetching in +page.server.ts via lib/server/, clean server/client boundary; runes mode forced project-wide in vite.config.ts:8-11 with an explanatory comment"
+      ],
+      "rationale": "Reads like the framework's own current docs: Kit 3 configuration, runes everywhere, $app/state, Snippet children, throw-style error(), and the official best-practice pattern of a $state class shared through context. Only nit: setContext/getContext instead of the now-recommended createContext (available in their pinned Svelte)."
+    },
+    "correctness_risks": {
+      "score": 4,
+      "evidence": [
+        "app/src/routes/+page.svelte:38-53 — debounce timer is never cleared on unmount; a pending setTimeout can fire goto() after the user has already navigated away (e.g. typed then clicked a card within 200 ms)",
+        "app/src/lib/server/api.ts:33-51 — otherwise excellent: promise-deduped cache, TTL + 5000-entry bound, failed requests evicted, res.body.cancel() on 404/error",
+        "app/src/lib/server/pokedex.ts:181 — page clamped server-side (Math.min/max), so out-of-range ?page can't break pagination",
+        "app/src/lib/server/pokedex.ts:401 — a team member whose species 404s is silently dropped, so 'n of 6' can diverge from the cookie contents",
+        "app/src/lib/team.svelte.ts:36-38 — client cookie write with no multi-tab reconciliation; last-writer-wins (inherent to the chosen cookie approach, documented in team.ts:1-3)"
+      ],
+      "rationale": "Very careful overall — bounded cache, dedupe, race-aware search input, missing-value sorting, URL clamping. Two minor real issues: an uncleaned debounce timer that can race a navigation, and silent member-dropping on the team page; the multi-tab desync is an accepted trade-off of the cookie design."
+    },
+    "global_abstractions": {
+      "score": 4,
+      "evidence": [
+        "app/src/lib/server/pokedex.ts — single server data module (~450 lines) with clearly sectioned per-page loaders (Home/Pokémon/Move/Ability/Type/Team) and shared indexes (getSpecies/getTypes at :104-125)",
+        "app/src/lib/server/api.ts — one small, well-documented HTTP/cache/concurrency layer; nothing else touches fetch",
+        "app/src/lib/team.ts vs team.svelte.ts — client-safe parsing (cookie logic) deliberately split from the reactive class so +layout.server.ts:1-6 can reuse parseTeam without importing runes",
+        "app/src/lib/server/pokedex.ts:403-408 — default-variety + slot-sorted types logic duplicates getPokemonPage's version at :288-289 instead of a shared helper",
+        "app/src/lib/types.ts — three small shared shape types; components stay dumb (PokemonCard, CardList, Section)"
+      ],
+      "rationale": "Boundaries are clean (server-only data layer, tiny shared types, dumb components), but pokedex.ts is a growing god-module and the feature added one duplicated helper (default-variety/types extraction) that a second consumer should have forced into a shared function."
+    },
+    "readability": {
+      "score": 5,
+      "evidence": [
+        "app/src/lib/server/api.ts:1-2,28,45,63 — comments explain *why* (cache rationale, apiBase doc, mapLimit) rather than restating code",
+        "app/src/lib/team.ts:1-3 — header comment states the whole design decision (cookie → SSR-correct first render)",
+        "app/src/lib/server/pokedex.ts:41-45,100-113 — section banners and focused doc comments per exported loader",
+        "app/src/lib/format.ts — five tiny, named, one-purpose helpers (humanize/dexNumber/orDash/pageTitle/DASH) used consistently across every page",
+        "app/src/lib/components/Section.svelte:5-12 — heading id derivation and aria-labelledby in one obvious place"
+      ],
+      "rationale": "Consistent naming, small files, why-comments at every non-obvious decision; a new teammate can navigate this in minutes."
+    },
+    "review_cost": {
+      "score": 4,
+      "evidence": [
+        "app/src/routes/+page.svelte:38-53 — ask: clear the debounce timer on destroy ($effect cleanup)",
+        "app/src/lib/server/pokedex.ts:403-408 — ask: extract the duplicated default-variety/types-slot helper",
+        "app/src/lib/team.svelte.ts:47-51 — ask: use createContext (svelte >=5.40) for type safety",
+        "app/src/lib/server/pokedex.ts:394 — nit: skip fetching all 18 type records when the team is empty"
+      ],
+      "rationale": "Approve-with-nits: every issue is small, local and non-blocking; no structural rework needed."
+    }
+  },
+  "overall": 5,
+  "findings": [
+    {
+      "severity": "medium",
+      "location": "app/src/routes/+page.svelte:38-53",
+      "issue": "Debounce timer is never cleared when the component unmounts; a pending setTimeout calls goto() with stale props after navigation has started, which can hijack a card/link click made within the 200 ms window.",
+      "suggestion": "Clear the timer in an $effect cleanup (or onDestroy) so the pending update is dropped when the page unmounts."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/lib/server/pokedex.ts:403-408",
+      "issue": "getTeamPage re-implements the 'default variety → default Pokémon → slot-sorted types' logic that already exists in getPokemonPage (:288-289), creating a second copy the feature added next to the original.",
+      "suggestion": "Extract a shared getDefaultPokemon(species): Promise<ApiPokemon> helper in pokedex.ts and use it from both loaders."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/lib/team.svelte.ts:47-51",
+      "issue": "Uses setContext/getContext with a Symbol key; with the pinned Svelte ^5.57, the docs now recommend createContext for type-safe context.",
+      "suggestion": "Replace with `export const [getTeamContext, setTeamContext] = createContext<TeamState>()`, whose get() throws if unset."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/lib/server/pokedex.ts:401",
+      "issue": "A team member whose species no longer resolves is silently filtered out, so the rendered '<n> of 6' can disagree with the cookie's stored count.",
+      "suggestion": "Either keep a placeholder row for missing members or tolerate the divergence with a comment stating it's intentional."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/lib/server/pokedex.ts:394",
+      "issue": "getTeamPage fetches all 18 full type records even when the team is empty and the coverage table won't be rendered.",
+      "suggestion": "Early-return `{ members: [], coverage: [] }` when names is empty (the 18 records are cached, so this is only a cold-start cost)."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/lib/team.svelte.ts:36-38",
+      "issue": "Team cookie is written client-side with no cross-tab reconciliation; a second tab's stale TeamState overwrites the first tab's additions (last-writer-wins).",
+      "suggestion": "Acceptable for this spec (team 'belongs to the browser'); if it matters later, listen for cookie/storage changes or re-seed from layout data after navigation."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/app.html:6",
+      "issue": "`<meta name=\"text-scale\" content=\"scale\">` is a non-standard meta tag.",
+      "suggestion": "Remove it or replace with standard text-size-adjust CSS (already present in app.css:13-16)."
+    }
+  ],
+  "summary": "This is a genuinely current, idiomatic SvelteKit 3 app: config in vite.config.ts, #lib imports, runes everywhere, $app/state, and a clean server-only data layer with an exemplary bounded, promise-deduped cache. Correctness care is high — race-aware search input, server-side page clamping, missing-values-last sorting — with only small gaps: an uncleaned debounce timer, a duplicated default-variety helper the feature introduced, and the older setContext/getContext API instead of createContext. I'd merge it with a nits-only follow-up round."
+}

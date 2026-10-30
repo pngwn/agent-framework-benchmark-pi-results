@@ -1,0 +1,124 @@
+{
+  "dimension": "mergeability",
+  "criteria": {
+    "idiomatic": {
+      "score": 3,
+      "evidence": [
+        "app/app/routes.ts:1-16 — manual route config with index/route is a documented Framework-mode shape",
+        "app/app/root.tsx:24-70 — root shell with Links/Meta/Scripts/ScrollRestoration matches the framework examples",
+        "app/app/lib/api.server.ts:1 — `.server.ts` naming keeps fetch logic out of the client bundle (verified against app/build)",
+        "app/app/routes/pokemon.tsx:7-12 — not-found handled by returning `{ notFound: true }` sentinel instead of the documented `throw data(null, { status: 404 })` + ErrorBoundary pattern",
+        "app/app/routes/pokemon.tsx:42 — `({ loaderData }: any)` bypasses the generated `./+types/*` Route types the framework generates (no route imports them; tsconfig.json:2 even includes .react-router/types)",
+        "app/app/routes/home.tsx:6-8 — loader ignores the URL entirely; docs recommend parsing search params in the loader for shareable filter state",
+        "app/app/root.tsx:1-70 — no ErrorBoundary exported on root or any route, so loader errors render the framework default"
+      ],
+      "rationale": "Recognisably idiomatic Framework mode: route config, route modules with loaders/meta, correct server-only module boundary. But it opts out of three framework features — generated route types, the documented 404 throw/ErrorBoundary pattern, and loader-driven filter state — and adds an untuned revalidation story on the home route."
+    },
+    "correctness_risks": {
+      "score": 3,
+      "evidence": [
+        "app/app/routes/home.tsx:27-33 — the URL→state sync effect skips updates while the search input is focused, so back/forward navigation can leave the input/filter desynced from the URL",
+        "app/app/routes/home.tsx:81-86 — out-of-range `?page=` is clamped for display but the URL keeps the bogus value, so the visible 'Page N of M' disagrees with the address bar",
+        "app/app/lib/api.server.ts:336-338 — an invalid `?game=` silently falls back to the latest group while the URL retains the bad value",
+        "app/app/lib/api.server.ts:38-43 — fetchJson throws on non-OK responses and has no timeout; with no ErrorBoundary anywhere this surfaces as the raw framework error page",
+        "app/app/lib/api.server.ts:15 — recordCache is unbounded (acceptable given the fixed snapshot and the spec explicitly permitting runtime caching)"
+      ],
+      "rationale": "No serious bugs: SSR/client state is consistent, missing values sort last correctly, alternate forms are filtered, and the live-overlay species path is handled. The remaining issues are edge-case URL/state desyncs and unguarded fetch failures."
+    },
+    "global_abstractions": {
+      "score": 3,
+      "evidence": [
+        "app/app/lib/api.server.ts:15,65,96,174,258 — five module-level promise caches plus a global record cache in one 520-line god data module holding every page's data shape",
+        "app/app/lib/api.server.ts:174-235 — HomeData embeds all 1025 species (with types, sprites, generations) in a single loader response reused everywhere",
+        "app/app/lib/api.server.ts:456-465 — getAbilityPage re-implements the dedupe/sort logic of cardsFromRefs (150-158) just to add a `hidden` flag",
+        "app/app/routes/move.tsx:5-20, ability.tsx:5-20, type-detail.tsx:5-20 — the same loader-notFound + meta boilerplate duplicated across four routes",
+        "app/app/app.css:1-60 — design/tokens.css duplicated verbatim instead of imported, so future token changes need a manual sync"
+      ],
+      "rationale": "Boundaries between server and client are clean and format.ts/components.tsx earn their keep, but api.server.ts is a single global-state module with one duplicated card-building path; it will need splitting before it grows further."
+    },
+    "readability": {
+      "score": 3,
+      "evidence": [
+        "app/app/lib/format.ts:1-46 — small, well-named pure helpers with a clear contract",
+        "app/app/lib/api.server.ts:56,124,163,236,373 — section banner comments give the big module a usable map",
+        "app/app/routes/pokemon.tsx:42-45, home.tsx (elsewhere) vs pokemon.tsx — inconsistent typing discipline: home.tsx:16 is properly typed while pokemon/move/ability/type-detail components are `any`",
+        "app/app/routes/pokemon.tsx:246-283 — MovesTable sort logic is self-contained and readable"
+      ],
+      "rationale": "A new teammate finds their way quickly — files are small and consistently formatted — but the pervasive `any` on loaderData props means every component's data shape must be traced back into api.server.ts by hand."
+    },
+    "review_cost": {
+      "score": 3,
+      "evidence": [
+        "app/app/routes/pokemon.tsx:7-42 — `any`-typed loader/meta/component need retyping with generated Route types",
+        "app/app/routes/home.tsx:49-62,86 — full-dataset payload re-serialized on every keystroke-driven search-param change (loader at home.tsx:6-8) needs revalidation tuning or loader-side pagination",
+        "app/app/lib/api.server.ts:456-465 — dedupe card logic needs merging",
+        "app/app/routes/not-found.tsx:1-9 — splat route fine, but per-route notFound sentinels need replacing with the documented throw+ErrorBoundary pattern"
+      ],
+      "rationale": "The structure is sound and I'd approve the architecture, but there's a real round of changes: adopt generated route types, use the documented 404/ErrorBoundary handling, fix the home-route revalidation payload, and dedupe the card helpers."
+    }
+  },
+  "overall": 3,
+  "findings": [
+    {
+      "severity": "medium",
+      "location": "app/app/routes/home.tsx:6-8",
+      "issue": "The home loader ignores search params, yet every search-param change (each search keystroke, no debounce) revalidates the loader and re-serializes the full 1025-species HomeData payload from the server.",
+      "suggestion": "Either move filtering/pagination into the loader (returning just the 48-card page) or add `shouldRevalidate: () => false` on the home route since the loader is param-independent."
+    },
+    {
+      "severity": "medium",
+      "location": "app/app/routes/pokemon.tsx:7-12",
+      "issue": "Not-found is handled by returning a `{ notFound: true }` sentinel (HTTP 200) and rendering NotFoundPage inline, instead of the framework's documented `throw data(null, { status: 404 })` + ErrorBoundary pattern; the same pattern is duplicated in move/ability/type-detail.",
+      "suggestion": "Throw `data` with status 404 from the loaders and render a shared NotFound via ErrorBoundary (or at least export the sentinel logic once)."
+    },
+    {
+      "severity": "medium",
+      "location": "app/app/routes/pokemon.tsx:42",
+      "issue": "Loaders, meta and components are typed `any` instead of using the generated `./+types/*` Route types, despite tsconfig including `.react-router/types`.",
+      "suggestion": "Import `Route` from './+types/pokemon' (etc.) and use Route.LoaderArgs / Route.ComponentProps throughout; type the API responses too."
+    },
+    {
+      "severity": "medium",
+      "location": "app/app/root.tsx:24-70",
+      "issue": "No ErrorBoundary on root or any route, so an API failure (fetchJson throws on non-404) renders the raw framework error page.",
+      "suggestion": "Export an ErrorBoundary from root.tsx (and optionally busy routes) with a friendly message and a link home."
+    },
+    {
+      "severity": "low",
+      "location": "app/app/lib/api.server.ts:456-465",
+      "issue": "getAbilityPage re-implements the dedupe/sort card-building logic of cardsFromRefs (lines 150-158) just to attach the `hidden` flag.",
+      "suggestion": "Extend cardsFromRefs with an optional per-card decorator instead of duplicating the map/dedupe/sort pipeline."
+    },
+    {
+      "severity": "low",
+      "location": "app/app/routes/home.tsx:27-33",
+      "issue": "The URL→input sync effect skips while the search input is focused, so back/forward navigation can leave the input text and filters disagreeing with the URL.",
+      "suggestion": "Always sync from the URL on popstate (e.g., compare against a ref of the last pushed value rather than activeElement)."
+    },
+    {
+      "severity": "low",
+      "location": "app/app/routes/home.tsx:81-86",
+      "issue": "Out-of-range `?page=` values are clamped for rendering while the URL keeps the bogus page number.",
+      "suggestion": "Redirect/replace the URL to the clamped page when requestedPage exceeds totalPages."
+    },
+    {
+      "severity": "low",
+      "location": "app/app/lib/api.server.ts:336-338",
+      "issue": "An invalid `?game=` param silently selects the latest version group while the URL retains the unrecognized value.",
+      "suggestion": "Normalize the URL (replace the param or drop it) when the game param isn't a known version group."
+    },
+    {
+      "severity": "low",
+      "location": "app/app/app.css:1-60",
+      "issue": "design/tokens.css is duplicated verbatim into app.css rather than imported, creating a manual sync point for future token changes.",
+      "suggestion": "Import the tokens file (or a copied tokens.css kept as its own file) so app.css only contains component styles."
+    },
+    {
+      "severity": "low",
+      "location": "app/app/lib/api.server.ts:38-43",
+      "issue": "fetchJson has no timeout, so a hung API request stalls the loader indefinitely.",
+      "suggestion": "Add AbortSignal.timeout() to the fetch call so failures surface as errors."
+    }
+  ],
+  "summary": "A competent, recognisably idiomatic React Router framework-mode app with clean server/client boundaries, correct route-module structure and a working cache layer. The main gaps are opting out of framework features — generated route types, the documented 404 throw/ErrorBoundary pattern, and any error boundaries at all — plus a home route that re-validates and re-serializes the full 1025-species payload on every filter keystroke. I'd merge after one round of changes addressing those, none of which require rearchitecting."
+}

@@ -1,0 +1,162 @@
+The app contains no test files of its own — no runner, no `test` script, and empty `devDependencies` (`app/package.json:5-17`). The only guard is the external acceptance suite in `tests/`, which is broad (home filtering, Pokémon detail, moves/abilities/types, not-found, layout) but lives outside `app/` and won't protect refactors of this codebase's own data layer. Per the dimension's instructions, I score the coverage criteria on what the app's own tests would catch: nothing.
+
+The most useful output is therefore the map of untested risk. This app is almost entirely data transformation and URL-state logic, and the risky spots are:
+
+- **ID/URL parsing and alternate-form exclusion** — `refId` regex `\/(\d+)\/?$/` (`app/src/lib/queries.ts:178`) and the `id > 10000` guard repeated at four call sites (`app/src/lib/queries.ts:292`, `367`, `416`, `453`). These invariants are what keep Mega forms out and map `deoxys-normal` → species 386; a refactor that drops or loosens them silently corrupts every list.
+- **Level-up dedup** — `Math.min` across duplicate `version_group_details` (`app/src/lib/queries.ts:575`) with first-wins for other methods; the `Level` column depends on it.
+- **Missing-values sort last in both directions** — `sortRows` deliberately returns `1` for missing before applying direction (`app/src/components/MoveTable.tsx:18-33`); the "obvious" refactor (multiplying by direction) breaks the spec invisibly.
+- **Debounce ↔ URL sync race** — the effect at `app/src/routes/index.tsx:68-77` bails out when a debounce is pending, so pressing Back during the 250 ms window (`app/src/routes/index.tsx:50-64`) can discard the URL's `q` and re-navigate to the typed text. Classic fragile interplay, zero coverage.
+- **Pagination clamping and link construction** — `parseInt || 1` plus min/max clamp and hand-built `pageHref` query (`app/src/routes/index.tsx:94-124`).
+- **Error paths** — `fetchJson` throws on non-404 (`app/src/lib/queries.ts:156-166`) but there is no `ErrorBoundary` anywhere (`app/src/app.tsx:14` uses only `Suspense`), and the 404 render depends on `data() === null` rather than undefined (`app/src/routes/pokemon/[name].tsx:144-151`); a transient API 500 leaves a permanently stuck "Loading…".
+- **Pure formatting helpers** — `humanize`, `latestEnglishFlavor` (last *en* entry, not first), `collapseWhitespace`, `dexNumber`, `formatMeasurement` (`app/src/lib/format.ts:1-33`) are one-line unit-test targets that pin the spec's display rules; none exist.
+
+```json
+{
+  "dimension": "tests",
+  "criteria": {
+    "coverage_of_risk": {
+      "score": 1,
+      "evidence": [
+        "app/package.json:5-17 — no test script, no test runner, empty devDependencies",
+        "app/src/lib/queries.ts:178-183 — refId URL-ID parsing, core data invariant, untested",
+        "app/src/lib/queries.ts:292 — id > 10000 alternate-form exclusion, repeated at 367/416/453, untested",
+        "app/src/routes/index.tsx:94-124 — pagination clamp and pageHref query construction, untested"
+      ],
+      "rationale": "No tests were written at all, so the riskiest logic (data transformation, ID parsing, URL state) has zero coverage beyond the external acceptance suite."
+    },
+    "behaviour_not_implementation": {
+      "score": 1,
+      "evidence": [
+        "app/package.json:5-17 — no tests exist to be either behavioural or implementation-focused"
+      ],
+      "rationale": "There are no tests in app/, so the criterion cannot be satisfied."
+    },
+    "regression_power": {
+      "score": 1,
+      "evidence": [
+        "app/src/lib/format.ts:13-19 — latestEnglishFlavor last-en-entry rule would regress silently under refactor",
+        "app/src/components/MoveTable.tsx:18-33 — missing-last-in-both-directions logic would break undetected if direction were applied to missing comparisons",
+        "app/src/lib/queries.ts:575 — level-up min-level dedup unguarded"
+      ],
+      "rationale": "Nothing in app/ would fail if any of these behaviours were broken; only the outside acceptance suite notices, and only until it stops being run against this code."
+    },
+    "signal_to_noise": {
+      "score": 3,
+      "evidence": [
+        "app/package.json:5-17 — no tests means no noise, but also no signal"
+      ],
+      "rationale": "Per the rubric, no tests scores 3: no low-value tests to maintain, but nothing earning its keep either."
+    }
+  },
+  "overall": 1,
+  "findings": [
+    {
+      "severity": "high",
+      "location": "app/package.json:5-17",
+      "issue": "The app ships no test infrastructure whatsoever — no test script, no runner, no devDependencies — in a ~2000-LOC app whose logic is almost entirely data transformation and URL state.",
+      "suggestion": "Add vitest (and optionally @solidjs/testing-library / Playwright for a couple of route-level smoke tests), a `test` script, and start with unit tests for lib/format.ts and the pure parts of lib/queries.ts."
+    },
+    {
+      "severity": "high",
+      "location": "app/src/lib/queries.ts:178-183",
+      "issue": "refId parses IDs out of API URLs with a regex and returns 0 on mismatch; the id>10000 alternate-form guard (lines 292, 367, 416, 453) is duplicated inline four times. A refactor that changes either silently drops or admits species from every list.",
+      "suggestion": "Extract and unit-test the ID extraction and form-exclusion rules against fixtures with alternate forms (e.g. deoxys-normal 386 vs a Mega ID 10033)."
+    },
+    {
+      "severity": "high",
+      "location": "app/src/lib/queries.ts:156-166",
+      "issue": "fetchJson throws on any non-404 response but no ErrorBoundary exists (app/src/app.tsx:14 uses only Suspense); a transient API 500 leaves the page stuck on 'Loading…' and the not-found branch in app/src/routes/pokemon/[name].tsx:144-151 (which keys on data() === null, not undefined) never renders.",
+      "suggestion": "Add an ErrorBoundary in the router root with a retry message, and test the failure path with a stubbed 500."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/routes/index.tsx:68-77",
+      "issue": "The URL→input sync effect bails out while a debounce is pending (line 72), so navigating back during the 250 ms window (lines 50-64) discards the URL's q and re-navigates to the typed text — a race nothing pins down.",
+      "suggestion": "Cancel the pending debounce on popstate/URL change instead of ignoring the URL, and add a test that types then immediately presses Back."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/components/MoveTable.tsx:18-33",
+      "issue": "Missing values must sort last in both directions (spec); sortRows hard-codes return 1/-1 for missing before applying direction. The natural refactor of multiplying the whole comparison by direction breaks this silently.",
+      "suggestion": "Unit-test sortRows directly with null power/accuracy rows in ascending and descending order."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/lib/queries.ts:575",
+      "issue": "Level-up moves deduplicate across version_group_details with Math.min on level; other methods keep the first detail seen. A subtle change here corrupts the Level column for Pokémon with per-version level differences.",
+      "suggestion": "Test the methodMoves construction with a fixture where the same move appears at levels 1 and 37 in the same version group."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/routes/index.tsx:94-124",
+      "issue": "Page clamping (parseInt || 1, min/max) and pageHref's hand-built query string are untested: out-of-range, zero, and garbage `page` values, and whether pagination links preserve an in-flight (undebounced) q, are all unpinned.",
+      "suggestion": "Unit-test currentPage/totalPages clamping and assert pageHref output for combined filter states."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/lib/format.ts:1-33",
+      "issue": "Pure, instantly testable display helpers (humanize, latestEnglishFlavor's last-en-entry rule, collapseWhitespace, dexNumber zero-padding, formatMeasurement's em-dash for null) have no tests; regressions here violate the spec's display rules.",
+      "suggestion": "Five-minute vitest table tests over these functions; they encode the spec's exact formatting rules."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/lib/queries.ts:292-300",
+      "issue": "Type membership keeps the lowest slot per type then sorts by slot/name; slot-order bugs would mislabel dual-type Pokémon cards with no in-app guard.",
+      "suggestion": "Unit-test the per-species type aggregation with a fixture containing duplicate type entries at different slots."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/routes/pokemon/[name].tsx:140-142",
+      "issue": "The #moves hash-scroll effect uses requestAnimationFrame and only runs client-side; untested, and its interaction with Suspense hydration is fragile.",
+      "suggestion": "Cover with a route test that loads /pokemon/pikachu#moves and asserts the moves section is scrolled into view."
+    }
+  ],
+  "summary": "The app contains zero tests of its own — no runner, script, or dev dependencies — despite being dominated by pure data-transformation and URL-state logic that is cheap to unit-test. Everything currently passes only because the external acceptance suite in tests/ exercises the rendered pages end to end; once that suite is no longer the sole guard, refactors of refId/ID-exclusion, level dedup, missing-last sorting, and the debounce/URL sync would regress silently. Adding vitest coverage of lib/format.ts and the pure builders in lib/queries.ts, plus one error-boundary test, would be the highest-value first steps.",
+  "wroteTests": false,
+  "testCount": 0,
+  "valuableTests": [],
+  "lowValueTests": [],
+  "untested": [
+    {
+      "area": "ID/URL parsing and alternate-form exclusion (queries.ts:178-183, 292, 367, 416, 453)",
+      "risk": "high",
+      "likelyBug": "A regex or off-by-one change silently drops species from every list or leaks Mega forms into cards, links and counts"
+    },
+    {
+      "area": "Search debounce ↔ URL query sync (index.tsx:50-77)",
+      "risk": "high",
+      "likelyBug": "Back navigation during the 250 ms debounce window discards the URL's q and re-navigates, breaking history"
+    },
+    {
+      "area": "Pagination clamping and pageHref construction (index.tsx:94-124)",
+      "risk": "medium",
+      "likelyBug": "Out-of-range or garbage `page` values render an empty page, or pagination links drop the q/type/generation filters"
+    },
+    {
+      "area": "Server error handling (fetchJson throws, no ErrorBoundary; app.tsx:14)",
+      "risk": "medium",
+      "likelyBug": "A transient API 500 leaves a permanently stuck 'Loading…' with no 404 or error message rendered"
+    },
+    {
+      "area": "Move-table sorting incl. missing-last in both directions (MoveTable.tsx:18-33)",
+      "risk": "medium",
+      "likelyBug": "Applying sort direction to missing-value comparisons puts em-dash rows first when sorting descending, violating the spec"
+    },
+    {
+      "area": "Level-up min-level dedup and method ordering (queries.ts:542-600)",
+      "risk": "medium",
+      "likelyBug": "Duplicate version_group_details produce wrong Level values or Level Up/Machine/Egg/Tutor tables fall out of spec order"
+    },
+    {
+      "area": "Display formatting helpers (format.ts:1-33)",
+      "risk": "low",
+      "likelyBug": "First-en-entry instead of last for flavor text, un-collapsed \\f whitespace, or '0.4 m' rendered as '4 m' after a units refactor"
+    },
+    {
+      "area": "Not-found rendering per resource type and #moves hash scroll (routes/*/[name].tsx, [...404].tsx)",
+      "risk": "low",
+      "likelyBug": "A query that throws (rather than returning null) shows infinite loading instead of the 404 page; hash scroll breaks after hydration changes"
+    }
+  ]
+}
+```

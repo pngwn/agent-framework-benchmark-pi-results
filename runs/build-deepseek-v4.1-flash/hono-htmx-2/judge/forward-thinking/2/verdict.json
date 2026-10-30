@@ -1,0 +1,155 @@
+{
+  "dimension": "forward-thinking",
+  "criteria": {
+    "latest_apis": {
+      "score": 3,
+      "evidence": [
+        "app/server.mjs:136-144 — current v4 API throughout: app.notFound/app.onError((err,c))/serve({fetch,port,hostname})",
+        "app/server.mjs:28-39 — hand-rolled static file serving (fs.readFileSync at boot, per-file routes) instead of serveStatic from @hono/node-server/serve-static",
+        "app/src/render.mjs:3-9 — hand-rolled escapeHtml plus raw template-string concatenation instead of Hono's current hono/html html`` helper (auto-escaping, hono.dev/docs/helpers/html)",
+        "app/src/views.mjs:108-115 — current htmx 2.x attribute set (hx-get, hx-swap='outerHTML', hx-include, hx-trigger with 300ms debounce)"
+      ],
+      "rationale": "Hono 4.13.14 is the current stable (v5 is RC-only as of 2026-10-25), and the routing/context/adapter usage is exactly that generation; but two current framework primitives — @hono/node-server's serveStatic and the hono/html helper — are replaced with hand-rolled equivalents, so the rendering/serving layer reads as the pre-helper era."
+    },
+    "platform": {
+      "score": 4,
+      "evidence": [
+        "app/src/api.mjs:53 — native fetch for all upstream data, no HTTP client library",
+        "app/src/render.mjs:95 — URLSearchParams builds filter URLs (no string concatenation)",
+        "app/src/views.mjs:410 — .at(-1); app/src/views.mjs:303 — localeCompare with {numeric, sensitivity} options",
+        "app/package.json:4 — \"type\": \"module\" with ES-module .mjs throughout",
+        "app/src/api.mjs:53 — fetch has no AbortSignal.timeout/AbortController, so a stalled upstream hangs a request indefinitely"
+      ],
+      "rationale": "Reaches for the platform first (fetch, URLSearchParams, at(), localeCompare options, ES modules) with zero polyfills; the one gap is that upstream fetches have no timeout/cancellation, which is precisely the platform feature (AbortSignal.timeout) this design wants."
+    },
+    "dependencies": {
+      "score": 5,
+      "evidence": [
+        "app/package.json:9-13 — exactly three runtime deps, zero dev deps, no build toolchain or client framework",
+        "app/package.json:10 — hono 4.13.14, the current stable release (v4.13.14 shipped 2026-10-25)",
+        "app/package.json:11 — @hono/node-server 2.1.5, the latest adapter release",
+        "app/package.json:12 — htmx.org 2.0.11, the latest htmx (2026-09-22), needed for the spec's as-you-type partial updates without a client framework"
+      ],
+      "rationale": "Minimal and entirely current: each of the three packages is the latest stable of its project, none is redundant with the platform, and htmx is the leanest way to meet the 'update as the user types' requirement. Exact pins plus a lockfile make upgrades deliberate."
+    },
+    "churn_resistance": {
+      "score": 3,
+      "evidence": [
+        "app/src/api.mjs:85-164 — all data access behind one memoized module (memoize/fetchJson/catalogs); views and server never touch fetch directly",
+        "app/server.mjs:58,124 — partial rendering detected by literal DOM ids ('pokemon-results', 'moves'), a hidden string contract with app/src/render.mjs:114 and app/src/views.mjs:481",
+        "app/server.mjs:100-117 — a dedicated partial route for move tables, so two competing partial strategies coexist in the same app",
+        "app/src/views.mjs:596-612 — dead exports renderMovePageByName/renderAbilityPageByName/renderTypePageByName duplicate the handlers in app/server.mjs:60-95",
+        "app/src/views.mjs:112 + app/server.mjs:81 — push-URL state expressed twice (hx-push-url attribute and HX-Push-Url header)",
+        "app/src/api.mjs:1 + app/server.mjs:143 — config split across two modules; no shared config boundary"
+      ],
+      "rationale": "The data layer is genuinely centralized and there are no hono/* subpath imports (so v5's adapter split barely touches it), but the htmx wiring is coupled through hardcoded DOM ids and duplicated URL-push state, dead code shadows the live route handlers, and there are no types or JSDoc anywhere at the PokeAPI boundary in a TypeScript-first framework."
+    }
+  },
+  "overall": 3,
+  "findings": [
+    {
+      "severity": "high",
+      "location": "app/server.mjs:58",
+      "issue": "Partial responses are selected by sniffing literal HX-Target DOM ids ('pokemon-results' at server.mjs:58, 'moves' at server.mjs:124), creating an invisible string contract with the ids in app/src/render.mjs:114 and app/src/views.mjs:481; renaming an id silently returns a full document into a partial swap.",
+      "suggestion": "Use dedicated partial routes (the /pokemon/:name/move-table route at server.mjs:100 already does this correctly) or export one shared constant for the target ids; pick a single strategy for all three swap flows."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/render.mjs:3",
+      "issue": "Hand-rolled escapeHtml plus manual string templates: every one of ~100 interpolation sites must remember to call escapeHtml, and a single miss is an XSS; Hono's current hono/html helper escapes automatically.",
+      "suggestion": "Adopt html``/raw() from 'hono/html' (hono.dev/docs/helpers/html) so escaping is the default and raw is the explicit exception."
+    },
+    {
+      "severity": "medium",
+      "location": "app/server.mjs:28",
+      "issue": "Static assets are served by fs.readFileSync at startup plus three hand-written routes (server.mjs:37-56) instead of the adapter's serveStatic, so there is no ETag/Last-Modified/Cache-Control — costly for immutable assets behind the proxy the spec assumes — and the boilerplate must be maintained by hand.",
+      "suggestion": "Use serveStatic from '@hono/node-server/serve-static' (documented at hono.dev/docs/getting-started/nodejs) with the import.meta.url root pattern and add long-lived cache headers for the hashed asset routes."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/api.mjs:53",
+      "issue": "Upstream fetches have no AbortSignal.timeout or AbortController, so a slow or stalled API request hangs the page render indefinitely and cannot be cancelled when the client disconnects.",
+      "suggestion": "Wrap fetchJson in AbortSignal.timeout (e.g. 5-10s) and let the existing cache/pending maps absorb repeats; optionally forward the request signal."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/views.mjs:596",
+      "issue": "Dead exports renderMovePageByName/renderAbilityPageByName/renderTypePageByName duplicate the live route handlers in app/server.mjs:60-95 and will drift the first time one of them changes.",
+      "suggestion": "Delete them, or make server.mjs the single caller by having the handlers delegate to these functions."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/views.mjs:112",
+      "issue": "URL-push state is duplicated: templates set hx-push-url=\"true\" (views.mjs:112, views.mjs:491) while the server also sets the HX-Push-Url header (server.mjs:81, server.mjs:127) for the same request.",
+      "suggestion": "Choose one source of truth (the server header, since it already canonicalizes the URL) and drop the attribute."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/api.mjs:1",
+      "issue": "Configuration lives in two places (API_BASE_URL at api.mjs:1, PORT at server.mjs:143) with no shared boundary, and the PokeAPI response shapes have no types or JSDoc anywhere (typeLines: 0), leaving renames unguarded.",
+      "suggestion": "Add a small config module plus JSDoc typedefs for the API payloads at the api.mjs boundary — Hono is TS-first and hono's types work fine from .mjs via JSDoc."
+    },
+    {
+      "severity": "low",
+      "location": "app/server.mjs:138",
+      "issue": "onError uses the v4 (err, c) signature, which is the current stable API but is exactly what Hono v5 changes to (c, next) middleware reading c.error (hono.dev/docs/guides/migrating-to-v5).",
+      "suggestion": "Fine today; when v5 goes GA, only this handler and notFound need updating — worth a comment or a TODO referencing the migration guide."
+    },
+    {
+      "severity": "low",
+      "location": "app/server.mjs:144",
+      "issue": "No graceful shutdown (SIGINT/SIGTERM close) as documented in the Node.js guide, so in-flight requests are dropped on redeploys.",
+      "suggestion": "Capture the returned server instance and close it on SIGINT/SIGTERM per hono.dev/docs/getting-started/nodejs."
+    }
+  ],
+  "summary": "This app will age reasonably: it runs on the current stable Hono (4.13.14), the current adapter (2.1.5) and the latest htmx (2.0.11), keeps every upstream call behind one memoized data module, and has no hand-rolled polyfills. The forward-looking weaknesses are that it reinvents three things the framework already provides — serveStatic, hono/html's auto-escaping, and single-source URL-push handling — and that its htmx wiring is coupled to literal DOM ids shared between server and templates. Net: a solid 3, with the partial-route refactor as the highest-leverage fix.",
+  "apis": [
+    {
+      "api": "Hono app/context (new Hono, app.get, c.html, c.body, c.req.query/param/header, c.header, app.notFound, app.onError((err,c)))",
+      "location": "app/server.mjs:47",
+      "status": "current",
+      "replacement": "current v4 stable API; app.onError's (err, c) signature becomes (c, next) with c.error in Hono v5 (migrating-to-v5 guide)"
+    },
+    {
+      "api": "serve from @hono/node-server",
+      "location": "app/server.mjs:1",
+      "status": "current",
+      "replacement": "none (latest adapter, 2.1.5)"
+    },
+    {
+      "api": "hand-rolled static file routes (fs.readFileSync)",
+      "location": "app/server.mjs:28",
+      "status": "legacy",
+      "replacement": "serveStatic from '@hono/node-server/serve-static' (hono.dev/docs/getting-started/nodejs)"
+    },
+    {
+      "api": "hand-rolled escapeHtml + string templates",
+      "location": "app/src/render.mjs:3",
+      "status": "legacy",
+      "replacement": "html/raw tagged templates from 'hono/html' with automatic escaping (hono.dev/docs/helpers/html)"
+    },
+    {
+      "api": "htmx 2.x attributes (hx-get, hx-swap, hx-include, hx-trigger, hx-push-url)",
+      "location": "app/src/views.mjs:108",
+      "status": "current",
+      "replacement": "none (htmx.org 2.0.11 is the latest release)"
+    }
+  ],
+  "dependencies": [
+    {
+      "name": "hono",
+      "verdict": "modern",
+      "note": "4.13.14 is the current stable release (2026-10-25); v5 is RC-only, so pinning v4 is correct today."
+    },
+    {
+      "name": "@hono/node-server",
+      "verdict": "modern",
+      "note": "2.1.5 is the latest adapter release; correct choice for Node 24, and its serveStatic should replace the hand-rolled static routes."
+    },
+    {
+      "name": "htmx.org",
+      "verdict": "modern",
+      "note": "2.0.11 is the latest htmx (2026-09-22); the leanest possible way to meet the spec's live-filter requirement without a client framework."
+    }
+  ]
+}

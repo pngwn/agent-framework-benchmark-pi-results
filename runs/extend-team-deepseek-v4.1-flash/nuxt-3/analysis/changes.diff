@@ -1,0 +1,314 @@
+diff --git a/app/app/assets/main.css b/app/app/assets/main.css
+index b64de88..5a1716c 100644
+--- a/app/app/assets/main.css
++++ b/app/app/assets/main.css
+@@ -357,6 +357,69 @@ a.type-badge:hover {
+   font-size: var(--text-xs);
+ }
+ 
++/* Team builder */
++
++.team-action {
++  display: flex;
++  align-items: center;
++  flex-wrap: wrap;
++  gap: var(--space-3);
++  margin-top: var(--space-5);
++}
++
++.team-action__button,
++.team-card__remove {
++  font: inherit;
++  color: var(--color-on-accent);
++  background: var(--color-accent);
++  border: 1px solid var(--color-accent);
++  border-radius: var(--radius-md);
++  padding: var(--space-2) var(--space-3);
++  cursor: pointer;
++}
++
++.team-action__button:disabled {
++  color: var(--color-text-muted);
++  background: var(--color-surface);
++  border-color: var(--color-border);
++  cursor: not-allowed;
++}
++
++.team-action__note {
++  color: var(--color-text-muted);
++  font-size: var(--text-sm);
++}
++
++.team-card {
++  display: flex;
++  flex-direction: column;
++  gap: var(--space-2);
++}
++
++.team-card__remove {
++  color: var(--color-text);
++  background: var(--color-surface);
++  border-color: var(--color-border);
++  font-size: var(--text-sm);
++}
++
++.coverage-table {
++  width: 100%;
++  border-collapse: collapse;
++  font-size: var(--text-sm);
++}
++
++.coverage-table th,
++.coverage-table td {
++  text-align: left;
++  padding: var(--space-2) var(--space-3);
++  border-bottom: 1px solid var(--color-border);
++}
++
++.coverage-table th {
++  font-weight: var(--weight-normal);
++}
++
+ /* Pokémon page summary */
+ 
+ .summary {
+diff --git a/app/app/components/SiteHeader.vue b/app/app/components/SiteHeader.vue
+index 97a9211..cebf968 100644
+--- a/app/app/components/SiteHeader.vue
++++ b/app/app/components/SiteHeader.vue
+@@ -6,6 +6,7 @@
+         <ul class="site-header__nav">
+           <li><NuxtLink to="/">Pokémon</NuxtLink></li>
+           <li><NuxtLink to="/types">Types</NuxtLink></li>
++          <li><NuxtLink to="/team">Team</NuxtLink></li>
+         </ul>
+       </nav>
+     </div>
+diff --git a/app/app/composables/useTeam.ts b/app/app/composables/useTeam.ts
+new file mode 100644
+index 0000000..768993d
+--- /dev/null
++++ b/app/app/composables/useTeam.ts
+@@ -0,0 +1,30 @@
++export const MAX_TEAM_SIZE = 6;
++
++/**
++ * The team lives in a cookie so the server can render the correct state on the
++ * first request (no wrong label flashing after hydration). The cookie is only
++ * a list of species names; the Pokémon data itself is always fetched live.
++ */
++export function useTeam() {
++  const team = useCookie<string[]>('team', {
++    default: () => [],
++    maxAge: 60 * 60 * 24 * 365,
++    sameSite: 'lax',
++    path: '/',
++  });
++
++  const names = computed(() => (Array.isArray(team.value) ? team.value.filter(Boolean) : []));
++  const isFull = computed(() => names.value.length >= MAX_TEAM_SIZE);
++  const has = (name: string) => names.value.includes(name);
++
++  function add(name: string) {
++    if (!name || has(name) || isFull.value) return;
++    team.value = [...names.value, name];
++  }
++
++  function remove(name: string) {
++    team.value = names.value.filter((n) => n !== name);
++  }
++
++  return { team, names, isFull, has, add, remove };
++}
+diff --git a/app/app/pages/pokemon/[name].vue b/app/app/pages/pokemon/[name].vue
+index 382af9f..de0dbef 100644
+--- a/app/app/pages/pokemon/[name].vue
++++ b/app/app/pages/pokemon/[name].vue
+@@ -41,6 +41,14 @@ const pokemon = await usePageData<PokemonData>(
+ );
+ usePageTitle(() => pokemon.value?.label);
+ 
++const { names: teamNames, isFull: teamIsFull, add: addToTeam, remove: removeFromTeam } = useTeam();
++const onTeam = computed(() => teamNames.value.includes(pokemon.value.name));
++const teamFull = computed(() => teamIsFull.value && !onTeam.value);
++function toggleTeam() {
++  if (onTeam.value) removeFromTeam(pokemon.value.name);
++  else addToTeam(pokemon.value.name);
++}
++
+ const total = computed(() => pokemon.value.stats.reduce((sum, s) => sum + s.value, 0));
+ const barWidth = (value: number, max: number) => `${Math.min(100, (value / max) * 100).toFixed(1)}%`;
+ 
+@@ -90,6 +98,13 @@ const tables = computed(() => {
+ </script>
+ 
+ <template>
++  <div class="team-action">
++    <button type="button" class="team-action__button" :disabled="teamFull" @click="toggleTeam">
++      {{ onTeam ? 'Remove from team' : 'Add to team' }}
++    </button>
++    <span v-if="teamFull" class="team-action__note">Team is full</span>
++  </div>
++
+   <div class="summary">
+     <div class="summary__art">
+       <img
+diff --git a/app/app/pages/team.vue b/app/app/pages/team.vue
+new file mode 100644
+index 0000000..969f013
+--- /dev/null
++++ b/app/app/pages/team.vue
+@@ -0,0 +1,80 @@
++<script setup lang="ts">
++interface TeamMember {
++  id: number;
++  name: string;
++  sprite: string;
++  types: { name: string; label: string }[];
++}
++interface CoverageRow {
++  name: string;
++  label: string;
++  weak: number;
++  resistant: number;
++}
++interface TeamData {
++  members: TeamMember[];
++  coverage: CoverageRow[];
++}
++
++const { names, remove } = useTeam();
++usePageTitle('Team');
++
++const { data, error } = await useFetch<TeamData>('/api/team', {
++  key: 'team',
++  query: computed(() => ({ names: names.value.join(',') })),
++  watch: [names],
++});
++if (error.value || !data.value) {
++  throw createError({ statusCode: error.value?.statusCode ?? 500, statusMessage: 'Something went wrong', fatal: true });
++}
++
++// Show the list in team order, and reflect removals immediately.
++const members = computed(() =>
++  names.value
++    .map((name) => data.value?.members.find((member) => member.name === name))
++    .filter((member): member is TeamMember => Boolean(member)),
++);
++const coverage = computed(() => data.value?.coverage ?? []);
++</script>
++
++<template>
++  <h1>Team</h1>
++  <p class="count">{{ names.length }} of 6</p>
++
++  <template v-if="names.length">
++    <ul class="card-grid">
++      <li v-for="member in members" :key="member.name" class="team-card">
++        <PokemonCard v-bind="member" />
++        <button type="button" class="team-card__remove" @click="remove(member.name)">
++          Remove {{ humanize(member.name) }}
++        </button>
++      </li>
++    </ul>
++
++    <PageSection title="Type coverage">
++      <div class="table-scroll">
++        <table class="coverage-table">
++          <thead>
++            <tr>
++              <th scope="col">Type</th>
++              <th scope="col">Weak</th>
++              <th scope="col">Resistant</th>
++            </tr>
++          </thead>
++          <tbody>
++            <tr v-for="row in coverage" :key="row.name">
++              <th scope="row">{{ row.label }}</th>
++              <td>{{ row.weak }}</td>
++              <td>{{ row.resistant }}</td>
++            </tr>
++          </tbody>
++        </table>
++      </div>
++    </PageSection>
++  </template>
++
++  <template v-else>
++    <p class="empty">Your team is empty</p>
++    <p><NuxtLink to="/">Browse Pokémon</NuxtLink></p>
++  </template>
++</template>
+diff --git a/app/server/api/team.get.ts b/app/server/api/team.get.ts
+new file mode 100644
+index 0000000..caf82ef
+--- /dev/null
++++ b/app/server/api/team.get.ts
+@@ -0,0 +1,67 @@
++const MAX_TEAM_SIZE = 6;
++
++interface DamageRelations {
++  double_damage_to: { name: string }[];
++  half_damage_to: { name: string }[];
++  no_damage_to: { name: string }[];
++}
++
++function multiplier(type: { damage_relations: DamageRelations }, defendingType: string): number {
++  const relations = type.damage_relations;
++  if (relations.no_damage_to.some((t) => t.name === defendingType)) return 0;
++  if (relations.double_damage_to.some((t) => t.name === defendingType)) return 2;
++  if (relations.half_damage_to.some((t) => t.name === defendingType)) return 0.5;
++  return 1;
++}
++
++export default defineEventHandler((event) =>
++  withNotFound(async () => {
++    const query = getQuery(event).names;
++    const raw = Array.isArray(query) ? query.join(',') : String(query ?? '');
++    const names = [...new Set(raw.split(',').map((n) => n.trim()).filter(Boolean))].slice(0, MAX_TEAM_SIZE);
++
++    const [types, members] = await Promise.all([
++      allTypes(),
++      Promise.all(
++        names.map(async (name) => {
++          const species = await api(`pokemon-species/${encodeURIComponent(name)}`);
++          const variety = species.varieties?.find((v: any) => v.is_default) ?? species.varieties?.[0];
++          if (!variety) throw new NotFound(name);
++          const pokemon = await api(variety.pokemon.url);
++          return {
++            id: species.id as number,
++            name: species.name as string,
++            sprite: spriteUrl(species.id),
++            pokemonTypes: (pokemon.types as any[])
++              .slice()
++              .sort((a, b) => a.slot - b.slot)
++              .map((t) => t.type.name as string),
++          };
++        }),
++      ),
++    ]);
++
++    const labels = Object.fromEntries(types.map((t) => [t.name, englishName(t)]));
++
++    const coverage = types.map((type) => {
++      let weak = 0;
++      let resistant = 0;
++      for (const member of members) {
++        const damage = member.pokemonTypes.reduce((product, t) => product * multiplier(type, t), 1);
++        if (damage > 1) weak++;
++        else if (damage < 1) resistant++;
++      }
++      return { name: type.name, label: labels[type.name], weak, resistant };
++    });
++
++    return {
++      members: members.map((member) => ({
++        id: member.id,
++        name: member.name,
++        sprite: member.sprite,
++        types: member.pokemonTypes.map((t) => ({ name: t, label: labels[t] ?? humanize(t) })),
++      })),
++      coverage,
++    };
++  }),
++);

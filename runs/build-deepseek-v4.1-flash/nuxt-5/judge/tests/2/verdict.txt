@@ -1,0 +1,131 @@
+## Review — test quality
+
+The agent wrote **zero tests**. `app/package.json` has no `test` script and no test dependencies (app/package.json:6-9), `grep` finds no `describe/it/test/vitest/@nuxt/test-utils` anywhere under `app/`, and the measured facts confirm `tests.files: 0`. Since Nuxt 4's official testing story (`@nuxt/test-utils` v4 with Vitest — released Feb 2026 and the documented recommendation at nuxt.com/docs/4.x/getting-started/testing) makes testing both the Nitro server handlers (`server/utils/pokeapi.ts`) and the sorting/filter components cheap, the omission is a real gap, not a tooling excuse.
+
+What makes that gap expensive is where the untested logic sits. Nearly all the risky behavior lives in `app/server/utils/pokeapi.ts` (552 lines, the whole data layer) and two UI files, and several spots are fragile in ways only tests would expose:
+
+- **Silent data loss**: `mapLimit` over all 1,025 species swallows per-species fetch failures into `null` and the result is cached for the process lifetime (`pokeapi.ts:186-190`, cache at `:157`/`getDexIndex`) — a transient API error permanently strips a Pokémon's sprite and types from every list with no trace.
+- **Sort that works by accident**: generations are sorted by a regex `(\d+)$` on the API name (`pokeapi.ts:171`), but names are Roman numerals (`generation-i`), so every key is `0`; the Generation `<select>` is only in order because the API happens to list generations sequentially. Any data reorder or "fix" silently breaks the spec's required ordering.
+- **Error paths conflated**: only `statusCode === 404` maps to not-found (`pokeapi.ts:272`, `:437`, `:478`); an API 500 or network outage makes `useFetch`'s data null and the page renders `NotFoundPage` (`app/app/pages/pokemon/[name].vue:2`) — a server outage looks like a missing resource.
+- **URL state**: page clamping keeps `?page=999` in the URL while showing the last page (`app/app/pages/index.vue:60-62`), and the debounce watcher's "did the query change" comparison (`index.vue:100-104`) plus filter-changes-reset-to-page-1 (`index.vue:84-88`) are exactly the logic that regresses unnoticed.
+- **Client sorting**: missing-values-last in both directions, descending via negated `localeCompare`, tie-breaks that ignore direction (`app/app/components/MoveTables.vue:96-116`) and the `aria-sort` contract — textbook regression bait.
+- **Default game selection** depends on `getVersionGroups` sorting by `order` and taking the last element (`pokeapi.ts:328`); the move-table dedup key and method ordering (`pokeapi.ts:342`, `:260`) likewise have nothing pinning them.
+
+The pure helpers (`humanize` `pokeapi.ts:38`, `collapseWhitespace`, `latestEnglishFlavor` `:55`) are trivially unit-testable and drive every label in the app — the cheapest possible insurance, skipped.
+
+```json
+{
+  "dimension": "tests",
+  "criteria": {
+    "coverage_of_risk": {
+      "score": 1,
+      "evidence": [
+        "app/package.json:6-9 — no test script, no test dependencies at all",
+        "app/server/utils/pokeapi.ts:186-190 — riskiest code (dex index build, error swallowing, caching) has zero coverage",
+        "app/app/components/MoveTables.vue:96-116 — client sorting/aria-sort logic untested"
+      ],
+      "rationale": "No tests exist, so none of the data transformation, filtering, URL state, or error paths are covered."
+    },
+    "behaviour_not_implementation": {
+      "score": 1,
+      "evidence": [
+        "app/server/utils/pokeapi.ts — grep for describe/it/test/vitest across app/ returns no test files"
+      ],
+      "rationale": "There are no tests to judge; by the rubric, no tests scores 1."
+    },
+    "regression_power": {
+      "score": 1,
+      "evidence": [
+        "app/server/utils/pokeapi.ts:171 — generation ordering only correct by accident of API list order; a refactor would pass nothing",
+        "app/server/api/app/pokemon/[name].get.ts:3-5 — 404 vs 500 conflation unguarded"
+      ],
+      "rationale": "Nothing would fail if any behavior broke; the only guard is the external acceptance suite, which does not live in the app."
+    },
+    "signal_to_noise": {
+      "score": 3,
+      "evidence": [
+        "app/ — zero test files, so no noise either"
+      ],
+      "rationale": "No tests means no low-value tests; per rubric this is a neutral 3, though it reflects absence rather than discipline."
+    }
+  },
+  "overall": 1,
+  "findings": [
+    {
+      "severity": "high",
+      "location": "app/server/utils/pokeapi.ts:186-190",
+      "issue": "Per-species fetch failures in the dex index are swallowed to null and cached for the process lifetime, silently stripping sprites/types from lists; nothing would catch this",
+      "suggestion": "Unit-test getDexIndex against a mocked API with one failing pokemon, and surface/log partial failures instead of caching them"
+    },
+    {
+      "severity": "high",
+      "location": "app/server/utils/pokeapi.ts:171",
+      "issue": "Generation sort key regex (\\d+)$ never matches Roman-numeral names (generation-i), so all keys are 0 and ordering survives only because the API lists generations sequentially",
+      "suggestion": "Sort by the generation's id (or a roman-numeral rank) and add a test pinning Generation I..IX select order against shuffled input"
+    },
+    {
+      "severity": "high",
+      "location": "app/server/api/app/pokemon/[name].get.ts:3-5",
+      "issue": "Only 404 maps to not-found; an API 500 or network error makes useFetch data null and the page renders NotFoundPage (app/app/pages/pokemon/[name].vue:2), misreporting outages as missing resources",
+      "suggestion": "Handle useFetch errors distinctly from found:false, and add tests for both the 404 and the 5xx path"
+    },
+    {
+      "severity": "medium",
+      "location": "app/server/utils/pokeapi.ts:328",
+      "issue": "Default game is games[games.length - 1], relying entirely on getVersionGroups sorting by order; a break changes the default game on every Pokémon page with nothing failing",
+      "suggestion": "Test that the default selection is the highest-order version group the Pokémon has moves in, using a fixture with out-of-order input"
+    },
+    {
+      "severity": "medium",
+      "location": "app/app/pages/index.vue:60-62",
+      "issue": "Page clamping shows the last page while ?page=999 stays in the URL, and filter-change/reset-to-page-1 logic (index.vue:84-88) is untested URL state",
+      "suggestion": "Add tests for filter changes resetting page, out-of-range pages, and empty-search cleanup of the q parameter"
+    },
+    {
+      "severity": "medium",
+      "location": "app/app/components/MoveTables.vue:96-116",
+      "issue": "Descending via negated localeCompare and missing-values tie-breaks that ignore sort direction are untested; a 'fix' to either changes spec-mandated behavior silently",
+      "suggestion": "Test sortable headers with missing power/accuracy: missing last in both directions, aria-sort values, second-click flips"
+    },
+    {
+      "severity": "medium",
+      "location": "app/server/utils/pokeapi.ts:342",
+      "issue": "Move-table dedup key method|move|level and METHOD_ORDER (:260) pin table ordering and row counts; regressions (duplicate or missing rows) would slip through",
+      "suggestion": "Fixture-test getPokemonPage's tables: method order Level Up/Machine/Egg/Tutor/alpha, level-up sorted by level then name"
+    },
+    {
+      "severity": "low",
+      "location": "app/server/utils/pokeapi.ts:451",
+      "issue": "O(n) index.species.find inside loops over up to ~1000 learned-by entries (:487, :526) — fine today, but a refactor to unsorted index data would misorder cards silently",
+      "suggestion": "Replace scans with a Map keyed by id, and add a test asserting card lists are ordered by dex number"
+    },
+    {
+      "severity": "low",
+      "location": "app/server/utils/pokeapi.ts:38",
+      "issue": "humanize/collapseWhitespace/latestEnglishFlavor (:55) are untested pure functions driving every label and flavor text in the app",
+      "suggestion": "These are one-line unit tests (mr-mime -> 'Mr Mime', \\f collapsing, latest-English entry) — the cheapest high-value coverage available"
+    },
+    {
+      "severity": "low",
+      "location": "app/app/pages/index.vue:100-104",
+      "issue": "The debounce watcher's 'same query' comparison compares raw values (breaks on array query params) and the 250ms debounce itself is unverified",
+      "suggestion": "Test the search round-trip: typing updates the URL after the debounce, clears q when emptied, and resets page"
+    }
+  ],
+  "summary": "The agent shipped no tests of its own; every line of the 552-line data layer, the URL-state handling, and the client-side sorting is guarded only by the external acceptance suite. Several behaviors are already fragile (accidental generation ordering, swallowed fetch errors, 404-vs-outage conflation) and would regress silently under any refactor. Nuxt 4's official @nuxt/test-utils (v4) makes testing the server routes and components cheap, so the omission is a straightforward miss rather than a tooling limitation.",
+  "wroteTests": false,
+  "testCount": 0,
+  "valuableTests": [],
+  "lowValueTests": [],
+  "untested": [
+    { "area": "Dex index construction and caching (alternate-form exclusion, type slot order, error swallowing) — app/server/utils/pokeapi.ts:143-224", "risk": "high", "likelyBug": "A failed per-species fetch permanently removes a Pokémon's sprite/types from all lists; forms above ID 10000 could leak into lists after a refactor" },
+    { "area": "Home filtering, search, pagination and URL query state — app/app/pages/index.vue:46-110", "risk": "high", "likelyBug": "Filter changes stop resetting page, ?page beyond range desyncs from the URL, or type/generation matching drops one slot" },
+    { "area": "Moves tables: method order, level sorting, dedup, default game selection — app/server/utils/pokeapi.ts:260-389", "risk": "high", "likelyBug": "Wrong default game on load, tables in the wrong method order, duplicated or missing rows after a dedup tweak" },
+    { "area": "Client-side column sorting and aria-sort contract — app/app/components/MoveTables.vue:80-116", "risk": "medium", "likelyBug": "Missing values stop sorting last, descending on ties flips, or aria-sort lands on the wrong header" },
+    { "area": "Not-found vs server-error distinction — app/server/api/app/*/[name].get.ts and app/app/pages/pokemon/[name].vue:2", "risk": "medium", "likelyBug": "API outages render as 'Not found' pages, hiding real failures from users and monitoring" },
+    { "area": "Evolution tree recursion (branching chains like Eevee) — app/server/utils/pokeapi.ts:230-237, app/app/components/EvolutionTree.vue", "risk": "medium", "likelyBug": "A recursion or structure change flattens branches into a single list" },
+    { "area": "Display helpers: humanize, whitespace collapse, latest-English flavor — app/server/utils/pokeapi.ts:38-61", "risk": "medium", "likelyBug": "A one-character regex change breaks dozens of labels and flavor text across every page" },
+    { "area": "Type damage-relations mapping — app/server/utils/pokeapi.ts:514-521", "risk": "low", "likelyBug": "Swapped double/half damage directions produce wrong type advice" }
+  ]
+}
+```

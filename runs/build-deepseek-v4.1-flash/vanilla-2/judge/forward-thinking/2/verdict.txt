@@ -1,0 +1,107 @@
+I have enough to judge. Summary of what the app is: a zero-runtime-dependency vanilla JS SPA — Vite 8 (current stable, `^8.3.5`) for the build, a ~100-line `node:http` static server for production, string-templated HTML rendered into `main#app`, a centralized fetch/cache layer (`api.js`), domain data caches (`data.js`), and pure HTML helpers (`ui.js`). No tests of its own, no config files, no TypeScript.
+
+```json
+{
+  "dimension": "forward-thinking",
+  "criteria": {
+    "latest_apis": {
+      "score": 4,
+      "evidence": [
+        "app/package.json:9 — devDependency vite ^8.3.5, exactly the current stable (8.3.5, released 2026-10-21 per vite.dev/releases)",
+        "app/index.html:15 — native ES module script, no bundler globals or legacy UMD patterns",
+        "app/src/main.js:46-51, 867-871 — history.pushState/popstate SPA routing; still the fully supported current API",
+        "app/src/api.js:27 — native fetch for all data access, no XMLHttpRequest anywhere"
+      ],
+      "rationale": "Everything is current: latest stable Vite, ES modules, native fetch, History API. The only 'newer generation' thing it doesn't reach for is the Navigation API (Chromium-only but still not cross-browser standard, and popstate remains the recommended baseline), and the default Vite setup needs no config, so a Vite upgrade touches nothing."
+    },
+    "platform": {
+      "score": 4,
+      "evidence": [
+        "app/src/api.js:27 — fetch; app/src/main.js:111, 129 — URLSearchParams for filter state in the URL",
+        "app/src/api.js:89-96 — replaceAll, String.padStart, ?? and ?. used throughout",
+        "app/src/main.js:92-101 — location.hash + scrollIntoView for #moves anchoring",
+        "app/src/styles.css:203, 345 — CSS grid and aspect-ratio; app/src/tokens.css imported as custom properties",
+        "app/src/main.js:46 — stale-render guarding via a manual renderToken counter instead of AbortController"
+      ],
+      "rationale": "Reaches for the platform almost everywhere: fetch, URL/URLSearchParams, History, grid, custom properties, modern string/number methods, and a hand-rolled 30-line static server in place of a dependency. The gap is cancellation: navigations away from a slow page don't abort in-flight fetches, they just discard the result via a token counter, and the debounce re-renders from a module-level timer. An AbortSignal per navigation would be the platform-first tool."
+    },
+    "dependencies": {
+      "score": 5,
+      "evidence": [
+        "app/package.json:5-11 — zero runtime dependencies; the only dependency of any kind is vite as a devDependency",
+        "app/server.mjs:1-4 — production server hand-built on node: modules instead of express/serve",
+        "app/src/api.js:120-139 — mapLimit concurrency helper hand-rolled rather than pulling p-limit"
+      ],
+      "rationale": "Minimal and modern: one current devDependency (vite ^8.3.5), no runtime deps, and the small things a package would usually provide (static serving, concurrency limiting, HTML escaping) are done with ~30 lines of platform code each. This is the leanest defensible shape for this app."
+    },
+    "churn_resistance": {
+      "score": 4,
+      "evidence": [
+        "app/src/api.js:20-41 — every HTTP access goes through one module with a single cache and error type; app/src/data.js:10-70 — domain data behind named loaders, so an API change is localized",
+        "app/server.mjs:13-14, app/src/api.js:3-6 — runtime API_BASE_URL injected in exactly one place, consumed in exactly one place",
+        "app/src/main.js:755-773 — one route table; adding a route touches one if-chain",
+        "app/src/main.js:439, 457 — moves panel re-rendered wholesale via outerHTML with handlers re-attached by hand each time; fragile if the panel grows",
+        "app/src/api.js:88-98 + ui.js:12-39 — every interpolation site must remember escapeHtml/escapeAttr manually; safe today, but each new field is a new miss opportunity",
+        "app/src/main.js:704 — alternate-form threshold (10000) duplicated inline instead of reusing isAlternateFormId from api.js:78"
+      ],
+      "rationale": "Boundaries are genuinely good: data access, config, routing, and markup helpers are each behind one module, and nothing depends on Vite internals or undocumented behavior — a framework upgrade would touch zero files. The residual churn risk is in the string-template rendering layer, where correctness (escaping, handler re-attachment) is a convention each author must uphold rather than something the structure enforces."
+    }
+  },
+  "overall": 4,
+  "findings": [
+    {
+      "severity": "medium",
+      "location": "app/src/main.js:46",
+      "issue": "No AbortController: navigating away from a slow page discards results via a renderToken counter, but in-flight fetches (and per-move detail fetches via mapLimit, up to 16 concurrent) keep running to completion.",
+      "suggestion": "Thread an AbortSignal through api() per navigation (e.g. abort the previous renderRoute's controller at the start of the next); this also stops pointless loadRowsForGame work for pages the user has left."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/ui.js:12-39",
+      "issue": "HTML is assembled by string concatenation with a hand-rolled escapeHtml that every interpolation site must remember to apply; correctness is convention, not structure.",
+      "suggestion": "At minimum centralize card/section builders further (already partly done) and add a lint-time or test-time guard; longer-term, consider template-element builders or a tiny tagged-template that auto-escapes so a new field can't be added unescaped."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/api.js:84-86",
+      "issue": "spriteUrl hardcodes the API's media layout ('/media/sprites/pokemon/<id>.png') rather than reading sprites.front_default from the API; a media-layout change breaks every card list.",
+      "suggestion": "Acceptable (avoids 1,025 pokemon-detail fetches on the home page and the spec documents the pattern), but note the coupling and fall back to the API-provided URL where a pokemon resource is already loaded (detail pages do this correctly at main.js:523)."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/main.js:704",
+      "issue": "Alternate-form threshold (id >= 10000) duplicated inline in renderAbility instead of using isAlternateFormId (api.js:78), unlike speciesIdsFromPokemonRefs.",
+      "suggestion": "Use isAlternateFormId(entry) so the threshold lives in one place."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/main.js:432-465",
+      "issue": "Every sort click and game change replaces the whole moves panel via outerHTML and re-attaches all handlers (attachMovesHandlers re-entry); easy to break as the panel grows, and state (sorts) silently resets on game change.",
+      "suggestion": "Use event delegation on the panel (one listener, no re-attach) and update only table contents; also consider the URL for sort state for shareability."
+    },
+    {
+      "severity": "low",
+      "location": "app/server.mjs:75",
+      "issue": "fs.createReadStream(file).pipe(res) has no 'error' handler; a mid-stream read failure truncates the response with no status correction.",
+      "suggestion": "stream.on('error', () => res.destroy()) or wrap in try/catch with res.end."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/api.js:7",
+      "issue": "responseCache stores promises and never evicts; entries live for the whole session (fine per spec), but there is no way to invalidate or TTL a cached endpoint if the API's data changes under the running app.",
+      "suggestion": "Fine for this spec ('caching in memory at runtime is fine'); a comment noting the deliberate permanence would help future readers."
+    }
+  ],
+  "summary": "This is a lean, current-generation vanilla app: the latest stable Vite, zero runtime dependencies, native fetch/URL/History usage, and a clean module layout (api → data → ui → main) that confines API access and configuration to single choke points, so a tooling upgrade touches almost nothing. The forward-looking weak spots are in the rendering layer — hand-rolled escaping at every interpolation site, token-based (rather than AbortController-based) cancellation, and whole-panel outerHTML re-renders — which are safe today but rely on discipline rather than structure as the app grows. I'd approve this with a note to introduce an abort-per-navigation pattern and consider auto-escaping template helpers.",
+  "apis": [
+    { "api": "fetch", "location": "app/src/api.js:27", "status": "current", "replacement": "" },
+    { "api": "History pushState/replaceState + popstate", "location": "app/src/main.js:867-871", "status": "current", "replacement": "Navigation API exists in Chromium but is not yet cross-browser standard; popstate remains the supported baseline" },
+    { "api": "URLSearchParams", "location": "app/src/main.js:129", "status": "current", "replacement": "" },
+    { "api": "import http from 'node:http' / node:fs / node:path / fileURLToPath", "location": "app/server.mjs:1-4", "status": "current", "replacement": "" },
+    { "api": "vite (build tool, ^8.3.5)", "location": "app/package.json:9", "status": "current", "replacement": "" }
+  ],
+  "dependencies": [
+    { "name": "vite", "verdict": "modern", "note": "devDependency only, pinned at ^8.3.5 — the current stable release (8.3.5, 2026-10-21, per vite.dev/releases); zero runtime dependencies and a hand-rolled 100-line static server keep the dependency surface at the minimum defensible size." }
+  ]
+}
+```

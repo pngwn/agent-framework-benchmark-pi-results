@@ -1,0 +1,99 @@
+## Review: experimentalness
+
+**What's there.** The app runs on Angular `^22.2.0` (`app/package.json:5-10`), i.e. the current stable release (v22.0 shipped June 2026, minors since). Static analysis found **zero experimental markers** — no `experimental_*`/`unstable_*` names, no preview flags, no zoneless/SSR toggles (`grep` across `app/src` confirms). What the app *does* do is lean on two APIs that only left experimental status in v22 itself:
+
+1. **`resource()`** — experimental since v19, promoted to stable in v22 (June 2026; PR #68253, confirmed by the v22 release announcement and angular.fr/ng-news coverage). It is the app's data backbone: all six pages load through it — `app/src/app/pages/home/home.ts:26`, `app/src/app/pages/pokemon/pokemon-page.ts:29` and `:40`, `app/src/app/pages/type-page.ts:86`, `app/src/app/pages/ability-page.ts:45`, `app/src/app/pages/move-page.ts:77`, `app/src/app/pages/types-page.ts:27`. The cleanest usage is `pokemon-page.ts:40-44`: a second resource keyed on `selectedGame()` re-fetches move tables when the `?game=` query param changes — params-driven reload, dedup and cancel for free.
+2. **`@Service()`** — introduced in v22.1 (PR #68195, Apr 2026) and marked stable for v22 (angular/angular #68470). Used once, for the single app-wide service `PokeApi` (`app/src/app/core/poke-api.ts:50`). Pure ergonomics over `@Injectable({providedIn: 'root'})`, but it's now the documented default with an official migration schematic.
+
+The test runner is `@angular/build:unit-test` with Vitest (`app/angular.json:64`), which was experimental in v20 but is the documented default for new CLI projects by v22; only the Karma→Vitest *migration schematic* is still flagged experimental in the docs, so this isn't a risk.
+
+Everything else is long-stable: signals/computed/effect (stable v19), `input.required` (`move-page.ts:70`), `untracked` (`home.ts:100`), `afterNextRender` with explicit injector (`pokemon-page.ts:66`), `takeUntilDestroyed` (`app.ts:33`), `booleanAttribute` input transform (`type-badge.ts:20`), `@let`/`@if`/`@for` control flow, and `provideBrowserGlobalErrorListeners` (`app.config.ts:3`).
+
+**Containment.** `resource()` is not hidden behind a wrapper — it's invoked directly in six page components — but every loader delegates to plain async functions in `core/` and per-page data modules (`loadHomeData`, `loadPokemonView`, `loadMoveTables`…), so the reactive plumbing is a one-line field per page and the data logic is framework-free. If `resource()`'s surface ever shifts, the swap surface is six small declarations, not 100+ lines. That's "partly contained": 3.
+
+**Justification.** The `resource()` usage is genuinely load-bearing, not novelty: route-input-keyed reloading (the `name` input drives `params`, `pokemon-page.ts:30`), query-param re-fetch (`pokemon-page.ts:41-43`), and loading/error state consumed by `LoadState` without a single RxJS subscription. `@Service()` is the one gratuitous-but-harmless choice; `@Injectable` would behave identically.
+
+```json
+{
+  "dimension": "experimentalness",
+  "criteria": {
+    "reach": {
+      "score": 3,
+      "evidence": [
+        "app/package.json:5-10 — pins @angular/* ^22.2.0, the current stable major (v22.0 released 2026-06-03)",
+        "app/src/app/pages/home/home.ts:26 — resource() backs the home page's data loading; stable only since v22",
+        "app/src/app/pages/pokemon/pokemon-page.ts:29 — resource() for the core Pokémon page, plus a second chained resource at :40",
+        "app/src/app/core/poke-api.ts:50 — @Service() decorator, introduced v22.1 (Apr 2026), stable in v22",
+        "app/src/app/pages/type-page.ts:86, ability-page.ts:45, move-page.ts:77, types-page.ts:27 — resource() on every remaining page"
+      ],
+      "rationale": "No experimental or preview APIs at all, but the app's entire data layer rests on resource(), which only became stable ~5 months ago in v22, plus the equally fresh @Service decorator — squarely 'recently-stable APIs in central places'."
+    },
+    "containment": {
+      "score": 3,
+      "evidence": [
+        "app/src/app/pages/home/home.ts:26 — resource() called directly in the component, no wrapper; same pattern in 5 other page files",
+        "app/src/app/core/poke-api.ts:100-140 — all fetching lives in framework-free async methods (speciesIndex, types, cardsFor), so resource() is a thin declarative shell per page",
+        "app/src/app/pages/pokemon/poves-table.ts:1 — (moves-table.ts) uses only stable signal/computed/input; no experimental API leaked into shared components",
+        "app/src/app/shared/load-state.ts:15 — loading/error UI consumes resource() state via a plain input, keeping the shared component API-agnostic"
+      ],
+      "rationale": "Partly contained: six direct resource() call sites across all pages, but each is a one-line declaration delegating to plain async loaders in core/, so a swap touches six lines and no data logic — no dedicated wrapper though."
+    },
+    "justification": {
+      "score": 4,
+      "evidence": [
+        "app/src/app/pages/pokemon/pokemon-page.ts:40-44 — second resource keyed on selectedGame() re-fetches move tables when the ?game= query param changes; params-driven reload/cancel is much simpler than an RxJS switchMap equivalent",
+        "app/src/app/pages/pokemon/pokemon-page.ts:30 — params: () => this.name() reloads on route change, replacing manual subscribe/teardown",
+        "app/src/app/shared/load-state.ts:1-15 — hasValue()/error() state consumed declaratively with zero RxJS in the whole app",
+        "app/src/app/core/poke-api.ts:50-51 — @Service() is ergonomics-only over @Injectable({providedIn: 'root'}); mildly gratuitous but it is now the documented default"
+      ],
+      "rationale": "Every resource() use buys real simplification (keyed reloads, cancellation, no observables); the single @Service() use is a style pick, stable and officially recommended, so nothing is novelty for its own sake."
+    }
+  },
+  "overall": 3,
+  "findings": [
+    {
+      "severity": "low",
+      "location": "app/src/app/pages/home/home.ts:26",
+      "issue": "resource(), stable only since Angular v22 (Jun 2026), is the data-loading mechanism of all six pages with no thin wrapper of its own",
+      "suggestion": "Acceptable given ^22.2 is pinned; if the team wants insurance against near-term churn, introduce a small typed helper (e.g. pageResource(loader)) in core/ so all six call sites share one seam"
+    },
+    {
+      "severity": "low",
+      "location": "app/src/app/core/poke-api.ts:50",
+      "issue": "@Service() decorator shipped in v22.1 (~5 months old); offers no behavioral benefit over @Injectable({providedIn: 'root'}) here",
+      "suggestion": "Fine to keep — it is stable in v22 and the CLI default — but the revert path to @Injectable is mechanical if the team standardizes on the older form"
+    },
+    {
+      "severity": "low",
+      "location": "app/src/app/pages/types-page.ts:27",
+      "issue": "resource() with no params and a loader that reads no reactive state — a stable one-shot fetch wrapped in a reloadable primitive",
+      "suggestion": "Harmless and idiomatic; no action needed, noted only because it is the one use where a plain promise + signal would do the same"
+    }
+  ],
+  "summary": "The app uses zero experimental, preview or canary APIs; it targets the current stable Angular v22.2. Its reach for newness is limited to two APIs stabilized in v22 itself — resource() as the data backbone of every page and the @Service() decorator — both confirmed stable and both well-justified by the simplification they buy. Risk is low: caret-pinned to v22 and the swap surface is six one-line declarations.",
+  "experimentalApis": [
+    {
+      "api": "resource() (@angular/core)",
+      "location": "app/src/app/pages/home/home.ts:26",
+      "status": "recently-stable",
+      "since": "v22.0, 2026-06-03 (experimental v19–v21)",
+      "source": "Angular v22 announcement (blog.angular.dev, Jun 3 2026): resource/rxResource/httpResource promoted to stable; also angular.fr PR #68253 and ng-news 26/15"
+    },
+    {
+      "api": "@Service() decorator (@angular/core)",
+      "location": "app/src/app/core/poke-api.ts:50",
+      "status": "recently-stable",
+      "since": "v22.0 (introduced v22.1 cycle, Apr 2026, marked stable for v22)",
+      "source": "angular/angular #68470 'mark service decorator as stable' (merged 2026-04-30); angular.dev migration guide 'Injectable to Service'"
+    },
+    {
+      "api": "@angular/build:unit-test (Vitest runner)",
+      "location": "app/angular.json:64",
+      "status": "recently-stable",
+      "since": "default for new CLI projects by v22 (experimental in v20)",
+      "source": "angular.dev/guide/testing presents Vitest as the default with no preview warning; only the Karma→Vitest migration schematic is flagged experimental"
+    }
+  ],
+  "count": 0
+}
+```

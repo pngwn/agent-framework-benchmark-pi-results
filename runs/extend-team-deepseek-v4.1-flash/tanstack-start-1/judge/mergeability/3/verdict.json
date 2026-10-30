@@ -1,0 +1,100 @@
+{
+  "dimension": "mergeability",
+  "criteria": {
+    "idiomatic": {
+      "score": 5,
+      "evidence": [
+        "app/src/server/functions.ts:3 — createServerFn({ method: 'GET' }) with .validator(), the exact stable v1 API (the RC's .inputValidator is gone)",
+        "app/src/server/functions.ts:4 — getCookie imported from '@tanstack/react-start/server' and read inside each handler, matching the start-server-core skill's 'read cookies in the active request' rule",
+        "app/src/server/pokeapi.ts:68 — apiBase() read per-call, never captured at module scope (edge/worker guidance)",
+        "app/src/routes/pokemon.$name.tsx:15-18 — validateSearch + loaderDeps for the ?game= param, and throw notFound() from loaders for 404s",
+        "app/src/routes/__root.tsx:6-7 — HeadContent/Scripts in a root route with head(); server.mjs serves dist/server/server.js via srvx, the same setup the official examples/e2e projects use",
+        "app/src/lib/team.ts:22-28 — cookie-based session instead of the removed useSession, which is what the stable migration doc recommends"
+      ],
+      "rationale": "This reads like the framework's own examples: file-based routes, server functions as the data boundary, router-managed URL state, and a hand-rolled srvx production server identical to the official examples. The only home-grown piece, the TTL memo cache in pokeapi.ts, is justified (server-side dedup with correct rejection eviction) and doesn't fight the framework."
+    },
+    "correctness_risks": {
+      "score": 4,
+      "evidence": [
+        "app/src/router.tsx:5-10 — no defaultErrorComponent/onCatch; a non-404 API error (pokeapi.ts:50 throws a raw Error) bubbles to the router's default error UI, and per the stable docs uncaught server-function errors return a generic JSON body",
+        "app/src/server/pokeapi.ts:45-51 — fetchJson has no timeout/AbortSignal; a hung API call hangs the page indefinitely",
+        "app/src/server/pokeapi.ts:31-34 — cache eviction only runs when size > 5000 and only removes expired entries, so a burst of fresh keys can grow it (bounded in practice by data cardinality)",
+        "app/src/routes/index.tsx:37-57 — the search/URL sync race is handled carefully with lastPushed ref + timer cleanup; page is clamped to totalPages",
+        "app/src/routes/team.tsx:24-30 — context-vs-loader merge after an in-page removal is handled and commented, so no stale member is rendered",
+        "app/src/routes/__root.tsx:13-14 — head() also checks m._notFound, an internal-looking property alongside the documented m.status === 'notFound'"
+      ],
+      "rationale": "No SSR/CSR mismatches, no leaked listeners, debounce and revalidation races handled, 404s thrown idiomatically. The gaps are robustness, not bugs: no error boundary for a live API dependency and no fetch timeout."
+    },
+    "global_abstractions": {
+      "score": 4,
+      "evidence": [
+        "app/src/server/pokeapi.ts:1-249 — a single ~250-line data module plus cache serves every route; cohesive as the API boundary but will grow with each new resource",
+        "app/src/server/functions.ts:66-70 — slot-sorted type mapping duplicated in speciesIndex() (pokeapi.ts:168-190) and team.tsx's typeLabels map (routes/team.tsx:33) repeats index.tsx:53",
+        "app/src/lib/config.ts:7-9 — a one-line useMediaBase wrapper over root loader data; harmless but a layer a teammate must chase",
+        "app/src/lib/team.ts:1-30 — cookie format shared cleanly between server parse and client write, a deliberate and documented boundary"
+      ],
+      "rationale": "Boundaries are genuinely clear (routes / components / lib / server, types shared as DTOs), and the one large module is a coherent API client. A couple of near-duplicate helpers and a growing god-data-module are worth tidying before they spread, but nothing structural."
+    },
+    "readability": {
+      "score": 5,
+      "evidence": [
+        "app/src/server/pokeapi.ts:22-29 — comment explains TTL memo, promise sharing and rejection eviction",
+        "app/src/routes/team.tsx:22-23 — 'Membership lives in a cookie, so never reuse loader data' plus the loader/context merge comment at :26-27",
+        "app/src/lib/team.ts:5-6 — 'URI-encoded JSON array ... so the server can render the right state on the first request' explains the non-obvious design",
+        "app/src/components/MoveTable.tsx:47-49 — comment on default ordering; app/src/lib/coverage.ts:12-13 explains the multiplier math",
+        "app/src/styles.css:55,108,206,257 — CSS sectioned with banner comments; components are small single-purpose files"
+      ],
+      "rationale": "Naming is precise, files are small and consistently organized, and comments consistently explain *why* (caching, cookie strategy, sort defaults) rather than what. A new teammate would find their way quickly."
+    },
+    "review_cost": {
+      "score": 4,
+      "evidence": [
+        "app/src/routes/__root.tsx:14 — drop the m._notFound poke and rely on the documented status check",
+        "app/package.json:6-9 — only dev/build/start; no typecheck script despite tsconfig strict mode being set",
+        "app/src/server/pokeapi.ts:45 — add AbortSignal.timeout to API fetches",
+        "app/src/router.tsx:5-10 — add a defaultErrorComponent so API failures render something styled"
+      ],
+      "rationale": "I'd approve after one pass of nits: an error boundary, a fetch timeout, and the two duplicated mapping helpers. Nothing needs structural rework."
+    }
+  },
+  "overall": 4,
+  "findings": [
+    {
+      "severity": "medium",
+      "location": "app/src/router.tsx:5",
+      "issue": "No custom error component anywhere; any non-404 API failure (pokeapi.ts throws a raw Error on non-ok responses) renders the router's default error UI, and on the server function path produces a generic JSON error body per the stable docs.",
+      "suggestion": "Add a defaultErrorComponent (and onCatch) on the router, and keep throwing notFound() only for genuine 404s."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/server/pokeapi.ts:45",
+      "issue": "API fetches have no timeout, so a hung upstream request hangs the page indefinitely (the pokemon page fans out to ~90 move fetches).",
+      "suggestion": "Pass AbortSignal.timeout(10_000) to fetch, and surface failures as a user-visible error."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/routes/__root.tsx:14",
+      "issue": "head() checks m._notFound, an internal/undocumented match property, alongside the documented m.status === 'notFound'.",
+      "suggestion": "Use only the documented status check; add a comment if a specific version needed the fallback."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/server/pokeapi.ts:31",
+      "issue": "Cache eviction only fires above 5000 entries and only drops expired ones; a burst of fresh keys can push past the cap.",
+      "suggestion": "Evict by insertion order/age unconditionally, or note that key cardinality is bounded by the dataset."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/server/functions.ts:66",
+      "issue": "Slot-ordered type mapping is duplicated (team member types here, speciesIndex slots in pokeapi.ts:168, and the typeLabels Map built twice in routes/index.tsx:53 and routes/team.tsx:33).",
+      "suggestion": "Extract a small helper (e.g. typesBySlot / typeLabelMap) next to the type functions."
+    },
+    {
+      "severity": "low",
+      "location": "app/package.json:6",
+      "issue": "No typecheck or lint script, even though tsconfig is strict and routeTree.gen.ts is generated.",
+      "suggestion": "Add \"typecheck\": \"tsc --noEmit\" so CI catches generated-tree drift."
+    }
+  ],
+  "summary": "This is a clean, current, idiomatic TanStack Start v1 app: server functions with validators, cookie-based team state seeded server-side to avoid a flash, careful URL/search sync, and correct notFound handling. The main gaps are operational robustness (no error boundary, no fetch timeout) rather than bugs, plus a few duplicated helpers. I'd approve after one round of small changes."
+}

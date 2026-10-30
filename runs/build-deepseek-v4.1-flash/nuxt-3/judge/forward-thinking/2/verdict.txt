@@ -1,0 +1,126 @@
+## Review
+
+**Framework currency.** `app/package.json` pins `nuxt@4.6.3`, which is the current stable (released 2026-10-27, verified via the nuxt/nuxt releases page). The resolved tree (`app/package-lock.json:4645` h3 1.15.11, `:5805` nitropack 2.13.5, `:8325` vue 3.5.44) confirms the app targets Nuxt 4.6's actual runtime, so `defineEventHandler`/`getRouterParam` are the *current* Nitro-2/h3-1 APIs here — h3 v2's `defineHandler` rename applies only to the h3 v2/Nitro v3 beta (per h3.dev/migration and nitro.build/docs/migration), not to what this app runs on.
+
+**What ages well.** All upstream PokeAPI access sits behind one module (`app/server/utils/pokeapi.ts`) with a single in-process cache; the client only ever calls the app's own five Nitro routes; `API_BASE_URL` is read in exactly one place (`app/server/utils/pokeapi.ts:4`); `compatibilityDate` and the `node-server` preset are pinned (`app/nuxt.config.ts`). A framework upgrade would touch the five thin route files and the util, not the pages.
+
+**What will churn.** Every page throws away the response typing Nuxt infers for server routes (`useFetch<any>` at `app/pages/index.vue:63`, `app/pages/pokemon/[name].vue:116`, `app/pages/moves/[name].vue:53`, `app/pages/abilities/[name].vue:31`, `app/pages/types/[name].vue:53`), and the server module itself is `any`-heavy (`mapEvolutionNode(node: any): any` at `pokeapi.ts:319`), so payload-shape changes ripple silently. The `/api/pokemon/:name` route returns move rows for *every* version group when the page renders one (`pokeapi.ts:347-365`), and "not found" is in-band data rather than `createError`/404.
+
+**Platform.** Native `fetch`, `Map`/`Set`, CSS custom properties and grid, `loading="lazy"` — good. But `app/pages/index.vue:112-116` hand-rolls query-string encoding instead of `URLSearchParams`/`router.resolve`, and `pokeapi.ts:40-43` regex-parses IDs instead of `new URL`; upstream fetches (`pokeapi.ts:63`) have no `AbortSignal.timeout`.
+
+```json
+{
+  "dimension": "forward-thinking",
+  "criteria": {
+    "latest_apis": {
+      "score": 4,
+      "evidence": [
+        "app/package.json:4 — nuxt@4.6.3, the current stable (released 2026-10-27 per github.com/nuxt/nuxt/releases)",
+        "app/pages/pokemon/[name].vue:116-118 — useFetch with reactive URL factory + watch: [name], current Nuxt 4 idiom",
+        "app/pages/pokemon/[name].vue:120 — reactive useHead(() => ...) for document title",
+        "app/server/api/pokemon/[name].get.ts:2-4 — defineEventHandler + getRouterParam, current for the h3 1.15/Nitro 2.13 that Nuxt 4.6 resolves (app/package-lock.json:4645, :5805)",
+        "app/nuxt.config.ts:13 — compatibilityDate set, required and forward-pin friendly",
+        "app/pages/index.vue:57 — definePageMeta({}) is an empty, do-nothing macro call (boilerplate, not an upgrade hazard)"
+      ],
+      "rationale": "Consistently on the current generation: Nuxt 4 app/ structure, useFetch/useHead, typed-props SFCs, and the h3/Nitro APIs matching the installed version (h3 v2's defineHandler rename applies only to the h3 v2 beta, per h3.dev/migration). Docked for discarding Nuxt's inferred server-route types via useFetch<any> and one piece of dead meta boilerplate."
+    },
+    "platform": {
+      "score": 3,
+      "evidence": [
+        "app/server/utils/pokeapi.ts:63 — native fetch for upstream data, no axios/polyfill",
+        "app/components/PokemonCard.vue:6 — loading=\"lazy\" + width/height on img, good platform usage",
+        "app/assets/css/main.css:1-80 — custom properties, grid, media queries; no framework, no polyfills",
+        "app/pages/index.vue:112-116 — hand-rolled query-string encoder instead of URLSearchParams or router.resolve({query}).fullPath",
+        "app/server/utils/pokeapi.ts:40-43 — regex parse of IDs from URLs instead of new URL().pathname",
+        "app/server/utils/pokeapi.ts:59-72 — in-process promise cache with no AbortSignal.timeout, an upstream hang is unbounded"
+      ],
+      "rationale": "Solidly platform-forward in the data layer and CSS, but a few hand-rolled substitutes for URL/URLSearchParams/AbortController remain where the platform primitive is the better choice."
+    },
+    "dependencies": {
+      "score": 5,
+      "evidence": [
+        "app/package.json:3-6 — exactly one dependency, nuxt@4.6.3, current stable",
+        "app/assets/css/main.css:1 — plain CSS with tokens import; no CSS framework or UI kit (per spec, and per its own choice)",
+        "app/server/utils/pokeapi.ts — no axios, no lodash, no debounce library; everything else is native"
+      ],
+      "rationale": "Minimal and modern: a single, freshly released framework dependency, and the platform covers the rest."
+    },
+    "churn_resistance": {
+      "score": 3,
+      "evidence": [
+        "app/server/utils/pokeapi.ts:4 — API_BASE_URL env read in exactly one place",
+        "app/server/api/*/[name].get.ts — five thin handlers; all upstream logic centralized in server/utils/pokeapi.ts, so a h3/Nitro upgrade touches ~6 files",
+        "app/pages/index.vue:63 — useFetch<any> discards Nuxt's inferred server-route response types (same at pokemon/[name].vue:116, moves/[name].vue:53, abilities/[name].vue:31, types/[name].vue:53)",
+        "app/server/utils/pokeapi.ts:319-325 — mapEvolutionNode(node: any): any; page-data builders return untyped objects",
+        "app/server/utils/pokeapi.ts:347-365 — move rows for every version group serialized into one payload while the page renders only the selected group",
+        "app/pages/[...slug].vue:1-7 — catch-all 404 via a page, not createError/HTTP 404, so notFound travels as in-band data in every page type"
+      ],
+      "rationale": "Data access, config and env are excellently centralized, so an upgrade or an API move is cheap. But the client/server boundary is untyped on both sides (any everywhere), the pokemon payload ships far more than it renders, and 404 is a data flag rather than a status — three things that guarantee rework when requirements or payloads change."
+    }
+  },
+  "overall": 4,
+  "findings": [
+    {
+      "severity": "medium",
+      "location": "app/pages/pokemon/[name].vue:116 (also index.vue:63, moves/[name].vue:53, abilities/[name].vue:31, types/[name].vue:53)",
+      "issue": "useFetch<any> throws away the response types Nuxt infers from the server routes; the whole client/server contract is any-typed.",
+      "suggestion": "Drop the explicit <any> and let Nuxt infer the handler return types; export shared DTO interfaces from server/utils/pokeapi.ts and use them for the page-data builders."
+    },
+    {
+      "severity": "medium",
+      "location": "app/server/utils/pokeapi.ts:347-365",
+      "issue": "/api/pokemon/:name serializes move rows for every version group (hundreds of rows for Pikachu) while the page renders one group.",
+      "suggestion": "Accept ?game= in the handler and return only the selected group's tables, or move grouping server-side; the client already round-trips the game param."
+    },
+    {
+      "severity": "medium",
+      "location": "app/server/utils/pokeapi.ts:59-72",
+      "issue": "Upstream fetches have no timeout or AbortController; a slow PokeAPI request hangs the page render forever, and the promise cache never invalidates on success.",
+      "suggestion": "Pass AbortSignal.timeout(10000) to fetch and cache with a TTL (or keyed on a data-version) so live-data changes eventually surface."
+    },
+    {
+      "severity": "low",
+      "location": "app/pages/[...slug].vue:1-7 and pages/*/[name].vue (notFound flags)",
+      "issue": "Not-found is modeled as in-band data (notFound: true) rather than an HTTP 404 via createError, so caching, prefetching and SEO semantics can't be improved without touching every page.",
+      "suggestion": "throw createError({ statusCode: 404 }) from the server handlers and render an error.vue page."
+    },
+    {
+      "severity": "low",
+      "location": "app/pages/index.vue:57",
+      "issue": "definePageMeta({}) is a no-op macro call; dead boilerplate that a reviewer must think about.",
+      "suggestion": "Delete it, or use it for what it's for (e.g. definePageMeta({ name: 'pokedex' }))."
+    },
+    {
+      "severity": "low",
+      "location": "app/pages/index.vue:107-116",
+      "issue": "pageUrl/searchString hand-roll query-string building and percent-encoding.",
+      "suggestion": "Use router.resolve({ path: '/', query }).fullPath (or URLSearchParams) so encoding rules live with the router."
+    },
+    {
+      "severity": "low",
+      "location": "app/server/api/pokemon/[name].get.ts:3 (all four handlers)",
+      "issue": "decodeURIComponent(getRouterParam(...)) can double-decode a param the router already decoded.",
+      "suggestion": "Trust getRouterParam's value (or add a comment/test documenting the router's decoding behavior) — PokéAPI names never contain % today, which is exactly why this will surprise someone later."
+    },
+    {
+      "severity": "low",
+      "location": "app/server/utils/pokeapi.ts:4",
+      "issue": "process.env.API_BASE_URL read directly instead of via Nuxt's runtimeConfig.",
+      "suggestion": "Add runtimeConfig: { apiBaseUrl: 'http://localhost:9000' } and read it with useRuntimeConfig(event), the Nuxt-blessed place for environment-driven config."
+    }
+  ],
+  "summary": "This is a clean, current Nuxt 4.6.3 app with a single dependency, centralized upstream data access, and the framework's modern primitives (useFetch with reactive URLs, useHead, Nitro server routes), so an upgrade would touch very few files. The main debts are at the client/server boundary: every page discards inferred response types, the Pokémon payload ships all version groups' move tables at once, and 404 is modeled as data rather than a status. Those are cheap to fix now and expensive to fix once behavior depends on them.",
+  "apis": [
+    { "api": "useFetch", "location": "app/pages/pokemon/[name].vue:116", "status": "current", "replacement": "" },
+    { "api": "useHead", "location": "app/pages/pokemon/[name].vue:120", "status": "current", "replacement": "" },
+    { "api": "defineEventHandler", "location": "app/server/api/pokemon/[name].get.ts:2", "status": "current", "replacement": "defineHandler (or a plain function) only under h3 v2 / Nitro v3, which is still beta; the installed stack is h3 1.15 / Nitro 2.13 (h3.dev/migration, nitro.build/docs/migration)" },
+    { "api": "getRouterParam", "location": "app/server/api/pokemon/[name].get.ts:3", "status": "current", "replacement": "" },
+    { "api": "definePageMeta", "location": "app/pages/index.vue:57", "status": "current", "replacement": "" },
+    { "api": "useRoute / useRouter / NuxtLink", "location": "app/pages/index.vue:60-61", "status": "current", "replacement": "" },
+    { "api": "process.env (server config)", "location": "app/server/utils/pokeapi.ts:4", "status": "legacy", "replacement": "useRuntimeConfig(event) with a runtimeConfig entry — the Nuxt-blessed pattern for environment-driven config" }
+  ],
+  "dependencies": [
+    { "name": "nuxt", "verdict": "modern", "note": "4.6.3 is the current stable, released 2026-10-27 (github.com/nuxt/nuxt/releases); the only dependency, and no library was pulled in for CSS, fetching or debounce." }
+  ]
+}
+```

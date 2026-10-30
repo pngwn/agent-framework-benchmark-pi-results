@@ -1,0 +1,122 @@
+## Review
+
+This is a genuinely well-built Angular 22 app. I verified the current-framework claims before crediting or dinging them:
+
+- **Up-to-date primitives.** Zoneless by default (no `zone.js` in `app/package.json`), `@Service()` on `PageData` (`app/src/app/data/page-data.ts:44`) — the decorator the docs migrated to in v22.1 — `input.required` + resolved-data binding via `withComponentInputBinding` (`app/src/app/app.config.ts`, `app/src/app/app.routes.ts:11-13`), `linkedSignal` for sort/filter state resets (`app/src/app/pages/pokemon/move-table.ts:64`, `home.ts:29`), `@if/@for/@else` control flow everywhere, `RESPONSE_INIT` for the SSR 404 status (`app/src/app/pages/not-found/not-found.ts:11-13`), `RenderMode.Server` per-request SSR (`app/src/app/app.routes.server.ts:4`), `provideAppInitializer` + `mergeApplicationConfig` (`app/src/app/app.config.server.ts`), hydration with `withEventReplay` and TransferState reuse so the client never refetches what the server rendered (`page-data.ts:56-63`).
+- **The custom scroll logic is legitimate.** I checked the RouterScroller source: `Scroll` events are emitted even with both `withInMemoryScrolling` options disabled, and the router docs themselves show an App-component subscriber + `ViewportScroller` as the sanctioned way to do custom restoration. `app/src/app/app.ts:21-41` implements exactly that, with a comment explaining why (keep position on filter/game change, top on page change). Right call.
+- **The architecture is a deliberate BFF.** Instead of the browser talking to PokeAPI (or `httpResource` per component), the Express server builds compact view models per page (`app/src/server/loaders.ts`) and serves them to the browser via `/_data/...` (`app/src/server.ts:17-25`). This is justified: a Pokémon page needs ~100 large API documents but only a few KB of view model, and the home page would otherwise need 28 requests in the browser. It's documented in `README.md`. The cost is a stringly-typed internal protocol that duplicates route knowledge and uses a second path vocabulary (`/types/fire` in the browser vs `/type/fire` in `/_data`, `/` vs `/home`) — `app/src/app/app.routes.ts:10-12` vs `app/src/server/loaders.ts:390-407` — so every new page touches four places.
+- **Real nits, not blockers.** No `"strict": true` in `app/tsconfig.json` (Angular scaffolds strict by default; all the `| null` types in `models.ts` are currently unenforced). No user-visible handling of a failed resolver: a client-side `/_data` 500 rejects the navigation and the user stays on the stale page (`page-data.ts:14-17`); the server 500s. The module-level client cache is TTL-only with no size cap (`page-data.ts:11-12`), unlike its server counterpart (`api-client.ts:40`). `@angular/forms` is a dependency nothing imports. `API_BASE_URL`/`publishApiBaseUrl` are oddly homed in `page-data.ts:45-53`.
+
+Not-found handling, URL-synced filters, debounced search with proper cleanup, sprite `onerror` fallback, malformed-path defense in `loadPageData`, and bounded, self-evicting server caching are all done carefully. I'd approve after one small round.
+
+```json
+{
+  "dimension": "mergeability",
+  "criteria": {
+    "idiomatic": {
+      "score": 4,
+      "evidence": [
+        "app/src/app/data/page-data.ts:44 — @Service() decorator, the current v22 replacement for root-provided @Injectable",
+        "app/src/app/app.routes.ts:11-13 — ResolveFn + withComponentInputBinding feeding input.required; exactly the documented SSR data-loading pattern",
+        "app/src/app/app.ts:21-41 — custom scroll restoration matching the RouterScroller source and the router docs' own App-component example",
+        "app/src/app/pages/not-found/not-found.ts:11-13 — RESPONSE_INIT status 404; app/src/app/app.routes.server.ts:4 — per-request RenderMode.Server",
+        "app/src/app/data/page-data.ts:14-17 — bespoke fetch + /_data endpoint instead of HttpClient/httpResource primitives (the one deviation)"
+      ],
+      "rationale": "Everywhere else this reads like the framework's current docs — signals, control flow, zoneless, TransferState hydration. The one home-grown layer is the BFF-style /_data view-model protocol, which is a justified, documented deviation rather than a workaround."
+    },
+    "correctness_risks": {
+      "score": 4,
+      "evidence": [
+        "app/src/app/data/page-data.ts:14-17 — failed /_data fetch rejects the resolver; client navigation silently aborts on the stale page with no user feedback",
+        "app/src/app/data/page-data.ts:11-12 — module-level clientCache has a TTL but no size cap (server cache in api-client.ts:40 does)",
+        "app/src/server/loaders.ts:238-241 — ~100 parallel move fetches per uncached Pokémon render plus 18 type docs; bounded and 60s-cached, but a real fan-out",
+        "app/src/server/loaders.ts:392-395 — malformed percent-encoding and extra path segments handled (returns null/404), so /_data traversal is safe",
+        "app/src/app/shared/pokemon-card.ts:16-18 — sprite onerror fallback hides the image instead of showing a broken icon"
+      ],
+      "rationale": "Careful look found no serious bugs — 404s, hydration consistency, listeners and timers all handled. Remaining risks are minor robustness gaps: silent failure when data loading errors, and an uncapped client-side cache."
+    },
+    "global_abstractions": {
+      "score": 4,
+      "evidence": [
+        "app/src/server/loaders.ts:390-407 — stringly-typed loadPageData dispatch; adding a page means touching routes, resolver path, loader and VM type",
+        "app/src/app/app.routes.ts:10-12 vs app/src/server/loaders.ts:401-402 — two vocabularies: browser '/types/fire' vs data path '/type/fire', '/' vs '/home'",
+        "app/src/app/data/page-data.ts:45-53 — API_BASE_URL token and publishApiBaseUrl homed in page-data.ts, mixing config concerns into the data module",
+        "app/src/app/shared/models.ts:1-88 — single, shared VM contract used verbatim by both server loaders and client templates; no duplicated helpers"
+      ],
+      "rationale": "The page-data BFF is locally reasonable, documented in the README, and earns its keep given the API's fan-out shape. The cost is the dual path vocabulary and four-point touch surface per new page, plus one mis-homed token."
+    },
+    "readability": {
+      "score": 5,
+      "evidence": [
+        "app/README.md:13-22 — architecture (SSR per request, view models, /_data, caching) explained in prose",
+        "app/src/app/app.ts:23-25 — comment explains the non-obvious scroll policy rather than the mechanics",
+        "app/src/app/shared/format.ts:1-3 — tiny, tested, single-purpose helpers with spec-covered examples",
+        "app/src/app/pages/* — uniform one-component-per-file layout with default exports for lazy routes and shared components in shared/"
+      ],
+      "rationale": "Files are small, naming is consistent, every non-obvious decision carries a why-comment, and the README plus central models.ts make the architecture legible in minutes."
+    },
+    "review_cost": {
+      "score": 4,
+      "evidence": [
+        "app/tsconfig.json:5-16 — no \"strict\": true (Angular scaffolds strict by default); all the | null types in models.ts are unenforced",
+        "app/package.json:17 — @angular/forms listed but never imported",
+        "app/src/app/data/page-data.ts:14-17 — error path for failed data loads worth one round of discussion",
+        "app/src/app/app.routes.ts:27-34 — runGuardsAndResolvers tuned to skip refetch on same-pokemon navigations; a perf nicety a reviewer would appreciate"
+      ],
+      "rationale": "Approvable after one small round: enable strict TypeScript, drop the unused forms dependency, and add minimal feedback for failed data loads. Nothing requires structural rework."
+    }
+  },
+  "overall": 4,
+  "findings": [
+    {
+      "severity": "medium",
+      "location": "app/tsconfig.json:5",
+      "issue": "TypeScript strict mode (strict null checks etc.) is off, deviating from Angular's scaffolded default and style guide; every `| null` type in models.ts and the loaders is currently unenforced.",
+      "suggestion": "Add \"strict\": true and \"forceConsistentCasingInFileNames\": true to compilerOptions and fix whatever the compiler surfaces."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/app/data/page-data.ts:14",
+      "issue": "A failed /_data fetch (API down, 5xx) rejects the route resolver: on the client the navigation silently aborts leaving the user on the old page; on the server it becomes a plain 500.",
+      "suggestion": "Resolve to a small error view model (or provide a router error component/404 fallback) so failed loads render something user-visible."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/app/data/page-data.ts:11",
+      "issue": "Module-level clientCache is TTL-only with no entry cap, unlike the server cache which evicts at 4000 entries; long sessions accumulate view models.",
+      "suggestion": "Reuse the bounded-eviction logic from api-client.ts (or extract one shared cache helper)."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/server/loaders.ts:390",
+      "issue": "The internal page-data path vocabulary duplicates browser URLs and differs from it ('/types/fire' → '/type/fire', '/' → '/home'); each new page requires edits in routes, resolver, dispatcher and models.",
+      "suggestion": "Derive the data path from the browser route pattern (a single mapping object keyed by route path), or at least add a short comment table documenting the correspondence."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/server/loaders.ts:238",
+      "issue": "Per-Pokémon page fan-out: one fetch per learned move plus 18 type documents for labels on every uncached render (mitigated by the 60s server cache).",
+      "suggestion": "Batch or lazily load type labels, and consider a small per-page response cache keyed by species+game."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/app/data/page-data.ts:45",
+      "issue": "API_BASE_URL and publishApiBaseUrl (environment/config concerns) live in the page-data module rather than a config module.",
+      "suggestion": "Move the token and publish helper into their own file (e.g. app/src/app/api-base.ts) so page-data stays a single concern."
+    },
+    {
+      "severity": "low",
+      "location": "app/package.json:17",
+      "issue": "@angular/forms is declared as a dependency but no form module is imported anywhere in src/.",
+      "suggestion": "Remove it."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/app/app.ts:27",
+      "issue": "Scroll behavior re-derives 'did the page change' from raw URL comparison, which is fragile if future routes add other pagination params; it also duplicates what the browser does on popstate when restoration is 'disabled'.",
+      "suggestion": "Keep it, but mark the coupling with the home route's `page` query param in the comment, and add a home-page scroll test."
+    }
+  ],
+  "summary": "A modern, idiomatic Angular 22 SSR app: signals-first, resolver-based data loading, TransferState hydration, correct 404 statuses, and a documented BFF view-model layer that smartly keeps the browser's payloads tiny. The main merge friction is tooling/robustness rather than design: strict TypeScript is off, failed data loads fail silently, and the stringly-typed /_data path vocabulary adds a four-point touch surface per new page. I'd merge after one small round of fixes."
+}
+```

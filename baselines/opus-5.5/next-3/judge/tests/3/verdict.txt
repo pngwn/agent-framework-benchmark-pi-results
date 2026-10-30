@@ -1,0 +1,81 @@
+## Review: test quality
+
+The app contains **zero tests of its own** — no test script, no runner, no test dependencies anywhere in `app/` (`app/package.json:6-15`). Everything below is therefore about what the acceptance suite in `tests/` (which it didn't write) leaves unguarded, and where a refactor will silently break behaviour.
+
+The codebase is unusually testable for a Next.js app: most of the risk lives in small pure functions (`app/lib/format.ts`), pure-ish aggregation (`app/lib/data.ts`), and URL-state math (`app/app/page.tsx`, `app/components/Filters.tsx`) — all of which could be covered with a minimal Vitest setup and no browser. That no such setup exists is the finding.
+
+**Risky, untested logic, in rough order of danger:**
+
+1. **Alternate-form exclusion and ordering** — `app/lib/data.ts:57` (`id <= MAX_SPECIES_ID`, relying on NaN-comparison-to-false), `app/lib/data.ts:48-54` (dedup by species id, sort by dex). Flip the comparison, drop the dedup, or sort by name instead of id and the dex pages reorder or Megas leak into every list. The acceptance fixtures only include *one extra Pokémon*, so a partial regression (e.g. dedup gone but IDs still sorted) can slip past them.
+2. **URL-state sync in `Filters`** — `app/components/Filters.tsx:29-41`: the `sentQuery`-ref trick that stops a slow navigation from clobbering what the user typed, plus the 200ms debounce (`app/components/Filters.tsx:49-51`) and the pending-timer cancellation on select (`app/components/Filters.tsx:60`). This is exactly the kind of code that breaks invisibly on a refactor (back/forward, fast typing, select-while-typing) and can only regress silently because nothing exercises it.
+3. **Pagination clamping and param parsing** — `app/app/page.tsx:15` (`first()` picking `value[0]` of an array param), `app/app/page.tsx:32-33` (`parseInt` NaN → 1, clamp to `[1, totalPages]`). A refactor to `Number()` or a searchParams library changes edge behaviour (`?page=0`, `?page=99`, `?page=abc`, `?q=a&q=b`) with nothing to catch it.
+4. **Spec-critical formatters** — `app/lib/format.ts:10-16` (`humanize`: `filter(Boolean)` handles `--` names like `ho--oh`-style doubles, digit words like `nidoran-f`), `app/lib/format.ts:44-49` (`latestFlavorText` uses `findLast`, an ES2023 method — a single line a unit test would pin), `app/lib/format.ts:55-58` (`idFromUrl` returning `NaN` and everything downstream depending on that).
+5. **The in-memory cache** — `app/lib/api.ts:34-52`: TTL, the somewhat convoluted eviction loop (`if (entry.expires <= now || cache.size > MAX_ENTRIES) cache.delete(key)`), and error-invalidation via `value.catch` identity check (`app/lib/api.ts:39-42`). A tweak here (e.g. caching rejections, off-by-one in expiry) wouldn't fail any test until production.
+6. **Moves assembly on the Pokémon page** — `app/app/pokemon/[name]/page.tsx:145-203`: game-selection fallback to `games.at(-1)`, the dedup key `${l.method}:${l.move}:${level}` at line 176, and the two-level sort (level vs. label at line 193, method rank at line 199). Subtle, data-heavy, completely unguarded.
+7. **Not-found / error paths** — the `isApiName` guard + `find` → `notFound()` pattern in all four `[name]` pages (e.g. `app/app/moves/[name]/page.tsx:9-12`) and `app/app/error.tsx`. Some of this is covered by the acceptance suite today, but nothing in `app/` pins it.
+
+Nothing here is framework-version-sensitive enough to change the verdict: Next 16 with `params`/`searchParams` as Promises is handled correctly, and the right test tooling (Vitest + Testing Library, Playwright component tests for `Filters`) is all current — it just wasn't used.
+
+```json
+{
+  "dimension": "tests",
+  "criteria": {
+    "coverage_of_risk": {
+      "score": 1,
+      "evidence": [
+        "app/package.json:6-15 — no test script, no test runner or library in devDependencies",
+        "app/lib/format.ts:10-16 — humanize, the spec's humanized-name rule, untested",
+        "app/lib/data.ts:45-54 — cardsForPokemon: alternate-form filter, dedup and dex sort untested",
+        "app/app/page.tsx:30-33 — pagination clamp and parseInt-on-URL-param untested",
+        "app/components/Filters.tsx:36-51 — URL-state sync and debounce, the riskiest client code, untested"
+      ],
+      "rationale": "No tests exist at all, and the riskiest logic (data aggregation, filtering/pagination, URL state, cache) is precisely the code a refactor would break first."
+    },
+    "behaviour_not_implementation": {
+      "score": 1,
+      "evidence": ["app/package.json:6-15 — the app defines no tests of any kind"],
+      "rationale": "No tests, so the criterion is scored at the bottom per the rubric."
+    },
+    "regression_power": {
+      "score": 1,
+      "evidence": [
+        "app/lib/data.ts:57 — inverting 'id <= MAX_SPECIES_ID' would leak Mega forms into every list with no failing test",
+        "app/lib/api.ts:34-52 — TTL cache and eviction loop can be broken (e.g. caching rejected promises) with no failing test",
+        "app/app/pokemon/[name]/page.tsx:176 — changing the move dedup key would alter row counts with no failing test"
+      ],
+      "rationale": "With zero tests, any refactor that isn't caught by the acceptance suite's happy paths ships silently; the fixtures cover only one extra Pokémon, so partial regressions pass."
+    },
+    "signal_to_noise": {
+      "score": 3,
+      "evidence": ["app/package.json:6-15 — no test files, so no noise either"],
+      "rationale": "No tests means no low-value tests; scored 3 per the rubric, though the absence is itself the problem."
+    }
+  },
+  "overall": 1,
+  "findings": [
+    { "severity": "high", "location": "app/package.json:6-15", "issue": "No test infrastructure whatsoever: no test script, no runner (Vitest/Playwright) in devDependencies, zero test files in app/.", "suggestion": "Add Vitest for the pure logic (lib/format.ts, lib/data.ts aggregation, pagination math) and a component test for Filters; even ~15 unit tests would cover most of the risk." },
+    { "severity": "high", "location": "app/lib/data.ts:45-57", "issue": "cardsForPokemon and getSpeciesIndex encode the spec's trickiest rules (alternate-form exclusion via 'id <= MAX_SPECIES_ID', dedup, slot ordering, dex sort) with no regression guard.", "suggestion": "Unit-test with a fixture list containing a Mega form (id > 10000), a duplicate species, and shuffled order; assert exclusion, dedup, and id ordering." },
+    { "severity": "high", "location": "app/components/Filters.tsx:29-51", "issue": "The sentQuery-ref dance, 200ms debounce, and timer cancellation on select are race-prone and completely untested; back/forward and select-while-typing regressions would be invisible.", "suggestion": "Add a Playwright component or e2e test: type quickly, select a type mid-debounce, press back, and assert the input and URL agree." },
+    { "severity": "medium", "location": "app/app/page.tsx:15-33", "issue": "URL param parsing (first() of array params, parseInt NaN handling, page clamping to [1, totalPages]) is untested edge-case logic.", "suggestion": "Table-driven unit tests for ?page=0, ?page=abc, ?page=999, ?q=a&q=b, and page-beyond-total after narrowing filters." },
+    { "severity": "medium", "location": "app/lib/format.ts:10-16", "issue": "Spec-critical helpers (humanize, dexNumber, latestFlavorText via ES2023 findLast, idFromUrl's NaN) are untested despite encoding explicit spec definitions.", "suggestion": "A ~20-line unit test per function pinning the spec's examples (mr-mime, #0025, whitespace collapsing including \\f)." },
+    { "severity": "medium", "location": "app/lib/api.ts:34-52", "issue": "In-memory TTL cache: eviction loop and error invalidation (identity-checked value.catch) are subtle and untested; caching rejections or an expiry off-by-one would ship silently.", "suggestion": "Unit tests with mocked fetch: assert 404s are not cached, TTL expiry refetches, and concurrent gets share one request." },
+    { "severity": "medium", "location": "app/app/pokemon/[name]/page.tsx:145-203", "issue": "Moves assembly (game fallback to games.at(-1), dedup key, two-level sorting) is data-heavy logic with no guard; wrong sort keys would silently reorder tables.", "suggestion": "Extract getMoves to a testable function and unit-test game selection fallback, dedup, and method/level ordering with a small fixture." },
+    { "severity": "low", "location": "app/app/moves/[name]/page.tsx:9-12", "issue": "The isApiName guard + find → notFound pattern is repeated across four route files and only incidentally covered by acceptance tests.", "suggestion": "A shared test (or shared helper with a test) covering invalid names, mixed-case names, and unknown-but-valid names hitting the 404 path." }
+  ],
+  "summary": "The app ships no tests and no test tooling, despite containing exactly the kind of pure, high-risk logic (formatters, species-index aggregation, pagination, URL-state sync, an in-memory cache) that is cheap to unit-test and expensive to regress. The acceptance suite in tests/ was authored by others and covers happy paths only, so a data-layer refactor could break alternate-form exclusion, ordering, or dedup without a single failing test. Add a minimal Vitest layer over lib/ plus one interaction test for Filters; that alone would move this from a 1 to a defensible position.",
+  "wroteTests": false,
+  "testCount": 0,
+  "valuableTests": [],
+  "lowValueTests": [],
+  "untested": [
+    { "area": "Alternate-form exclusion, dedup and dex ordering in cardsForPokemon/getSpeciesIndex (lib/data.ts)", "risk": "high", "likelyBug": "Mega forms leak into lists, duplicates appear, or cards sort by name instead of dex number after a refactor" },
+    { "area": "Filters URL-state sync: debounce, sentQuery ref, back/forward, select-while-typing (components/Filters.tsx)", "risk": "high", "likelyBug": "Typed input clobbered by an in-flight navigation, or debounced search firing with stale filter values" },
+    { "area": "Home page filtering, multi-value params, and pagination clamping (app/page.tsx)", "risk": "high", "likelyBug": "?page=abc or ?page=0 rendering an empty/incorrect slice, or ?q=a&q=b mis-reading the first value" },
+    { "area": "Spec-critical formatters: humanize, dexNumber, latestFlavorText (findLast), idFromUrl NaN (lib/format.ts)", "risk": "medium", "likelyBug": "Humanization regresses for hyphen/edge names, flavor text picks the first instead of last English entry" },
+    { "area": "In-memory TTL cache: expiry, eviction, error invalidation (lib/api.ts)", "risk": "medium", "likelyBug": "Rejected fetches (including 404s) cached and served for 60s, or cache never evicting under load" },
+    { "area": "Pokémon moves assembly: game selection fallback, dedup key, method/level sorting (pokemon/[name]/page.tsx)", "risk": "medium", "likelyBug": "Wrong version group defaulted to, duplicate rows after a key change, or machine moves sorted by level" },
+    { "area": "Not-found and error paths: isApiName guards, find → notFound, error.tsx reset", "risk": "medium", "likelyBug": "A refactored slug guard turns a 404 into an unhandled fetch error page" },
+    { "area": "Evolution chain rendering and null evolution_chain fallback (pokemon/[name]/page.tsx)", "risk": "low", "likelyBug": "Empty evolution section or crash for species with no chain after a refactor of the recursive component" }
+  ]
+}
+```

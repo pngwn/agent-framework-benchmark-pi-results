@@ -1,0 +1,135 @@
+I've reviewed the app, the spec, the framework-mode skill references, and verified React Router 8.5.1 is the current stable release (released 2026-10-27). Here's my review.
+
+## Review
+
+**Overall shape.** This is a competent, working Framework-mode app: `routes.ts` config (`app/app/routes.ts:1`), SSR enabled (`app/react-router.config.ts:4`), route modules with server `loader`s, `meta`/`links` exports in `root.tsx`, `useSearchParams` for URL state, and — nicely — a `.server.ts` module (`app/app/lib/api.server.ts:1`) that correctly keeps Node-only fetch code out of the client bundle. The framework's recommended practices are followed in most places.
+
+**Where it departs from the docs:**
+
+1. **404s are faked, not thrown.** Four loaders return `{ notFound: true }` and the component renders a shared `<NotFoundPage />` (`app/app/routes/pokemon.tsx:14-17`, `move.tsx:5-10`, `ability.tsx:5-10`, `type-detail.tsx:5-10`). The framework-mode reference is explicit: *"Missing record in a loader: `throw data("Not Found", { status: 404 })` and render the route `ErrorBoundary`."* Here unknown names return HTTP 200 with a hand-rolled branch duplicated four times, plus a duplicated `loaderData?.notFound` branch in four `meta` functions.
+
+2. **Generated route types are configured but never used.** `app/tsconfig.json:3-4` includes `.react-router/types/**/*` and sets `rootDirs`, yet the route modules type their loader args and props as `any` (`app/app/routes/pokemon.tsx:13,23`) or hand-derive them (`app/app/routes/home.tsx:16`). The docs make `Route.LoaderArgs` / `Route.ComponentProps` from `./+types/<route>` the default; here `strict: true` is undermined by `any` throughout the largest module.
+
+3. **Boot-time index promises never recover from failure.** `typeInfosPromise`, `generationInfosPromise`, `speciesIndexPromise` and `homeDataPromise` (`app/app/lib/api.server.ts:65,82,96,174`) are module-level IIFEs with no rejection handling. A transient API hiccup at boot rejects them permanently (they're memoized forever), and because they're started at import and not yet awaited, the rejection surfaces as `unhandledRejection` — which kills the Node server by default. Contrast with `fetchJson` (`api.server.ts:37-40`), which correctly evicts the failed cache entry so later requests retry. That resilience just wasn't extended to the top-level indexes.
+
+4. **Every search keystroke is a server round trip.** `onSearch` calls `setSearchParams` per keystroke (`app/app/routes/home.tsx:49-63`), which navigates the home route and — since there's no `shouldRevalidate` — re-runs the home `loader` and re-serializes the entire 1025-species dataset (~hundreds of KB of HTML + hydration payload) for every character typed. A `shouldRevalidate: () => false` (the data is param-independent) or a `clientLoader` would fix it; neither appears anywhere in the app (grep confirms no `shouldRevalidate`, `clientLoader`, or `ErrorBoundary`).
+
+**Other findings:** `lib/api.server.ts` is a 520-line god data module that eagerly builds every page's indexes at import, so a request to `/types` warms the entire home dataset too (`api.server.ts:174`); `Card` in `components.tsx:29` duplicates `PokemonCard` in `api.server.ts:117`; the `page` display is clamped to `totalPages` while the URL still says the out-of-range value (`home.tsx:82-86`); and compiled `build/` artifacts are committed to the repo. On the plus side, `format.ts` is a tidy, well-named pure module, the `Section`/`PokemonGrid` components are small and reusable, and the live-overlay concern (species beyond ID 1025) is explicitly handled (`api.server.ts:143-150`).
+
+```json
+{
+  "dimension": "mergeability",
+  "criteria": {
+    "idiomatic": {
+      "score": 3,
+      "evidence": [
+        "app/app/routes.ts:1 — clean manual RouteConfig with index/route, correct for v8",
+        "app/app/lib/api.server.ts:1 — .server.ts convention correctly isolates Node-only fetching",
+        "app/app/routes/pokemon.tsx:14-17 — returns { notFound: true } instead of the documented throw data(\"Not Found\", { status: 404 }) + ErrorBoundary",
+        "app/app/routes/pokemon.tsx:13,23 — loader args and component props typed `any`; generated `./+types/<route>` types unused despite tsconfig.json:3-4 configuring them",
+        "app/app/root.tsx:1-13 — links/Meta/Scripts/ScrollRestoration and meta exports all match current docs"
+      ],
+      "rationale": "Recognisably idiomatic Framework mode with no deprecated APIs (no react-router-dom, no legacy meta `data`), but it bypasses two documented facilities — 404 responses via ErrorBoundary and generated route types — in favour of hand-rolled workarounds repeated across four routes."
+    },
+    "correctness_risks": {
+      "score": 3,
+      "evidence": [
+        "app/app/lib/api.server.ts:65,82,96,174 — top-level IIFE index promises memoize rejection forever and can raise unhandledRejection (crashes Node) on a boot-time API failure",
+        "app/app/lib/api.server.ts:37-40 — fetchJson does retry on failure; the resilience simply stops at the shared indexes",
+        "app/app/routes/home.tsx:49-63 — each keystroke navigates and revalidates the server loader, re-serializing the full 1025-species payload per character",
+        "app/app/routes/home.tsx:82-86 — displayed page clamped to totalPages while the URL keeps the out-of-range ?page= value",
+        "app/app/routes/pokemon.tsx:5-10 — ?game= parsed in the loader, so game changes are server-driven; no SSR/CSR mismatch found"
+      ],
+      "rationale": "No rendering or hydration bugs found and the fallback sprite logic (api.server.ts:143-150) shows real care, but permanently poisoned boot-time caches and per-keystroke server round trips are genuine fragilities the acceptance tests can't see."
+    },
+    "global_abstractions": {
+      "score": 3,
+      "evidence": [
+        "app/app/lib/api.server.ts:65-174 — single 520-line module eagerly builds type, generation, species, home and version-group indexes at import",
+        "app/app/lib/api.server.ts:174 — homeDataPromise built on import, so any route importing the module warms the whole home dataset",
+        "app/app/components.tsx:29 — Card type duplicates PokemonCard in app/app/lib/api.server.ts:117",
+        "app/app/routes/pokemon.tsx:14 — the notFound branch is duplicated in four loaders, four meta functions and four components"
+      ],
+      "rationale": "The boundaries themselves are sound (.server.ts naming, small pure format.ts, small components.tsx), but the data layer is a god module with hidden module-level state and a copy-pasted not-found pattern that will need untangling once more pages are added."
+    },
+    "readability": {
+      "score": 3,
+      "evidence": [
+        "app/app/lib/format.ts:1-15 — clear, small, well-named pure helpers",
+        "app/app/components.tsx:7-27 — Section correctly wires aria-labelledby to its heading id",
+        "app/app/lib/api.server.ts:258-269 — long but sectioned with comments; still heavy `any` for every API record",
+        "app/app/components.tsx:45 — PokemonGrid actually renders a ul of cards, not a grid"
+      ],
+      "rationale": "Organisation and naming are good and a new teammate would find their way quickly, but the pervasive `any` on API shapes and page data makes the largest module's data flow something you infer rather than read."
+    },
+    "review_cost": {
+      "score": 3,
+      "evidence": [
+        "app/app/routes/pokemon.tsx:14-17 — needs conversion to thrown 404 + ErrorBoundary",
+        "app/app/lib/api.server.ts:65 — boot-time promises need rejection recovery",
+        "app/app/routes/home.tsx:49 — needs shouldRevalidate or clientLoader to stop per-keystroke server calls",
+        "app/build/client/assets — compiled build artifacts committed to the repo"
+      ],
+      "rationale": "The architecture and most code is merge-quality, but the 404 pattern rewrite across four routes, boot-promise resilience, and typed route modules are a full round of changes I'd ask for before approving."
+    }
+  },
+  "overall": 3,
+  "findings": [
+    {
+      "severity": "high",
+      "location": "app/app/routes/pokemon.tsx:14",
+      "issue": "Unknown resources return HTTP 200 with a hand-rolled { notFound: true } branch, duplicated across four routes (move.tsx:5, ability.tsx:5, type-detail.tsx:5) and four meta functions, instead of the documented `throw data(\"Not Found\", { status: 404 })` plus a route ErrorBoundary.",
+      "suggestion": "Throw a 404 Response/data from each loader, export an ErrorBoundary per route (or a shared one) and delete the notFound plumbing; this also fixes the status code for proxies and crawlers."
+    },
+    {
+      "severity": "high",
+      "location": "app/app/lib/api.server.ts:65",
+      "issue": "Module-level IIFE index promises (typeInfosPromise:65, generationInfosPromise:82, speciesIndexPromise:96, homeDataPromise:174) are memoized at import with no rejection handling; a transient API failure at boot poisons them forever and surfaces as an unhandledRejection that kills the Node process by default.",
+      "suggestion": "Build the indexes lazily behind a function with the same failed-cache eviction fetchJson already uses (api.server.ts:37-40), so a rejected index can be retried on the next request."
+    },
+    {
+      "severity": "medium",
+      "location": "app/app/routes/home.tsx:49",
+      "issue": "Every keystroke in the search input calls setSearchParams, which navigates and revalidates the server loader, re-serializing the entire 1025-species dataset to the client per character typed.",
+      "suggestion": "Export `shouldRevalidate: () => false` from home.tsx (the dataset is param-independent), or move filtering into the loader / use a clientLoader so search is purely client-side."
+    },
+    {
+      "severity": "medium",
+      "location": "app/app/routes/pokemon.tsx:13",
+      "issue": "Loader args, meta args and component props are typed `any` in four route modules even though typegen is fully configured in tsconfig.json (rootDirs, .react-router/types include).",
+      "suggestion": "Import `type { Route } from './+types/pokemon'` and use Route.LoaderArgs / Route.MetaArgs / Route.ComponentProps, matching the v8 docs."
+    },
+    {
+      "severity": "medium",
+      "location": "app/app/lib/api.server.ts:174",
+      "issue": "homeDataPromise and every other shared index are built eagerly at module import, so a request to /types or /types/fire warms the whole home dataset (~30 API calls) whether or not it's needed, coupling all routes to one god data module.",
+      "suggestion": "Split page data shapers into per-page modules over a small shared cache, and build indexes on first use of the pages that need them."
+    },
+    {
+      "severity": "low",
+      "location": "app/app/routes/home.tsx:82",
+      "issue": "The displayed page is clamped to totalPages but the URL keeps the out-of-range ?page= value, so the UI and the URL disagree on filtered pages.",
+      "suggestion": "Clamp when reading the param and redirect/replace the URL to the clamped value, or render the first page URL."
+    },
+    {
+      "severity": "low",
+      "location": "app/app/components.tsx:29",
+      "issue": "Card in components.tsx duplicates the shape of PokemonCard in lib/api.server.ts:117, so the two can drift.",
+      "suggestion": "Define the card type once in a shared types module and import it from both."
+    },
+    {
+      "severity": "low",
+      "location": "app/build/client/assets",
+      "issue": "Compiled production artifacts are committed to the repository.",
+      "suggestion": "Add build/ to .gitignore; the harness runs `npm run build` itself."
+    },
+    {
+      "severity": "low",
+      "location": "app/app/components.tsx:45",
+      "issue": "PokemonGrid is named as a grid but renders a `ul` of card links; naming mismatches what the spec calls a list and what the component does.",
+      "suggestion": "Rename to PokemonList (or PokemonCardList)."
+    }
+  ],
+  "summary": "A genuinely competent React Router 8 framework-mode app: correct routing, SSR, loaders, meta and a proper server-only data module, with no deprecated v8 APIs. The main merge blockers are process-level rather than structural — 404s returned as HTTP 200 with a hand-rolled pattern duplicated four times instead of thrown responses plus ErrorBoundaries, boot-time index promises that crash or poison forever on a transient API failure, and per-keystroke server revalidation of a 1025-species payload. I'd request one round of changes before approving."
+}
+```

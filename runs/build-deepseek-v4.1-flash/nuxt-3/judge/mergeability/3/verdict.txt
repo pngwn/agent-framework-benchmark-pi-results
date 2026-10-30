@@ -1,0 +1,146 @@
+I've now read the full app, the spec, and verified current Nuxt 4 guidance (v4 `app/` srcDir fallback, `shared/` folder for cross-context types, useFetch patterns). Here's my review.
+
+## Review: Nuxt Pokédex app
+
+**Structure** — File-based routing under `app/pages/`, thin Nitro handlers under `app/server/api/[name].get.ts` that delegate to a server-only data layer (`app/server/utils/pokeapi.ts`), with in-memory caching explicitly allowed by the spec. Vue components are small and focused (`PokemonCard`, `TypeBadge`, `MoveMethodTable`, `EvolutionNode`, `NotFoundContent`). Landmarks, `useHead` titles, `htmlAttrs: { lang: 'en' }` all handled correctly.
+
+**What's good**
+- URL-driven filter state with two-way `watch` sync and default-omitting query building (`app/pages/index.vue:92-141`) — SSR renders filtered views correctly from the URL.
+- Debounced search (200 ms ≤ spec's 300 ms) with timer cleanup on unmount (`app/pages/index.vue:143-156`, `:158-160`).
+- Missing-values-sort-last, `aria-sort`, and stable fallback ordering in `MoveMethodTable.vue:63-101` are all correct and non-trivial.
+- The API cache rejects-and-deletes failed promises so a transient upstream error isn't cached forever (`server/utils/pokeapi.ts:69-73`).
+
+**What I'd flag before merge**
+1. `getPokemonPageData` eagerly fetches **every move detail and every version group** and ships move tables for **all** games in one payload, when the page renders only the selected game (`server/utils/pokeapi.ts:309-351`) — hundreds of upstream fetches and a very large JSON payload per Pokémon.
+2. All client-side typing is `any` (`useFetch<any>` in all 5 pages) even though the server layer exports proper types — Nuxt 4's `shared/types/` or a simple shared DTO module would make `useFetch` give real inference.
+3. Upstream API failure and genuine 404 are conflated: a non-OK upstream response throws, `data` stays null, and the page renders "Not found" with HTTP 200 (`server/utils/pokeapi.ts:65`, `pages/pokemon/[name].vue:2`).
+4. The project uses the legacy v3 directory layout (top-level `pages/`, `app.vue`) — Nuxt 4.6 silently falls back to it, but current docs put app code in an `app/` srcDir.
+5. On param-only navigation the page component is reused, so `watch: [name]` refetches while the old Pokémon stays rendered (brief stale content + stale `useHead` title) until resolve.
+
+The rest are nits: hand-rolled query-string builder, `definePageMeta({})` dead code, double `decodeURIComponent` on already-decoded Nitro params, duplicated `useHead` title blocks, and a single 735-line global stylesheet.
+
+```json
+{
+  "dimension": "mergeability",
+  "criteria": {
+    "idiomatic": {
+      "score": 4,
+      "evidence": [
+        "app/pages/index.vue:63 — useFetch to a Nitro server route, the recommended data-flow primitive",
+        "app/pages/index.vue:92-141 — filter state in URL query via router.replace, matching spec and Vue Router idiom",
+        "app/server/api/pokemon/[name].get.ts:3-5 — defineEventHandler + getRouterParam, standard Nitro handler",
+        "app/nuxt.config.ts:1-12 — ssr, css, app.head.htmlAttrs lang set declaratively",
+        "app/pages/moves/[name].vue:53 — useFetch<any> everywhere discards the type inference Nuxt 4 encourages; server types in app/server/utils/pokeapi.ts:12-28 are never shared (Nuxt 4's shared/types is the documented home)",
+        "app/package.json:11 — Nuxt 4.6.3 with v3-style top-level pages/ layout; Nuxt 4 docs default srcDir is an app/ subdirectory (supported legacy fallback)"
+      ],
+      "rationale": "Data loading, routing, rendering and state all use the framework's recommended primitives; the only real gaps are any-typed useFetch calls instead of shared types and the legacy v3 directory layout under Nuxt 4."
+    },
+    "correctness_risks": {
+      "score": 3,
+      "evidence": [
+        "app/server/utils/pokeapi.ts:65 — non-OK upstream response throws; client never checks error, so an upstream outage renders the Not-found page with HTTP 200 (pages/pokemon/[name].vue:2 treats !data and notFound identically)",
+        "app/pages/pokemon/[name].vue:116-118 — watch:[name] refetch on param navigation while old data stays rendered: brief stale Pokémon and stale title from useHead at line 120",
+        "app/server/utils/pokeapi.ts:30,60-67 — cache is keyed by request-derived URL and grows without bound; 404 misses (null) are cached forever, so adversarial distinct names accumulate entries",
+        "app/pages/index.vue:143-156 — debounce timer cleared on unmount; no leaked listener",
+        "app/pages/pokemon/[name].vue:80-86 — selected game validated against data before use; invalid ?game falls back to latest"
+      ],
+      "rationale": "No serious bugs, but several minor ones: error/404 conflation, stale-content flash on param navigation, and an unbounded request-keyed cache."
+    },
+    "global_abstractions": {
+      "score": 3,
+      "evidence": [
+        "app/server/utils/pokeapi.ts:1-500 — single server module holds the cache, all formatting helpers and DTO shaping for all four page types; every endpoint and page depends on it",
+        "app/server/api/pokedex.get.ts:5-10 — one coarse endpoint returns the full 1025-species index, so app/pages/types/index.vue:23 embeds the entire index payload just to render 18 type links",
+        "app/server/utils/pokeapi.ts:289-351 — getPokemonPageData eagerly builds move tables for every version group though only the selected game is rendered",
+        "app/pages/index.vue:117-127 — hand-rolled query-string serializer (searchString/pageUrl) reinvents router.resolve/withQuery"
+      ],
+      "rationale": "The server data layer is one god module with a hidden module-level cache, and the coarse /api/pokedex and all-games move payloads will need untangling as the app grows; boundaries between server and client are otherwise clean."
+    },
+    "readability": {
+      "score": 4,
+      "evidence": [
+        "app/components/MoveMethodTable.vue:18-101 — self-contained, well-named sorting logic with columns derived declaratively",
+        "app/components/PokemonCard.vue:20-30 — typed props document the data shape",
+        "app/server/utils/pokeapi.ts:145-166 — page-data DTOs are named after the pages they serve, making the mapping easy to follow",
+        "app/pages/index.vue:52-56, app/pages/types/index.vue:6-10 — consistent section/aria-labelledby patterns across all pages",
+        "app/assets/css/main.css — 735-line single global stylesheet; component styles not colocated, and only 2 comment lines in the whole codebase"
+      ],
+      "rationale": "A new teammate finds their way quickly: consistent naming, small components, predictable page structure; rough spots are the one big CSS file, near-zero comments, and any-typed data on the client."
+    },
+    "review_cost": {
+      "score": 3,
+      "evidence": [
+        "app/server/utils/pokeapi.ts:309-351 — reviewer would ask to move the per-game move tables behind a game param (payload + upstream fan-out)",
+        "app/pages/moves/[name].vue:53 — any-typed useFetch calls in all pages would be asked to use shared types",
+        "app/pages/pokemon/[name].vue:2 — error-vs-404 handling would need a branch",
+        "app/pages/index.vue:57 — dead definePageMeta({}), app/pages/index.vue:119-126 hand-rolled query builder: nits"
+      ],
+      "rationale": "Approvable after one round: payload/fan-out restructuring, shared types, and an explicit error state; the remaining items are nits."
+    }
+  },
+  "overall": 4,
+  "findings": [
+    {
+      "severity": "medium",
+      "location": "app/server/utils/pokeapi.ts:309",
+      "issue": "getPokemonPageData fetches every move detail and version group and returns move tables for all games, while the page renders only the selected game — heavy upstream fan-out on first load and a large JSON payload per Pokémon page.",
+      "suggestion": "Accept a game query parameter on /api/pokemon/[name] (page already has it in the URL) and build move rows only for that game, or lazily expose per-game data."
+    },
+    {
+      "severity": "medium",
+      "location": "app/pages/pokemon/[name].vue:116",
+      "issue": "Every page uses useFetch<any>, discarding the types the server layer already exports; DTOs are untyped on the client so renames and shape changes won't be caught.",
+      "suggestion": "Move the DTO types into shared/types/ (Nuxt 4's documented location for cross-context types) or a shared module, and drop the <any> so useFetch infers them."
+    },
+    {
+      "severity": "medium",
+      "location": "app/server/utils/pokeapi.ts:65",
+      "issue": "A non-OK upstream response throws, useFetch leaves data null, and the page renders 'Not found' with HTTP 200 — an upstream outage is indistinguishable from a missing resource.",
+      "suggestion": "Distinguish error from 404 (e.g. throw createError with statusCode 502/404 from the handler, or return {error:true}) and render an error state, ideally via error.vue."
+    },
+    {
+      "severity": "low",
+      "location": "app/pages/pokemon/[name].vue:116",
+      "issue": "On param-only navigation the component is reused and watch:[name] refetches while the old Pokémon's data (and title) stays rendered until resolve — a brief stale-content flash.",
+      "suggestion": "Treat pending state explicitly (use status from useFetch and gate the template), or key the page on the route param."
+    },
+    {
+      "severity": "low",
+      "location": "app/server/utils/pokeapi.ts:30",
+      "issue": "The promise cache is keyed by request-derived URLs with no bound and caches 404 nulls forever, so arbitrary distinct names accumulate entries.",
+      "suggestion": "Cap the cache (LRU) or only cache successful responses, leaving 404s uncached."
+    },
+    {
+      "severity": "low",
+      "location": "app/package.json:11",
+      "issue": "The project uses the legacy Nuxt 3 directory layout (top-level pages/, app.vue) that Nuxt 4 silently falls back to, rather than the current app/ srcDir structure the v4 docs recommend.",
+      "suggestion": "Move app code into app/ subdirectory (app/app.vue, app/pages/…) to match Nuxt 4's documented structure."
+    },
+    {
+      "severity": "low",
+      "location": "app/pages/types/index.vue:23",
+      "issue": "The /types page fetches the full 1025-species pokédex index and embeds it in the SSR payload to render 18 type links.",
+      "suggestion": "Serve a slim /api/types endpoint (or at minimum a separate useFetch key) so /types doesn't ship the whole index."
+    },
+    {
+      "severity": "low",
+      "location": "app/pages/index.vue:119",
+      "issue": "Hand-rolled query-string serializer (searchString/pageUrl) duplicates router.resolve/withQuery, and the 4 detail pages duplicate the same useHead title logic (e.g. app/pages/moves/[name].vue:57).",
+      "suggestion": "Use withQuery/router.resolve for pagination links and a tiny composable for the '… – Pokédex' title."
+    },
+    {
+      "severity": "low",
+      "location": "app/pages/index.vue:57",
+      "issue": "Dead definePageMeta({}) call; watch:[name] on the detail pages is redundant since useFetch already watches the reactive URL getter.",
+      "suggestion": "Remove the empty definePageMeta and the redundant watch options."
+    },
+    {
+      "severity": "low",
+      "location": "app/server/api/pokemon/[name].get.ts:3",
+      "issue": "decodeURIComponent applied to getRouterParam, which already returns decoded params — double-decoding (harmless for current data names but fragile).",
+      "suggestion": "Drop the decodeURIComponent; use getRouterParam(event, 'name', { decode: true }) explicitly if decoding is intended."
+    }
+  ],
+  "summary": "A solid, clearly-idiomatic Nuxt app: correct routing/data-fetch primitives, clean small components, careful URL-driven state and accessibility, and spec-compliant details throughout. The main merge blockers are efficiency and typing, not craft: the Pokémon endpoint eagerly builds and ships every game's move tables, and everything client-side is any-typed despite well-defined server DTOs. I'd approve after one round addressing payload weight, shared types, and the error-vs-404 conflation."
+}
+```

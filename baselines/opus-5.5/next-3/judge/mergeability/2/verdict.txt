@@ -1,0 +1,129 @@
+I've now read the entire app, the spec, and verified the relevant Next.js 16 guidance. Summary of my analysis before scoring:
+
+- **Architecture**: App Router used as intended — RSC pages with `Promise`-based `params`/`searchParams` (the Next 15/16 convention), `generateMetadata` with the title template, `notFound()`, `error.tsx` as a client boundary, `server-only` guarding the data layer, `usePathname`/`useRouter` for URL-as-state in filters. `force-dynamic` in the root layout is still valid in 16 (only removed when `cacheComponents` is on, which this app doesn't enable) and is exactly the right guard against build-time prerendering that the spec forbids.
+- **Data layer**: a small hand-rolled TTL cache (`lib/api.ts`) instead of `"use cache"` — the spec explicitly permits in-memory runtime caching, and with `no-store` fetches under `force-dynamic` the framework data cache wouldn't cache anyway; in-flight promise dedup means `generateMetadata` and the page don't double-fetch.
+- **Risks found**: minor — a back/forward-vs-debounce edge in `Filters`, unbounded (but naturally capped) parallel fan-out for move details, silently dropped invalid `type`/`generation` query params.
+- **Abstractions**: clean split (`api`/`data`/`format`), small components, no god modules; mild scaffold duplication across the four `[name]` pages.
+
+```json
+{
+  "dimension": "mergeability",
+  "criteria": {
+    "idiomatic": {
+      "score": 4,
+      "evidence": [
+        "app/app/pokemon/[name]/page.tsx:10-12 — async Promise-based params/searchParams, the current Next 15/16 convention",
+        "app/app/layout.tsx:6-7 — root-level force-dynamic with a comment; correct guard against build-time data embedding the spec forbids",
+        "app/app/layout.tsx:9-10 — metadata title template '%s – Pokédex' matches the framework's recommended pattern",
+        "app/components/Filters.tsx:1-2 — URL-as-state via useRouter/usePathname instead of local state; exactly what the docs recommend",
+        "app/lib/api.ts:1 — 'server-only' guard on the data layer",
+        "app/components/PokemonCards.tsx:12-13 — raw <img> with inline eslint-disable instead of next/image, a deliberate but unidiomatic escape hatch",
+        "app/components/PokemonCards.tsx:11 — prefetch={false} blanket-applied to every link in the app"
+      ],
+      "rationale": "Recognisably the framework's own example style: async server components, metadata templates, notFound, error boundary, client components only where interaction demands them. Deducted for the hand-rolled TTL cache where 'use cache' is the platform's current direction (spec-sanctioned, so minor), raw <img> over next/image, and cargo-culted prefetch={false}."
+    },
+    "correctness_risks": {
+      "score": 4,
+      "evidence": [
+        "app/lib/api.ts:28-36 — in-flight promise dedup plus eviction of failed entries; bounded cache, no double-fetch between generateMetadata and page",
+        "app/lib/api.ts:37-41 — failed requests are evicted so a transient API error doesn't poison the cache",
+        "app/components/Filters.tsx:29-52 — thoughtful sentQuery guard against slow navigations overwriting typed text, but a back/forward press during a pending debounce can leave the input desynced from the URL",
+        "app/app/page.tsx:23-24 — invalid type/generation query params are silently dropped, so URL and select can disagree instead of erroring",
+        "app/app/pokemon/[name]/page.tsx:262-268 — parallel Promise.all over every move detail for a game; ~100+ concurrent fetches on a cold cache, unbounded by design",
+        "app/app/page.tsx:34-37 — page number clamped to [1, totalPages]; NaN handled"
+      ],
+      "rationale": "No XSS (all text through React), no leaked listeners (Filters cleans up its timer), no unbounded caches (TTL + MAX_ENTRIES with sensible eviction), 404s handled via find/notFound everywhere, and hydration matches. Only minor fragility: the Filters URL edge, the dropped-invalid-param behaviour, and the cold-cache fan-out burst."
+    },
+    "global_abstractions": {
+      "score": 4,
+      "evidence": [
+        "app/lib/api.ts — transport + cache + API shapes in one small module; single clear boundary",
+        "app/lib/format.ts:1-2 — pure helpers with no 'server-only' import, deliberately shared with client components; comment says why",
+        "app/lib/data.ts:57-72 — cardsForPokemon avoids N+1 fetches by deriving cards from species names and the sprite URL pattern; a locally and globally sound abstraction",
+        "app/app/moves/[name]/page.tsx:12-15 vs app/app/abilities/[name]/page.tsx:12-15 vs app/app/types/[name]/page.tsx:17-20 vs app/app/pokemon/[name]/page.tsx:24-25 — four near-identical getX/generateMetadata/notFound scaffolds, mild duplication",
+        "app/components/MoveTable.tsx:26 — MISSING constant redefined locally instead of reusing lib/format.ts"
+      ],
+      "rationale": "The lib/ split is clean, cohesive and earns its keep; the one module-level cache is deliberate and documented, not hidden state. Only mild cost: the repeated per-resource page scaffold could be one helper, and MISSING is defined twice."
+    },
+    "readability": {
+      "score": 4,
+      "evidence": [
+        "app/lib/api.ts:3-5 — comment explains the TTL trade-off ('changes on the API still show up quickly')",
+        "app/components/Filters.tsx:24-25 — sentQuery comment explains the race being prevented",
+        "app/lib/data.ts:13-14 — MAX_SPECIES_ID comment explains the alternate-forms cutoff",
+        "app/components/Section.tsx:5-11 — slug() contains literal combining diacritics in a regex character class; effectively invisible characters in source",
+        "app/app/pokemon/[name]/page.tsx:230-288 — getMoves is ~60 lines doing grouping, fetching and sorting in one body; readable but dense"
+      ],
+      "rationale": "A new teammate would find their way quickly: conventional file layout, good names, why-comments where they matter. The slug() regex and the size of getMoves are the only rough spots."
+    },
+    "review_cost": {
+      "score": 4,
+      "evidence": [
+        "app/components/PokemonCards.tsx:12-13 — reviewer must ask: document the next/image decision or use a relative loader",
+        "app/components/TypeBadge.tsx:17 — same prefetch={false} question at 8 call sites",
+        "app/lib/api.ts:14-16 — reviewer asks whether 'use cache'/cacheLife should replace the hand-rolled TTL Map",
+        "app/app/page.tsx:23-24 — reviewer asks about silently dropping invalid query params"
+      ],
+      "rationale": "I'd approve after one round of nits and questions; nothing here needs structural rework, and every non-obvious choice already has a comment explaining the intent."
+    }
+  },
+  "overall": 4,
+  "findings": [
+    {
+      "severity": "low",
+      "location": "app/components/PokemonCards.tsx:13",
+      "issue": "Raw <img> with an inline eslint-disable for @next/next/no-img-element, repeated in the pokemon page; no comment recording why next/image (with a runtime loader derived from API_BASE_URL) was rejected.",
+      "suggestion": "Either add a loader-based next/image setup or a one-line comment at each disable explaining the runtime-host rationale, so the decision survives review."
+    },
+    {
+      "severity": "low",
+      "location": "app/lib/api.ts:14",
+      "issue": "Hand-rolled TTL/promise cache duplicates a concern the framework now owns ('use cache' + cacheLife under cacheComponents, or unstable_cache under the default model); justified by the spec, but a future Next upgrade touches this file.",
+      "suggestion": "Keep it, but note in the comment that it is the seam to replace with 'use cache' when cacheComponents is adopted."
+    },
+    {
+      "severity": "low",
+      "location": "app/components/Filters.tsx:29-52",
+      "issue": "Back/forward navigation while a search debounce is pending can leave the input text desynced from the URL query (sentQuery guard covers the common paths, not this one).",
+      "suggestion": "On popstate-derived prop changes, always adopt the URL's q (or flush/cancel the pending debounce on navigation)."
+    },
+    {
+      "severity": "low",
+      "location": "app/app/page.tsx:23-24",
+      "issue": "Invalid type/generation query values are silently dropped: the URL keeps ?type=xyz while the select shows 'All types'.",
+      "suggestion": "Either redirect to the canonical URL (param stripped) or treat unknown values as a 404, so URL and UI can't disagree."
+    },
+    {
+      "severity": "low",
+      "location": "app/app/pokemon/[name]/page.tsx:262-268",
+      "issue": "getMoves fires Promise.all over every move detail for the selected game with no concurrency cap (~100+ simultaneous fetches on a cold cache).",
+      "suggestion": "Fine against a local API with the 60s cache, but a small p-limit-style chunking helper would make it safe against any upstream."
+    },
+    {
+      "severity": "low",
+      "location": "app/app/moves/[name]/page.tsx:12",
+      "issue": "Four resource pages repeat the same getX/generateMetadata/notFound scaffold (moves, abilities, types/[name], pokemon).",
+      "suggestion": "Extract a tiny withResource(resource, name) helper or a shared fetchResource(name, path) so a change to the 404/metadata policy lands in one place."
+    },
+    {
+      "severity": "low",
+      "location": "app/components/Section.tsx:6",
+      "issue": "slug()'s regex contains literal combining diacritic characters (U+0300–U+036F written invisibly in source), which is unreadable and fragile in diffs.",
+      "suggestion": "Write the range explicitly (/[\\u0300-\\u036f]/g) or use /\\p{M}/u; or drop slug() entirely since titles are fixed English strings."
+    },
+    {
+      "severity": "low",
+      "location": "app/components/PokemonCards.tsx:11",
+      "issue": "prefetch={false} is repeated at 8 link sites rather than being a single documented decision.",
+      "suggestion": "Decide once: either rely on Next 16's default dynamic-route prefetch (loading.js only) or add a comment explaining the blanket opt-out."
+    },
+    {
+      "severity": "low",
+      "location": "app/components/MoveTable.tsx:26",
+      "issue": "MISSING constant duplicated from lib/format.ts.",
+      "suggestion": "Import MISSING from '@/lib/format' (the module is deliberately client-safe)."
+    }
+  ],
+  "summary": "A clean, idiomatic Next.js 16 App Router app: RSC data loading, URL-as-state filters, proper 404/error handling and a well-bounded data layer with an in-flight-promise cache. The only recurring nits are framework escape hatches applied without documentation (raw <img>, blanket prefetch={false}, hand-rolled TTL cache) and a mild scaffold duplication across the four resource pages. I'd approve after one round of comment-and-nit changes."
+}
+```

@@ -1,0 +1,90 @@
+## Review — Test quality
+
+The app contains **zero tests of its own**: no test files, no test runner in `package.json` (`app/package.json:6-9` defines only `dev`/`build`/`start`), no test dependencies, no config. Every verification relied on the acceptance suite in `tests/`, which the agent doesn't own. Per the dimension rules, `coverage_of_risk` and `regression_power` score 1, and the value of this review is the map of what's unguarded.
+
+Where the bugs will hide once someone refactors:
+
+**Data layer (`app/server/utils/pokeapi.ts`, ~550 lines, entirely untested).**
+- `humanize` and `collapseWhitespace` (`app/server/utils/pokeapi.ts:45-55`) are pure functions feeding every label and flavor text in the app; a one-character regex change silently mangles everything, and no app-owned test would notice.
+- The alternate-forms exclusion is a single comparison (`app/server/utils/pokeapi.ts:184` — `ref.id < 10000`; also `:221`). Drop it and Mega forms flood every list; invert it and the dex is empty.
+- `apiGet`'s cache evicts rejected promises so failures aren't cached forever (`app/server/utils/pokeapi.ts:99` — `promise.catch(() => rawCache.delete(key))`). This is the kind of line that disappears in a refactor and produces a permanently-broken page after one upstream 500.
+- Game selection: default = highest-order available group, query override only if valid (`app/server/utils/pokeapi.ts:327-330`), method table ordering (`:260-264`), level-up sort by level-then-name and the `${method}|${move}|${level}` dedup key (`:341-343`, `:382-386`).
+- Species↔Pokémon reconciliation for move/ability/type pages (`:459-465`, `:489-495`, `:541-546`) — mapping `deoxys-normal` back to species `deoxys` and excluding ID ≥ 10000 again.
+- The effect fallback chain short_effect → flavor → `—` (`:455-457`) and the `—` for null power/accuracy/PP are each one-off conditionals.
+
+**Frontend URL state and sorting (untested).**
+- The debounced search watcher and the "same query" comparison in `app/app/pages/index.vue:97-111` — this is the subtlest logic on the home page (dropping `page` from the equality check so filters reset pagination; `router.replace` vs `push`). A bug here shows up as double history entries or lost filter state.
+- Pagination clamp: `page=abc`/`page=0` → 1, `page=999` → last page (`app/app/pages/index.vue:75-80`).
+- The move-table comparator (`app/app/components/MoveTables.vue:104-131`): missing-values-last in both directions, numeric vs. label columns, descending flip, tie-break, and `aria-sort` on exactly one header — high bug density, zero coverage.
+- Game select preserving hash and query (`app/app/pages/pokemon/[name].vue:96-98`).
+
+**Error paths.** 404 → `{found:false}` + `setResponseStatus(404)` (`app/server/api/app/pokemon/[name].get.ts:3-6`), the catch-all page (`app/app/pages/[...slug].vue:1-7`), and what happens when the upstream API returns 500 (unhandled throw → Nitro error page) are unguarded by anything the team owns.
+
+The cheapest high-value first step would be Vitest + `@nuxt/test-utils` unit tests on the pure functions in `pokeapi.ts` and the `MoveTables` comparator, plus a couple of Playwright specs mirroring the URL-state rules.
+
+```json
+{
+  "dimension": "tests",
+  "criteria": {
+    "coverage_of_risk": {
+      "score": 1,
+      "evidence": [
+        "app/package.json:6-9 — only dev/build/start scripts; no test script, runner or test deps anywhere in app/",
+        "app/server/utils/pokeapi.ts:45-80 — humanize, collapseWhitespace, englishName, latestEnglishFlavor: the app's core transforms have zero tests",
+        "app/server/utils/pokeapi.ts:184 — alternate-forms filter (id < 10000), a one-line invariant guarding every list, untested",
+        "app/app/components/MoveTables.vue:104-131 — the entire sortable-table comparator (missing-last, numeric vs label, descending) is untested"
+      ],
+      "rationale": "No tests exist at all, so none of the app's genuinely risky logic — data transforms, sorting, pagination, URL state, caching, not-found paths — is covered by anything the team owns."
+    },
+    "behaviour_not_implementation": {
+      "score": 1,
+      "evidence": ["app/ — grep for spec/test files, vitest/jest/@nuxt/test-utils, describe(): zero matches"],
+      "rationale": "There are no tests, so there is nothing to classify; the floor score applies."
+    },
+    "regression_power": {
+      "score": 1,
+      "evidence": [
+        "app/server/utils/pokeapi.ts:99 — rejected-promise cache eviction; breaking this caches a failure forever and no owned test would fail",
+        "app/app/pages/index.vue:97-111 — debounced search + query-equality logic could regress (lost filters, doubled history entries) with zero owned-test failures",
+        "app/server/utils/pokeapi.ts:327-330 — game default/override selection would break silently under a data-layer refactor"
+      ],
+      "rationale": "With no app-owned tests, every behavioural regression passes. The only guard today is the external acceptance suite, which the team neither owns nor will run per-commit forever."
+    },
+    "signal_to_noise": {
+      "score": 3,
+      "evidence": ["app/ — testLoc 0, tests.files 0; no low-value tests were written either"],
+      "rationale": "No tests means no noise; per the anchor, the neutral score applies, but it earns no credit."
+    }
+  },
+  "overall": 1,
+  "findings": [
+    { "severity": "high", "location": "app/package.json:6-9", "issue": "No test infrastructure whatsoever: no test script, no runner (vitest/@nuxt/test-utils/playwright), no test files in app/.", "suggestion": "Add Vitest with @nuxt/test-utils for unit tests and a minimal Playwright config for URL-state/e2e specs; wire a `test` script." },
+    { "severity": "high", "location": "app/server/utils/pokeapi.ts:45-80", "issue": "All shared data transforms (humanize, collapseWhitespace, englishName, latestEnglishFlavor, idFromUrl, mediaUrl) are untested pure functions used on every page.", "suggestion": "Table-driven unit tests for these functions: names with dashes, non-English entries, whitespace runs, sprite URL normalization." },
+    { "severity": "high", "location": "app/server/utils/pokeapi.ts:184", "issue": "The id < 10000 alternate-forms exclusion guards every Pokémon list; a regression re-adds Mega forms everywhere or empties the dex.", "suggestion": "Unit-test getDexIndex's filter with a fixture containing species ID 10033 alongside 25." },
+    { "severity": "high", "location": "app/app/components/MoveTables.vue:104-131", "issue": "The sortable-table comparator (missing-values-last in both directions, numeric vs label columns, descending flip, tie-break) plus aria-sort toggling is the highest bug-density component and is untested.", "suggestion": "Unit-test sortedRows/sortBy with a small rows fixture including null power and duplicate move names; assert aria-sort indirectly via rendered order." },
+    { "severity": "high", "location": "app/app/pages/index.vue:97-111", "issue": "Debounced search watcher and the 'same query' comparison (page deliberately excluded from equality) implement filter-URL semantics with no tests; regressions double-push history or lose filter state.", "suggestion": "Playwright (or component-mount) tests: typing search replaces URL without page param; back/forward restores filters; repeated identical search does not push." },
+    { "severity": "medium", "location": "app/server/utils/pokeapi.ts:327-330", "issue": "Selected game defaults to the highest-order available version group and honours ?game only when valid; neither rule is tested.", "suggestion": "Unit-test getPokemonPage's games/selectedGame output for a fixture Pokémon, including an invalid ?game value." },
+    { "severity": "medium", "location": "app/server/utils/pokeapi.ts:341-343", "issue": "Move-row dedup key `${method}|${move}|${level}` and the level-up-then-name sort (382-386) are unguarded; a key change duplicates rows in the tables.", "suggestion": "Unit-test with a Pokémon that learns the same move at multiple levels in one version group." },
+    { "severity": "medium", "location": "app/server/utils/pokeapi.ts:459-465", "issue": "Species reconciliation for move/ability/type pages (mapping deoxys-normal to species deoxys, excluding alternate forms) repeats in three page builders with no shared test.", "suggestion": "One fixture-driven test per builder asserting a Pokémon-form reference yields the species card." },
+    { "severity": "medium", "location": "app/server/utils/pokeapi.ts:99", "issue": "Cache eviction of rejected promises is the only thing preventing a single upstream 500 from being cached for the process lifetime; a refactor dropping the .catch is silent.", "suggestion": "Unit-test apiGet: after a failing fetch, a subsequent call retries (with fetch mocked to fail then succeed)." },
+    { "severity": "low", "location": "app/app/pages/[...slug].vue:1-7", "issue": "Not-found handling (catch-all with setResponseStatus(404), and each API route returning {found:false}) has no app-owned coverage; upstream 500s fall through to an unstyled Nitro error page.", "suggestion": "Playwright spec for /pokemon/missingno and one asserting graceful behaviour when the API is unavailable." }
+  ],
+  "summary": "The app ships with zero tests of its own — no runner, no script, no files — so every safeguard is the borrowed acceptance suite. All of the genuinely risky logic (the 550-line data-layer transform module, the move-table sort comparator, debounced URL-state sync, pagination clamping, cache failure eviction, and not-found/404 paths) is unguarded. Bugs in any of it will surface only in production or when someone manually re-runs the external tests.",
+  "wroteTests": false,
+  "testCount": 0,
+  "valuableTests": [],
+  "lowValueTests": [],
+  "untested": [
+    { "area": "Shared data transforms in pokeapi.ts (humanize, collapseWhitespace, englishName, latestEnglishFlavor, idFromUrl, mediaUrl)", "risk": "high", "likelyBug": "A regex or fallback change mangles every list label, heading and flavor text app-wide; 'latest English' silently becomes 'first English'." },
+    { "area": "Dex index construction: id < 10000 filter, id ordering, generation assignment (pokeapi.ts:152-232)", "risk": "high", "likelyBug": "Alternate forms re-enter every list, ordering becomes insertion-order, or a Pokémon without a matching generation entry disappears from generation filtering." },
+    { "area": "Move-table sorting: missing-last both directions, numeric vs label, descending flip, tie-break, aria-sort (MoveTables.vue:63-131)", "risk": "high", "likelyBug": "Null power/accuracy sorts first when descending, aria-sort stays on two headers, or a column compares numbers as strings ('9' > '80')." },
+    { "area": "Home URL-state: debounced search, query-equality check, filter change resetting page (index.vue:88-111)", "risk": "high", "likelyBug": "Typing pushes duplicate history entries, filters are lost on back/forward, or changing a filter keeps a stale page number." },
+    { "area": "Pagination: parse/clamp of ?page, 48-per-page slicing, edge pages (index.vue:66-80)", "risk": "medium", "likelyBug": "?page=0 or ?page=abc shows a blank page; last page renders off-by-one items." },
+    { "area": "Game selection and move tables: default highest-order game, ?game validation, method order, row dedup (pokeapi.ts:260-264, 320-386)", "risk": "medium", "likelyBug": "Wrong default game after a version-group data change, methods alphabetized instead of Level Up/Machine/Egg/Tutor, or duplicated rows." },
+    { "area": "Species reconciliation on move/ability/type pages (deoxys-normal → deoxys, alternate-form exclusion) (pokeapi.ts:459-465, 489-495, 541-546)", "risk": "medium", "likelyBug": "Forms above ID 10000 leak into 'Learned by'/'Pokémon' lists, or a referenced species is dropped from the list entirely." },
+    { "area": "Effect/text fallback chain and missing-value rendering (—) (pokeapi.ts:455-457; MoveTables.vue:132-134)", "risk": "medium", "likelyBug": "Pages show empty sections or 'null' instead of the em dash; effect falls back in the wrong order." },
+    { "area": "Runtime cache error eviction (pokeapi.ts:94-101)", "risk": "medium", "likelyBug": "One upstream 500 gets its rejected promise cached for the process lifetime; the page stays broken until restart." },
+    { "area": "Not-found and upstream-error paths (catch-all [...slug].vue; API routes returning {found:false})", "risk": "low", "likelyBug": "A missing resource renders a page with a 200 status and empty sections, or an API 500 shows a raw Nitro error page instead of Not found." }
+  ]
+}
+```

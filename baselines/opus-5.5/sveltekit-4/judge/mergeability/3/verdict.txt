@@ -1,0 +1,118 @@
+I've read the full app (all 19 source files), the spec, and verified framework currency against the SvelteKit 3 migration guide (config moved into `vite.config.ts`, `$lib` → `#lib` subpath imports, `goto` option changes, `$app/state`, function-valued `runes` compiler option) — this app matches all of them. Notably strong: `app/vite.config.ts:3-12` (Kit 3 plugin config + function-valued `runes`), `app/package.json` (`#lib/*` subpath imports), `app/src/routes/+page.svelte:40` (`goto` with the new `reset`/`replace` options), `app/tsconfig.json` extending `$app/tsconfig`, runes-only components with keyed eachs, recursive snippets for the evolution tree, and `$app/state` instead of stores.
+
+```json
+{
+  "dimension": "mergeability",
+  "criteria": {
+    "idiomatic": {
+      "score": 5,
+      "evidence": [
+        "app/vite.config.ts:3-12 — SvelteKit 3 config in the vite plugin with function-valued runes compiler option, exactly the current idiom",
+        "app/package.json:22-24 — #lib/* subpath imports, the Kit 3 replacement for $lib",
+        "app/src/routes/+page.svelte:40 — goto(href, { replace, reset: false }) uses the new Kit 3 goto options",
+        "app/src/routes/pokemon/[name]/+page.svelte:14 — {#snippet evolutionList} + {@render} recursion, the modern replacement for svelte:self",
+        "app/src/routes/+error.svelte:2 — page from $app/state, not the removed $app/stores",
+        "app/src/routes/pokemon/[name]/+page.server.ts:26 — error(404, ...) called without throw, correct Kit 2+ style",
+        "app/src/lib/server/api.ts:12 — process.env.API_BASE_URL instead of the recommended $app/env/private module"
+      ],
+      "rationale": "The app reads like current SvelteKit 3 documentation: runes everywhere, PageProps/LayoutProps, keyed eachs, snippets, style: custom properties, and the brand-new config locations. The only idiom miss is reading the environment via process.env rather than $app/env/private."
+    },
+    "correctness_risks": {
+      "score": 4,
+      "evidence": [
+        "app/src/routes/pokemon/[name]/+page.server.ts:130 — Promise.all over every unique move in a version group with no concurrency cap; hundreds of simultaneous fetches for TM-heavy Pokémon",
+        "app/src/lib/server/api.ts:47 — expired cache entries are never evicted (only rejected fetches are deleted at line 48-50), so the Map retains every URL ever requested",
+        "app/src/routes/+page.svelte:13 — debounce timer is never cleared on component destroy, so a pending setTimeout can fire goto after unmount",
+        "app/src/routes/+page.server.ts:25-27 — an out-of-range ?page= is clamped for display but the URL keeps the stale value, desynchronising UI and query string",
+        "app/src/routes/+page.svelte:15-17 — afterNavigate type check deliberately prevents stale search results from clobbering newer keystrokes; a thoughtfully handled race"
+      ],
+      "rationale": "Careful look found only minor issues: unbounded move-detail fetch fan-out, a never-evicted (though practically bounded) TTL cache, and an uncleared debounce timer. The trickiest race in the app — search input vs arriving data — is handled explicitly and correctly."
+    },
+    "global_abstractions": {
+      "score": 4,
+      "evidence": [
+        "app/src/lib/server/api.ts:1-205 — single server data module every load depends on, but it has a coherent job (API access + indexes) rather than being a utils dumping ground",
+        "app/src/lib/util.ts:1-31 — tiny genuinely-shared module (humanize, dexNumber, display, types) with no server code leaking into it",
+        "app/src/lib/server/api.ts:118 — TypeInfo.data: any embeds raw API payloads past the abstraction's boundary",
+        "app/src/lib/components/MoveTable.svelte:5-13 — Row interface near-duplicates MoveRow from the pokemon page's server load",
+        "app/src/lib/components/CardList.svelte:1-4 — components import only shared types/util, keeping the server/client boundary clean"
+      ],
+      "rationale": "Abstractions are few and have clear boundaries — the #lib/server convention keeps server code out of the client bundle, and pokemonCards is a single shared helper rather than duplicated per page. Two small leaks: raw any API data escaping the data layer, and a duplicated table-row type."
+    },
+    "readability": {
+      "score": 5,
+      "evidence": [
+        "app/src/lib/server/api.ts:1-2 — file-opening comment explains the caching strategy",
+        "app/src/routes/+page.svelte:10-11 — comment explains exactly why the search box keeps its own value",
+        "app/src/routes/pokemon/[name]/+page.server.ts:82 — 'Moves: version groups in which...' comment marks the trickiest block",
+        "app/src/lib/components/MoveTable.svelte:60 — 'Missing values sort last in both directions' documents the non-obvious comparator rule",
+        "app/src/app.css:96-104 — shared classes (panel, count, bullets, facts) documented with purpose comments"
+      ],
+      "rationale": "Naming is consistent (label/name pairs everywhere), files are small and single-purpose, and the comments that exist explain why rather than what. A new teammate could navigate this in minutes."
+    },
+    "review_cost": {
+      "score": 4,
+      "evidence": [
+        "app/src/routes/pokemon/[name]/+page.server.ts:130 — the one item I'd actually ask about: cap or chunk the move fan-out",
+        "app/src/lib/server/api.ts:12 — switch to $app/env/private",
+        "app/src/lib/server/api.ts:47 — evict expired cache entries",
+        "app/src/routes/+page.svelte:13 — clear the timer in onDestroy/onDestroy-equivalent",
+        "app/src/routes/pokemon/[name]/+page.server.ts:57-90 — pervasive any casts on API payloads would ideally become minimal interfaces, but is not blocking"
+      ],
+      "rationale": "I would approve after one quick pass — everything I'd raise is a nit-level change (env module, cache eviction, timer cleanup, a concurrency cap). Nothing requires structural rework."
+    }
+  },
+  "overall": 4,
+  "findings": [
+    {
+      "severity": "medium",
+      "location": "app/src/routes/pokemon/[name]/+page.server.ts:130",
+      "issue": "Promise.all fires one fetch per unique move in the selected version group with no concurrency limit; a Pokémon like Mew in a modern version group triggers several hundred simultaneous requests per page load",
+      "suggestion": "Cap concurrency (e.g. a small pooled map or chunked batches), or fetch only the five fields needed from move resources"
+    },
+    {
+      "severity": "low",
+      "location": "app/src/lib/server/api.ts:47",
+      "issue": "Expired cache entries are never deleted — only rejected fetches are removed — so the Map retains every URL ever requested for the process lifetime",
+      "suggestion": "Delete the entry on read when hit.expires <= now (bounded in practice by API size, but still an unbounded-growth pattern)"
+    },
+    {
+      "severity": "low",
+      "location": "app/src/routes/+page.svelte:13",
+      "issue": "The 150ms search debounce timer is never cleared when the component unmounts, so a pending timeout can call goto after the user has navigated to a Pokémon page",
+      "suggestion": "Clear the timer in $effect cleanup (return () => clearTimeout(timer)) or onDestroy"
+    },
+    {
+      "severity": "low",
+      "location": "app/src/lib/server/api.ts:12",
+      "issue": "API_BASE_URL is read via process.env instead of the framework's environment module; SvelteKit 3 deprecates $env/* in favour of $app/env/private",
+      "suggestion": "Import from $app/env/private, which also works if the adapter ever changes"
+    },
+    {
+      "severity": "low",
+      "location": "app/src/lib/server/api.ts:118",
+      "issue": "TypeInfo.data: any carries the entire raw API type payload past the data layer, so untyped API shapes flow through every load",
+      "suggestion": "Keep labels/byPokemon in the index and drop data, or define minimal interfaces for the consumed fields"
+    },
+    {
+      "severity": "low",
+      "location": "app/src/lib/components/MoveTable.svelte:5",
+      "issue": "The Row interface near-duplicates MoveRow exported from the pokemon page's +page.server.ts, so the two can drift",
+      "suggestion": "Import and reuse the MoveRow type (or move it to #lib/util.ts with the other shared types)"
+    },
+    {
+      "severity": "low",
+      "location": "app/src/routes/+page.server.ts:25",
+      "issue": "An out-of-range ?page=999 is clamped for display but the URL retains the stale value, leaving UI and query string inconsistent",
+      "suggestion": "Leave as-is (tests don't cover it) or redirect to the clamped page URL"
+    },
+    {
+      "severity": "low",
+      "location": "app/src/app.html:6",
+      "issue": "Non-standard <meta name=\"text-scale\"> — harmless but will draw questions from future readers",
+      "suggestion": "Remove it or add a comment explaining what it's for"
+    }
+  ],
+  "summary": "This is a well-crafted, framework-current SvelteKit 3 app: runes throughout, config in the vite plugin, #lib subpath imports, new goto options, and clean server/client boundaries. The data layer is a single coherent module rather than a dumping ground, and comments explain the non-obvious decisions (cache strategy, search race handling). I'd merge it after one nit pass — the only substantive ask is capping the move-detail fetch fan-out on Pokémon pages."
+}
+```

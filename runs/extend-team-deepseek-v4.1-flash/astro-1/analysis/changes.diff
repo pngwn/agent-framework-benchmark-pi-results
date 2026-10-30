@@ -1,0 +1,416 @@
+diff --git a/app/src/components/CardList.astro b/app/src/components/CardList.astro
+index 79e0679..e96e5fe 100644
+--- a/app/src/components/CardList.astro
++++ b/app/src/components/CardList.astro
+@@ -5,8 +5,9 @@ import TypeBadge from './TypeBadge.astro';
+ 
+ interface Props {
+   cards: Card[];
++  removable?: boolean;
+ }
+-const { cards } = Astro.props;
++const { cards, removable = false } = Astro.props;
+ ---
+ 
+ <ul class="card-grid">
+@@ -26,6 +27,11 @@ const { cards } = Astro.props;
+           </span>
+         )}
+         {card.note && <span class="card-note">{card.note}</span>}
++        {removable && (
++          <button type="button" class="card-action" data-team-remove={card.name}>
++            Remove {humanize(card.name)}
++          </button>
++        )}
+       </li>
+     ))
+   }
+diff --git a/app/src/components/TeamButton.astro b/app/src/components/TeamButton.astro
+new file mode 100644
+index 0000000..364e78e
+--- /dev/null
++++ b/app/src/components/TeamButton.astro
+@@ -0,0 +1,66 @@
++---
++interface Props {
++  name: string;
++  inTeam: boolean;
++  full: boolean;
++}
++const { name, inTeam, full } = Astro.props;
++const disabled = full && !inTeam;
++---
++
++<div class="team-actions">
++  <button type="button" class="team-button" data-team-toggle data-team-name={name} disabled={disabled}>
++    {inTeam ? 'Remove from team' : 'Add to team'}
++  </button>
++  {disabled && <span class="team-full">Team is full</span>}
++</div>
++
++<script>
++  const TEAM_SIZE = 6;
++
++  function readTeam(): string[] {
++    const entry = document.cookie.split('; ').find((part) => part.startsWith('team='));
++    return entry ? entry.slice('team='.length).split(',').filter(Boolean) : [];
++  }
++
++  function writeTeam(names: string[]) {
++    document.cookie = `team=${names.join(',')}; Path=/; Max-Age=31536000; SameSite=Lax`;
++  }
++
++  document.addEventListener('click', (event) => {
++    const target = event.target;
++    if (!(target instanceof Element)) return;
++    const button = target.closest<HTMLButtonElement>('[data-team-toggle]');
++    if (!button) return;
++
++    const name = button.dataset.teamName;
++    if (!name) return;
++
++    let team = readTeam();
++    if (team.includes(name)) {
++      team = team.filter((member) => member !== name);
++    } else {
++      if (team.length >= TEAM_SIZE) return;
++      team = [...team, name];
++    }
++    writeTeam(team);
++
++    const inTeam = team.includes(name);
++    const full = team.length >= TEAM_SIZE;
++    button.textContent = inTeam ? 'Remove from team' : 'Add to team';
++    button.disabled = !inTeam && full;
++
++    const actions = button.closest('.team-actions');
++    let note = actions?.querySelector('.team-full');
++    if (full && !inTeam) {
++      if (!note && actions) {
++        note = document.createElement('span');
++        note.className = 'team-full';
++        note.textContent = 'Team is full';
++        actions.append(note);
++      }
++    } else {
++      note?.remove();
++    }
++  });
++</script>
+diff --git a/app/src/layouts/Base.astro b/app/src/layouts/Base.astro
+index a80c2f8..d0010bb 100644
+--- a/app/src/layouts/Base.astro
++++ b/app/src/layouts/Base.astro
+@@ -24,6 +24,7 @@ const docTitle = title ? `${title} – Pokédex` : 'Pokédex';
+           <ul>
+             <li><a href="/">Pokémon</a></li>
+             <li><a href="/types">Types</a></li>
++            <li><a href="/team">Team</a></li>
+           </ul>
+         </nav>
+       </div>
+diff --git a/app/src/lib/team.ts b/app/src/lib/team.ts
+new file mode 100644
+index 0000000..bfbe78c
+--- /dev/null
++++ b/app/src/lib/team.ts
+@@ -0,0 +1,48 @@
++import { api, apiPath } from './api';
++import { MAX_SPECIES_ID, getTypeLabels, type Card } from './pokedex';
++
++export const TEAM_COOKIE = 'team';
++export const TEAM_SIZE = 6;
++
++/** Reads the comma-separated species names from a cookie value, keeping order and removing duplicates. */
++export function parseTeam(value: string | null | undefined): string[] {
++  if (!value) return [];
++  const seen = new Set<string>();
++  const names: string[] = [];
++  for (const raw of value.split(',')) {
++    const name = raw.trim().toLowerCase();
++    if (!name || seen.has(name)) continue;
++    seen.add(name);
++    names.push(name);
++    if (names.length >= TEAM_SIZE) break;
++  }
++  return names;
++}
++
++export type TeamMember = Card & { types: { name: string; label: string }[] };
++
++/**
++ * Loads the species on a team in the order given, with the types of each species' default
++ * Pokémon. Species the API no longer knows are dropped.
++ */
++export async function getTeamMembers(names: string[]): Promise<TeamMember[]> {
++  const typeLabel = await getTypeLabels();
++  const members = await Promise.all(
++    names.map(async (name) => {
++      const species = await api(`pokemon-species/${encodeURIComponent(name)}`);
++      if (!species || !(species.id < MAX_SPECIES_ID)) return null;
++
++      const variety = species.varieties?.find((v: any) => v.is_default) ?? species.varieties?.[0];
++      const pokemon = variety ? await api(apiPath(variety.pokemon.url)) : null;
++      if (!pokemon) return null;
++
++      const types = [...(pokemon.types ?? [])]
++        .sort((a: any, b: any) => a.slot - b.slot)
++        .map((t: any) => ({ name: t.type.name, label: typeLabel(t.type.name) }));
++
++      return { id: species.id, name: species.name, types } satisfies TeamMember;
++    }),
++  );
++
++  return members.filter((member): member is TeamMember => member !== null);
++}
+diff --git a/app/src/pages/pokemon/[name].astro b/app/src/pages/pokemon/[name].astro
+index 400893e..8352b66 100644
+--- a/app/src/pages/pokemon/[name].astro
++++ b/app/src/pages/pokemon/[name].astro
+@@ -3,9 +3,11 @@ import Base from '../../layouts/Base.astro';
+ import NotFound from '../../components/NotFound.astro';
+ import Section from '../../components/Section.astro';
+ import TypeBadge from '../../components/TypeBadge.astro';
++import TeamButton from '../../components/TeamButton.astro';
+ import Evolution from '../../components/Evolution.astro';
+ import MovesSection from '../../components/MovesSection.astro';
+ import { api, apiPath } from '../../lib/api';
++import { TEAM_COOKIE, TEAM_SIZE, parseTeam } from '../../lib/team';
+ import {
+   MAX_SPECIES_ID,
+   dexNumber,
+@@ -51,6 +53,10 @@ const stats: { label: string; value: number }[] = (pokemon?.stats ?? []).map((s:
+ const total = stats.reduce((sum, s) => sum + s.value, 0);
+ const abilities = pokemon ? [...pokemon.abilities].sort((a: any, b: any) => a.slot - b.slot) : [];
+ const pct = (value: number, max: number) => `${Math.min(100, (value / max) * 100).toFixed(1)}%`;
++
++const team = parseTeam(Astro.cookies.get(TEAM_COOKIE)?.value);
++const inTeam = species ? team.includes(species.name) : false;
++const teamFull = team.length >= TEAM_SIZE;
+ ---
+ 
+ {
+@@ -86,6 +92,7 @@ const pct = (value: number, max: number) => `${Math.min(100, (value / max) * 100
+             </div>
+           </dl>
+           {flavor && <p class="flavor">{flavor}</p>}
++          <TeamButton name={species.name} inTeam={inTeam} full={teamFull} />
+         </div>
+       </div>
+ 
+diff --git a/app/src/pages/team.astro b/app/src/pages/team.astro
+new file mode 100644
+index 0000000..910b07a
+--- /dev/null
++++ b/app/src/pages/team.astro
+@@ -0,0 +1,115 @@
++---
++import Base from '../layouts/Base.astro';
++import CardList from '../components/CardList.astro';
++import Section from '../components/Section.astro';
++import { getTypes } from '../lib/pokedex';
++import { TEAM_COOKIE, getTeamMembers, parseTeam } from '../lib/team';
++
++const names = parseTeam(Astro.cookies.get(TEAM_COOKIE)?.value);
++const [members, types] = await Promise.all([getTeamMembers(names), getTypes()]);
++
++const coverage = types.map((type) => {
++  const relations = type.record.damage_relations ?? {};
++  const namesIn = (key: string): Set<string> =>
++    new Set((relations[key] ?? []).map((related: { name: string }) => related.name));
++
++  const doubles = namesIn('double_damage_to');
++  const halves = namesIn('half_damage_to');
++  const none = namesIn('no_damage_to');
++
++  let weak = 0;
++  let resistant = 0;
++  for (const member of members) {
++    let multiplier = 1;
++    for (const defender of member.types) {
++      if (none.has(defender.name)) multiplier = 0;
++      else if (doubles.has(defender.name)) multiplier *= 2;
++      else if (halves.has(defender.name)) multiplier *= 0.5;
++    }
++    if (multiplier > 1) weak++;
++    else if (multiplier < 1) resistant++;
++  }
++
++  return { name: type.name, label: type.label, weak, resistant };
++});
++---
++
++<Base title="Team">
++  <h1>Team</h1>
++  <div id="team-content">
++    <p class="team-count">{members.length} of 6</p>
++    {
++      members.length === 0 ? (
++        <>
++          <p>Your team is empty</p>
++          <p><a href="/">Browse the Pokédex</a></p>
++        </>
++      ) : (
++        <>
++          <CardList cards={members} removable />
++          <Section title="Type coverage">
++            <div class="table-scroll">
++              <table class="coverage">
++                <thead>
++                  <tr>
++                    <th scope="col">Type</th>
++                    <th scope="col">Weak</th>
++                    <th scope="col">Resistant</th>
++                  </tr>
++                </thead>
++                <tbody>
++                  {coverage.map((row) => (
++                    <tr>
++                      <th scope="row">{row.label}</th>
++                      <td>{row.weak}</td>
++                      <td>{row.resistant}</td>
++                    </tr>
++                  ))}
++                </tbody>
++              </table>
++            </div>
++          </Section>
++        </>
++      )
++    }
++  </div>
++</Base>
++
++<script>
++  const TEAM_COOKIE = 'team';
++
++  function readTeam(): string[] {
++    const entry = document.cookie.split('; ').find((part) => part.startsWith(`${TEAM_COOKIE}=`));
++    return entry ? entry.slice(TEAM_COOKIE.length + 1).split(',').filter(Boolean) : [];
++  }
++
++  function writeTeam(names: string[]) {
++    document.cookie = `${TEAM_COOKIE}=${names.join(',')}; Path=/; Max-Age=31536000; SameSite=Lax`;
++  }
++
++  async function refreshTeam() {
++    try {
++      const res = await fetch(location.pathname, { cache: 'no-store' });
++      const doc = new DOMParser().parseFromString(await res.text(), 'text/html');
++      const next = doc.getElementById('team-content');
++      const current = document.getElementById('team-content');
++      if (next && current) current.replaceWith(next);
++      else location.reload();
++    } catch {
++      location.reload();
++    }
++  }
++
++  document.addEventListener('click', (event) => {
++    const target = event.target;
++    if (!(target instanceof Element)) return;
++    const button = target.closest<HTMLButtonElement>('[data-team-remove]');
++    if (!button) return;
++
++    const name = button.dataset.teamRemove;
++    if (!name) return;
++
++    writeTeam(readTeam().filter((member) => member !== name));
++    void refreshTeam();
++  });
++</script>
+diff --git a/app/src/styles/global.css b/app/src/styles/global.css
+index a6893c3..987fc1b 100644
+--- a/app/src/styles/global.css
++++ b/app/src/styles/global.css
+@@ -292,6 +292,90 @@ select {
+   font-size: var(--text-xs);
+ }
+ 
++/* Team ------------------------------------------------------------------------------- */
++
++.team-actions {
++  display: flex;
++  flex-wrap: wrap;
++  align-items: center;
++  gap: var(--space-3);
++  margin-top: var(--space-3);
++}
++
++.team-button,
++.card-action {
++  font: inherit;
++  border-radius: var(--radius-md);
++  cursor: pointer;
++}
++
++.team-button {
++  padding: var(--space-2) var(--space-4);
++  border: 1px solid var(--color-accent);
++  background: var(--color-accent);
++  color: var(--color-on-accent);
++}
++
++.team-button:hover:not(:disabled) {
++  background: color-mix(in srgb, var(--color-accent) 85%, black);
++}
++
++.team-button:disabled {
++  opacity: 0.55;
++  cursor: not-allowed;
++}
++
++.team-full {
++  color: var(--color-text-muted);
++  font-size: var(--text-sm);
++}
++
++.team-count {
++  color: var(--color-text-muted);
++  font-size: var(--text-sm);
++}
++
++.card-action {
++  position: relative;
++  z-index: 1;
++  margin-top: var(--space-2);
++  padding: var(--space-1) var(--space-3);
++  border: 1px solid var(--color-border);
++  background: var(--color-surface);
++  color: var(--color-text);
++  font-size: var(--text-sm);
++}
++
++.card-action:hover {
++  border-color: var(--color-text-muted);
++}
++
++.coverage {
++  width: 100%;
++  border-collapse: collapse;
++  font-size: var(--text-sm);
++}
++
++.coverage th,
++.coverage td {
++  text-align: left;
++  padding: var(--space-2) var(--space-3);
++  border-bottom: 1px solid var(--color-border);
++}
++
++.coverage thead th {
++  color: var(--color-text-muted);
++  font-weight: var(--weight-normal);
++}
++
++.coverage tbody th {
++  font-weight: var(--weight-normal);
++}
++
++.coverage td {
++  font-variant-numeric: tabular-nums;
++}
++
+ /* Pokémon page ------------------------------------------------------------------------ */
+ 
+ .pokemon-summary {

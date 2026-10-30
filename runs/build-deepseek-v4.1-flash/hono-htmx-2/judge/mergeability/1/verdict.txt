@@ -1,0 +1,86 @@
+I've reviewed the app against the current stable releases (Hono 4.13.14 — still `latest`, v5 is only at RC; htmx 2.0.11 — current), the official Hono skill guidance, and the htmx source/docs (including the `changed`-modifier semantics fixed in htmx PR #1571, which this app relies on). Here is my review.
+
+## Review
+
+**Stack check:** `hono` 4.13.14 and `@hono/node-server` 2.1.5 are the current stable versions as of 2026-10-30 (Hono 5 is at `5.0.0-rc.1` only), so the app is not on an outdated framework. htmx 2.0.11 is current. The Hono usage itself — `c.html()`, `app.notFound`, `app.onError`, `serve()` from `@hono/node-server` (`app/server.mjs:136-146`) — is textbook. The htmx integration (partial detection via `HX-Request`/`HX-Target` headers, `HX-Push-Url` response headers, `hx-include`/`hx-swap="outerHTML"`) is also the documented pattern.
+
+**Main reservations:**
+1. `app/src/views.mjs:114` — `hx-trigger="input changed delay:300ms, change"` on the filter form. Chromium `<select>`s fire both `input` and `change`, so picking a type issues two identical requests and (with `hx-push-url="true"` at `views.mjs:112` plus the `HX-Push-Url` header at `server.mjs:62`) pushes two identical history entries — the back button then needs two presses per filter change. Notably the moves select (`views.mjs:487`) uses a single `change` trigger, so the inconsistency is visible in-file. Also, no `hx-sync`/abort for rapid typing means a slow earlier response can clobber a newer swap.
+2. `app/server.mjs:138-141` — `onError` renders the *Not found* page with status 500; when this happens during an htmx partial request a full HTML document gets swapped into a `<table>` or list target.
+3. Hand-rolled infrastructure where framework features exist: `escapeHtml` + string concatenation everywhere (Hono ships `hono/html`, an auto-escaping tagged template, exactly for this), and `readPublicFile` + `c.body` static routes (`server.mjs:28-46`) instead of `serveStatic` from `@hono/node-server/serve-static` (also no `Cache-Control`). With manual escaping, every future template line is one forgotten `escapeHtml` away from injection — and there's already an inconsistency: move table cells interpolate `formatValue(...)` unescaped (`views.mjs:362-364`) while the move page escapes the same values (`views.mjs:217-219`).
+4. Structure: `views.mjs` is a 620-line module that both orchestrates data loading (`getHomeData`, `getMovesData`, `getPokemonPageData`) and renders every page, while `server.mjs` loads data for the move/ability/type routes — responsibility is split two ways. `api.mjs` mixes the fetch client with display formatters (`humanize`, `formatDex`, `statLabel`). Three overlapping cache layers (`api.mjs:5`, `api.mjs:85`, `api.mjs:180`). Dead code: `renderMovePageByName`/`renderAbilityPageByName`/`renderTypePageByName` (`views.mjs:596-613`) duplicate route logic in `server.mjs`; `englishEffect` (`api.mjs:42`) is unused.
+
+On the plus side: escaping discipline is otherwise very consistent, 404 handling is complete and correct per resource, the dedup/pending-fetch cache (`api.mjs:55-80`) correctly avoids stampedes and evicts failed promises, pagination clamping is right, and the spec's tricky details (sort semantics with missing-values-last, method ordering, evolution nesting, hidden-ability labeling) are all implemented carefully with clear naming.
+
+```json
+{
+  "dimension": "mergeability",
+  "criteria": {
+    "idiomatic": {
+      "score": 3,
+      "evidence": [
+        "app/server.mjs:136-146 — app.notFound/app.onError/c.html/serve used exactly as current Hono 4.x docs recommend",
+        "app/server.mjs:62 — HX-Push-Url response header + server-side partial detection, the documented htmx pattern",
+        "app/src/render.mjs:5-13 — hand-rolled escapeHtml + string concat instead of Hono's built-in hono/html auto-escaping tagged template",
+        "app/server.mjs:28-46 — hand-rolled in-memory static file serving instead of serveStatic from @hono/node-server/serve-static; no Cache-Control"
+      ],
+      "rationale": "Routing, error handling and the htmx contract are recognisably idiomatic on current stable Hono/htmx, but static serving and HTML escaping are reimplemented by hand where the framework ships features for exactly those jobs."
+    },
+    "correctness_risks": {
+      "score": 3,
+      "evidence": [
+        "app/src/views.mjs:114 — hx-trigger 'input changed delay:300ms, change' on the form: selects fire both events, double-firing the request and pushing duplicate history entries (with hx-push-url at views.mjs:112 and HX-Push-Url at server.mjs:62)",
+        "app/server.mjs:138-141 — onError renders the 'Not found' page with status 500; mid-partial errors swap a full document into an htmx target",
+        "app/src/views.mjs:362-364 — formatValue(row.power/accuracy/pp) interpolated unescaped, unlike the escaped equivalents at views.mjs:217-219",
+        "app/src/api.mjs:63 — 404 responses cached as null forever; a transient API miss is sticky",
+        "app/src/views.mjs:114 — no hx-sync/abort, so out-of-order partial swaps can clobber newer results on slow responses"
+      ],
+      "rationale": "No serious bug, but several minor ones: the double-trigger/double-history-push on filter selects is user-visible (back button needs two presses), and the 500-as-not-found fallback is misleading."
+    },
+    "global_abstractions": {
+      "score": 3,
+      "evidence": [
+        "app/src/views.mjs:37-96,393-533 — views module owns data loading (getHomeData/getMovesData/getPokemonPageData) as well as all rendering; server.mjs:77-95 loads data for move/ability/type routes instead — split responsibility",
+        "app/src/api.mjs:5,85,180 — three overlapping cache layers (fetchJson cache, memoize, versionGroupCache) for the same resource set",
+        "app/src/api.mjs:22-47 — data client also carries display formatters (humanize, formatDex, statLabel)",
+        "app/src/views.mjs:596-613 — dead renderMovePageByName/renderAbilityPageByName/renderTypePageByName duplicating server.mjs route logic"
+      ],
+      "rationale": "Boundaries are workable but blurry: the views god-module, duplicated caching layers and dead duplicated loaders will need untangling before the codebase grows."
+    },
+    "readability": {
+      "score": 4,
+      "evidence": [
+        "app/src/render.mjs:52-91 — small, well-named shared partials (layout, pokemonCard, section, renderHomeResults)",
+        "app/src/views.mjs:285-341 — sortRows/defaultCompare with missing-values-last logic is easy to follow",
+        "app/src/api.mjs:55-80 — fetchJson pending-dedupe is compact and correct",
+        "app/src/views.mjs:596-613 — dead exports and a 620-line module are the rough spots; zero comments in the whole app"
+      ],
+      "rationale": "Naming is clear and functions are small, so a new teammate finds their way quickly; the size of views.mjs and the dead exports are the only friction."
+    },
+    "review_cost": {
+      "score": 3,
+      "evidence": [
+        "app/src/views.mjs:114 — trigger fix plus hx-sync would be requested before merge",
+        "app/server.mjs:138-141 — distinct 500 page requested",
+        "app/src/views.mjs:596-613 and app/src/api.mjs:42 — dead code removal",
+        "app/server.mjs:28-46 and app/src/render.mjs:5 — switch to serveStatic and hono/html (or justify)"
+      ],
+      "rationale": "One round of small-to-medium changes: fix the double-trigger/history bug, fix the 500 page, delete dead code, and adopt the framework's static/escaping helpers. No rework of structure or behavior needed."
+    }
+  },
+  "overall": 3,
+  "findings": [
+    { "severity": "medium", "location": "app/src/views.mjs:114", "issue": "Filter form's hx-trigger 'input changed delay:300ms, change' double-fires on <select> changes (both input and change events), issuing duplicate requests and pushing duplicate history entries (hx-push-url at views.mjs:112, HX-Push-Url at server.mjs:62) — back button needs two presses per filter change", "suggestion": "Use a single debounced trigger (e.g. 'input changed delay:300ms, change changed delay:300ms') or add hx-sync='this:abort'; the moves select at views.mjs:487 already correctly uses one trigger" },
+    { "severity": "medium", "location": "app/server.mjs:138-141", "issue": "onError renders the 'Not found' page with HTTP 500, misleading users during API outages; when the error occurs on an htmx partial request, a full HTML document is swapped into the #pokemon-results or table target", "suggestion": "Return a dedicated 500 error page (or a fragment for HX-Request) distinct from the 404 page" },
+    { "severity": "low", "location": "app/src/views.mjs:362-364", "issue": "formatValue(row.power/accuracy/pp) interpolated into move-table cells without escapeHtml, while the same values are escaped on the move page (views.mjs:217-219) — inconsistent escaping discipline under a hand-rolled template system", "suggestion": "Escape consistently, or better, adopt Hono's hono/html tagged template so escaping is automatic everywhere" },
+    { "severity": "low", "location": "app/server.mjs:28-46", "issue": "Hand-rolled static asset serving (files read into memory at startup, custom c.body routes) instead of serveStatic from @hono/node-server/serve-static, and no Cache-Control headers on immutable assets", "suggestion": "Use serveStatic({ root: './public/' }) with a Cache-Control header; delete readPublicFile" },
+    { "severity": "low", "location": "app/src/views.mjs:596-613", "issue": "Dead code: renderMovePageByName/renderAbilityPageByName/renderTypePageByName duplicate the fetch+render orchestration that server.mjs:77-95 does inline; englishEffect (api.mjs:42) is also unused", "suggestion": "Delete the unused exports, or conversely use them in the routes so data loading lives in one place" },
+    { "severity": "low", "location": "app/src/api.mjs:5,85,180", "issue": "Three overlapping cache mechanisms: the fetchJson cache+pending map, memoize for catalogs, and versionGroupCache which just duplicates fetchJson's per-URL cache", "suggestion": "Drop versionGroupCache (apiGet already caches) and document the two deliberate layers" },
+    { "severity": "low", "location": "app/src/views.mjs:37-533", "issue": "views.mjs mixes data-loading orchestration (getHomeData, getMovesData at :393, getPokemonPageData at :534) with all page rendering, while server.mjs also loads data for move/ability/type routes — responsibility split two ways", "suggestion": "Move data loading into a data/loader module (or into the routes) so views are pure render functions" },
+    { "severity": "low", "location": "app/server.mjs:102-115", "issue": "The move-table sort endpoint refetches/rebuilds the entire Pokémon page data (species, default Pokémon, evolution chain, all move details for the game) just to re-render one table", "suggestion": "Persist the already-built movesData (or accept sort state and rows via query params) so a sort click doesn't redo full page data assembly" },
+    { "severity": "low", "location": "app/src/api.mjs:63", "issue": "404 responses are cached as null permanently, so a transient API miss stays 'not found' for the process lifetime even though the spec treats the API as live data", "suggestion": "Don't cache nulls (or use a TTL for negative results)" },
+    { "severity": "low", "location": "app/src/views.mjs:114", "issue": "No hx-sync/abort strategy on the live search form, so a slow earlier response can overwrite the results of a newer keystroke", "suggestion": "Add hx-sync='this:abort' on the form to make the newest request win" }
+  ],
+  "summary": "A solid, careful implementation on the current stable Hono and htmx: spec details are handled thoroughly, escaping and 404 handling are mostly disciplined, and the htmx partial/push-URL contract is done the documented way. The main merge blockers are a user-visible double-trigger/double-history-push bug on the filter form and the 500-as-not-found fallback. Beyond those it's a normal review round: hand-rolled static serving and HTML escaping where Hono ships serveStatic and hono/html, a god-module views file with dead duplicated loaders, and three overlapping cache layers."
+}
+```

@@ -1,0 +1,188 @@
+{
+  "dimension": "forward-thinking",
+  "criteria": {
+    "latest_apis": {
+      "score": 5,
+      "evidence": [
+        "app/package.json:11 — @gracile/gracile ^0.11.0, the current stable release (npm lists 0.11.0 latest; only 0.11.1-next.* prereleases above it)",
+        "app/src/routes/(home).ts:1,42-113 — current defineRoute({ handler:{GET}, document, template }) + context.props.GET pattern, matching the docs' 'Defining routes' page verbatim",
+        "app/src/document.ts:11-12 — new URL('./document.css', import.meta.url).pathname asset notation, which the current 'Working with assets' doc explicitly names the canonical form for server output",
+        "app/server.mjs:7-9 — honoAdapter + getClientBuildPath from @gracile/gracile/hono, verified against 0.11.0's dist/hono.d.ts exports",
+        "app/vite.config.js:5 — gracile({ output: 'server' }) from @gracile/gracile/plugin, current plugin API",
+        "app/src/routes/(home).ts:103 — current lit SSR boolean-attribute binding ?selected=${...} instead of stringified attributes"
+      ],
+      "rationale": "Every framework API in use is the current 0.11-era generation, including the newer URL+import.meta.url asset notation that post-dates older Gracile tutorials; even the server-only html import in templates is documented as acceptable for non-hydrated sites. No legacy-era API appears anywhere."
+    },
+    "platform": {
+      "score": 4,
+      "evidence": [
+        "app/src/lib/api.ts:21 — native fetch for all API access, no axios/node-fetch",
+        "app/src/routes/(home).ts:19,27 + app/src/client/interactions.ts:13,24-30 — URL/URLSearchParams for filter state on both server and client",
+        "app/src/lib/data.ts:265 — Array.prototype.at(-1), Set/Map idioms throughout",
+        "app/src/lib/components.ts:26 — loading=\"lazy\" plus explicit width/height on sprites",
+        "app/src/routes/(home).ts:53 + client/interactions.ts:41-49 — native form with method=\"get\" as a no-JS fallback, JS only enhances (debounce ≤300ms per spec)",
+        "app/src/lib/api.ts:21-24 — no AbortSignal.timeout on a server-side fetch that can hang a request indefinitely",
+        "app/src/lib/api.ts:38-40 and app/src/routes/(home).ts:60 — hand-rolled regex to extract IDs from API URLs (two divergent copies) where new URL(x).pathname segments would do"
+      ],
+      "rationale": "Platform-first for data transport, URL handling, arrays/sets, and progressive enhancement; loses a point for unbounded upstream fetches (no AbortSignal.timeout) and duplicated regex URL parsing where URL would be cleaner."
+    },
+    "dependencies": {
+      "score": 5,
+      "evidence": [
+        "app/package.json:10-18 — exactly four runtime deps (framework, hono, @hono/node-server, lit) plus vite as devDep; no CSS framework, no lodash/axios, no client router",
+        "app/server.mjs:1-9 — hono + @hono/node-server are the minimal pieces needed to serve Gracile's documented hono adapter",
+        "app/package.json:14 — lit 3.3 kept explicit, which the docs require for the lit dedupe/multiple-versions warning even though app code never imports it directly"
+      ],
+      "rationale": "Minimal, modern, well-maintained, and all at current majors; every package earns its place, and the framework's peer (lit) is correctly pinned rather than installed blindly."
+    },
+    "churn_resistance": {
+      "score": 3,
+      "evidence": [
+        "app/src/lib/api.ts + app/src/lib/data.ts — all API access and shaping behind two modules; no route fetches directly, and routes/ never touches framework internals (only documented exports)",
+        "app/src/lib/format.ts:1-31 — all display formatting centralized",
+        "app/src/lib/api.ts:22 — references `res`, which is undefined in this module (only an ambient global); the latent ReferenceError shipped to production in app/dist/server/chunk/data.js:32",
+        "app/ — no tsconfig.json and no typescript/@types/node devDeps, though the docs' minimal boilerplate ships `check: tsc` and `@gracile/gracile/tsconfigs/strictest`; nothing type-checks, which is precisely what let the `res` bug through",
+        "app/src/lib/data.ts:26 and app/src/routes/pokemon/[name].ts:60 — `api<any>` and untyped context.props.GET.data propagate `any` through the whole boundary (11 type lines in 848 significant LOC)",
+        "app/src/routes/pokemon/[name].ts:46-60, moves/[name].ts:20-36, types/[name].ts:18-33, abilities/[name].ts:16-31, 404.ts — identical not-found markup and title ternary copy-pasted five ways while a shared notFound() helper sits unused at app/src/lib/components.ts:43",
+        "app/src/lib/api.ts:25 — promise-level cache stores rejections forever; one transient upstream failure permanently serves null until process restart",
+        "app/src/lib/api.ts:4 — dead ApiError class never thrown; app/src/lib/components.ts:50 dead sectionHeading export"
+      ],
+      "rationale": "The data-access boundary and single-point configuration are genuinely well-factored and no framework internals are touched, so a Gracile upgrade would be cheap — but the absent TypeScript setup (the framework's own type-safety story), pervasive `any`, and five-way duplication of the 404 path mean requirement changes ripple widely and bugs ship silently."
+    }
+  },
+  "overall": 4,
+  "findings": [
+    {
+      "severity": "medium",
+      "location": "app/src/lib/api.ts:22",
+      "issue": "The non-ok branch throws `new Error(`HTTP ${res.status} ${res.statusText}`)` but `res` is not defined in this module; it throws a ReferenceError instead of a diagnostic (and the bug is live in app/dist/server/chunk/data.js:32). The unused ApiError class at api.ts:4 shows the original intent.",
+      "suggestion": "Use `response.status`/`response.statusText`, or better `throw new ApiError(response.status, url)` and delete the dead class."
+    },
+    {
+      "severity": "medium",
+      "location": "app/package.json",
+      "issue": "No tsconfig.json, no `typescript`/`@types/node` devDependencies, no typecheck script — nothing validates the TS sources, and Gracile's `defineRoute` typed-props feature is never actually exercised. This is what allowed the `res` bug to reach production.",
+      "suggestion": "Add `{ \"extends\": \"@gracile/gracile/tsconfigs/strictest\" }` plus a `check: tsc` script, per the framework's Installation docs."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/lib/api.ts:19-26",
+      "issue": "The promise-level cache stores rejections forever with no TTL or invalidation, so a single upstream hiccup permanently poisons that resource (route shows 'Not found') until the process restarts.",
+      "suggestion": "Only memoize on success (e.g. `p.then(v => { cache.set(url, v); return v; }).catch(e => { cache.delete(url); throw e; })`), and consider a TTL."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/routes/pokemon/[name].ts:46-60",
+      "issue": "The not-found markup and the 'Not found – Pokédex' title ternary are copy-pasted across four route files plus 404.ts, while the shared notFound() helper in components.ts:43 is never imported — a 404 design change edits five files.",
+      "suggestion": "Extract a notFoundRoute() helper (document + template) in lib/components.ts and reuse it in all five places."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/lib/api.ts:21",
+      "issue": "Server-side fetch has no timeout/abort signal, so a hung upstream request hangs the page request and ties up a mapLimit worker indefinitely.",
+      "suggestion": "`fetch(url, { signal: AbortSignal.timeout(10_000) })`."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/lib/api.ts:38-40",
+      "issue": "ID-from-URL extraction is a hand-rolled regex, and a second, subtly different copy exists at routes/(home).ts:60.",
+      "suggestion": "Keep one helper (or parse with `new URL(u).pathname.split('/')`) and use it everywhere."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/lib/data.ts:26",
+      "issue": "`api<T = any>` default plus `any` in every destructure leaves the whole PokeAPI boundary untyped, so upstream data-shape changes surface as runtime render bugs rather than compile errors.",
+      "suggestion": "Declare minimal interfaces for the endpoints actually consumed (Species, Pokemon, Move, Ability, Type, Generation) and type `api<Species>(...)`."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/lib/api.ts:4",
+      "issue": "Dead code: ApiError is exported but never thrown; sectionHeading in components.ts:50 is also unused.",
+      "suggestion": "Use ApiError in the error branch (see finding 1) and delete unused exports."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/routes/abilities/[name].ts:22",
+      "issue": "Inconsistent error handling: this route wraps `api()` in `.catch(() => null)` while every other route uses the shared tryApi helper.",
+      "suggestion": "Make getAbilityPage use tryApi for a single, uniform failure path."
+    }
+  ],
+  "summary": "This app is squarely on Gracile's current stable release and its current idioms — 0.11.0's defineRoute/handler/props pipeline, the documented URL+import.meta.url asset notation for server output, the hono adapter, and a lean four-package runtime — so a framework upgrade would touch very little. The platform is used natively and well (fetch, URL/URLSearchParams, modern arrays, progressive-enhancement forms). The weak spot is longevity: there is no TypeScript setup at all (the framework's tsconfig presets and `tsc` check are skipped), the API boundary is `any`-typed, the 404 path is duplicated five ways, and a real `res`-is-undefined bug shipped to the production bundle because nothing type-checks.",
+  "apis": [
+    {
+      "api": "defineRoute (@gracile/gracile/route)",
+      "location": "app/src/routes/(home).ts:1",
+      "status": "current",
+      "replacement": ""
+    },
+    {
+      "api": "html (@gracile/gracile/server-html)",
+      "location": "app/src/document.ts:1",
+      "status": "current",
+      "replacement": ""
+    },
+    {
+      "api": "honoAdapter / getClientBuildPath (@gracile/gracile/hono)",
+      "location": "app/server.mjs:7-9",
+      "status": "current",
+      "replacement": ""
+    },
+    {
+      "api": "gracile({ output: 'server' }) plugin (@gracile/gracile/plugin)",
+      "location": "app/vite.config.js:5",
+      "status": "current",
+      "replacement": ""
+    },
+    {
+      "api": "new URL(asset, import.meta.url).pathname document assets",
+      "location": "app/src/document.ts:11-12",
+      "status": "current",
+      "replacement": ""
+    },
+    {
+      "api": "<route-template-outlet>",
+      "location": "app/src/document.ts:19",
+      "status": "current",
+      "replacement": ""
+    },
+    {
+      "api": "responseInit.status 404 in route handler",
+      "location": "app/src/routes/pokemon/[name].ts:25",
+      "status": "current",
+      "replacement": ""
+    },
+    {
+      "api": "@gracile/gracile/tsconfigs/* + `tsc` check",
+      "location": "app/package.json",
+      "status": "current",
+      "replacement": ""
+    }
+  ],
+  "dependencies": [
+    {
+      "name": "@gracile/gracile",
+      "verdict": "modern",
+      "note": "0.11.0 is the latest stable release on npm as of 2026-10; caret range correctly avoids pre-releases."
+    },
+    {
+      "name": "hono",
+      "verdict": "modern",
+      "note": "Required to serve the framework's documented hono adapter; current 4.x major."
+    },
+    {
+      "name": "@hono/node-server",
+      "verdict": "modern",
+      "note": "Minimal, current Node adapter for the above; no heavier server framework pulled in."
+    },
+    {
+      "name": "lit",
+      "verdict": "established",
+      "note": "Installed but never imported directly by app code; justified as the peer/dedupe target Gracile's docs require to avoid 'multiple versions of Lit' warnings."
+    },
+    {
+      "name": "vite (dev)",
+      "verdict": "modern",
+      "note": "Current major, used only as the build tool exactly as Gracile prescribes."
+    }
+  ]
+}
