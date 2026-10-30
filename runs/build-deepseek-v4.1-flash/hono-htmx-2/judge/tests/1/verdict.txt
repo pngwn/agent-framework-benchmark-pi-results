@@ -1,17 +1,15 @@
-The app contains **zero tests of its own** — confirmed by the measured facts (`tests.files: 0`) and by reading `app/`: `package.json` (app/package.json:11-13) defines only `build` and `start`, `devDependencies` is absent, and there is no test runner, spec file, or assertion anywhere in `app/src`, `app/scripts`, or `app/server.mjs`. Everything below scores the *absence* and maps the risk that leaves behind.
+I have enough to assess. The `app/` contains zero tests: no test files, no test script (`app/package.json` only defines `build` and `start`), no test runner in dependencies, and no assertions anywhere in `src/`. The riskiest logic — data-layer caching, sort tie-breaking, URL-param normalization, and the spec's trickiest formatting rules — is entirely unguarded beyond the acceptance suite.
 
-The riskiest code is substantial and exactly the kind that unit tests earn their keep on:
+Key latent bugs I found while reading the untested code:
 
-- **Home filtering pipeline** — `app/src/views.mjs:38-64` combines a type filter (built from `typeCatalog.byPokemon` in `app/src/api.mjs:96-104`), a generation Set-membership filter, and a case-insensitive search against `humanize()`d names; a change to `humanize` (`app/src/api.mjs:16-21`) silently changes search results.
-- **Pagination math and URL canonicalization** — `app/src/views.mjs:66-72` (count, `Math.ceil(count/48)`, clamping an out-of-range `page`, slice window) plus `homeUrl`'s "omit empty/default params" rule at `app/src/render.mjs:83-96`, and the clamped-page `HX-Push-Url` at `app/server.mjs:51`.
-- **Move-table comparator** — `app/src/views.mjs:258-295` (`sortRows`) implements missing-values-last in *both* directions, direction flips, numeric vs `localeCompare` with `numeric: true`, and a `defaultCompare` tie-break; `app/src/views.mjs:385-397` sorts learn methods (`level-up/machine/egg/tutor` first, rest alphabetical). These are the most bug-dense 40 lines in the repo and have no guard at all.
-- **Alternate-form exclusion and dedupe** — the `id <= 10000` boundary in `dedupeSortedPokemonEntries` (`app/src/views.mjs:150-160`), the hidden-ability OR-aggregation across duplicate entries (`app/src/views.mjs:248-256`), and the `id > 10000` skip in `byPokemon` (`app/src/api.mjs:96-104`).
-- **Error/edge paths** — `fetchJson`'s 404→cached-`null`, non-OK throw, and in-flight dedupe with cache eviction on failure (`app/src/api.mjs:48-77`); the `onError` → 500 not-found page (`app/server.mjs:126-129`); the fallback to the default game when `?game=` is bogus (`app/src/views.mjs:373`); the HX-Request/HX-Target partial negotiation (`app/server.mjs:49-52`, `app/server.mjs:108-117`) and the `/pokemon/:name/move-table` sub-route (`app/server.mjs:84-105`).
-- **Injection surface** — `escapeHtml` (`app/src/render.mjs:4-11`) guarding the reflected `q` value in the search input (`app/src/views.mjs:111`) and every href built with `encodeURIComponent`.
+1. **`getVersionGroup` caches rejected promises permanently** (`app/src/api.mjs:180-186`): unlike `memoize` (which resets on error, `api.mjs:105-115`) and `fetchJson` (which evicts its own cache on failure, `api.mjs:74-77`), this Map holds the rejected promise forever — one transient API hiccup during a Pokémon page load poisons that version group until process restart.
+2. **404s are cached as `null` forever** (`app/src/api.mjs:55`) — against the spec's "treat the API as a live service" framing, a resource that 404s once stays invisible.
+3. **Descending sort ties break direction** (`app/src/views.mjs:306`): `result || defaultCompare(...)` always falls back to *ascending* tie-break, so descending sort isn't a stable reverse of ascending — invisible to the acceptance test, which only checks value order.
+4. **`onError` returns the "Not found" page with status 500** (`app/server.mjs:138-141`) — an API outage is rendered as a missing URL.
+5. **Unguarded numeric fields** (`app/src/views.mjs:584-585`): missing height/weight render as `NaN m`, bypassing the `—` convention every other field follows.
+6. **URL param clamping and invalid-filter semantics** (`app/server.mjs:53-55`, `app/src/views.mjs:44-64`) — `page=abc`, `page=9999`, `type=bogus` behaviors are all implementation-defined and untested.
 
-The acceptance suite in `tests/` (Playwright against a live API) covers the happy paths broadly, but it is slow, needs the whole API running, and won't be run in a tight loop by someone refactoring the data layer — and the live-overlay tests (`tests/specs/home.spec.mjs:54`, `pokemon.spec.mjs:185-197`) only exercise a handful of cache-freshness cases, not the comparator or filter internals.
-
-Also worth flagging: `renderMovePageByName`/`renderAbilityPageByName`/`renderTypePageByName` (`app/src/views.mjs:591-606`) are exported but never imported by `server.mjs` — dead, untested wrappers that would drift from the real route handlers (`app/server.mjs:56-74`).
+The one mitigating factor: the spec's hardest pure functions (`humanize`, `formatDex`, `latestEnglishFlavorText`, `idFromUrl`, `homeUrl`) are pure and trivially unit-testable — the absence of tests is a missed opportunity rather than an architectural obstacle.
 
 ```json
 {
@@ -20,68 +18,131 @@ Also worth flagging: `renderMovePageByName`/`renderAbilityPageByName`/`renderTyp
     "coverage_of_risk": {
       "score": 1,
       "evidence": [
-        "app/package.json:11-13 — scripts are only build/start; no test script, no devDependencies, zero test files anywhere in app/",
-        "app/src/views.mjs:258-295 — sortRows comparator (missing-last, direction flip, tie-breaks) is the riskiest logic in the repo and is untested",
-        "app/src/views.mjs:38-72 — combined type/generation/search filtering plus 48-per-page pagination math has no test",
-        "app/src/render.mjs:83-96 — URL query canonicalization (omit empty/default params) untested"
+        "app/package.json:9-11 — scripts define only build and start; no test runner anywhere in the app",
+        "app/src/api.mjs:53-90 — fetchJson dedupe/cache/error-eviction logic (the most failure-prone code) has zero tests",
+        "app/src/views.mjs:272-314 — sortRows/defaultCompare tie-breaking and missing-value handling untested",
+        "app/src/views.mjs:37-81 — getHomeData filter chaining, generation/type validation and page clamping untested"
       ],
-      "rationale": "No tests exist, so none of the high-risk logic — comparators, filtering, pagination, alternate-form exclusion — is covered. The app is guarded solely by the external Playwright acceptance suite."
+      "rationale": "No tests were written at all, so none of the riskiest logic (caching semantics, sorting, URL state, error paths) is covered by anything the app owns."
     },
     "behaviour_not_implementation": {
       "score": 1,
       "evidence": [
-        "app/src/api.mjs:1-208 and app/src/views.mjs:1-625 — no assertion of any observable behaviour exists in app/",
-        "tests/ (external) — all behaviour verification lives in the harness's Playwright specs, which are not the app's work"
+        "app/src/api.mjs:17-47 — pure spec-definition helpers (humanize, formatDex, latestEnglishFlavorText) are exported and unit-testable but have no tests asserting their behaviour",
+        "app/src/render.mjs:82-89 — homeUrl's default-omission rules are pure and directly assertable, untested"
       ],
-      "rationale": "There are no tests in the app at all, so the criterion bottoms out at 1."
+      "rationale": "The criterion anchors 'or no tests' at 1; there are no tests of any kind, behavioural or otherwise."
     },
     "regression_power": {
       "score": 1,
       "evidence": [
-        "app/src/views.mjs:273-295 — flipping a comparator branch (e.g. making missing values sort first when descending) fails nothing in app/",
-        "app/src/views.mjs:66-72 — an off-by-one in the page slice or the totalPages clamp fails nothing in app/",
-        "app/src/api.mjs:48-77 — breaking the 404→null cache path or the error-eviction in fetchJson fails nothing in app/"
+        "app/src/api.mjs:180-186 — getVersionGroup caches rejected promises permanently; a refactor or transient-API regression here has no guard and the failure is process-lifetime",
+        "app/src/views.mjs:306 — descending sort falls back to ascending tie-break (result || defaultCompare); no test would fail if someone 'fixed' or further broke it",
+        "app/server.mjs:53-55 — page parsing/clamping and invalid-filter semantics would regress silently"
       ],
-      "rationale": "Zero tests means zero regression power inside app/. Any of the subtle data-layer bugs above would sail through a refactor reviewed only against the app's own (nonexistent) suite."
+      "rationale": "With zero app-owned tests, nothing would fail if any covered behaviour broke once the acceptance suite stops being the only guard — and several behaviours are genuinely fragile."
     },
     "signal_to_noise": {
       "score": 3,
       "evidence": [
-        "app/src/views.mjs:591-606 — renderMovePageByName/renderAbilityPageByName/renderTypePageByName are exported but unused by server.mjs, i.e. dead code that would have generated noise-only tests",
-        "app/package.json:5-17 — no test runner present, so no padding tests were written either"
+        "app/package.json:14-18 — three runtime deps only; no devDependencies, no test infrastructure to carry padding",
+        "app/src/api.mjs:42,192 — dead exports (englishEffect, typeDisplayName) are the only 'noise', and they carry no test cost"
       ],
-      "rationale": "Per the anchor, no tests scores 3: there is no noise, but there is also nothing earning its keep. The one nearby smell is the untested dead wrappers, which argue for deletion rather than tests."
+      "rationale": "Anchored at 3 for no tests: there is no noise, but also no signal."
     }
   },
   "overall": 1,
   "findings": [
-    { "severity": "high", "location": "app/package.json:11-13", "issue": "The app ships with no tests whatsoever: no test script, no runner, no devDependencies, zero test files across 6 source files and ~1550 LOC.", "suggestion": "Add node:test or vitest with a few fast unit specs for the pure functions (sortRows, getHomeData, humanize, homeUrl, dedupeSortedPokemonEntries) — they need no HTTP or browser and would catch most refactoring regressions." },
-    { "severity": "high", "location": "app/src/views.mjs:258-295", "issue": "The move-table sort comparator (missing-values-last in both directions, direction flip, numeric vs locale-aware string compare, defaultCompare tie-break) is the most bug-prone code in the app and has no regression guard.", "suggestion": "Unit-test sortRows with rows containing missing power/accuracy, equal keys, and both directions, asserting exact row order; also cover the method-order comparator at app/src/views.mjs:385-397." },
-    { "severity": "high", "location": "app/src/views.mjs:38-72", "issue": "The home filtering and pagination pipeline (type slot matching, generation set membership, humanized-name search, totalPages clamp, 48-item slice) is untested; a refactor of the species catalog shape would break it silently.", "suggestion": "Unit-test getHomeData against a small fake catalog: filter combinations, counts across pages, page clamping for out-of-range and non-numeric ?page, and 'No Pokémon found' for zero matches." },
-    { "severity": "high", "location": "app/src/api.mjs:16-21", "issue": "humanize() feeds search matching, card labels, table cells, and the default game display; changing it (e.g. capitalization, digit handling for names like 'nidoran-f' or 'ho-oh') changes behaviour everywhere with no test to notice.", "suggestion": "Table-driven unit tests for humanize, formatDex, formatValue, statLabel, and latestEnglishFlavorText (last-en entry, whitespace collapse) — all pure functions in app/src/api.mjs:16-45." },
-    { "severity": "medium", "location": "app/src/render.mjs:83-96", "issue": "URL-state construction (omitting empty/default params, preserving filters in pagination links, pushing the clamped page) is only exercised by a couple of happy-path Playwright specs; edge cases like page=0, page=999, or combined filter+page links are unguarded.", "suggestion": "Unit-test homeUrl for all omission cases and assert getHomeData's returned page is what gets pushed (server.mjs:51), including when a requested page is clamped." },
-    { "severity": "medium", "location": "app/src/views.mjs:150-160", "issue": "Alternate-form exclusion (id <= 10000), dedupe, and the hidden-ability OR-aggregation at app/src/views.mjs:248-256 rely on subtle invariants; moving the boundary or the slot sort would pass most end-to-end checks.", "suggestion": "Unit-test dedupeSortedPokemonEntries and the ability hiddenById aggregation with duplicates and boundary IDs (10000, 10001)." },
-    { "severity": "medium", "location": "app/src/api.mjs:48-77", "issue": "fetchJson's error handling (404 cached as null, non-OK throws, in-flight dedupe, cache eviction on failure) and the onError 500 page (app/server.mjs:126-129) are untested; a failed catalog load mid-Promise.all currently 500s the whole app with no guard.", "suggestion": "Unit-test fetchJson against a stubbed fetch (404, 500, network error, concurrent identical requests) and assert the memoize reset at app/src/api.mjs:108-119 allows retry." },
-    { "severity": "medium", "location": "app/server.mjs:49-52", "issue": "The htmx partial negotiation (HX-Request/HX-Target sniffing, HX-Push-Url headers) and the /pokemon/:name/move-table sub-route (app/server.mjs:84-105) are untested; a typo in a header or target id would break live filtering while full-page loads still pass.", "suggestion": "Add lightweight supertest-style tests (Hono's app.fetch) asserting partial responses contain only the fragment and set HX-Push-Url, and that unknown method/game on the move-table route returns 404." },
-    { "severity": "low", "location": "app/src/render.mjs:4-11", "issue": "escapeHtml guards user-controlled ?q reflected into an attribute (app/src/views.mjs:111) and all hrefs use encodeURIComponent; an accidental removal would introduce attribute injection with nothing failing.", "suggestion": "A one-line unit test asserting escapeHtml('" on <q>') output, plus a route test hitting /?q=%22%3E%3Cscript%3E." },
-    { "severity": "low", "location": "app/src/views.mjs:591-606", "issue": "renderMovePageByName/renderAbilityPageByName/renderTypePageByName are exported but never used by server.mjs (which calls the render functions directly at app/server.mjs:56-74); dead wrappers invite divergence.", "suggestion": "Delete them, or route through them and test them — the current duplication is how untested drift starts." }
+    {
+      "severity": "high",
+      "location": "app/src/api.mjs:183",
+      "issue": "getVersionGroup caches rejected promises in its own Map forever; unlike memoize (api.mjs:105-115) it never evicts on error, so one transient API failure permanently poisons that version group's moves section for the life of the process.",
+      "suggestion": "Evict on rejection the way memoize does, or reuse the memoize helper instead of a bespoke Map."
+    },
+    {
+      "severity": "high",
+      "location": "app/package.json:9",
+      "issue": "No test script, no test runner, and no test files exist in app/ despite the spec's hardest rules living in easily testable pure functions.",
+      "suggestion": "Add node:test (zero new deps) unit tests for api.mjs/render.mjs pure helpers: humanize, formatDex, formatValue, idFromUrl, latestEnglishFlavorText, homeUrl, sortRows, dedupeSortedPokemonEntries."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/api.mjs:55",
+      "issue": "404 responses are cached as null permanently, so a resource that 404s once (API restart mid-deploy, species added later) stays invisible until the process restarts, contradicting the spec's 'treat the API as live' framing.",
+      "suggestion": "Give negative cache entries a TTL, or skip caching 404s for resources the catalogs can rediscover."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/views.mjs:306",
+      "issue": "sortRows falls back to defaultCompare (always ascending) on ties, so descending sort of equal keys is not the reverse of ascending; also uses a different collation than the explicit sort branch (views.mjs:303 pins 'en', the tie-break at views.mjs:286 does not).",
+      "suggestion": "Apply the direction to the tie-break too and pin the locale consistently; add a unit test with tied rows."
+    },
+    {
+      "severity": "medium",
+      "location": "app/server.mjs:138",
+      "issue": "onError returns the 'Not found' page body with status 500, so an API outage is presented to users and support as a missing URL, and no test covers the error path.",
+      "suggestion": "Render a distinct error page (or at least a distinct h1) for 500s, and test it with a stubbed failing API."
+    },
+    {
+      "severity": "medium",
+      "location": "app/server.mjs:53",
+      "issue": "Query-param normalization — page=abc/-1/9999 clamping (server.mjs:53-55, views.mjs:63-64) and invalid type/generation values silently yielding empty results (views.mjs:48-57) — is undefined and untested; a refactor could change these semantics invisibly.",
+      "suggestion": "Pin the clamping and invalid-filter behaviour with a few HTTP-level tests using fetch against the Hono app."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/views.mjs:584",
+      "issue": "Height/weight are interpolated without formatValue, so a missing value renders 'NaN m' instead of the em-dash convention used everywhere else.",
+      "suggestion": "Route through formatValue (or an explicit null check) and add a fixture test for a Pokémon with null height/weight."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/api.mjs:42",
+      "issue": "englishEffect and typeDisplayName (api.mjs:192) are exported but never used — dead code that invites untested divergence.",
+      "suggestion": "Delete them, or cover them if they are kept intentionally."
+    }
   ],
-  "summary": "The agent wrote no tests at all: app/ has no test script, runner, or spec file, so this dimension scores the floor for coverage and regression power. That's a real loss because the riskiest logic — the move-table sort comparator, the filter/pagination pipeline, alternate-form exclusion, and the URL-state and caching invariants — is precisely the kind of pure-function code a handful of fast unit tests would pin down cheaply. Until those exist, any refactor of the data layer is guarded only by a slow external Playwright suite whose happy paths won't catch comparator or boundary regressions.",
+  "summary": "The app ships zero tests of its own: no test script, runner, or files, even though its riskiest logic (caching semantics, sort tie-breaking, URL normalization, error paths) is precisely where acceptance tests stop. Reading that code reveals at least two real latent bugs — a permanently poisoned version-group cache and a 404-negative cache that never expires — plus a descending-sort tie-break inconsistency that nothing would ever catch. The spec's hardest rules live in small pure functions that would take a day to cover with dependency-free node:test suites.",
   "wroteTests": false,
   "testCount": 0,
   "valuableTests": [],
   "lowValueTests": [],
   "untested": [
-    { "area": "Move-table sorting (app/src/views.mjs:258-295): missing-values-last in both directions, ascending/descending flips, numeric vs locale-aware compare, tie-breaks, and aria-sort headers", "risk": "high", "likelyBug": "A flipped comparator branch makes missing power sort first when descending, or ties sort randomly, and every table quietly mis-orders while Playwright happy-path clicks still pass." },
-    { "area": "Home filtering and pagination (app/src/views.mjs:38-72): type slot matching, generation membership, humanized-name search, 48-per-page slices, page clamping", "risk": "high", "likelyBug": "Off-by-one in the slice window or a broken clamp shows page 1's Pokémon on page 2 or drops the last partial page; combined filters return the wrong count." },
-    { "area": "humanize and text formatting (app/src/api.mjs:16-45): search-matching, card labels, latest-English flavor text with whitespace collapse, stat labels", "risk": "high", "likelyBug": "Changing capitalization or digit handling ('mr-mime', 'nidoran-f', 'ho-oh') silently breaks search and every list label at once." },
-    { "area": "URL state (app/src/render.mjs:83-96, app/server.mjs:51): param omission, filters preserved in pagination links, pushed URL matching clamped page", "risk": "medium", "likelyBug": "Pagination links drop the active type/generation filter, or a stray ?page=1/empty params appear in pushed URLs, breaking shareable filtered views." },
-    { "area": "Alternate-form exclusion and dedupe (app/src/views.mjs:150-160, 248-256, app/src/api.mjs:96-104): id<=10000 boundary, duplicate entries, hidden-ability aggregation", "risk": "medium", "likelyBug": "Mega forms reappear in type/move/ability lists, or a Pokémon listed twice with a hidden flag lost because the OR over duplicate entries was reordered." },
-    { "area": "API client error handling (app/src/api.mjs:48-77, 108-119): 404→null caching, non-OK throws, in-flight dedupe, memoize reset, onError 500 page", "risk": "medium", "likelyBug": "A failed catalog load inside Promise.all 500s the whole app, or a thrown error gets cached permanently so the page never recovers without a restart." },
-    { "area": "htmx partial negotiation and the move-table sub-route (app/server.mjs:49-52, 84-117): HX-Request/HX-Target sniffing, HX-Push-Url, 404 on unknown method/game", "risk": "medium", "likelyBug": "A mismatched target id or header check returns a full document into the fragment swap, breaking live search/sort while full-page loads still look fine." },
-    { "area": "Game selection fallback (app/src/views.mjs:373): unknown ?game= silently falls back to the highest-order version group", "risk": "medium", "likelyBug": "A refactor turns an unknown game into a 404 or selects the first game instead of the latest, and no test notices because the happy path uses valid names." },
-    { "area": "HTML escaping and URL encoding (app/src/render.mjs:4-11, app/src/views.mjs:111): reflected ?q in an attribute, encodeURIComponent on every href", "risk": "medium", "likelyBug": "Removing an escape introduces attribute injection via ?q=\"><script>… with nothing failing and no hostile input in the acceptance suite." },
-    { "area": "Dead exported wrappers renderMovePageByName/renderAbilityPageByName/renderTypePageByName (app/src/views.mjs:591-606)", "risk": "low", "likelyBug": "The wrappers drift from the real route handlers in server.mjs, and someone later 'fixes' behaviour in the wrong copy. Should be deleted rather than tested." }
+    {
+      "area": "Data-layer caching and failure semantics (app/src/api.mjs:53-90, 180-186)",
+      "risk": "high",
+      "likelyBug": "A transient API error permanently poisons a version group's moves section for the life of the process, and a once-404ed resource never becomes visible — the classic 'works until the first blip, then broken forever' failure that only shows up in production."
+    },
+    {
+      "area": "Spec-definition pure helpers: humanize, formatDex, formatValue, idFromUrl, latestEnglishFlavorText, homeUrl (app/src/api.mjs:17-47, app/src/render.mjs:82-89)",
+      "risk": "high",
+      "likelyBug": "A data-layer refactor breaks dex zero-padding, humanized-name capitalization, whitespace collapsing in flavor text, or default-query-param omission silently — these encode the spec's trickiest rules and are the first thing someone will touch."
+    },
+    {
+      "area": "Move-table sorting: tie-breaking, missing-value placement, method ordering, descending direction (app/src/views.mjs:272-314, 441-457)",
+      "risk": "medium",
+      "likelyBug": "Descending sort of tied rows isn't the reverse of ascending, and a collation change (unpinned locale at views.mjs:286) reorders equal-keyed rows; the acceptance test only checks raw value order and cannot see this."
+    },
+    {
+      "area": "URL query normalization: page parsing/clamping, invalid type/generation values, param omission (app/server.mjs:51-55, app/src/views.mjs:44-81)",
+      "risk": "medium",
+      "likelyBug": "A refactor changes what page=abc, page=9999, or type=bogus does — clamping, empty results, or 404 — with no test to pin the choice; these are exactly the inputs users and crawlers generate."
+    },
+    {
+      "area": "Error and not-found paths for malformed data: species without default Pokémon, missing height/weight, API outage handling (app/src/views.mjs:584-585, app/server.mjs:138-141)",
+      "risk": "medium",
+      "likelyBug": "A Pokémon with absent height renders 'NaN m', and an upstream outage surfaces as a 500 'Not found' page; regressions here are invisible until real bad data or a real outage arrives."
+    },
+    {
+      "area": "Alternate-form (id > 10000) exclusion across every list path (app/src/api.mjs:131-134, app/src/views.mjs:143-145, 255-259)",
+      "risk": "medium",
+      "likelyBug": "A refactor that drops one of the four separate >10000 filters floods type, move, ability, or home lists with Mega/alternate forms; acceptance tests only cover the happy paths."
+    },
+    {
+      "area": "htmx partial endpoints and HX-Push-Url/HX-Target header contract (app/server.mjs:62-69, 121-130)",
+      "risk": "low",
+      "likelyBug": "A header rename or target-id change breaks URL syncing after search/sort/game-select while full page loads still pass; acceptance tests cover main flows but not the partial/echo edge cases."
+    }
   ]
 }
 ```

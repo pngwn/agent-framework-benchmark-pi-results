@@ -5,22 +5,22 @@ Values in parentheses are the Opus 5.5 medians from Nolan Lawson's published bui
 
 ## Agent cost and page loads (upstream metrics)
 
-`Tests`: the final acceptance run, as upstream. `Retests`: extra runs of the same tests in clean containers (harness/retest.mjs), to tell flaky results from real ones. Cost is pi's estimate from the model catalog prices, not an invoice. Lighthouse is the home page on mobile, as upstream.
+`Tests`: the final acceptance run, as upstream. `Retests`: extra runs of the same tests in clean containers (harness/retest.mjs), to tell flaky results from real ones. Cost is pi's estimate from the model catalog prices, not an invoice. Lighthouse is the home page on mobile, as upstream; in parentheses, Opus 5.5's apps re-measured on the same machine.
 
 | Framework | Tests | Retests | Tokens (M) | Output (k) | Cost ($) | Time (min) | Turns | Perf | LCP (ms) | TBT (ms) | JS (KiB) |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| nuxt | 5/5 | — | 4.50 | 56 | 0.10 | 5.7 | 54 | 98 | 2013 | 77 | 86 |
-| gracile | 5/5 | — | 9.68 | 67 | 0.12 | 7.7 | 84 | 100 | 1660 | 0 | 2 |
-| react-router | 5/5 | — | 5.27 | 64 | 0.12 | 5.1 | 64 | 99 | 1732 | 41 | 115 |
-| tanstack-start | 5/5 | — | 6.79 | 61 | 0.13 | 5.3 | 76 | 99 | 1879 | 58 | 118 |
-| solidstart | 5/5 | — | 10.71 | 81 | 0.13 | 9.2 | 95 | 100 | 1402 | 14 | 39 |
-| vanilla | 5/5 | — | 5.91 | 74 | 0.14 | 6.7 | 66 | 97 | 1535 | 40 | 7 |
-| hono-htmx | 5/5 | — | 7.20 | 78 | 0.14 | 7.2 | 78 | 100 | 1026 | 0 | 18 |
-| angular | 5/5 | — | 9.09 | 91 | 0.18 | 9.3 | 90 | 87 | 2138 | 346 | 87 |
-| next | 5/5 | — | 12.34 | 93 | 0.19 | 9.4 | 108 | 99 | 2014 | 122 | 136 |
-| qwik | 4/5 | — | 13.18 | 87 | 0.20 | 9.3 | 118 | 100 | 1495 | 0 | 39 |
-| sveltekit | 5/5 | — | 11.29 | 95 | 0.21 | 8.8 | 108 | 100 | 1188 | 0 | 35 |
-| astro | 5/5 | — | 13.23 | 105 | 0.22 | 9.6 | 122 | 100 | 1683 | 0 | 0 |
+| nuxt | 5/5 | 10/10 | 4.50 | 56 | 0.10 | 5.7 | 54 | 98 (99) | 2013 (1773) | 77 (63) | 86 (84) |
+| gracile | 5/5 | 10/10 | 9.68 | 67 | 0.12 | 7.7 | 84 | 100 (100) | 1660 (981) | 0 (0) | 2 (8) |
+| react-router | 5/5 | 10/10 | 5.27 | 64 | 0.12 | 5.1 | 64 | 99 (99) | 1732 (1735) | 41 (0) | 115 (115) |
+| tanstack-start | 5/5 | 10/10 | 6.79 | 61 | 0.13 | 5.3 | 76 | 99 (99) | 1879 (1961) | 58 (26) | 118 (118) |
+| solidstart | 5/5 | 10/10 | 10.71 | 81 | 0.13 | 9.2 | 95 | 100 (100) | 1402 (1207) | 14 (19) | 39 (40) |
+| vanilla | 5/5 | 10/10 | 5.91 | 74 | 0.14 | 6.7 | 66 | 97 (97) | 1535 (1528) | 40 (0) | 7 (7) |
+| hono-htmx | 5/5 | 10/10 | 7.20 | 78 | 0.14 | 7.2 | 78 | 100 (100) | 1026 (1030) | 0 (0) | 18 (18) |
+| angular | 5/5 | 10/10 | 9.09 | 91 | 0.18 | 9.3 | 90 | 87 (96) | 2138 (1937) | 346 (105) | 87 (93) |
+| next | 5/5 | 10/10 | 12.34 | 93 | 0.19 | 9.4 | 108 | 99 (98) | 2014 (2087) | 122 (102) | 136 (142) |
+| qwik | 4/5 | 10/10 | 13.18 | 87 | 0.20 | 9.3 | 118 | 100 (100) | 1495 (1030) | 0 (14) | 39 (40) |
+| sveltekit | 5/5 | 10/10 | 11.29 | 95 | 0.21 | 8.8 | 108 | 100 (100) | 1188 (1174) | 0 (0) | 35 (36) |
+| astro | 5/5 | 10/10 | 13.23 | 105 | 0.22 | 9.6 | 122 | 100 (100) | 1683 (830) | 0 (0) | 0 (0) |
 
 ## Code size: significant code vs. lines
 
@@ -71,7 +71,7 @@ Median of samples, then of iterations. Experimentalness is descriptive, not bett
 | gracile | 3.5 (4.0) | 3.0 (2.5) | 0 (1.5) | 4.0 (4.5) | 3.0 (4.0) | 1.0 (1.0) | 4.5 |
 | react-router | 3.5 (4.0) | 1.0 (1.0) | 0 (0) | 3.5 (4.0) | 3.0 (4.0) | 1.0 (1.0) | 4.5 |
 | tanstack-start | 3.5 (4.0) | 3.0 (3.0) | 1 (0) | 4.0 (4.0) | 4.0 (4.0) | 1.0 (1.0) | 4.5 |
-| solidstart | 3.0 (4.0) | 3.0 (3.0) | 1 (1) | 4.0 (4.3) | 3.0 (4.0) | 1.0 (1.0) | 4.0 |
+| solidstart | 3.0 (4.0) | 3.0 (3.0) | 1 (1) | 4.0 (4.5) | 3.0 (4.0) | 1.0 (1.0) | 4.0 |
 | vanilla | 3.5 (4.0) | 1.5 (2.0) | 0 (0) | 4.0 (4.0) | 4.0 (4.0) | 1.0 (1.0) | 4.0 |
 | hono-htmx | 3.0 (4.0) | 1.5 (2.5) | 0 (0) | 4.0 (4.0) | 3.5 (4.0) | 1.0 (1.0) | 4.0 |
 | angular | 4.0 (4.0) | 2.0 (3.0) | 0 (0) | 4.0 (4.0) | 3.5 (4.0) | 1.0 (2.5) | 4.5 |
