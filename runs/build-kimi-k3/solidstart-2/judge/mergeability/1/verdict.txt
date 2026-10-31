@@ -1,0 +1,130 @@
+I've reviewed the app against SolidStart v2's current stable docs (verified: `vite.config.ts` with `solidStart()` + `nitro()`, `query` + `"use server"` + `createAsync` + `route.preload`, `@solidjs/start#HttpStatusCode`). Here's my review.
+
+## Review notes
+
+**Idiom (strong).** The app matches the current stable (SolidStart v2 / solid-router 1.x) almost exactly: `app/vite.config.ts:1-6` is the documented v2 config verbatim; `app/src/lib/data.js:102` (`query` + `"use server"`) with `createAsync`/`preload` in every route (`app/src/routes/index.jsx:11-13`) is the documented data-loading pattern; `FileRoutes` in `app/src/app.jsx:34`, `MetaProvider`/`Title`, and `HttpStatusCode` in `app/src/components/NotFound.jsx:5` are all the recommended primitives. Home-grown spots where a framework feature exists: hand-rolled `URLSearchParams` string building in `app/src/routes/index.jsx:17-24` instead of the `useSearchParams` setter, and the `Moves` section is hand-duplicated at `app/src/routes/pokemon/[name].jsx:79-80` even though `Section` supports an `anchor` prop (`app/src/components/Section.jsx:4`). No `ErrorBoundary` anywhere, though the data-fetching guide shows it in every example.
+
+**Correctness (a few real ones).**
+- `app/src/lib/data.js:24-28` caches the *promise*, including failures: one transient API hiccup permanently 404s that resource (and hard-crashes the Pokémon page, below) until process restart.
+- `app/src/lib/data.js:244` yields `evolution: null` on a failed chain fetch, but `app/src/routes/pokemon/[name].jsx:112` renders `<EvoNode node={d().evolution}/>` unguarded → uncaught exception, and with no `ErrorBoundary` the page goes blank.
+- `app/src/routes/index.jsx:26-30`: the debounce timer has no `onCleanup`; type, then click a card within 250 ms and the pending `navigate("/?q=…")` yanks the user off the Pokémon page back to the filtered home.
+- Errors are swallowed to `null` everywhere (`data.js:25-27`), so an API outage renders "No Pokémon found" (`index.jsx`) or a 404 page instead of an error state — misleading but functional.
+
+**Abstractions.** `lib/data.js` is the single server boundary and everything else is thin and presentational — that's the right shape, and the only hidden global is the response cache. Duplicated `num` helper at `components/MoveTables.jsx:44` and `routes/moves/[name].jsx:14`.
+
+**Readability.** Good: sectioned data module, why-comments (`data.js:1-4`, `MoveTables.jsx:19`, `Section.jsx:1`), consistent `d()` accessor convention, small components. Fine to onboard onto.
+
+```json
+{
+  "dimension": "mergeability",
+  "criteria": {
+    "idiomatic": {
+      "score": 4,
+      "evidence": [
+        "app/vite.config.ts:1-6 — exactly the documented SolidStart v2 setup (solidStart() + nitro() from nitro/vite)",
+        "app/src/lib/data.js:102 — query() with 'use server' server functions, matching the current data-fetching guide",
+        "app/src/routes/index.jsx:11-13 — route.preload wired to the query, as docs prescribe",
+        "app/src/app.jsx:31-36 — Router root + MetaProvider + Suspense + FileRoutes, canonical",
+        "app/src/components/NotFound.jsx:5 — HttpStatusCode code={404} for the not-found pages",
+        "app/src/routes/index.jsx:17-24 — hand-rolled URLSearchParams manipulation where useSearchParams' setter exists",
+        "app/src/routes/pokemon/[name].jsx:79-80 — Moves section hand-duplicated instead of reusing Section (which supports anchor)"
+      ],
+      "rationale": "Reads like the current v2 docs; only nits are manual query-string building and two spots that skip the framework/component features that exist."
+    },
+    "correctness_risks": {
+      "score": 3,
+      "evidence": [
+        "app/src/lib/data.js:24-28 — failed/non-ok fetches are cached forever (promise cached, not the result), so one transient error permanently 404s a resource",
+        "app/src/lib/data.js:244 — evolution can be null on a failed fetch, while app/src/routes/pokemon/[name].jsx:112 renders EvoNode unguarded → uncaught crash",
+        "app/src/routes/index.jsx:26-30 — debounce timer never cleaned up (no onCleanup); fires navigate after the user has left the page",
+        "app/src/lib/data.js:25-27 — all API errors swallowed to null, so outages render 'No Pokémon found' or 404 pages instead of error states",
+        "app/src/lib/data.js:177-186 — 48 parallel pokemon fetches per home page render (cached, so bounded, but no concurrency cap)"
+      ],
+      "rationale": "No serious data-corruption bugs, but the cache-forever-on-failure semantics plus the unguarded evolution null are real production hazards the acceptance tests can't catch."
+    },
+    "global_abstractions": {
+      "score": 4,
+      "evidence": [
+        "app/src/lib/data.js:1-16 — one coherent server-side API boundary; routes and components stay thin and presentational",
+        "app/src/lib/data.js:16 — module-level Map cache is the only hidden global state; unbounded in principle but capped by the dataset size",
+        "app/src/components/MoveTables.jsx:44 and app/src/routes/moves/[name].jsx:14 — duplicated num() helper in two files",
+        "app/src/lib/util.js:1-45 — small, pure, honestly-shared helpers with a clear 'safe on both server and client' boundary comment"
+      ],
+      "rationale": "Abstractions earn their keep and boundaries are clear; the cache's failure semantics (not its existence) is the only thing that will need revisiting."
+    },
+    "readability": {
+      "score": 4,
+      "evidence": [
+        "app/src/lib/data.js:39-42 — section banners (Shared lookups / Home page / Move page) make a 440-line module navigable",
+        "app/src/components/MoveTables.jsx:19-20 — comment explains missing-values-sort-last rather than restating code",
+        "app/src/routes/types/[name].jsx:14 — consistent `d()` accessor-of-props pattern used in every content component",
+        "app/src/components/Section.jsx:1-7 — the region-role contract is documented at the component"
+      ],
+      "rationale": "Consistent, well-named, commented where it matters; a new teammate finds their way in minutes."
+    },
+    "review_cost": {
+      "score": 3,
+      "evidence": [
+        "app/src/lib/data.js:24-28 — I would block on not caching failures (5-line fix)",
+        "app/src/routes/index.jsx:26-30 — add onCleanup for the debounce timer",
+        "app/src/routes/pokemon/[name].jsx:112 — guard or filter out null evolution",
+        "app/src/components/MoveTables.jsx:44 — dedupe num() into lib/util.js",
+        "app/src/routes/pokemon/[name].jsx:79-80 — reuse Section with anchor=\"moves\""
+      ],
+      "rationale": "One round of small, localized changes — none structural, but the failure-caching and timer leak are things I'd want fixed before approving."
+    }
+  },
+  "overall": 4,
+  "findings": [
+    {
+      "severity": "high",
+      "location": "app/src/lib/data.js:24-28",
+      "issue": "apiFetch caches the promise itself, so a network error or non-ok response is cached as null for the lifetime of the process: a single transient failure permanently renders that resource as a 404 / 'Not found' page.",
+      "suggestion": "Cache only successful results (or cache.delete(url) on rejection/non-ok) so failures are retried on the next request."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/routes/pokemon/[name].jsx:112",
+      "issue": "EvoNode is rendered unguarded while data.js:244 can return evolution: null (failed evolution-chain fetch), throwing during render with no ErrorBoundary to catch it — the whole page goes blank.",
+      "suggestion": "Guard with <Show when={d().evolution}> and add an ErrorBoundary per the data-fetching guide."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/routes/index.jsx:26-30",
+      "issue": "The 250 ms search debounce timer is never cleared on cleanup; if the user types then clicks a Pokémon card, the pending navigate('/?q=…') fires after unmount and yanks them back to the filtered home page.",
+      "suggestion": "Clear the timer in onCleanup (or track the latest input value and no-op if the route has changed)."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/lib/data.js:25-27",
+      "issue": "All API errors are swallowed to null, so an API outage shows 'No Pokémon found' on the home page and 404 pages elsewhere — misleading failure modes with no way to distinguish 404 from 5xx.",
+      "suggestion": "Let unexpected errors throw and render an ErrorBoundary fallback; reserve null for genuine 404s (res.status === 404)."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/routes/index.jsx:17-24",
+      "issue": "Query-string state is built by hand with URLSearchParams and navigate() in two places (updateParams and pageHref) instead of the router's useSearchParams setter.",
+      "suggestion": "Use the useSearchParams setter (single source of truth for filter state) and derive page hrefs from it."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/components/MoveTables.jsx:44",
+      "issue": "num() is duplicated verbatim in app/src/routes/moves/[name].jsx:14.",
+      "suggestion": "Move the em-dash fallback for missing values into src/lib/util.js next to EM_DASH."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/routes/pokemon/[name].jsx:79-80",
+      "issue": "The Moves section hand-rolls the section/aria-labelledby markup that the Section component already provides (including its anchor prop), creating an inconsistent pattern in the same file.",
+      "suggestion": "Use <Section title=\"Moves\" anchor=\"moves\" ref={movesEl}> so all regions come from one component."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/routes/pokemon/[name].jsx:34-37",
+      "issue": "Hash scrolling is done via a one-shot onMount window.location.hash check, which won't re-scroll when the user changes the game select (navigate to ?game=…#moves on the same route).",
+      "suggestion": "Also scroll when location.hash changes (createEffect on the hash, or rely on the router's hash-scroll support) rather than only on mount."
+    }
+  ],
+  "summary": "A well-structured, genuinely current-SolidStart app: vite.config, query/use-server data layer, preloading and not-found handling all match the v2 docs, and the single data-module boundary keeps routes thin. The blocking issue is error handling: the response cache stores failures forever and one unguarded null can crash the Pokémon page with no ErrorBoundary. Fix those plus a debounce-timer leak and this merges cleanly."
+}
+```

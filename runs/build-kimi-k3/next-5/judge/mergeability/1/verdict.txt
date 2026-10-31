@@ -1,0 +1,129 @@
+I have enough to score. Quick summary of what I verified before judging:
+
+- **Next 16.4.3 + React 19.2** (`app/package.json:9-11`); confirmed via release notes that `params`/`searchParams` are Promises that must be awaited, `dynamic = 'force-dynamic'` is still a valid route segment config, and Turbopack is the default bundler (the `turbopack.root` pin in `next.config.mjs:9` is a reasonable fix for the app being nested in a larger repo).
+- **App Router usage is correct throughout**: awaited async params/searchParams on every page, `notFound()` for missing resources, `generateMetadata` reusing the cached fetch, metadata title template in the root layout, server components with exactly two small `'use client'` islands, plain CSS with the design tokens as the spec requires.
+- **Data layer**: `lib/api.js` (HTTP + in-memory promise cache, rejection-safe), `lib/data.js` (memoized aggregates), `lib/format.js` (pure helpers) — clean layering, no god modules.
+
+```json
+{
+  "dimension": "mergeability",
+  "criteria": {
+    "idiomatic": {
+      "score": 4,
+      "evidence": [
+        "app/app/page.jsx:15 — `await searchParams`, the Next 15+/16 async-request-API convention",
+        "app/app/pokemon/[name]/page.jsx:36-39 — generateMetadata awaits `params` and reuses the cached fetch",
+        "app/app/pokemon/[name]/page.jsx:157 — `notFound()` on a null API response, with a root `app/not-found.jsx`",
+        "app/app/layout.jsx:5-9 — metadata title template `'%s – Pokédex'` with home-page default",
+        "app/app/page.jsx:8 — `export const dynamic = 'force-dynamic'` fits the spec's request-time-data rule",
+        "app/components/HomeControls.jsx:35 — reads `window.location.search` instead of next/navigation's `useSearchParams`, with an eslint-disable at line 43",
+        "app/components/PokemonCard.jsx:17 — plain `<img>` rather than next/image (defensible for remote media, but a documented primitive is bypassed)"
+      ],
+      "rationale": "This is how the Next 16 docs write App Router apps — async dynamic APIs, notFound, generateMetadata, server components with two small client islands. Two minor spots hand-roll what a framework primitive provides (useSearchParams, next/image)."
+    },
+    "correctness_risks": {
+      "score": 4,
+      "evidence": [
+        "app/app/pokemon/[name]/page.jsx:94-98 — move-record fetches are zipped by index with no null guard; a 404/null record makes line 114 `record.name` throw and 500 a valid Pokémon page",
+        "app/app/pokemon/[name]/page.jsx:94-95 — one parallel fetch per learnable move (hundreds on first view of a Pokémon) with no concurrency cap",
+        "app/lib/api.js:14-25 — cache is dedup-safe and deletes the entry on rejection, so the risky parts are handled correctly",
+        "app/components/HomeControls.jsx:33-43 — debounce uses a termRef so stale closures can't win the race; input is re-synced from the URL prop",
+        "app/app/moves/[name]/page.jsx:57 — a null `damage_class` renders empty string instead of the spec's '—' (same at app/app/pokemon/[name]/page.jsx:118)",
+        "app/components/MovesSection.jsx:37-41 — descending sort reverses tie order relative to ascending's moveLabel tie-break"
+      ],
+      "rationale": "The genuinely hard parts (URL-state debounce, promise dedupe, 404 handling, alternate-form exclusion in lib/data.js:87-105) are done carefully. Remaining risks are an unguarded null in move assembly, an uncapped fetch fan-out, and a couple of display edge cases — all minor and unlikely under the fixed snapshot."
+    },
+    "global_abstractions": {
+      "score": 4,
+      "evidence": [
+        "app/lib/api.js:6 — process-lifetime cache on `globalThis.__pokedexStore`; documented, spec-sanctioned",
+        "app/lib/data.js:5,34,52,74 — module-level memoized promises for aggregates; single-purpose, no god module",
+        "app/lib/format.js:1-42 — pure, framework-free helpers, no `utils` dumping ground",
+        "app/components/Section.jsx:1-13, app/components/TypeBadge.jsx:3-14 — tiny, composable components instead of a god component",
+        "app/components/PokemonCard.jsx:3 — imports `apiUrl` from the server-only `lib/api.js`; a client import of this shared card would silently lose `process.env.API_BASE_URL` (app/lib/api.js:4) and break media URLs",
+        "app/app/pokemon/[name]/page.jsx:55-133 — `buildMoves` is 80 lines but lives in the only page that uses it, correctly local"
+      ],
+      "rationale": "Abstractions are few and earn their keep with a clear api/data/format layering. The one real cross-codebase concern is the leaky server/client boundary: `apiUrl` (browser-consumable) lives in the server-only fetch/cache module with no `server-only` marker to fail fast on a client import."
+    },
+    "readability": {
+      "score": 5,
+      "evidence": [
+        "app/lib/api.js:1-2,10-11 — header comments explain the caching contract and 404-as-null semantics",
+        "app/lib/data.js:23-29 — docblock on the aggregate shape; MAX_DEFAULT_POKEMON_ID named constant at line 9",
+        "app/components/HomeControls.jsx:4-8, app/components/MovesSection.jsx:70-72 — docblocks state the URL-state and sorting contracts",
+        "app/app/types/[name]/page.jsx:12-19 — RELATIONS table maps spec terms to API keys declaratively",
+        "app/lib/format.js:4-6 — humanize is 4 lines and exactly matches the spec definition"
+      ],
+      "rationale": "Consistent page template (getX → generateMetadata → page → sections), small files, comments that explain why rather than what. A new teammate can navigate this in minutes; 1,477 LOC for this spec is lean."
+    },
+    "review_cost": {
+      "score": 4,
+      "evidence": [
+        "app/app/pokemon/[name]/page.jsx:94-98 — the only change I'd insist on: filter/handle null move records (a ~3-line diff)",
+        "app/lib/api.js:34 — second ask: `import 'server-only'` or split the media-URL helper (1-2 lines)",
+        "app/components/HomeControls.jsx:35 — optional swap to useSearchParams",
+        "app/app/page.jsx:29-33 — filtering, pagination and default handling all correct, nothing to change there"
+      ],
+      "rationale": "Everything structural is right; I'd request two small diffs (null guard, boundary marker) and leave the rest as nits. Approve after one light round."
+    }
+  },
+  "overall": 4,
+  "findings": [
+    {
+      "severity": "medium",
+      "location": "app/app/pokemon/[name]/page.jsx:94-98",
+      "issue": "Move records are fetched in bulk and zipped by index into `recordByName` with no null handling; unlike the version-group fetch at line 67, a 404/null record isn't filtered, so line 114 dereferences it and crashes the whole Pokémon page with a 500.",
+      "suggestion": "Filter nulls or null-guard the row build (skip the row / fall back to the raw name), mirroring the `.filter(Boolean)` already used at line 67."
+    },
+    {
+      "severity": "medium",
+      "location": "app/lib/api.js:4",
+      "issue": "The module mixes server-only concerns (process.env, an in-memory fetch cache on globalThis) with `apiUrl`, which is consumed by the shared `PokemonCard` component (app/components/PokemonCard.jsx:3,17). Importing PokemonCard into any client tree would silently produce relative/broken media URLs because `API_BASE_URL` is undefined in the browser.",
+      "suggestion": "Add `import 'server-only'` to lib/api.js and move `apiUrl`/the media-URL construction into a pure, client-safe helper module."
+    },
+    {
+      "severity": "medium",
+      "location": "app/app/pokemon/[name]/page.jsx:94-95",
+      "issue": "Uncapped fan-out: one request per learnable move of the selected game (hundreds in parallel on a cold cache) plus all version-group records at line 63. Fine against the bundled local API, but it would hammer a real remote service and has no concurrency limit.",
+      "suggestion": "Chunk the Promise.all (e.g. batches of 25-50) or use a small concurrency limiter; the process cache still makes it a one-time cost."
+    },
+    {
+      "severity": "low",
+      "location": "app/lib/api.js:17",
+      "issue": "A non-404 API failure throws inside a server component with no `error.jsx` anywhere, so users get the framework's default crash page instead of a graceful one.",
+      "suggestion": "Add an `app/error.jsx` boundary (and consider `loading.jsx` for the heavy moves section)."
+    },
+    {
+      "severity": "low",
+      "location": "app/components/HomeControls.jsx:35",
+      "issue": "Builds query state from `window.location.search` instead of next/navigation's `useSearchParams`, and needs an eslint-disable (line 43) to do it.",
+      "suggestion": "Use `useSearchParams()`; pages are force-dynamic so the Suspense-boundary caveat doesn't apply."
+    },
+    {
+      "severity": "low",
+      "location": "app/app/moves/[name]/page.jsx:57",
+      "issue": "A move with no damage class renders an empty `<dd>` instead of the spec's em dash (same pattern at app/app/pokemon/[name]/page.jsx:118).",
+      "suggestion": "Apply the existing '—' fallback convention: `humanize(...) || '—'`."
+    },
+    {
+      "severity": "low",
+      "location": "app/components/MovesSection.jsx:37-41",
+      "issue": "Descending sort reverses the already-tie-broken array, so rows tied on the sort key come out in the opposite order from ascending sort.",
+      "suggestion": "Sort with a direction-aware comparator (keeping missing-last) instead of reversing."
+    },
+    {
+      "severity": "low",
+      "location": "app/components/PokemonCard.jsx:17",
+      "issue": "Plain `<img>` bypasses next/image (and triggers the `no-img-element` lint); avoiding the optimizer config for a remote API is defensible but undocumented.",
+      "suggestion": "Either configure `images.remotePatterns` for API_BASE_URL and use next/image, or add a comment explaining the deliberate choice."
+    },
+    {
+      "severity": "low",
+      "location": "app/lib/api.js:6",
+      "issue": "The process-lifetime cache is unbounded and never evicts; sanctioned by the spec today, but it will grow with every distinct resource touched.",
+      "suggestion": "Acceptable as-is for a fixed 1,025-species snapshot; note the trade-off in the header comment or add a simple size cap."
+    }
+  ],
+  "summary": "A genuinely idiomatic Next 16 App Router implementation — async request APIs, notFound, generateMetadata, memoized server data layer, and exactly two well-behaved client islands — that I'd merge after one light round. The blocking asks are small: a null guard in the move-record assembly that would otherwise 500 a valid page, and hardening the server/client boundary around lib/api.js's `apiUrl`. Everything else (uncapped first-load fan-out, missing error boundary, a couple of display edge cases) is nits the team can pick up opportunistically."
+}
+```

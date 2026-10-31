@@ -1,0 +1,124 @@
+{
+  "dimension": "mergeability",
+  "criteria": {
+    "idiomatic": {
+      "score": 4,
+      "evidence": [
+        "app/package.json:9 — pinned to nuxt 4.6.3, the current stable release",
+        "app/nuxt.config.ts:6-13 — runtimeConfig.public + app.head.htmlAttrs.lang, the documented pattern",
+        "app/app/pages/pokemon/[name].vue:172-174 — useRequestEvent().node.res.statusCode = 404, the pattern shown in Nuxt's own useRequestEvent docs",
+        "app/app/pages/pokemon/[name].vue:103-105 — useAsyncData with { watch: [selectedGame] } to refetch on query change",
+        "app/app/pages/index.vue:124-134 — selects use :selected + @change instead of v-model; Vue docs flag :selected as an initial-DOM-value edge case",
+        "app/app/plugins/api-base.ts:4 — plugin copies runtime config into module state instead of using useRuntimeConfig() in a composable",
+        "app/app/utils/poke.ts:66 — fetchApi(): Promise<any>, untyped API boundary throughout"
+      ],
+      "rationale": "Recognisably reads like the Nuxt 4 docs: right directory layout, auto-imports, top-level awaited useAsyncData, useHead with computeds, catch-all 404 route. A few home-grown workarounds (plugin→module config sync, :selected bindings, `any` types) keep it from a 5."
+    },
+    "correctness_risks": {
+      "score": 3,
+      "evidence": [
+        "app/nuxt.config.ts:6-10 — apiBaseUrl evaluated from process.env at build time; app/.output/server/chunks/nitro/nitro.mjs:4131 shows the value serialized into the build, so a different runtime API_BASE_URL is ignored (tests only pass because run.mjs:99 uses the same URL for build and start)",
+        "app/app/pages/index.vue:66-74 — debounce timer never cleared on unmount; navigating away within 250ms applies {q: ...} to the new page's URL",
+        "app/app/pages/pokemon/[name].vue:24 — fetchApi (not fetchRecord) for the default variety: a non-404 error propagates and renders Nuxt's default error page, which lacks the banner/nav/contentinfo landmarks; no app/error.vue exists",
+        "app/app/pages/pokemon/[name].vue:76-77 — artwork fallback always ends in spriteUrl(id), so a null sprite set renders a broken img instead of a fallback",
+        "app/app/utils/poke.ts:64-78 — promise cache is unbounded and process-lifetime; acceptable for a fixed dataset and spec-sanctioned, but worth a comment on eviction"
+      ],
+      "rationale": "No serious bug, but several minor fragilities: build-time config baking, a leaked debounce timer that mutates the URL after navigation, unhandled API errors bypassing the required landmark layout, and a broken-image fallback for null sprite URLs."
+    },
+    "global_abstractions": {
+      "score": 3,
+      "evidence": [
+        "app/app/utils/poke.ts:56-233 — single module holds transport ($fetch), the cache, four index builders and the card view-model; every page imports it",
+        "app/app/utils/poke.ts:54-62 — module-level mutable resolvedApiBase shared across all SSR requests, synced by app/app/plugins/api-base.ts:4; documented but a global side-channel",
+        "app/app/pages/index.vue:25-44 — home payload ships all 1025 species + types + generations to the client; reasonable but heavy and set in one place",
+        "app/app/pages/pokemon/[name].vue:76-77,app/app/pages/moves/[name].vue:33-35,app/app/pages/types/[name].vue:22-24 — small duplication of the 'English type label' lookup across pages rather than one shared helper"
+      ],
+      "rationale": "The poke.ts module is locally reasonable and well-sectioned, but it is a de-facto god data layer combining transport, cache, indexes and view models, plus cross-request module state — the first thing that will need untangling if the app grows."
+    },
+    "readability": {
+      "score": 4,
+      "evidence": [
+        "app/app/utils/poke.ts:1-4,51-53,98-99 — header comment and why-comments for caching and payload trimming",
+        "app/app/pages/moves/[name].vue:5-56 and app/app/pages/abilities/[name].vue:5-30 — the four [name] pages repeat one clear shape (fetch → model → useHead computed → 404 status), easy to follow",
+        "app/app/components/MovesTable.vue:8-19 — column model and SortKey type make the sort logic self-explanatory",
+        "app/app/assets/css/main.css:64-547 — single stylesheet with clear section banners per feature",
+        "app/app/pages/pokemon/[name].vue:53-55,90 — toTree(node: any) and inline casts rely on untyped API shapes, the main rough spot"
+      ],
+      "rationale": "Naming, file organisation and cross-file consistency are very good; a new teammate finds their way quickly. The `any`-typed API boundary and the size of poke.ts are the only rough edges."
+    },
+    "review_cost": {
+      "score": 4,
+      "evidence": [
+        "app/.nuxt/, app/.output/, app/.data/ and empty app/server/ are present with no app/.gitignore (root .gitignore:1-3 doesn't cover them) — generated artifacts would be committed",
+        "app/nuxt.config.ts:6-10 — one small change to fix the build-time config baking (use NUXT_PUBLIC_API_BASE_URL or a server-side runtime read)",
+        "app/app/pages/index.vue:66-74 — add onScopeDispose/onUnmounted to clear the debounce",
+        "app/app/pages/index.vue:124-134 — switch selects to v-model computed getters/setters"
+      ],
+      "rationale": "Approve after a round of small, well-localised changes: gitignore, runtime env handling, timer cleanup, v-model. Nothing structural needs rework."
+    }
+  },
+  "overall": 4,
+  "findings": [
+    {
+      "severity": "medium",
+      "location": "app/nuxt.config.ts:6-10",
+      "issue": "runtimeConfig.public.apiBaseUrl is evaluated from process.env.API_BASE_URL at build time and serialized into the output (app/.output/server/chunks/nitro/nitro.mjs:4131), so a runtime API_BASE_URL is silently ignored; the plugin at app/app/plugins/api-base.ts:4 then clobbers the correct runtime-time read in app/app/utils/poke.ts:54.",
+      "suggestion": "Keep a static default in nuxt.config and set NUXT_PUBLIC_API_BASE_URL (or map API_BASE_URL in a server plugin) so the value is read at request time, per Nuxt's runtime-config env-override convention."
+    },
+    {
+      "severity": "medium",
+      "location": "app/ (no .gitignore)",
+      "issue": "Generated .nuxt/, .output/ and .data/kv/ (and an empty server/ directory) live under app/ with no ignore rule; the root .gitignore only covers /data/ and node_modules, so build artifacts would be committed.",
+      "suggestion": "Add app/.gitignore with node_modules, .nuxt, .output, .data; delete the empty app/server/."
+    },
+    {
+      "severity": "medium",
+      "location": "app/app/pages/pokemon/[name].vue:24",
+      "issue": "Direct fetchApi calls (default-variety Pokémon, evolution chain, type/generation indexes) are not wrapped in error handling and there is no app/error.vue, so any non-404 API failure renders Nuxt's default error page without the banner/nav/contentinfo landmarks the spec requires on every page.",
+      "suggestion": "Add a custom app/error.vue with the site landmarks, or catch and null-out failures so the NotFound branch renders."
+    },
+    {
+      "severity": "low",
+      "location": "app/app/pages/index.vue:66-74",
+      "issue": "The search debounce timer is never cleared on unmount; typing then navigating away within 250ms fires router.replace and attaches {q: ...} to the new page's URL.",
+      "suggestion": "Clear the timer in onUnmounted (or use a watchEffect/vueuse useDebounceFn scoped to the component)."
+    },
+    {
+      "severity": "low",
+      "location": "app/app/utils/poke.ts:56-233",
+      "issue": "One module owns transport, the promise cache, module-level global state, four index builders and the card view-model; every page imports it, and future changes all land in the same 270-line file.",
+      "suggestion": "Split into api.ts (fetch + cache + config), indexes.ts, and cards.ts, and move the base-URL plumbing into a composable using useRuntimeConfig()."
+    },
+    {
+      "severity": "low",
+      "location": "app/app/utils/poke.ts:66",
+      "issue": "The API boundary is untyped (Promise<any>, inline casts like `toTree(node: any)` at app/app/pages/pokemon/[name].vue:53), so record-shape changes surface as runtime errors rather than type errors.",
+      "suggestion": "Define interfaces for the API records actually used (species, pokemon, move, ability, type) and type fetchRecord's return."
+    },
+    {
+      "severity": "low",
+      "location": "app/app/pages/index.vue:124-134",
+      "issue": "Filter selects bind :selected on <option> plus a manual @change handler instead of v-model; Vue documents :selected as an initial-DOM-value edge case and v-model is the supported pattern.",
+      "suggestion": "Use v-model with a writable computed that reads from and writes to the route query."
+    },
+    {
+      "severity": "low",
+      "location": "app/app/pages/pokemon/[name].vue:132",
+      "issue": "Switching the game select refetches every move record for that version group from the browser (hundreds of requests, mapLimit 16) on a client-only path; cached, but heavy on slow links.",
+      "suggestion": "Consider a server route that assembles the table rows, or shipping the move metadata alongside the page payload."
+    },
+    {
+      "severity": "low",
+      "location": "app/app/pages/pokemon/[name].vue:76-77",
+      "issue": "The artwork chain always ends in spriteUrl(pokemon.id), so a null sprite set (the spec says sprite URLs can be null) renders a broken image instead of a graceful fallback.",
+      "suggestion": "Fall back to nothing/alt-only when both official artwork and front sprite are null."
+    },
+    {
+      "severity": "low",
+      "location": "app/nuxt.config.ts:3",
+      "issue": "compatibilityDate is pinned to 2025-01-01 while running Nuxt 4.6.3 (2026-10); it silences newer default behavior the team may expect.",
+      "suggestion": "Bump the compatibility date to the release date of the Nuxt version in use."
+    }
+  ],
+  "summary": "A solid, idiomatic Nuxt 4 submission on the current stable release, with clean page structure, consistent patterns and a well-commented data layer. Merge-blockers are modest: build-time baking of the API base URL, missing ignore rules for generated artifacts, and a leaked debounce timer. The single 270-line, untyped data module is the main maintainability debt."
+}

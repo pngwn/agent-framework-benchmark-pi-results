@@ -1,0 +1,107 @@
+{
+  "dimension": "mergeability",
+  "criteria": {
+    "idiomatic": {
+      "score": 4,
+      "evidence": [
+        "app/astro.config.mjs:1-6 — current-stable Astro 7 with output:'server' and node adapter, exactly the documented SSR setup",
+        "app/src/pages/pokemon/[name].astro:1 — file-based routing with [name].astro params, as the docs prescribe",
+        "app/src/pages/pokemon/[name].astro:255 — set:html used for the trusted evolution list, the recommended primitive",
+        "app/src/pages/pokemon/[name].astro:47-56 — hand-rolled escapeHtml + string HTML building instead of a recursive component",
+        "app/src/pages/index.astro:143 — is:inline scripts bypass Astro's bundled/TypeScript script processing"
+      ],
+      "rationale": "Routing, SSR data loading, params and set:html all follow current docs; a few home-grown workarounds (manual HTML string building, is:inline scripts, DOMParser swap instead of an island or Astro view transitions) keep it from reading like the docs' own examples."
+    },
+    "correctness_risks": {
+      "score": 3,
+      "evidence": [
+        "app/src/lib/pokeapi.js:92-118 — getSpeciesList/getSpeciesIds/getTypes/getGenerations memoize module-level promises with no rejection cleanup, so one transient API failure breaks every page until restart (unlike apiFetch at line 44-48 which evicts failed promises)",
+        "app/src/pages/index.astro:164-167 — client refresh() never checks res.ok before DOM-swapping the fetched HTML",
+        "app/src/pages/index.astro:168-171 — swapping #results doesn't update the document title after a filter change",
+        "app/src/lib/pokeapi.js:6 — unbounded in-memory cache (spec explicitly allows runtime caching, so accepted)"
+      ],
+      "rationale": "No XSS (set:html content is hand-escaped, and the sort/select scripts operate on existing DOM), 404s handled, race guard on search present; but the poisoned memoized caches are a real fragility and the client fetch ignores non-2xx responses — a few minor ones, not none."
+    },
+    "global_abstractions": {
+      "score": 4,
+      "evidence": [
+        "app/src/lib/pokeapi.js — single data layer with clear boundary: fetching, caching, localization and card-building helpers, well commented",
+        "app/src/pages/abilities/[name].astro:31-45 — near-identical copy of cardsFromPokemonRefs (app/src/lib/pokeapi.js:117-141) reimplemented inline just to add a 'hidden' flag",
+        "app/src/pages/moves/[name].astro:45-52 — not-found wrapper duplicated across all four dynamic routes instead of a shared helper",
+        "app/src/components/PokemonCard.astro — small, reused component earning its keep"
+      ],
+      "rationale": "Abstractions are few and boundaries (server data module vs. presentational components vs. inline client scripts) are clean; one duplicated helper and the repeated 404 wrapper will need light untangling later."
+    },
+    "readability": {
+      "score": 4,
+      "evidence": [
+        "app/src/lib/pokeapi.js:1-10 — comments explain why (caching allowed, concurrency limiter rationale), not what",
+        "app/src/pages/pokemon/[name].astro:9-260 — the biggest file (~250 lines) keeps frontmatter data shaping and template clearly separated, with named constant maps (STAT_LABELS, METHOD_ORDER)",
+        "app/src/pages/pokemon/[name].astro:140-146 — whole template wrapped in a {!data ? <NotFound/> : (...)} ternary across four routes; unusual and slightly awkward to scan",
+        "app/src/components/Section.astro — consistent heading-id convention across all pages"
+      ],
+      "rationale": "A new teammate finds their way in minutes: consistent naming, small files, why-comments; only the long ternary-wrapped templates in the dynamic routes and the dense moves frontmatter are rough spots."
+    },
+    "review_cost": {
+      "score": 4,
+      "evidence": [
+        "app/src/lib/pokeapi.js:92-118 — only substantive ask: retry/evict failed memoized promises",
+        "app/.gitignore (root .gitignore lacks app/dist and app/.astro) — build artifacts and generated types need gitignoring",
+        "app/src/pages/abilities/[name].astro:31-45 — parameterize cardsFromPokemonRefs(hidden) instead of the copy"
+      ],
+      "rationale": "Approve with nits: nothing structurally needs rework, and the fixes (rejection eviction, dedupe the card helper, gitignore dist) are small, localized asks."
+    }
+  },
+  "overall": 4,
+  "findings": [
+    {
+      "severity": "medium",
+      "location": "app/src/lib/pokeapi.js:92-118",
+      "issue": "Module-level memoized promises (species list, species IDs, types, generations) are never evicted on failure, so a single transient API error or network blip permanently poisons every page render for the process lifetime — unlike apiFetch, which cleans up failed cache entries.",
+      "suggestion": "Apply the same rejection-eviction pattern apiFetch uses (pokeapi.js:44-48) to getSpeciesList/getSpeciesIds/getTypes/getGenerations/getTypeNameMap, or reset the memo on catch."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/pages/abilities/[name].astro:31-45",
+      "issue": "Reimplements card building (filter alternate forms, sort by dex, dedupe by species) nearly identically to cardsFromPokemonRefs in pokeapi.js:117-141, differing only in the hidden flag.",
+      "suggestion": "Extend cardsFromPokemonRefs to return is_hidden per entry (or accept a map callback) and delete the inline copy."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/pages/index.astro:164-171",
+      "issue": "Client-side refresh() doesn't check res.ok, and swapping #results leaves a stale document title after filter changes.",
+      "suggestion": "Guard with if (!res.ok) return; and update document.title from the fetched doc's <title>."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/pages/pokemon/[name].astro:47-56",
+      "issue": "Evolution chain is built as an HTML string with a hand-rolled escapeHtml and injected via set:html, instead of rendering the recursive structure through Astro's templating (which escapes by default).",
+      "suggestion": "Render the chain recursively in the template (or a small EvolutionChain component) and drop escapeHtml; set:html with manually escaped strings is a latent injection risk if someone forgets a call."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/pages/index.astro:143",
+      "issue": "is:inline scripts skip Astro's processed script pipeline (bundling, TypeScript, deduplication) — the same pattern repeats at pokemon/[name].astro:262.",
+      "suggestion": "Use Astro's default processed <script> tags; guard on element existence (already present) if hoisting past conditional rendering is a concern."
+    },
+    {
+      "severity": "low",
+      "location": "app/dist/ and app/.astro/",
+      "issue": "Build output (dist/) and generated types (.astro/) sit in app/ but the root .gitignore ignores neither, so build artifacts risk being committed.",
+      "suggestion": "Add app/dist/ and app/.astro/ to .gitignore."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/pages/moves/[name].astro:45-52",
+      "issue": "The {!data ? <Layout title=\"Not found – Pokédex\"><NotFound/></Layout> : (...)} wrapper is duplicated verbatim in four dynamic routes.",
+      "suggestion": "Extract a tiny wrapper or shared frontmatter helper so the 404 path is defined once."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/lib/pokeapi.js:6",
+      "issue": "Unbounded in-memory cache Map grows with every distinct URL fetched for the process lifetime (fine for this dataset/spec, but unbounded in principle).",
+      "suggestion": "Add a simple size cap or LRU eviction if the API surface ever grows."
+    }
+  ],
+  "summary": "A clean, current-stable Astro 7 SSR app that follows the framework's recommended patterns for routing, request-time data loading, and 404 handling, with a small well-bounded data layer and readable, why-commented code. The main merge blockers are the permanently poisoned memoized promise caches in pokeapi.js and a duplicated card-building helper; everything else is nits. I'd approve after one small round of fixes."
+}

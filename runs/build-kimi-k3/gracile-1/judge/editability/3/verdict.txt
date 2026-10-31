@@ -1,0 +1,150 @@
+# Review: Editability of the Gracile + Lit Pokédex
+
+The app is a clean Gracile 0.11 (current stable) server-output project: `vite.config.ts` with `output: 'server'`, an Express adapter in `server.js`, and per-route `defineRoute({ handler, document, template })` files with `.client.ts` companions. Data fetching is funneled through one module (`src/lib/api.ts`), rendering helpers through two (`components.ts`, `format.ts`), and reference→card conversion through one (`species-cards.ts`). That structure is what makes the scenarios below mostly painless.
+
+## Scenario walkthroughs
+
+1. **Remove Abilities.** Delete `app/src/routes/abilities/` and the single Abilities section in `app/src/routes/pokemon/[name].ts:315-340`; optionally drop `.abilities-list` in `app/public/styles/global.css:402`. No nav links exist (nav is spec-fixed), and grep shows no other references. Trivial.
+2. **Sprite bug (Deoxys-class).** Sprite is taken from the fetched Pokémon record's `sprites.front_default` in **two** independent places: `app/src/lib/species-cards.ts:42` (covers the Moves/Abilities/Types lists) and `app/src/routes/index.ts:125` (home page builds its own `CardData`). One fix covers 3 of 4 lists; home needs a second edit.
+3. **Sort all card lists by name.** Two sort sites: `species-cards.ts:46` and `index.ts:106` (the species list itself). Both one-liners with the sort key already available, but the same intent lives in two files.
+4. **Add an Items section.** New `routes/items/index.ts` (model: `routes/types/index.ts`) + `routes/items/[name].ts` (model: `routes/moves/[name].ts`). Everything substantive — `api`, `document`, `section`, `cardList`, `speciesCards`, `notFoundTemplate`, format helpers — is reused; only the declarative route glue is copied.
+5. **API base URL / caching change.** One file: `API_BASE` at `src/lib/api.ts:6`, the cache at `:72`, concurrency at `:14-32`, and the `/api/v2` prefix assumption at `:90` all live in `api.ts`. No route knows the URL shape beyond relative API paths.
+
+## Notable issues
+
+- Card-data construction is duplicated between the home handler and `species-cards.ts` — the exact seam where a sprite/sort bug would need two fixes.
+- The sortable-tables feature is split across two files with an implicit `data-v`/`data-n`/`data-missing` attribute contract (`routes/pokemon/[name].ts:62-90` ↔ `[name].client.ts:34-42`), with no shared constant or comment tying them.
+- Every route template does `context.props.GET as any`, discarding the type the handler established; every param route repeats the same stub-guard/try-catch/404 block verbatim (4×).
+
+```json
+{
+  "dimension": "editability",
+  "criteria": {
+    "removability": {
+      "score": 5,
+      "evidence": [
+        "app/src/routes/abilities/[name].ts:1-70 — entire feature is one self-contained route file with its own imports",
+        "app/src/routes/pokemon/[name].ts:315-340 — the only inbound /abilities links, in one section() block",
+        "app/public/styles/global.css:402 — one now-dead CSS rule (.abilities-list), easy to spot",
+        "app/src/lib/species-cards.ts:14 — comment mentions ability.pokemon but no code depends on the feature"
+      ],
+      "rationale": "Deleting the Abilities directory plus one section block removes the whole feature; no shared helper is polluted with ability-specific logic and the only leftover is one CSS rule."
+    },
+    "changeability": {
+      "score": 3,
+      "evidence": [
+        "app/src/lib/species-cards.ts:42 vs app/src/routes/index.ts:125 — sprite extraction duplicated across the two card-construction sites",
+        "app/src/lib/species-cards.ts:46 vs app/src/routes/index.ts:106 — the dex-number ordering rule duplicated in both",
+        "app/src/routes/moves/[name].ts:94-96, app/src/routes/abilities/[name].ts:62-64, app/src/routes/types/[name].ts:88-90 — identical 'N Pokémon + cardList' markup repeated three times",
+        "app/src/routes/pokemon/[name].ts:223, app/src/routes/moves/[name].ts:50, app/src/routes/types/[name].ts:44, app/src/routes/abilities/[name].ts:41 — 'as any' casts discard the handler's return type, so renaming a prop fails only at runtime"
+      ],
+      "rationale": "Fixes are findable but often land in two places: card construction, card ordering, and the count-plus-list section each exist in 2–4 near-identical copies, and the untyped props boundary means the compiler won't catch a missed one."
+    },
+    "coupling": {
+      "score": 4,
+      "evidence": [
+        "app/src/lib/api.ts:6,14-32,72-96 — URL, concurrency and caching policy all behind one narrow api(pathOrUrl) seam",
+        "app/src/lib/components.ts:56, section() and cardList() — routes depend on small helpers, not each other",
+        "app/src/routes/pokemon/[name].ts:62-90 ↔ app/src/routes/pokemon/[name].client.ts:34-42 — implicit data-v/data-n/data-missing attribute contract with no shared constant",
+        "app/src/routes/pokemon/[name].ts:100-120 vs :223-373 — data fetching (handler) cleanly separated from markup (template)"
+      ],
+      "rationale": "Modules meet through narrow, well-documented seams and server/client code is cleanly split; the main tangle is the undocumented attribute protocol shared by the moves-table template and its client-side sorter."
+    },
+    "abstraction_design": {
+      "score": 4,
+      "evidence": [
+        "app/src/lib/species-cards.ts:25-47 — speciesCards handles the real variation: wrapped vs bare refs, alternate-form filtering, species dedupe, and passes the raw entry through for the hidden-ability marker",
+        "app/src/lib/components.ts:20-27 — typeBadge(name, link) is a small boolean-flag abstraction, acceptable",
+        "app/src/lib/components.ts:33-43 — CardData's optional types/hiddenAbility flags are page-specific but documented as such",
+        "app/src/routes/types/[name].ts:70-80 — inlines its own type-badge anchor markup instead of reusing typeBadge, duplicating the class-name CSS contract",
+        "app/src/routes/[4 files]:104/19/24/28 — the stub-render guard + 404 try/catch pattern copy-pasted per route instead of extracted"
+      ],
+      "rationale": "speciesCards is designed around the app's genuine variation and stretches to new lists without copying; the gaps are small — an un-extracted not-found flow and a couple of boolean-flag helpers."
+    }
+  },
+  "overall": 4,
+  "findings": [
+    {
+      "severity": "medium",
+      "location": "app/src/routes/index.ts:125-147",
+      "issue": "Home page re-implements Pokémon-record→CardData mapping (sprite, slot-sorted types) that species-cards.ts also implements, so a sprite or ordering fix touches two files",
+      "suggestion": "Extract a shared cardFromPokemonRecord(record, extra) helper (or reuse speciesCards) so all four lists share one construction and one sort site"
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/routes/pokemon/[name].ts:223",
+      "issue": "Every template casts context.props.GET to 'as any', discarding the type contract the handler returns; prop renames surface as runtime undefined, not compile errors",
+      "suggestion": "Type the GET return (e.g. a discriminated Props union including notFound) and let it flow into document/template instead of casting"
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/routes/pokemon/[name].ts:62-90",
+      "issue": "Sortable-table protocol (data-v/data-n/data-missing attributes) is an implicit contract with [name].client.ts:34-42; changing a cell breaks sorting silently",
+      "suggestion": "Document the contract in both files (a shared constants module or at least a cross-referencing comment), or sort from a data model instead of DOM attributes"
+    },
+    {
+      "severity": "low",
+      "location": "app/src/routes/moves/[name].ts:26-33",
+      "issue": "The not-found flow (gracile-static stub guard, try/catch, responseInit.status=404, title fallback) is duplicated verbatim in four param routes",
+      "suggestion": "Extract a fetchResourceOr404(name, path) helper (and a shared stub-guard constant) so the pattern lives once"
+    },
+    {
+      "severity": "low",
+      "location": "app/src/routes/abilities/[name].ts:62-64",
+      "issue": "The '<count> Pokémon' + cardList section markup is repeated in moves, abilities and types routes",
+      "suggestion": "Add a cardsSection(headingId, cards) component to components.ts; the Ability removal scenario shows this block is edited in three places otherwise"
+    },
+    {
+      "severity": "low",
+      "location": "app/src/routes/types/[name].ts:70-80",
+      "issue": "Damage-relation links inline their own type-badge anchor markup rather than reusing typeBadge(), duplicating the 'type-badge type-<name>' CSS class contract",
+      "suggestion": "Extend typeBadge (e.g. a separator option) and reuse it here"
+    },
+    {
+      "severity": "low",
+      "location": "app/src/lib/api.ts:72",
+      "issue": "Runtime cache is an unbounded Map keyed by URL with no TTL; a long-lived process accumulates ~1000+ species/pokemon/move entries (fine per spec, but the only knob is rewriting this module)",
+      "suggestion": "Acceptable as-is since it's confined to one file; if rules change, parameterize TTL/max-size here rather than per call site"
+    },
+    {
+      "severity": "low",
+      "location": "app/src/lib/components.ts:20",
+      "issue": "typeBadge's boolean `link` parameter is mild flag creep; a third variant (plain, linked, spaced-list) would push it toward object options",
+      "suggestion": "If a new badge variant appears, switch to an options object before adding another boolean"
+    }
+  ],
+  "summary": "This is a well-seamed Gracile app: one module per cross-cutting concern (API access, formatting, cards) and self-contained route files make removal and addition easy, and a data-source change touches exactly one file. The main editability costs are duplication — card construction and dex ordering exist in two places, and the not-found flow and count-plus-list markup are copy-pasted across routes — plus untyped props at the handler→template boundary. I'd merge happily after extracting the shared card mapper and the 404 helper.",
+  "scenarios": [
+    {
+      "change": "Remove the Abilities pages and every link to them",
+      "files": ["app/src/routes/abilities/[name].ts", "app/src/routes/pokemon/[name].ts", "app/public/styles/global.css"],
+      "difficulty": 5,
+      "notes": "Delete one route directory, delete one section() block on the Pokémon page, optionally drop one CSS rule; no other references exist."
+    },
+    {
+      "change": "Fix wrong sprite for species whose default Pokémon has a different name (e.g. Deoxys)",
+      "files": ["app/src/lib/species-cards.ts", "app/src/routes/index.ts"],
+      "difficulty": 4,
+      "notes": "species-cards.ts:42 covers the Moves/Abilities/Types card lists in one fix, but the home page builds CardData independently (index.ts:125), so a second, identical edit is required."
+    },
+    {
+      "change": "Add sorting by name to every list of Pokémon cards",
+      "files": ["app/src/lib/species-cards.ts", "app/src/routes/index.ts"],
+      "difficulty": 4,
+      "notes": "Two sort sites (species-cards.ts:46 and index.ts:106), both one-line changes with the name already present; the duplication is why it isn't a 5."
+    },
+    {
+      "change": "Add an Items section (/items, /items/:name) shaped like Moves",
+      "files": ["app/src/routes/items/index.ts", "app/src/routes/items/[name].ts"],
+      "difficulty": 5,
+      "notes": "Purely additive: api, document, section, cardList, speciesCards, notFoundTemplate and format helpers are all reusable as-is; only the declarative route glue (modeled on types/index.ts and moves/[name].ts) is written fresh."
+    },
+    {
+      "change": "Change the API base URL and caching rules",
+      "files": ["app/src/lib/api.ts"],
+      "difficulty": 5,
+      "notes": "API_BASE, the /api/v2 prefix assumption, the cache Map and the concurrency pool all live in this one module; no route file knows anything about URLs or caching."
+    }
+  ]
+}
+```

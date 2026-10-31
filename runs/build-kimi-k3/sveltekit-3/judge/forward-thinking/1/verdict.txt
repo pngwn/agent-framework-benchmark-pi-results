@@ -1,0 +1,157 @@
+# Review — forward-thinking
+
+## What this code is
+
+A SvelteKit 3 Pokédex: server `load` functions pull from PokeAPI behind one module, Svelte 5 runes + snippets in the templates, plain CSS, zero runtime dependencies. All claims verified against the current (Oct 2026) SvelteKit docs and release notes.
+
+## Current-API verification (sources cited)
+
+- **`goto(..., { shallow: true, replace: true })` + `page.shallow`** — added in SvelteKit 3 (`sveltejs/kit` PR #16449, merged 2026-07; `3.0.0-next.13` notes; documented at svelte.dev/docs/kit/shallow-routing). This is the *replacement* for the now-deprecated `pushState`/`replaceState` and the deprecated `replaceState` option. The app uses the new spelling, not the deprecated one.
+- **`defineEnvVars` from `@sveltejs/kit/env` + `$app/env/private`** — the documented current way (svelte.dev/docs/kit/environment-variables: "The `$env/*` modules ... were deprecated in SvelteKit 3 ... in favour of explicit environment variables"). The app does not touch any `$env/*` module.
+- **Vite-plugin config** — `sveltekit({ adapter: ... })` in `vite.config.js` is required in SvelteKit 3 (`svelte.config.js` "is no longer supported", svelte.dev/docs/kit/migrating-to-sveltekit-3). Correct, with no leftover `svelte.config.js`.
+- **`error(404, 'Not found')`** — the `error(status, message)` signature; `error(status, {...})` was deprecated in SvelteKit 3 (release notes `3.0.0-next.13`). App uses the current form.
+- **`page` from `$app/state`** — current since 2.12; runes (`$props`, `$state`, `$derived`, `{#snippet}`/`{@render}`) are the Svelte 5 model.
+
+## Scoring
+
+**`latest_apis` — 5.** This is not just "current for my training data", it's current for *today*: `app/src/routes/+page.svelte:11` reads `page.shallow?.url` and `app/src/routes/+page.svelte:64` does `goto(..., { shallow: true, replace: true })` — an API three months old, used exactly as its release notes prescribe (filters update the URL without re-running `load`). `app/src/env.js:1-14` is the new `defineEnvVars` setup (and correctly `static: false` so `API_BASE_URL` is read at runtime, not inlined at build — a newer and easily-missed subtlety), consumed via `$app/env/private` at `app/src/lib/server/api.js:2`. `app/vite.config.js:7-9` places the adapter in the Vite plugin per the SvelteKit 3 migration; `app/src/routes/pokemon/[name]/+page.server.js:15` uses the new `error(status, message)` signature. No deprecated fallbacks anywhere.
+
+**`platform` — 5.** Platform-first throughout: native `fetch` with a memoized-promise cache (`app/src/lib/server/api.js:15-30`), `URLSearchParams` for all query building (`app/src/routes/+page.svelte:62-70, 84-91`), `Map`/`Set` and `??=` (`app/src/lib/server/api.js:13, 61`), `Array.prototype.at(-1)` (`app/src/routes/pokemon/[name]/+page.server.js:36`), `localeCompare` (`app/src/lib/components/MovesTable.svelte:54`), CSS custom properties for the whole design token set plus intrinsic responsive layout via `repeat(auto-fill, minmax(...))` grids instead of media queries (`app/src/app.css:249, 191` — no `@media` anywhere). `scrollIntoView` rather than manual math (`app/src/routes/pokemon/[name]/+page.svelte:10`). The only hand-rolled bits are a 10-line debounce and the hash-scroll, both trivial.
+
+**`dependencies` — 5.** Zero `dependencies` and exactly the five devDependencies SvelteKit 3 itself mandates: `@sveltejs/kit@3.1.1`, `svelte@^5.57.3` (3.x requires ≥5.57.1), `vite@^8.3.5` (3.x requires Vite 8), `@sveltejs/vite-plugin-svelte@^7.3.1`, `@sveltejs/adapter-node@^6` — confirmed current in the lockfile (`app/package-lock.json:390`). No CSS framework, no state library, no Lodash: filtering/pagination/sorting are ~30 lines of runes. Nothing to remove.
+
+**`churn_resistance` — 4.** Strong architecture: all API access and cache live behind one module (`app/src/lib/server/api.js`) that every route consumes; naming/shape helpers centralised in `app/src/lib/utils.js`; env vars defined in one file (`app/src/env.js`); `#lib` subpath imports (`app/package.json:4-7`) decouple route files from `../..` paths; load functions return small view-model objects (e.g. `app/src/routes/pokemon/[name]/+page.server.js:121-141`) so components won't churn with the API. Two gaps keep it from a 5: there is **not a single type annotation or JSDoc typedef in the codebase** (measured `typeLines: 0`) — the raw PokeAPI shapes are destructure-guessed at call sites, so an upstream shape change fails silently at runtime rather than at build; and the raw-species decoding is split between `api.js` and the route's `load` (`pokemon/[name]/+page.server.js:29-114`), so a second consumer would copy it.
+
+## Findings
+
+1. **medium** — `app/src/lib/server/api.js:20` (and all `load`s) — the PokeAPI boundary is entirely untyped; `api()` returns raw parsed JSON whose shape is implicit in destructuring. Suggestion: JSDoc `@typedef`s (or TS) for species/pokemon/move records — `defineEnvVars` already supports `schema` validation, and the same idea applied to the fetch layer would move breakage from runtime to build time.
+2. **low** — `app/src/routes/+page.svelte:66-70` — the 150 ms debounce timer is never cleared on component destruction; a keystroke immediately before navigating away fires `goto` against a stale URL. Use `$effect` cleanup or `$effect(() => () => clearTimeout(searchTimer))`.
+3. **low** — `app/src/routes/pokemon/[name]/+page.svelte:7-11` — `onMount` hash-scrolling re-implements router behaviour SvelteKit already handles (svelte.dev/docs/kit/$app-navigation: hash navigations scroll and focus the target; `disableScrollHandling` exists for opting out). This is the one place the app works *against* the framework.
+4. **low** — `app/src/lib/components/MovesTable.svelte:82` — `{#each sorted as row (row)}` keys by object identity; fragile if rows are ever rebuilt (e.g. server-sorting later). Key by `row.moveName` + `row.level`.
+5. **low** — `app/src/lib/server/api.js:15` — server-side `fetch` has no `AbortSignal.timeout()`; a hung upstream stalls the request indefinitely and the in-flight promise stays in the cache. `fetch(url, { signal: AbortSignal.timeout(10_000) })` is one line.
+6. **low** — `app/src/routes/pokemon/[name]/+page.svelte:75-86` — the stat-bar width formula is duplicated inline for stats and the total row; a tiny helper (or a `StatBar` component) would keep the /255 normalisation in one place.
+7. **low** — `app/` — no `.gitignore`; `build/` and `.svelte-kit/` artifacts appear to live in the repo alongside `package-lock.json`. Standard SvelteKit template ships one; regenerate with `npx sv create` hygiene.
+
+## Summary
+
+This codebase reads like it was written from the current SvelteKit 3 manual: shallow routing, `defineEnvVars`, Vite-plugin config and the new `error()` signature, with zero runtime dependencies and a clean single-module data layer — upgrades would touch almost nothing. The only meaningful forward-looking gap is the total absence of types at the API boundary, which is the one thing that would make future data-shape changes painful instead of mechanical.
+
+```json
+{
+  "dimension": "forward-thinking",
+  "criteria": {
+    "latest_apis": {
+      "score": 5,
+      "evidence": [
+        "app/src/routes/+page.svelte:11 — reads page.shallow?.url, the shallow-routing state object added in SvelteKit 3 (sveltejs/kit PR #16449, July 2026)",
+        "app/src/routes/+page.svelte:64 — goto(..., { shallow: true, replace: true }): new option spelling, not the deprecated replaceState/pushState",
+        "app/src/env.js:1-14 — defineEnvVars from @sveltejs/kit/env with static: false (runtime-read env), current replacement for deprecated $env/*",
+        "app/src/lib/server/api.js:2 — API_BASE_URL from $app/env/private (current) instead of deprecated $env/dynamic/private",
+        "app/vite.config.js:7-9 — adapter configured in the sveltekit Vite plugin, the required SvelteKit 3 layout; no legacy svelte.config.js",
+        "app/src/routes/pokemon/[name]/+page.server.js:15 — error(404, 'Not found') uses the current error(status, message) signature",
+        "app/src/routes/+layout.svelte:5 — $props children + @render; snippets and runes used throughout instead of slots"
+      ],
+      "rationale": "Consistently on the current generation, including APIs released mid-2026 (shallow routing, defineEnvVars, plugin-based config); no deprecated fallbacks remain."
+    },
+    "platform": {
+      "score": 5,
+      "evidence": [
+        "app/src/lib/server/api.js:15-30 — native fetch with a memoized-promise cache; no HTTP client library",
+        "app/src/routes/+page.svelte:62-91 — URLSearchParams for all query-string building and mutation",
+        "app/src/app.css:249,191 — intrinsic responsiveness via repeat(auto-fill, minmax(...)) grids; zero @media rules",
+        "app/src/lib/server/api.js:13,61 — Map/Set for caches and lookup tables; ??= for promise memoisation",
+        "app/src/routes/pokemon/[name]/+page.server.js:36 — Array.prototype.at(-1)",
+        "app/src/lib/components/MovesTable.svelte:54 — localeCompare for stable, locale-aware sorting",
+        "app/src/routes/pokemon/[name]/+page.svelte:10 — scrollIntoView instead of hand-computed offsets"
+      ],
+      "rationale": "Reaches for the platform first everywhere: fetch, URLSearchParams, modern Map/Set/array methods, and custom-property-driven CSS with intrinsic grids; the only hand-rolled pieces are a trivial debounce and the (unnecessary) hash scroll."
+    },
+    "dependencies": {
+      "score": 5,
+      "evidence": [
+        "app/package.json:8-16 — empty dependencies; only the five devDependencies SvelteKit 3 itself requires",
+        "app/package-lock.json:390 — @sveltejs/kit 3.1.1 (current stable line)",
+        "app/src/routes/+page.svelte:24-46 — filtering/pagination done in ~20 lines of runes; no state or util library",
+        "app/src/app.css:1 — hand-written CSS with the spec's tokens; no CSS framework"
+      ],
+      "rationale": "Minimal and modern: zero runtime packages, and the dev toolchain matches SvelteKit 3's documented minimums (Svelte ≥5.57, Vite 8, vite-plugin-svelte 7) exactly."
+    },
+    "churn_resistance": {
+      "score": 4,
+      "evidence": [
+        "app/src/lib/server/api.js — all HTTP access, caching and PokeAPI interpretation live behind this one module used by every route",
+        "app/src/lib/utils.js:1-40 — naming/flavor/dex helpers centralised rather than copy-pasted per route",
+        "app/src/env.js — single source of environment configuration",
+        "app/package.json:4-7 — #lib subpath imports decouple route files from relative paths",
+        "app/src/routes/pokemon/[name]/+page.server.js:29-114 — raw API decoding partially duplicated into the route's load rather than the api module",
+        "app/src/lib/server/api.js:20 — untyped raw JSON at the boundary: measured typeLines is 0 app-wide"
+      ],
+      "rationale": "A framework or API upgrade would touch very few files thanks to the single data module, view-model-producing loads and one-place env config; it loses a point because the data boundary is completely untyped and some species/move decoding leaks into route files."
+    }
+  },
+  "overall": 5,
+  "findings": [
+    {
+      "severity": "medium",
+      "location": "app/src/lib/server/api.js:20",
+      "issue": "The PokeAPI boundary is entirely untyped (no JSDoc, no TS); API shapes are implicit in destructuring at every load, so upstream shape changes fail silently at runtime",
+      "suggestion": "Add @typedef declarations (or migrate to TS) for species/pokemon/move records, or validate with a small schema library like valibot — already supported by defineEnvVars schemas"
+    },
+    {
+      "severity": "low",
+      "location": "app/src/routes/+page.svelte:66-70",
+      "issue": "Search debounce timer is never cleared when the component unmounts; a keystroke just before navigation can fire goto on a stale page",
+      "suggestion": "Track the timer in an $effect and clear it in the cleanup, or reset it in onDestroy"
+    },
+    {
+      "severity": "low",
+      "location": "app/src/routes/pokemon/[name]/+page.svelte:7-11",
+      "issue": "onMount re-implements hash scrolling that the SvelteKit router already performs (scroll + focus on hash navigation); duplicate behaviour can drift from the framework",
+      "suggestion": "Drop the manual scrollIntoView and rely on the router, using disableScrollHandling only if a genuine edge case appears"
+    },
+    {
+      "severity": "low",
+      "location": "app/src/lib/components/MovesTable.svelte:82",
+      "issue": "{#each sorted as row (row)} keys rows by object identity, which breaks subtly if rows are ever reconstructed",
+      "suggestion": "Key by a composite of move name and level (e.g. `${row.moveName}-${row.level}`)"
+    },
+    {
+      "severity": "low",
+      "location": "app/src/lib/server/api.js:15",
+      "issue": "Server-side fetch has no timeout; a hung upstream stalls the page indefinitely and the in-flight promise stays cached",
+      "suggestion": "Use fetch(url, { signal: AbortSignal.timeout(10_000) })"
+    },
+    {
+      "severity": "low",
+      "location": "app/src/routes/pokemon/[name]/+page.svelte:75-86",
+      "issue": "The stat-bar width formula (value/255 clamped to 100) is duplicated inline for stats and the Total row",
+      "suggestion": "Extract a small bar-width helper (or a StatBar snippet/component)"
+    },
+    {
+      "severity": "low",
+      "location": "app/",
+      "issue": "No .gitignore; build/ and .svelte-kit/ artifacts appear committed next to source",
+      "suggestion": "Add the standard SvelteKit .gitignore and remove generated artifacts from version control"
+    }
+  ],
+  "summary": "This is about as forward-looking as SvelteKit code gets right now: it uses SvelteKit 3's newest APIs (shallow routing via goto + page.shallow, defineEnvVars, Vite-plugin config, the new error() signature) exactly as documented, with zero runtime dependencies and all data access funnelled through one module. The platform is used first everywhere, from fetch/URLSearchParams to intrinsic auto-fill grids, so upgrades would ripple into very few files. The one real gap for the future is the complete absence of types at the API boundary, plus a couple of trivial hygiene nits.",
+  "apis": [
+    { "api": "page.shallow ($app/state)", "location": "app/src/routes/+page.svelte:11", "status": "current", "replacement": "none — added in SvelteKit 3 (sveltejs/kit PR #16449) as the successor to page-state via pushState/replaceState" },
+    { "api": "goto(url, { shallow, replace })", "location": "app/src/routes/+page.svelte:64", "status": "current", "replacement": "none — current option spelling; replaceState option and pushState/replaceState are the deprecated ones" },
+    { "api": "defineEnvVars (@sveltejs/kit/env)", "location": "app/src/env.js:1", "status": "current", "replacement": "none — current env-var mechanism; $env/* and $app/environment are deprecated as of SvelteKit 3" },
+    { "api": "$app/env/private", "location": "app/src/lib/server/api.js:2", "status": "current", "replacement": "none — succeeds the deprecated $env/dynamic-private" },
+    { "api": "error(status, message)", "location": "app/src/routes/pokemon/[name]/+page.server.js:15", "status": "current", "replacement": "none — error(status, {...}) object form is deprecated in SvelteKit 3" },
+    { "api": "sveltekit Vite plugin config (adapter)", "location": "app/vite.config.js:8", "status": "current", "replacement": "none — svelte.config.js is no longer supported in SvelteKit 3" },
+    { "api": "page ($app/state)", "location": "app/src/routes/+page.svelte:4", "status": "current", "replacement": "none — succeeds the deprecated $app/stores" },
+    { "api": "goto ($app/navigation)", "location": "app/src/routes/pokemon/[name]/+page.svelte:14", "status": "current", "replacement": "none" },
+    { "api": "onMount (svelte)", "location": "app/src/routes/pokemon/[name]/+page.svelte:6", "status": "current", "replacement": "none (an $effect would also work, but onMount remains idiomatic)" }
+  ],
+  "dependencies": [
+    { "name": "@sveltejs/kit", "verdict": "modern", "note": "3.1.1, the current stable major; required minimums for Svelte 5.57 / Vite 8 are satisfied" },
+    { "name": "svelte", "verdict": "modern", "note": "^5.57.3 meets SvelteKit 3's Svelte ≥5.57.1 requirement; full runes/snippets usage" },
+    { "name": "vite", "verdict": "modern", "note": "^8.3.5 — the Vite 8 line SvelteKit 3 mandates" },
+    { "name": "@sveltejs/vite-plugin-svelte", "verdict": "modern", "note": "^7.3.1 matches SvelteKit 3's required v7" },
+    { "name": "@sveltejs/adapter-node", "verdict": "modern", "note": "^6 — correct adapter for the spec's node-server deployment; zero runtime dependencies overall" }
+  ]
+}
+```

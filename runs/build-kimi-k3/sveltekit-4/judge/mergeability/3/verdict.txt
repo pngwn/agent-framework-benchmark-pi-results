@@ -1,0 +1,112 @@
+I've now read the full app and verified the current-framework claims. Key verifications: SvelteKit 3 removed `svelte.config.js` in favor of inline `sveltekit({ adapter })` options in `vite.config.js` (matches `app/vite.config.js`); `goto(..., { reset: false })` is the current replacement for `noScroll`/`keepFocus` (matches usage); `error(status, message)` is the current signature; `$app/state` is the current replacement for `$app/stores`. The code uses runes, snippets, `Self`-import recursion instead of `<svelte:self>`, `onclick`, `style:` custom props — all current Svelte 5 idioms.
+
+```json
+{
+  "dimension": "mergeability",
+  "criteria": {
+    "idiomatic": {
+      "score": 5,
+      "evidence": [
+        "app/vite.config.js:8 — SvelteKit 3 inline plugin config with adapter, exactly the current docs pattern (svelte.config.js is no longer supported in v3)",
+        "app/src/routes/+page.svelte:39,48,52 — goto with { reset: false }, the current SvelteKit 3 option replacing noScroll/keepFocus",
+        "app/src/routes/+error.svelte:2 — page from $app/state (current module, not deprecated $app/stores)",
+        "app/src/routes/pokemon/[name]/+page.server.js:8 — error(404, message) in a server load, current signature and routing primitive",
+        "app/src/lib/components/Section.svelte:4 — {@render children()} snippet pattern; keyed each blocks throughout (CardGrid.svelte:8)",
+        "app/src/lib/components/EvolutionNode.svelte:1 — self-import recursion instead of <svelte:self>, per current Svelte 5 guidance"
+      ],
+      "rationale": "Reads like the framework's own docs: URL-as-state filtering via server loads, runes everywhere, current module imports, and the new SvelteKit 3 config layout. Nothing fights the framework."
+    },
+    "correctness_risks": {
+      "score": 3,
+      "evidence": [
+        "app/src/routes/+page.svelte:35-42 — debounce timer is never cancelled on navigation/unmount; a pending timer can fire goto('/?q=…') after the user has navigated to another page, hijacking the route",
+        "app/src/routes/+page.svelte:36 — same root cause: typing then clicking Next page within the debounce window re-navigates to page 1, reverting the pagination click",
+        "app/src/lib/server/api.js:38-44 — module-level cache with no in-flight dedup: two concurrent requests for the same URL both miss and fetch (e.g. two page loads racing); also never invalidated, so a long-lived process serves stale data forever (spec allows this, but it's worth a TTL)",
+        "app/src/lib/server/data.js:33 — spriteFor fabricates /media/sprites/pokemon/<id>.png when the API explicitly returns null, producing a broken image instead of a placeholder",
+        "app/src/lib/server/api.js:24-31 — concurrency limiter overshoots by a small amount when waiters resolve via microtasks (advisory only, harmless)",
+        "app/src/routes/+page.server.js:47-49 — N+1 fan-out of 48 /pokemon fetches per page view and hundreds in speciesFromPokemonRefs callers; mitigated by cache + limiter but slow on first hit"
+      ],
+      "rationale": "No data-corruption or security bugs and 404/error paths are solid, but the uncancelled debounce timer is a real navigation race, and the cache layer has no dedup or invalidation."
+    },
+    "global_abstractions": {
+      "score": 4,
+      "evidence": [
+        "app/src/lib/server/data.js:51-56 — speciesFromPokemonRefs is reused by moves, abilities and types loads; earns its keep with a clear server boundary",
+        "app/src/lib/server/api.js:7 — apiBase exported so server data helpers never hardcode config; env read once at module scope",
+        "app/src/lib/server/api.js:16 — hidden module-level cache, but server-only, documented at file top (lines 1-6), and spec-sanctioned",
+        "app/src/lib/server/data.js:52 — augment callback receives the caller's array index, an implicit contract: abilities load (app/src/routes/abilities/[name]/+page.server.js:17-20) relies on refs being an unfiltered 1:1 map of entries",
+        "app/src/lib/utils.js — small, environment-agnostic, no server leakage; app.css centralizes shared card/pill/table styles"
+      ],
+      "rationale": "Abstractions are few, server code is cleanly quarantined under lib/server, and shared display logic is genuinely shared. The augment-by-index callback is the one spot with a leaky, brittle contract worth tightening."
+    },
+    "readability": {
+      "score": 5,
+      "evidence": [
+        "app/src/lib/server/api.js:1-6 — header comment explains caching policy and why",
+        "app/src/routes/+page.svelte:6-10 — comment explains the typed/data.q override dance (why, not what)",
+        "app/src/lib/components/MoveTable.svelte:35-37 — comment explains why sortOverride starts undefined",
+        "app/src/lib/utils.js:1-30 — JSDoc one-liners on every helper; naming (humanize, englishName, latestFlavor, dexNumber) is unambiguous and consistent across files",
+        "app/src/routes/types/[name]/+page.server.js:5-13 — RELATIONS table declaratively encodes the spec; loads are short and single-purpose"
+      ],
+      "rationale": "A new teammate can find any page's logic in minutes; comments explain intent, helpers are consistently named, and each file does one thing."
+    },
+    "review_cost": {
+      "score": 4,
+      "evidence": [
+        "app/src/routes/+page.svelte:35-42 — the one thing I'd ask changed before merge: cancel the debounce on unmount (e.g. $effect return cleanup or beforeNavigate) and re-check page state in the timer callback",
+        "app/src/lib/server/data.js:33 — small ask: return null and render a placeholder instead of fabricating a sprite URL",
+        "app/src/lib/server/api.js:38-44 — nice-to-have: cache in-flight promises, not just results",
+        "app/src/lib/components/MoveTable.svelte:70-77 — nit: body cells are hand-written while the header maps columns; slight duplication",
+        "app/src/routes/pokemon/[name]/+page.server.js:93-96 — dense one-line METHOD_ORDER comparator, would prefer a helper"
+      ],
+      "rationale": "Approve after one small round: the debounce cleanup fix is the only genuine bug; everything else is nits on an otherwise clean, idiomatic codebase."
+    }
+  },
+  "overall": 4,
+  "findings": [
+    {
+      "severity": "medium",
+      "location": "app/src/routes/+page.svelte:35",
+      "issue": "Debounce timer is never cleared, so a pending goto('/?q=…') can fire after the user navigates away from the home page (hijacking the route) or after clicking pagination (reverting page to 1).",
+      "suggestion": "Cancel the timer on unmount via $effect(() => () => clearTimeout(debounce)) or beforeNavigate, and no-op in the callback if the component is no longer current."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/lib/server/api.js:38",
+      "issue": "Cache stores only settled responses with no in-flight dedup or invalidation: concurrent duplicate fetches, and stale data forever in a long-lived process.",
+      "suggestion": "Cache the fetch Promise instead of the result (deduplicates concurrent callers) and consider a simple TTL, since the spec treats the API as live."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/lib/server/data.js:33",
+      "issue": "spriteFor constructs a sprite URL when the API explicitly returned null for front_default, yielding broken images.",
+      "suggestion": "Return null and have PokemonCard render a placeholder instead of guessing a URL the API said doesn't exist."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/lib/server/data.js:52",
+      "issue": "speciesFromPokemonRefs' augment callback receives the caller's array index; the abilities load silently depends on refs being an unfiltered 1:1 mapping of its entries.",
+      "suggestion": "Pass the original entry (not an index) to augment, or document the invariant at the API boundary."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/routes/+page.server.js:47",
+      "issue": "Home page load fans out to 48 per-pokemon requests per page view (first hit); type/ability/move pages fan out to hundreds via speciesFromPokemonRefs.",
+      "suggestion": "Acceptable given the concurrency limiter and cache, but consider batching or a longer-lived warm cache if cold-load latency matters."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/lib/components/MoveTable.svelte:70",
+      "issue": "Table body cells are hand-written while the header is driven by the columns array, so column definitions live in two places.",
+      "suggestion": "Render body cells from the same columns array (with a per-column renderer) to keep them in sync."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/routes/pokemon/[name]/+page.server.js:93",
+      "issue": "Method-ordering comparator is a dense one-liner mixing indexOf defaults and localeCompare.",
+      "suggestion": "Extract a small `methodRank(name)` helper for readability."
+    }
+  ],
+  "summary": "A small, well-organized SvelteKit 3 app that follows current framework guidance to the letter — inline vite-plugin config, $app/state, goto({reset:false}), runes and snippets — with clean server/client boundaries and genuinely earned abstractions. The only real defect is an uncancelled debounce timer that can fire a stale goto after navigation; the rest is nits around cache dedup and a fabricated sprite fallback. I'd merge after one quick round addressing the timer race."
+}
+```

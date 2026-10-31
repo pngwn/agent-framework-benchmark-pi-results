@@ -1,0 +1,168 @@
+## Test-quality review: `app/` (Pokédex, SvelteKit)
+
+**The agent wrote no tests at all.** There are no `*.test.*`/`*.spec.*` files under `app/`, no test runner or `test` script in `app/package.json:6-10`, and no test-related devDependencies — only the framework toolchain. Every line of logic — 4 `load()` functions, a hand-rolled fetch semaphore with an in-memory cache, pure text/number helpers, and a dense client-side sort comparator — is guarded solely by the harness's acceptance suite, which the app doesn't own and won't be the guard once someone refactors the data layer.
+
+The riskiest unguarded spots I found while reading:
+
+- **URL-state parsing** (`app/src/routes/+page.server.js:12,44-45`): `page` clamping via `Math.max/Math.min`, non-numeric `page`, invalid `type`/`generation` params (silently → zero results), and param-default omission. No test would catch a clamping or NaN regression.
+- **Client-side table sorting** (`app/src/lib/components/MoveTable.svelte:56-84`): the "missing values sort last in both directions" null-handling, number-vs-string compare, the three-term tiebreak, and `aria-sort` bookkeeping are exactly the kind of comparator code that breaks in refactor, and it's the only place the spec's default ordering is enforced.
+- **`speciesFromPokemonRefs` + augment coupling** (`app/src/lib/server/data.js:42-61` with `app/src/routes/abilities/[name]/+page.server.js:15-18`): the augment callback receives a ref index and the abilities route re-indexes into a *different* array (`entries`), relying on positional alignment. Any future filtering/reordering of the refs array silently mislabels which Pokémon have the hidden ability. This is the single most refactor-fragile seam in the app, and nothing pins it.
+- **API client** (`app/src/lib/server/api.js:14-29`): a hand-rolled concurrency limiter (`inflight`/`waiters`) and an unbounded never-invalidating cache — deadlock or a fetch-storm would only show under load, and no test exercises it.
+- **Learn-method ordering comparator** (`app/src/routes/pokemon/[name]/+page.server.js:115-118`): sentinel-based `indexOf` logic for the fixed-then-alphabetical method order.
+- **Search debounce/`typed`-override interaction** (`app/src/routes/+page.svelte:9-38`): the `typed ?? data.q` dance with `afterNavigate` reset and the pending 250 ms timer is race-prone and untested.
+- **Hard-wired data dependencies** (`app/src/lib/server/data.js:1`, `api.js:6,24`): `api()` binds `process.env` and global `fetch` at module level, so the data layer can't be unit-tested without module mocking — the structural reason no tests exist. The pure helpers in `app/src/lib/utils.js` were trivially testable and weren't tested either.
+- **Non-404 API failures**: only 404 is handled (`api.js:41-42`); what a 500/timeout from the API renders is untested and likely the raw `+error.svelte` page.
+
+Worth noting: the code is reasonably well factored (pure helpers, thin routes), so a small unit suite for `utils.js`, the two comparators, and `speciesFromPokemonRefs` (with an injected fetch) would be cheap and high-value. Its absence is the miss here.
+
+```json
+{
+  "dimension": "tests",
+  "criteria": {
+    "coverage_of_risk": {
+      "score": 1,
+      "evidence": [
+        "app/package.json:6-10 — no test script; no vitest/playwright/jest anywhere in devDependencies",
+        "app/src/lib/server/api.js:14-29 — hand-rolled concurrency limiter (inflight/waiters) and in-memory cache: zero tests",
+        "app/src/lib/components/MoveTable.svelte:56-84 — null-last sorting, tiebreak chain, aria-sort logic: the riskiest comparator in the app, untested",
+        "app/src/lib/server/data.js:42-61 — species mapping, alternate-form filtering (>=10000), dedup, augment seam: untested",
+        "app/src/routes/+page.server.js:12,44-45 — URL page clamping and filter params: untested"
+      ],
+      "rationale": "No tests exist, so the riskiest logic — sorting comparators, URL state, ref-to-species mapping, the fetch semaphore — has zero coverage; scoring on what would be caught, which is nothing."
+    },
+    "behaviour_not_implementation": {
+      "score": 1,
+      "evidence": [
+        "app/src — no *.test.* or *.spec.* files; grep for test/assert/expect across app/src returns nothing"
+      ],
+      "rationale": "No tests at all, so the criterion bottoms out at 1 by definition."
+    },
+    "regression_power": {
+      "score": 1,
+      "evidence": [
+        "app/src/lib/server/api.js:24 — global fetch with module-level cache: any data-layer refactor breaks silently",
+        "app/src/lib/server/data.js:61 — augment?.(ref, index, entry) positional coupling with app/src/routes/abilities/[name]/+page.server.js:18 (entries[index].is_hidden): refactor-safe only by luck",
+        "app/src/routes/pokemon/[name]/+page.server.js:76-82 — learn-row dedup key (method|move|level): unguarded"
+      ],
+      "rationale": "Breaking any behaviour — sort order, hidden-ability flags, pagination clamping — would pass CI because there is no CI inside app/; the acceptance suite is external and won't be run by the owning team after refactor."
+    },
+    "signal_to_noise": {
+      "score": 3,
+      "evidence": [
+        "app/package.json:11-16 — devDependencies contain only the build toolchain; no test infra to evaluate"
+      ],
+      "rationale": "No tests means no noise, per the rubric's anchor for the no-tests case."
+    }
+  },
+  "overall": 1,
+  "findings": [
+    {
+      "severity": "high",
+      "location": "app/package.json:6-10",
+      "issue": "Zero tests of any kind: no test script, no runner dependency, no test files in 22 source files.",
+      "suggestion": "Add vitest + @testing-library/svelte or Playwright component tests; at minimum unit-test lib/utils.js and the two comparators, which are pure and trivially testable."
+    },
+    {
+      "severity": "high",
+      "location": "app/src/lib/server/data.js:61",
+      "issue": "augment(ref, index, entry) passes the ref's index, and the abilities route (app/src/routes/abilities/[name]/+page.server.js:15-18) re-indexes into a different array (entries) assuming positional alignment; any filtering/reordering in speciesFromPokemonRefs silently attaches hidden-ability flags to the wrong Pokémon.",
+      "suggestion": "Pass the raw entry through to augment instead of an index, and pin the behaviour with a test using a Pokémon that has both a normal and a hidden entry."
+    },
+    {
+      "severity": "high",
+      "location": "app/src/lib/components/MoveTable.svelte:56-84",
+      "issue": "The sort comparator encodes three spec rules at once (missing-values-last in both directions, number vs string compare, tiebreak order) and is the only place the default Level-Up-by-level ordering is enforced; no test can fail if any of it breaks.",
+      "suggestion": "Extract the comparator to a pure module and unit-test: null handling in both directions, stable tiebreak, aria-sort state transitions."
+    },
+    {
+      "severity": "high",
+      "location": "app/src/routes/+page.server.js:12",
+      "issue": "URL state parsing (page clamping, NaN/garbage page, invalid type/generation values falling through to zero results) is untested; these are precisely the inputs users and crawlers will send.",
+      "suggestion": "Unit-test load() with a stubbed fetch for page=abc, page=99999, ?type=notatype, and filter-reset-to-page-1 transitions."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/lib/server/api.js:14-29",
+      "issue": "Hand-rolled semaphore (inflight/waiters with shift) plus a never-invalidating module-level Map cache; a deadlock or over-fetch regression only manifests under real concurrency, and no test exercises either.",
+      "suggestion": "Test with >MAX_CONCURRENT parallel fetches asserting all resolve, and make the cache injectable/inspectable so tests can assert hits vs misses."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/routes/pokemon/[name]/+page.server.js:115-118",
+      "issue": "The method-order comparator uses sentinel indexOf arithmetic for 'Level Up, Machine, Egg, Tutor, then others alphabetically' — dense logic, easy to break for unknown methods, completely unguarded.",
+      "suggestion": "Unit-test with a fixture containing level-up, tutor and a hypothetical 'other' method, asserting exact table order."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/routes/+page.svelte:9-38",
+      "issue": "Search UX correctness (typed override, 250 ms debounce, afterNavigate reset, race between a pending debounce and a select change) has no test; 'updates as the user types' is spec-required behaviour that a refactor of this component could silently break.",
+      "suggestion": "Add a Playwright test typing a query and asserting both the rendered results and the URL parameter, including typing then immediately changing a filter."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/lib/server/data.js:1",
+      "issue": "The data layer hard-wires api() (which reads process.env and global fetch at import time, api.js:6,24), so load functions and data.js cannot be unit-tested without module mocking — the structural reason no tests exist.",
+      "suggestion": "Inject the client (pass api as a parameter or use SvelteKit's fetch in load) so tests can stub responses without magic."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/lib/server/api.js:41-42",
+      "issue": "Only 404 is treated as a known outcome; API 500s/timeouts propagate as opaque errors with no test of what the user sees, and error() calls in +page.server.js:44 fire whole-list 500s on a single missing record.",
+      "suggestion": "Add a test that a single unavailable Pokémon record doesn't take down the whole home page."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/routes/pokemon/[name]/+page.server.js:27-29",
+      "issue": "Type labels use humanize(type.name) while the home page resolves English names from /type (+page.server.js:52) — an untested assumption that the two always coincide; a data change would produce wrong labels unnoticed.",
+      "suggestion": "Route all type labels through one English-name resolver and test it."
+    }
+  ],
+  "summary": "The app ships with no tests of its own — no runner, no script, no test files — leaving 648 LOC of data transformation, URL-state parsing, ref-to-species mapping and a dense client-side sort comparator entirely unguarded once the external acceptance suite stops being the safety net. The most refactor-fragile seam is the index-based augment coupling between speciesFromPokemonRefs and the abilities route, which would silently mislabel hidden abilities. The pure helpers in utils.js and both comparators would have been cheap, high-value unit tests; the fact that data.js can't be tested without mocking is the structural root cause and worth fixing.",
+  "wroteTests": false,
+  "testCount": 0,
+  "valuableTests": [],
+  "lowValueTests": [],
+  "untested": [
+    {
+      "area": "URL query parsing and pagination clamping on / (page=garbage/overflow, invalid type/generation, param-default omission)",
+      "risk": "high",
+      "likelyBug": "NaN page crashing slice(), out-of-range page rendering an empty list, or default params leaking into the URL"
+    },
+    {
+      "area": "MoveTable sort comparator (missing-values-last both directions, tiebreak chain, aria-sort state)",
+      "risk": "high",
+      "likelyBug": "Nulls sorted first on descending, or tiebreak order flipping to make default Level-Up ordering wrong"
+    },
+    {
+      "area": "speciesFromPokemonRefs: alternate-form filtering, dedup, and hidden-ability augment coupling",
+      "risk": "high",
+      "likelyBug": "Hidden-ability flag attached to the wrong Pokémon after any reordering/filtering refactor; alternate forms leaking into lists"
+    },
+    {
+      "area": "API client: concurrency limiter and in-memory cache",
+      "risk": "medium",
+      "likelyBug": "Deadlock when a waiter resolves but its fetch throws, or a cache-key collision after toUrl changes"
+    },
+    {
+      "area": "Learn-method table grouping/ordering and learn-row dedup (pokemon page)",
+      "risk": "medium",
+      "likelyBug": "Unknown methods sorted before the four canonical ones, or duplicate rows appearing after a dedup-key change"
+    },
+    {
+      "area": "Search debounce / typed-override interaction on the home page",
+      "risk": "medium",
+      "likelyBug": "Results stop updating as the user types after an afterNavigate refactor, or a pending debounce fires with stale filters"
+    },
+    {
+      "area": "Non-404 API failures (500/timeout) and per-card error() on the home page",
+      "risk": "medium",
+      "likelyBug": "One unavailable record renders the whole list as a 500 error page instead of degrading"
+    },
+    {
+      "area": "Evolution chain recursion (branching chains beyond Eevee) and version-group selection fallback for an unknown ?game=",
+      "risk": "low",
+      "likelyBug": "Deep/branching chains dropped or infinite loops on malformed data; invalid game param falling back to the first rather than latest game"
+    }
+  ]
+}
+```

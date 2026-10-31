@@ -1,0 +1,85 @@
+I've reviewed the app thoroughly against the spec, the current Vite 8 docs (Vite 8.3.5 is the current stable, and the app uses it correctly — `build.manifest` + reading `dist/.vite/manifest.json` is the documented backend-integration pattern), and the code itself. This is a well-structured vanilla-JS SSR app: `src/server/` (data + pages + layout), `src/shared/` (pure helpers reused by browser bundle), `src/client/` (progressive enhancement only), served by a small Node HTTP server that reads the Vite manifest for hashed assets.
+
+Notable issues found while reading:
+
+- **Dev mode is broken**: `app/src/client/main.js:2` does `import './styles.css'`, which only works after Vite transforms it — but `npm run dev` (`app/server/server.mjs`) serves raw source files directly instead of running Vite's dev server. The CSS import fails as a JS module, killing the whole module graph, so search, selects and sortable tables are dead in dev. The Vite docs' recommended pattern for this architecture is to mount Vite's dev server middleware in dev.
+- **Production leaks server source**: `app/server/server.mjs:46` serves any path under `/src/` unconditionally (not just in the dev fallback), so `GET /src/server/api.js` returns server-side source in production.
+- **`decodeURIComponent` in `app/src/shared/router.js:8` can throw `URIError`** on `/pokemon/%`, which the server turns into a 500 instead of a 404.
+- Smaller things: the full species dataset is embedded as JSON in every home-page response (`app/src/server/pages.js:66`); `speciesCardsForPokemonRefs` awaits serially in a loop (`app/src/server/api.js:138`); the search debounce timer isn't cleared on `popstate` (`app/src/client/main.js:40`); HEAD requests get the full body computed and written (`app/server/server.mjs:88`).
+
+On the plus side: consistent `escapeHtml`/`escapeJsonForHtml` usage everywhere data touches templates, bounded concurrency via `mapLimit`, failed cache entries evicted so retries work (`app/src/server/api.js:31`), path-traversal-safe static serving, real 404 statuses, and a genuinely good abstraction in `src/shared/home-view.js` that guarantees server and client render identical markup for the home page.
+
+```json
+{
+  "dimension": "mergeability",
+  "criteria": {
+    "idiomatic": {
+      "score": 4,
+      "evidence": [
+        "app/server/server.mjs:22-32 — reads dist/.vite/manifest.json for hashed asset URLs, the documented Vite backend-integration pattern",
+        "app/src/client/main.js:1-5 — client script is pure progressive enhancement over SSR pages, importing only the shared filter helpers",
+        "app/src/shared/home-view.js:1-3 — one module shared by SSR and client so both produce identical markup",
+        "app/src/client/main.js:2 — `import './styles.css'` is the Vite way in the browser bundle, but the app bypasses Vite's dev server (app/server/server.mjs:31 fallback) so this pattern breaks in dev",
+        "app/package.json:7-9 — dev script is a hand-rolled server instead of Vite dev server middleware, the one home-grown workaround"
+      ],
+      "rationale": "Uses Vite 8 exactly as its docs describe for a no-framework SSR app (manifest-driven assets, vanilla ES modules, CSS imported into the entry), except the dev script reimplements serving without Vite, which breaks the CSS-in-JS import and skips HMR."
+    },
+    "correctness_risks": {
+      "score": 3,
+      "evidence": [
+        "app/src/client/main.js:2 — with `npm run dev` (raw source served, app/server/server.mjs:57) the CSS import fails as a JS module, so search/select/sort are all dead in dev",
+        "app/server/server.mjs:46 — `/src/` paths are served in production too, exposing server-side source files",
+        "app/src/shared/router.js:8 — decodeURIComponent('%') throws URIError, surfaced as a 500 in app/server/server.mjs:82 instead of a 404",
+        "app/src/client/main.js:40-48 — the pending debounce timer is not cleared on popstate, so a keystroke followed quickly by Back re-renders/replaceStates after the popstate",
+        "app/src/server/api.js:138-143 — serial await in the refs loop; a non-cached fallback species fetch blocks all subsequent iterations",
+        "app/server/server.mjs:88 — HEAD requests get the full SSR body computed and written",
+        "app/src/server/api.js:28-32 — failed fetches are evicted from the cache so retries work; unbounded maps are bounded in practice by the fixed dataset"
+      ],
+      "rationale": "No production-breaking bug found — escaping, 404 handling, bounded fetch fan-out and cache-eviction-on-error are all handled — but broken dev interactivity, source exposure in prod and a 500-instead-of-404 path are more than nitpicks."
+    },
+    "global_abstractions": {
+      "score": 4,
+      "evidence": [
+        "app/src/server/api.js — all HTTP access, caching and species mapping live in one module with a clear contract; nothing else fetches",
+        "app/src/shared/format.js — small pure helpers, no hidden state",
+        "app/src/shared/home-view.js — the shared client/server render logic earns its keep by preventing markup drift",
+        "app/src/server/api.js:13 — API base from env, not buried",
+        "app/src/server/api.js:86-92 — module-level summariesPromise is single-purpose memoization, reset on failure"
+      ],
+      "rationale": "The shared/ layer is the right cut: pure functions with zero global state, reused by server and browser. api.js carries cache, summaries and species mapping together, which is the only spot that will need splitting if it grows."
+    },
+    "readability": {
+      "score": 5,
+      "evidence": [
+        "app/src/server/pages.js — one small function per page, identical internal shape, router at the bottom",
+        "app/src/server/api.js:59-66 — comment explains why the generation fallback exists",
+        "app/src/client/main.js:1-2 — file opens with a comment stating exactly what the script does and doesn't do",
+        "app/src/shared/format.js — every helper is ≤6 lines and named for what it returns",
+        "app/src/server/layout.js — single obvious template for the document shell"
+      ],
+      "rationale": "A new teammate can navigate this in minutes: the directory layout states the architecture, names match the spec's vocabulary, and comments explain intent rather than mechanics."
+    },
+    "review_cost": {
+      "score": 4,
+      "evidence": [
+        "app/server/server.mjs:46 — one-line fix: gate the /src/ branch on dev mode",
+        "app/package.json:7 — replace the hand-rolled dev server with Vite dev middleware (or drop the raw-source fallback)",
+        "app/src/shared/router.js:8 — wrap decodeURIComponent in try/catch to fall through to not-found"
+      ],
+      "rationale": "I'd ask for three small changes before approving — dev-mode serving, source exposure, and the 500-vs-404 edge — but the rest is approve-as-is quality."
+    }
+  },
+  "overall": 4,
+  "findings": [
+    { "severity": "medium", "location": "app/src/client/main.js:2", "issue": "Dev mode is broken: main.js imports './styles.css', but `npm run dev` (app/server/server.mjs dev fallback) serves raw untransformed source, so the CSS import fails as a JS module and all client interactivity (search, type/generation selects, sortable tables) is dead in development.", "suggestion": "Run Vite's dev server (createServer().middlewares mounted in server.mjs) for the dev script, as Vite's SSR/backend-integration docs recommend, or drop the raw-source dev fallback and use `vite dev` directly." },
+    { "severity": "medium", "location": "app/server/server.mjs:46", "issue": "The `/src/` static branch runs unconditionally, so in production the app serves its server-side source files (e.g. GET /src/server/api.js) to any client.", "suggestion": "Only enable the `/src/` branch when the Vite manifest is absent (dev mode); otherwise return 404." },
+    { "severity": "low", "location": "app/src/shared/router.js:8", "issue": "decodeURIComponent on a malformed path like /pokemon/% throws URIError, which the server's catch turns into a 500 instead of the spec's Not-found page.", "suggestion": "Wrap in try/catch and fall through to the not-found route." },
+    { "severity": "low", "location": "app/src/server/pages.js:66", "issue": "The full 1025-entry species dataset is embedded as JSON in every home-page response (~130KB+), including filtered/paginated views.", "suggestion": "Consider a lazily fetched /api/summaries endpoint the client requests once, or only embedding on unfiltered first loads." },
+    { "severity": "low", "location": "app/src/server/api.js:138", "issue": "speciesCardsForPokemonRefs awaits each ref serially in a for-loop, so a cache-miss fallback record('pokemon', id) blocks all later iterations.", "suggestion": "Collect species results first (mapLimit over refs), then dedupe/sort, so fallback fetches run in parallel." },
+    { "severity": "low", "location": "app/src/client/main.js:40", "issue": "The search debounce timer is not cleared on popstate, so a pending timer can fire right after a back navigation and re-render/replaceState with stale intent.", "suggestion": "clearTimeout(debounce) inside the popstate handler." },
+    { "severity": "low", "location": "app/server/server.mjs:88", "issue": "HEAD requests go through full SSR and get a body written, which the HTTP spec discourages and wastes work.", "suggestion": "Early-return after writeHead for HEAD, or only send headers." },
+    { "severity": "low", "location": "app/src/client/main.js:78-80", "issue": "Changing the Game select does a full location.assign reload, inconsistent with the instant client-side filtering everywhere else (works, but jarring UX).", "suggestion": "Fetch and re-render the moves section in place, or at least keep the full navigation deliberate and documented." }
+  ],
+  "summary": "A clean, idiomatic vanilla-JS + Vite 8 SSR app with genuinely good structure: pure shared modules, consistent HTML escaping, bounded fetch concurrency and real 404 semantics. The merge blockers are small and mechanical: dev mode is broken by bypassing Vite's dev server, the production server leaks /src/ files, and a malformed URL yields 500 instead of 404. Fix those three and this ships."
+}
+```

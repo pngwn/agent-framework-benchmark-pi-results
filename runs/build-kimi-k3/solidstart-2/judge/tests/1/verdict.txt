@@ -1,0 +1,127 @@
+I've read the spec, all of `app/src` (data layer, utils, routes, components) and confirmed the measured facts. Findings below.
+
+**Test reality check:** `app/` contains zero test files — no runner in devDependencies, no test script in `app/package.json:6-11`, no spec/test files anywhere under `app/src` (grep for `describe(`/`it(`/`test(` returns nothing). The app is pure production code whose only safety net is the acceptance suite in `tests/`, which the agent didn't write and won't guard future refactors.
+
+**Where the risk actually lives** (and is untested):
+
+- **Data layer `app/src/lib/data.js`** — ~340 lines of server queries doing all the spec's hard logic: combined filtering (`data.js:150-157`), 48-per-page pagination and page clamping (`data.js:146-148`), alternate-form exclusion and species collapsing (`data.js:106-127`), move-method ordering with the custom `METHOD_ORDER` comparator (`data.js:306-315`), default level-then-name sort (`data.js:327-331`), version-group default selection (`data.js:261`). A refactor here (say, swapping the fetch layer or touching the sort comparator) has nothing to catch a regression.
+- **Client sorting `app/src/components/MoveTables.jsx:15-49`** — `compareValues` implements the tricky "missing values sort last in both directions" rule plus the ascending/descending toggle and `aria-sort` state. This is exactly the kind of code that silently breaks.
+- **URL state `app/src/routes/index.jsx:21-43`** — `updateParams` (omit-empty/default, reset `page` on filter change, replace-vs-push on debounce) and `pageHref`. Easy to break the "omit parameters that are empty or at default" invariant.
+- **Error/not-found paths** — `apiFetch` caches a failed/`null` promise for the process lifetime (`data.js:22-31`), so a transient API hiccup permanently poisons a resource; and `getPokemonPage` returns `evolution: null` when the chain fetch fails (`data.js:203-216`), which `EvoNode` dereferences unconditionally (`app/src/routes/pokemon/[name].jsx:17-25`) — a plausible server-500 crash with no test to surface it.
+- **Pure helpers `app/src/lib/util.js`** — `humanize`, `dexNumber`, `latestEnglishFlavor`, `idFromUrl` (whose regex `util.js:33` requires a trailing slash — brittle against a URL shape change). These are one-line unit tests the agent could have written for free.
+
+The acceptance specs cover the happy paths (home filters, pagination, pokemon/move/ability/type details, layout), but the subtle behaviors above — tie-breaking, caching semantics, failure modes — are the gaps that will let bugs through once the harness's suite is not the only guard.
+
+```json
+{
+  "dimension": "tests",
+  "criteria": {
+    "coverage_of_risk": {
+      "score": 1,
+      "evidence": [
+        "app/package.json:6-19 — no test script, no test runner, empty devDependencies",
+        "app/src/lib/data.js:146-160 — pagination math and combined filter logic, zero tests",
+        "app/src/components/MoveTables.jsx:15-49 — missing-values-last sort comparator and aria-sort toggle, untested",
+        "app/src/lib/util.js:33-38 — idFromUrl trailing-slash regex and alternate-form cutoff, untested"
+      ],
+      "rationale": "No tests exist at all, and the app's riskiest logic (filtering, pagination, sorting, URL state, error paths) is entirely uncovered."
+    },
+    "behaviour_not_implementation": {
+      "score": 1,
+      "evidence": [
+        "app/src/lib/data.js:1-339 — no test files anywhere under app/src (grep for describe/it/test matches nothing)"
+      ],
+      "rationale": "No tests to evaluate; the criterion's floor of 1 applies."
+    },
+    "regression_power": {
+      "score": 1,
+      "evidence": [
+        "app/src/lib/data.js:306-315 — METHOD_ORDER comparator would survive a bad refactor unnoticed",
+        "app/src/lib/data.js:22-31 — null/promise caching semantics would break silently",
+        "app/src/routes/index.jsx:21-43 — omit-default URL param invariant unguarded"
+      ],
+      "rationale": "Nothing in app/ would fail if any behaviour broke; the only guard is the external acceptance suite."
+    },
+    "signal_to_noise": {
+      "score": 3,
+      "evidence": [
+        "app/src — zero test files, so no noise either"
+      ],
+      "rationale": "Per the rubric, no tests scores 3: no padding, but no signal."
+    }
+  },
+  "overall": 1,
+  "findings": [
+    {
+      "severity": "high",
+      "location": "app/package.json:6-19",
+      "issue": "The app ships no tests and no test infrastructure (no runner, no test script, empty devDependencies); every behaviour is guarded only by the external acceptance suite.",
+      "suggestion": "Add vitest (or @solidjs/testing-library) with a `npm test` script, and start with unit tests for lib/util.js and lib/data.js query bodies (they are plain async functions over fetch)."
+    },
+    {
+      "severity": "high",
+      "location": "app/src/lib/data.js:146-160",
+      "issue": "Pagination and the three-way filter combination (search + type + generation) are untested; an off-by-one in PAGE_SIZE slicing or the page>totalPages clamp would slip through.",
+      "suggestion": "Extract the filter/slice logic into a pure function and unit-test boundary cases: page 1, last page, page beyond range, empty q, combined type+generation with zero matches."
+    },
+    {
+      "severity": "high",
+      "location": "app/src/lib/data.js:306-331",
+      "issue": "Move-table assembly is untested: method ordering (METHOD_ORDER then alphabetical), level-up default sort with name tie-break, and duplicate rows for multi-level moves are all regression-prone.",
+      "suggestion": "Unit-test the methodEntries sorting with a fixture covering level-up/machine/egg/tutor plus an 'other' method, and a level-up move learned at two levels."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/components/MoveTables.jsx:15-49",
+      "issue": "compareValues implements 'missing sorts last in both directions' plus the asc/desc toggle and aria-sort state — the trickiest client logic in the app, untested.",
+      "suggestion": "Extract compareValues into a testable module and unit-test missing-vs-present in both directions and numeric vs string comparison."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/lib/data.js:22-31",
+      "issue": "apiFetch caches the promise (including rejected/null results) for the process lifetime, so a transient API failure or 500 permanently serves null for that resource; no test exercises failure semantics.",
+      "suggestion": "Cache only successful responses (or evict failures), and add a test with a mocked fetch that fails once then succeeds."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/routes/pokemon/[name].jsx:17-25",
+      "issue": "If the evolution-chain fetch fails, getPokemonPage returns evolution:null and EvoNode dereferences props.node.name, throwing a server error; the not-found/error path is untested.",
+      "suggestion": "Guard <EvoNode node={d().evolution}/> with a Show/ternary and add a test for the degraded data path."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/routes/index.jsx:21-43",
+      "issue": "URL-state helpers (updateParams omitting empty/default params, resetting page on filter change, pageHref) are untested; a refactor could break the 'omit parameters that are empty or at their default' invariant.",
+      "suggestion": "Extract URL param building into a pure helper and unit-test it against the spec's URL examples (?type=fire&generation=generation-i)."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/lib/util.js:33-38",
+      "issue": "idFromUrl's regex requires a trailing slash and isAlternateForm's 10000 cutoff are load-bearing everywhere (card collapsing, type filter) and untested.",
+      "suggestion": "One-line unit tests per helper, including a URL without a trailing slash and ID 10001."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/lib/data.js:106-127",
+      "issue": "cardsFromPokemonRefs' alternate-form exclusion and multi-form-to-one-species collapsing (deoxys-normal → deoxys) is subtle and untested.",
+      "suggestion": "Unit-test with refs containing IDs 386 and 10001 mixed, asserting one card for the species and none for the form."
+    }
+  ],
+  "summary": "The app contains zero tests of its own — no runner, no test script, no spec files — so the score is the floor on coverage and regression power. All of the app's genuinely risky logic (filtering, pagination, move-table ordering, client-side sorting, URL state, cache failure semantics) sits unguarded in lib/data.js, MoveTables.jsx and routes/index.jsx. The pure helpers in lib/util.js are one-line unit tests the agent left on the table, and a real latent crash (null evolution chain) exists in a path nothing exercises.",
+  "wroteTests": false,
+  "testCount": 0,
+  "valuableTests": [],
+  "lowValueTests": [],
+  "untested": [
+    { "area": "Home filtering + 48/page pagination (getHomeData, app/src/lib/data.js:95-161)", "risk": "high", "likelyBug": "Off-by-one in slicing, page-clamp regression, or a broken filter combination (e.g. type+generation+q) would ship unnoticed in a refactor" },
+    { "area": "Move-table assembly: method order, default sort, duplicate level rows (app/src/lib/data.js:251-337)", "risk": "high", "likelyBug": "Reordering METHOD_ORDER vs alphabetical others, or losing the level-then-name tie-break, silently mis-orders every Pokémon moves table" },
+    { "area": "Client column sorting and aria-sort toggle (app/src/components/MoveTables.jsx:15-49)", "risk": "medium", "likelyBug": "Missing values no longer sort last in descending, or toggle flips to no-sort instead of descending" },
+    { "area": "URL query state on home page (app/src/routes/index.jsx:21-43)", "risk": "medium", "likelyBug": "Default/empty params no longer omitted, or changing a filter keeps the old page number past the last page" },
+    { "area": "In-memory cache failure semantics (app/src/lib/data.js:22-31)", "risk": "medium", "likelyBug": "A transient API 500 caches null forever, blanking a page for the process lifetime; nothing distinguishes 404 from transient failure" },
+    { "area": "Error and degraded-data paths (app/src/routes/pokemon/[name].jsx:17-25, data.js:203-216)", "risk": "medium", "likelyBug": "A failed evolution-chain fetch renders evolution:null and throws in EvoNode, turning a degraded response into a 500" },
+    { "area": "Alternate-form exclusion and species collapsing (app/src/lib/data.js:106-127)", "risk": "medium", "likelyBug": "Mega forms leak into 'Learned by' lists, or two cards appear for one species after a refactor of the seen map" },
+    { "area": "Pure helpers: humanize, dexNumber, latestEnglishFlavor, idFromUrl (app/src/lib/util.js)", "risk": "low", "likelyBug": "idFromUrl breaks on URLs without trailing slash; whitespace-collapse or zero-pad edge cases regress" },
+    { "area": "Type damage-relations mapping and 'None' fallback (app/src/lib/data.js:359-377, types/[name].jsx:19-33)", "risk": "low", "likelyBug": "A key typo in DAMAGE_RELATIONS silently renders 'None' for a relation category" }
+  ]
+}
+```

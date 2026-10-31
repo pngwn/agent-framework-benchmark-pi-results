@@ -1,0 +1,128 @@
+## Review: Pokédex app (`app/`)
+
+**Architecture.** Server-rendered vanilla JS: a small Node `http` server (`app/server/server.mjs`) renders every page from live API data, and Vite 8 (verified current stable, 8.3.5) is used only to bundle the client behavior + CSS, wired in via Vite's build manifest. Logic is split `src/shared` (router, format, components, home view — used by both sides), `src/server` (api, pages, layout), `src/client` (interactivity, styles). The shared/client/server boundary is explicit and clean, which is the strongest thing about this codebase.
+
+**Idiom.** This is a sensible, framework-appropriate use of Vite for a no-framework app: manifest-based asset injection (`app/vite.config.js:4`, `app/server/server.mjs:16-27`) matches the docs' SSR pattern; routing/data-loading by hand is expected in vanilla. The one non-idiomatic corner is `npm run dev` (`app/package.json:6`) — it bypasses Vite entirely and serves raw ESM, which can't load `import './styles.css'` (`app/src/client/main.js:4`), so the client bundle is dead in dev mode.
+
+**Correctness.** Careful work overall: consistent `escapeHtml` on all interpolated API values (`app/src/shared/format.js:28`, used throughout `pages.js`), promise-caching that dedupes concurrent requests and evicts on failure (`app/src/server/api.js:21-27`), 404s mapped to a proper not-found page and status (`app/src/server/pages.js:455`, `server.mjs` writes `page.status`). But I found several minor risks: the `/src/` static branch's containment guard only checks ROOT, so `/src/../server/server.mjs` is served (guard at `server.mjs:45`, dispatch at `:68`); no fetch timeout in `getJson` (`api.js:21`); `variety.pokemon.url` throws (→500) if a species has no varieties (`pages.js:225`); `loadAssets` silently degrades production to broken dev mode when the manifest is missing (`server.mjs:24-27`); a mid-stream read error after a 200 leaves the response hanging (`server.mjs:59`). None of these hit the tested flow, so 3 rather than lower.
+
+**Abstractions.** `format.js`/`components.js`/`home-view.js` are small, pure, and earn their sharing between SSR and client (identical markup on both sides — good design). `api.js` is the one god-ish data module (cache + summaries + species mapping + `mapLimit`), but it's cohesive and the only place that talks to the API. `pages.js` at ~460 lines is the file that will need splitting first.
+
+```json
+{
+  "dimension": "mergeability",
+  "criteria": {
+    "idiomatic": {
+      "score": 4,
+      "evidence": [
+        "app/package.json:12 — vite ^8.3.5, the current stable release (verified against vite.dev/releases)",
+        "app/vite.config.js:4 — build.manifest enabled, consumed at app/server/server.mjs:19-22, matching Vite's documented SSR asset-injection pattern",
+        "app/src/shared/router.js:2 — hand-rolled path routing; no framework router exists to use in vanilla JS",
+        "app/src/client/main.js:4 — import './styles.css' is idiomatic Vite for the build, but dev mode (app/package.json:6, app/server/server.mjs:27) serves it as raw ESM the browser cannot execute",
+        "app/src/shared/home-view.js:1-4 — pure view logic shared between SSR and client so both emit identical markup"
+      ],
+      "rationale": "Uses Vite the way its docs describe (build + manifest for a custom server) and leans on native platform primitives in vanilla JS; only the dev-mode path, which skips Vite's dev server entirely, is unidiomatic and broken."
+    },
+    "correctness_risks": {
+      "score": 3,
+      "evidence": [
+        "app/src/client/main.js:4 + app/server/server.mjs:27 — dev-mode client bundle fails to load: browsers reject a text/css module import, killing all client interactivity when dist/ is absent",
+        "app/server/server.mjs:45,68 — the containment guard only checks ROOT, so /src/../server/server.mjs escapes the /src subtree and is served",
+        "app/src/server/api.js:21 — fetch has no timeout/AbortSignal; a hung upstream request stalls the SSR response indefinitely",
+        "app/src/server/pages.js:225 — no guard on species.varieties being empty; variety.pokemon.url throws and yields a 500 instead of the not-found page",
+        "app/server/server.mjs:59 — fs.createReadStream error after the 200 header is unhandled, leaving the response hanging",
+        "app/src/server/api.js:21-27 — promise cache dedupes concurrent requests and evicts failed entries (good), and app/src/shared/format.js:28 escapeHtml is applied to every interpolated API value (no unescaped HTML found)"
+      ],
+      "rationale": "The tested request paths look solid (escaping, caching, 404 handling, back/forward state), but there are several minor fragilities: a broken dev mode, an ineffective traversal guard, no fetch timeout, and two unhandled-error paths in the server."
+    },
+    "global_abstractions": {
+      "score": 4,
+      "evidence": [
+        "app/src/shared/ — router.js, format.js, components.js, home-view.js: small pure modules genuinely shared by server and client, not a junk-drawer utils file",
+        "app/src/server/api.js:15-27 — single data module with module-level promise caches; the only place that talks to the API, with the server/client boundary made explicit by the directory layout",
+        "app/src/server/pages.js:30-456 — one file renders all six page types (~460 lines); cohesive now but the first file that will need splitting as pages grow",
+        "app/src/shared/components.js:8-13 — components are tiny template functions with no hidden global state"
+      ],
+      "rationale": "The shared/server/client split is deliberate and clean; the only untangling on the horizon is splitting pages.js and the slightly overloaded api.js, both low-risk."
+    },
+    "readability": {
+      "score": 4,
+      "evidence": [
+        "app/src/shared/format.js:3-16 — small, well-named helpers (humanize, dexNumber, englishName) consistent across every file",
+        "app/src/server/api.js:136-137 — comment explains the alternate-forms rule rather than restating code",
+        "app/src/server/pages.js:246,252 — magic numbers 255 and 720 for stat-bar widths with no comment on what they mean",
+        "app/src/client/main.js:83-91 — sorting derives values from server-rendered DOM textContent; clever, but it silently couples the client to the exact server markup",
+        "app/src/server/pages.js — organized with clear section banners (home / pokemon / move / ability / type / not found) making navigation easy despite its length"
+      ],
+      "rationale": "Consistent style, good naming, and comments that explain why; a new teammate would find their way quickly. Rough spots are the oversized pages.js and two magic numbers."
+    },
+    "review_cost": {
+      "score": 4,
+      "evidence": [
+        "app/.gitignore (repo root) — missing app/dist entry; built assets sit in the tree next to source (app/dist/index.html)",
+        "app/src/server/pages.js:45-48 — invalid filter values are defensively reset rather than crashing; reviewer won't chase edge cases",
+        "app/src/shared/home-view.js:26-40 — URL state, filtering, and pagination centralized, so spec-compliance changes land in one place"
+      ],
+      "rationale": "I'd approve after a nits round: gitignore the build output, tighten the /src static guard (or drop the dev branch), add a fetch timeout and a varieties guard. No architectural rework needed."
+    }
+  },
+  "overall": 4,
+  "findings": [
+    {
+      "severity": "medium",
+      "location": "app/server/server.mjs:45-68",
+      "issue": "The static-file guard checks resolved paths against ROOT, but the /src/ branch joins the raw URL pathname, so /src/../server/server.mjs (or any file under app/) is served — the guard doesn't confine requests to the intended subtree.",
+      "suggestion": "Join the URL pathname against a fixed base (path.join(ROOT, 'src', ...)) and validate the result starts with that base, or reject pathnames containing '..' segments."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/client/main.js:4",
+      "issue": "In dev mode (npm run dev, which serves raw /src/ files), the browser cannot execute import './styles.css' from a native ES module, so the whole client bundle fails and no interactivity (filters, sorting, game select) works.",
+      "suggestion": "Either use Vite's dev server for development (middleware mode behind the custom server), or move the CSS import out of the module graph in dev and accept dev mode is SSR-only."
+    },
+    {
+      "severity": "low",
+      "location": "app/dist/",
+      "issue": "Build output (app/dist/index.html, assets, manifest) is present in the repository tree and app/dist is not in .gitignore (only /data/, /.data-cache/, node_modules/ are).",
+      "suggestion": "Add app/dist (or dist/) to .gitignore and delete the committed build artifacts; the harness builds fresh anyway."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/server/api.js:21",
+      "issue": "getJson has no timeout or AbortController; a hung upstream connection stalls the page render indefinitely, and per-request rendering (server.mjs:84-89) means this blocks responses, not just caching.",
+      "suggestion": "Wrap fetch in AbortSignal.timeout(ms) and translate the abort into a 502/500 error page."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/server/pages.js:225",
+      "issue": "If a species record has no varieties, variety.pokemon.url throws a TypeError, which escapes renderPage's NotFoundError-only catch (pages.js:455) and surfaces as a 500.",
+      "suggestion": "Guard the variety lookup and throw NotFoundError (or return the not-found page) when no default variety exists."
+    },
+    {
+      "severity": "low",
+      "location": "app/server/server.mjs:16-30",
+      "issue": "loadAssets silently falls back to dev-mode asset paths when dist/.vite/manifest.json is missing, so npm start without a prior build produces a page with broken client JS instead of a clear error.",
+      "suggestion": "Fail fast with a descriptive message when the production server can't find the build manifest."
+    },
+    {
+      "severity": "low",
+      "location": "app/server/server.mjs:59",
+      "issue": "fs.createReadStream(resolved).pipe(res) has no error handling; a read error after the 200 header leaves the response open until the proxy times out.",
+      "suggestion": "Attach an 'error' handler that destroys the response (stream.on('error', () => res.destroy()))."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/server/pages.js:74",
+      "issue": "Every home-page SSR response embeds the full 1025-species summary JSON inline (and re-serializes it per request with Cache-Control: no-cache), roughly doubling the payload for a page showing 48 cards.",
+      "suggestion": "Fetch the summaries JSON from a small client-side endpoint (or reuse the cached promise to serve /data/summaries.json) so it can be cached by the browser instead of re-sent per request."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/shared/home-view.js:10",
+      "issue": "filterSummaries, homeQueryString, parseHomeState and the client sorting logic are pure and testable, but the app ships zero tests of its own (all verification is the external acceptance suite).",
+      "suggestion": "Add a few unit tests for the shared pure functions (filtering, pagination clamping, sort comparators) so regressions are caught without spinning up the full Playwright suite."
+    }
+  ],
+  "summary": "A well-structured vanilla-JS SSR app that uses Vite 8 (current stable) correctly via its build manifest and keeps clean shared/server/client boundaries; filtering, escaping, caching and 404 handling are done carefully. The issues are all in the rough edges around them: a broken dev mode, an ineffective static-path guard, no fetch timeout, and committed build output. Mergeable after a nits-only round."
+}
+```

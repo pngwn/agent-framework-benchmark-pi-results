@@ -1,0 +1,75 @@
+I've reviewed the whole app, verified the framework version (astro 7.4.4 is the current stable release, released 2026-10-28 — the app is up to date), and checked the data layer, all six routes, the four components, and the client scripts. Everything below is anchored to code I read.
+
+```json
+{
+  "dimension": "mergeability",
+  "criteria": {
+    "idiomatic": {
+      "score": 4,
+      "evidence": [
+        "app/astro.config.mjs:1-5 — minimal, correct current config: output 'server' + @astrojs/node standalone, the documented on-demand SSR setup",
+        "app/src/pages/index.astro:18 — new URL(Astro.request.url) where the docs' canonical property is Astro.url",
+        "app/src/pages/pokemon/[name].astro:36-46,228 — evolution chain built as concatenated HTML strings with a hand-rolled escapeHtml + set:html instead of mapping data into markup and letting Astro auto-escape",
+        "app/src/pages/index.astro:137, app/src/pages/pokemon/[name].astro:299 — is:inline IIFE scripts rather than Astro's default processed <script> (recommended default in the docs)",
+        "app/src/lib/pokeapi.js:8-24,94-133 — hand-rolled promise cache, concurrency limiter and per-resource singletons where Astro ships runtime caching primitives (Astro.cache); spec-allowed but home-grown"
+      ],
+      "rationale": "Genuinely up-to-date Astro 7 usage — correct routing, frontmatter data loading at request time, set:html with escaping, Astro.response.status for 404s. A handful of places work around or ignore framework conveniences (Astro.url, processed scripts, framework caching), which keeps it from reading like the docs' own examples."
+    },
+    "correctness_risks": {
+      "score": 4,
+      "evidence": [
+        "app/src/pages/index.astro:162-172 — client refresh() has no try/catch: a failed fetch leaves stale results and an unhandled rejection",
+        "app/src/pages/index.astro:163-164 — refresh() is guarded by a seq counter, so the keystroke race condition is properly handled",
+        "app/src/lib/pokeapi.js:40-43 — failed fetches are evicted from the cache instead of poisoning it; non-404 errors are correctly rethrown by callers (e.g. app/src/pages/index.astro:47-50)",
+        "app/src/lib/pokeapi.js:12-24 — fetch fan-out bounded at 24 concurrent sockets for the 'learned by' lists; cache is unbounded but the dataset is finite",
+        "app/src/pages/index.astro:36-37 — page clamped to totalPages; invalid type/generation filters degrade to unfiltered rather than 500",
+        "app/src/pages/pokemon/[name].astro:66-69 — invalid ?game= falls back to the default version group instead of erroring"
+      ],
+      "rationale": "The fragile spots I looked for — request races, cache poisoning, unbounded fan-out, missing 404 handling, XSS via set:html — are all deliberately handled. The one real gap is the unguarded client-side fetch in the filter script; everything else is minor."
+    },
+    "global_abstractions": {
+      "score": 4,
+      "evidence": [
+        "app/src/lib/pokeapi.js:1-165 — one cohesive data module with clear boundaries, used by every page; comments explain the caching and limiter decisions",
+        "app/src/lib/pokeapi.js:94-133 — module-level promise singletons (speciesListPromise, typesPromise…) are hidden global state, but per-process and consistent with the spec's caching allowance",
+        "app/src/pages/abilities/[name].astro:23-35 — near-duplicate of cardsFromPokemonRefs (app/src/lib/pokeapi.js:135) reimplemented inline just to add the hidden flag; two code paths to keep in sync",
+        "app/src/components/PokemonCard.astro:1-40 — one small card component reused across all four card lists; good factoring"
+      ],
+      "rationale": "Abstractions are few and mostly earn their keep: one data module, four small components. The single wart is the abilities page duplicating the card-building helper instead of parameterizing it, plus the implicit global cache state."
+    },
+    "readability": {
+      "score": 4,
+      "evidence": [
+        "app/src/lib/pokeapi.js:1-6,8-11 — comments explain *why* (runtime caching allowed by spec, limiter rationale), not what",
+        "app/src/pages/pokemon/[name].astro:1-149 — ~150 lines of frontmatter mixing fetch, dedupe, method-ordering and sorting logic before any markup; the largest file and the only hard one to scan",
+        "app/src/pages/pokemon/[name].astro:152-168 — the whole page body wrapped in a `!data ? (NotFound) : (Layout)` ternary; explicit but clunky, repeated in 4 route files",
+        "app/src/components/Section.astro:1-14 — small, self-documenting; heading-id derivation is a single clear line",
+      ],
+      "rationale": "Consistent naming and structure across pages/components/lib/styles; a new teammate would find their way quickly. The pokemon detail page is a dense monolith in the frontmatter, and the repeated data-null ternary pattern adds noise."
+    },
+    "review_cost": {
+      "score": 4,
+      "evidence": [
+        "app/src/pages/index.astro:162-172 — ask for error handling in refresh()",
+        "app/src/pages/abilities/[name].astro:23-35 — ask to fold this into cardsFromPokemonRefs",
+        "app/src/pages/pokemon/[name].astro:39-46 — ask whether the string-built evolution HTML can be rendered as data instead",
+        "app/package.json:6-12 — scripts, deps and config all correct and minimal; nothing to challenge on setup"
+      ],
+      "rationale": "I'd approve after one round of nits: guard the client fetch, dedupe the ability card builder, and add a .gitignore for dist/. Nothing structural needs to move."
+    }
+  },
+  "overall": 4,
+  "findings": [
+    { "severity": "medium", "location": "app/src/pages/index.astro:162", "issue": "Client-side refresh() has no error handling — a failed fetch to the API or server silently leaves stale results and produces an unhandled promise rejection.", "suggestion": "Wrap refresh() in try/catch: on failure, fall back to location.assign(url) so the server-rendered page (or error) takes over." },
+    { "severity": "medium", "location": "app/src/pages/abilities/[name].astro:23", "issue": "Reimplements cardsFromPokemonRefs inline (app/src/lib/pokeapi.js:135) with only an added `hidden` flag; the two card builders will drift.", "suggestion": "Extend cardsFromPokemonRefs with an optional per-pokemon transform (e.g. include `hidden`) and delete the duplicate." },
+    { "severity": "low", "location": "app/src/pages/pokemon/[name].astro:39", "issue": "Evolution chain is rendered by concatenating HTML strings with a manual escapeHtml (line 36) and injected via set:html (line 228) — correct today, but every future edit must remember to escape.", "suggestion": "Map the chain into a nested data structure and render it with JSX so Astro's automatic escaping applies." },
+    { "severity": "low", "location": "app/src/lib/pokeapi.js:8", "issue": "Hand-rolled promise cache, concurrency limiter and six module-level singleton promises duplicate concerns Astro ships primitives for (runtime caching via Astro.cache / adapter cache provider).", "suggestion": "Acceptable given the spec's explicit in-memory-caching allowance, but consider Astro's built-in caching or at least isolate the singletons behind one `loadReferenceData()` helper." },
+    { "severity": "low", "location": "app/src/pages/index.astro:18", "issue": "Uses `new URL(Astro.request.url)` (also app/src/pages/pokemon/[name].astro:66) where the framework's canonical accessor is `Astro.url`.", "suggestion": "Use `Astro.url.searchParams` — shorter and the documented idiom for query params." },
+    { "severity": "low", "location": "app/src/pages/pokemon/[name].astro:149", "issue": "The try/catch-fetch → render-NotFound → set-404-status pattern is copy-pasted across four route files (lines 149, 42, 48, 44 of the respective [name].astro files).", "suggestion": "Extract a small `fetchOr404(path)` helper, or use Astro.rewrite('/404') so the branch is one line per page." },
+    { "severity": "low", "location": "app/", "issue": "No .gitignore inside app/; `dist/` and `.astro/` build artifacts sit next to the source and are not ignored by the root .gitignore, so build output can easily be committed.", "suggestion": "Add app/.gitignore covering dist/, .astro/ and node_modules/." },
+    { "severity": "low", "location": "app/src/pages/index.astro:137", "issue": "Both client behaviors are is:inline IIFE scripts (also app/src/pages/pokemon/[name].astro:299) rather than Astro's default processed scripts, losing bundling, TypeScript and dedup.", "suggestion": "Fine for this size, but the Astro-recommended form is a plain <script> (or a shared src/scripts module) — consider switching before the inline scripts grow." },
+    { "severity": "low", "location": "app/src/lib/pokeapi.js:1", "issue": "Plain-JS data layer in a framework with native TypeScript support; only two components declare Props interfaces (app/src/components/Layout.astro:3), while the shapes flowing through pages are untyped.", "suggestion": "Name the API record/card shapes in pokeapi.js types and type the data objects passed into pages." }
+  ],
+  "summary": "A clean, current-generation Astro 7 SSR app that works with the framework rather than against it: correct on-demand config, request-time fetching with a sensible in-memory cache and bounded fan-out, deliberate handling of races and 404s, and small reusable components. The real review items are one unguarded client-side fetch, a duplicated card builder on the abilities page, and a dense pokemon-detail page whose evolution HTML is built by hand with manual escaping. I'd merge after one round of nits."
+}
+```

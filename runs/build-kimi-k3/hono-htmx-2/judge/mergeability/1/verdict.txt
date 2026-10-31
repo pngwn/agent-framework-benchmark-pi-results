@@ -1,0 +1,136 @@
+## Review
+
+**What I verified against current releases:** Hono's current stable is v4.13.14 (v5.0.0 is still RC as of Oct 2026), so `hono ^4.13.14` is correct — `c.html`/`c.req`/`app.notFound`/`app.onError`/`hono/html` usage all matches current docs. `@hono/node-server` is now at v2.1.5 (peer `hono: ^4 || ^5`); the app installs 1.19.17. `hono/html` escapes interpolations by default (checked the source), so no injection issues. htmx docs explicitly call out the active-search race and recommend `hx-sync`, which the app omits.
+
+**Overall impression:** This is a clean, idiomatic Hono + htmx app — flat routes, `html` tagged templates with correct fragment/full-page branching on `HX-Request`, a lazily-built cached index, sectioned CSS built on the design tokens. The problems are concentrated and fixable: a permanently-poisoned index on first API failure, a double-triggering/no-sync htmx form, and some helper duplication between the data and view layers.
+
+```json
+{
+  "dimension": "mergeability",
+  "criteria": {
+    "idiomatic": {
+      "score": 4,
+      "evidence": [
+        "app/src/app.js:37 — `new Hono()` with flat routes, c.req.param/query/header, c.html: matches current v4 docs",
+        "app/src/views.js:44-73 — hono/html tagged template with nested `html` results, the documented non-JSX pattern",
+        "app/src/app.js:72,181 — HX-Request branch returning partial vs full page: the standard htmx+server pattern",
+        "app/src/views.js:99-103 — hx-get/hx-trigger delay debounce/hx-push-url: idiomatic hypermedia filtering",
+        "app/src/app.js:42-44 — three exact-path serveStatic middlewares where one root-mounted serveStatic is the documented pattern; comment claims app-dir resolution but node-server resolves `path` relative to CWD",
+        "app/package.json:8-10 + app/public/htmx.min.js — vendored htmx.min.js served from public/ while `htmx.org` is a dependency the no-op build never copies, so the dep is decorative"
+      ],
+      "rationale": "Reads like the framework's own examples with correct current-stable versions (hono 4.13.14, htmx 2.x); the static-asset wiring and vendored-script drift are the only non-idiomatic wrinkles."
+    },
+    "correctness_risks": {
+      "score": 3,
+      "evidence": [
+        "app/src/api.js:88-91 — `indexPromise ??= buildIndex()`: a rejected build is cached forever, so one transient API failure at first request makes every page 500 until restart (api.js:33 does clean up per-URL failures, the index does not)",
+        "app/src/views.js:100 — `hx-trigger=\"input changed delay:200ms, change\"`: a select change fires both `input` and `change` (duplicate request), and search blur fires an extra request",
+        "app/src/views.js:99-103 — no `hx-sync`, so a slow in-flight response can swap stale results over newer ones; htmx docs recommend `hx-sync=\"this:replace\"` for exactly this active-search case",
+        "app/src/api.js:26 — fetch without a timeout: a hung upstream hangs every page and the pending promise stays in the cache",
+        "app/src/app.js:255-257 — onError returns the full not-found layout with status 500; for an htmx fragment request that swaps a whole document into a table/div target",
+        "app/src/views.js:151 — `index.typeEn.get.bind(...)` lacks the `?? humanize(n)` fallback the other four typeEn closures have, so an out-of-index type renders `undefined`",
+        "app/src/views.js:316 — sortUrl concatenates the route param into the query by hand without encoding, unlike homeResults which uses URLSearchParams"
+      ],
+      "rationale": "No escaping or injection problems (hono/html escapes verified), but the index-poisoning bug, the double-trigger, and the missing hx-sync are real fragility a reviewer would ask to fix."
+    },
+    "global_abstractions": {
+      "score": 3,
+      "evidence": [
+        "app/src/api.js:17-135 — one module holds the fetch cache, the god index (species/byId/types/typeEn/generations) and view formatting helpers (humanize/dexNumber/spriteUrl) that views.js imports back, blurring the data/view boundary",
+        "app/src/api.js:86-91 — module-level singleton with hidden global state; reasonable as a cache (spec-sanctioned) but everything depends on its shape",
+        "app/src/api.js:42-44 — `englishGenus` exported and never used; views.js:181-184 reimplements genus and latest-flavor inline instead of `englishGenus`/`latestEnglishFlavor` (api.js:46)",
+        "app/src/app.js:112 + views.js:186,349,379,426 — the same `typeEn` closure defined five times",
+        "app/src/views.js:30 + app.js:47 — PAGE_SIZE exported from the views module while pagination slicing lives in the route"
+      ],
+      "rationale": "The index abstraction earns its keep, but api.js is three modules in one and there are enough duplicated near-identical helpers that a small untangling pass is warranted before this grows."
+    },
+    "readability": {
+      "score": 4,
+      "evidence": [
+        "app/src/app.js:39-256 — routes grouped under banner comments, each handler short and linear",
+        "app/src/views.js:23-75 — layout/section/pokemonCard composition makes the long pokemonPage readable",
+        "app/src/api.js:20-22 — comments explain *why* (cache lifecycle, mapLimit purpose), not what",
+        "app/public/styles.css:1-62 — tokens copied verbatim and every rule consuming them, sections clearly delimited",
+        "app/src/app.js:46 — local `notFound` shadows the `app.notFound` method name at app.js:253, a small confusion",
+        "app/src/views.js:207 — magic 255 stat-max with no comment"
+      ],
+      "rationale": "A new teammate finds their way in minutes: naming is precise, files are small, and comments carry intent; only a couple of tiny rough spots."
+    },
+    "review_cost": {
+      "score": 3,
+      "evidence": [
+        "app/src/api.js:88-91 — must add rejection cleanup (like api.js:33) before merge",
+        "app/src/views.js:100 — must fix the trigger (drop `change`) and add hx-sync",
+        "app/src/app.js:42-44 — replace three middlewares with one root-mounted serveStatic resolved via import.meta.url",
+        "app/src/views.js:181-184 — delete in favour of the existing api.js helpers",
+        "app/package.json:6 — build should copy node_modules/htmx.org/dist into public so the pinned dependency means something"
+      ],
+      "rationale": "Approvable after one round of small, localized changes — nothing structural, but the index-retry bug and htmx trigger are must-fix."
+    }
+  },
+  "overall": 3,
+  "findings": [
+    {
+      "severity": "high",
+      "location": "app/src/api.js:88-91",
+      "issue": "A failed getIndex() build is cached forever (`indexPromise ??= buildIndex()`), so a single transient API error on the first request permanently 500s every page until process restart; the per-URL cache at api.js:33 handles this correctly but the index does not.",
+      "suggestion": "Reset the singleton on failure, mirroring api.js:33: `try { return await (indexPromise ??= buildIndex()) } catch (e) { indexPromise = null; throw e }`."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/views.js:100",
+      "issue": "`hx-trigger=\"input changed delay:200ms, change\"` double-fires on every select change (both `input` and `change` bubble) and fires a redundant request on search blur, with no hx-sync to cancel stale in-flight responses.",
+      "suggestion": "Use a single `hx-trigger=\"input changed delay:200ms queue:last\"` (Chromium selects fire `input`) and add `hx-sync=\"this:replace\"` as the htmx docs recommend for active search."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/app.js:42-44",
+      "issue": "Three exact-path serveStatic middlewares whose `path` values resolve relative to the process CWD, not the app directory as the comment at app.js:31 claims — it only works because the harness happens to start npm from app/.",
+      "suggestion": "Mount one `serveStatic({ root: new URL('../public/', import.meta.url).pathname })` (or `app.use('*', serveStatic({ root: './public/' }))`) and fix the comment."
+    },
+    {
+      "severity": "low",
+      "location": "app/package.json:6",
+      "issue": "`npm run build` is a no-op while a vendored `public/htmx.min.js` is served, so the declared `htmx.org` dependency never influences what ships and can silently drift from the lockfile (2.0.11).",
+      "suggestion": "Have build copy `node_modules/htmx.org/dist/htmx.min.js` to public/, or drop the dependency and document the vendored copy's version."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/views.js:181-184",
+      "issue": "Genus and latest-flavor extraction are reimplemented inline although `englishGenus` (api.js:42, entirely unused) and `latestEnglishFlavor` (api.js:46) exist for exactly this.",
+      "suggestion": "Import and use the two helpers; delete the dead `englishGenus` if the views keep their own."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/app.js:112",
+      "issue": "The `typeEn` fallback closure is defined five times (app.js:112; views.js:186, 349, 379, 426), and the variant at views.js:151 binds the raw Map without the `?? humanize(n)` fallback, rendering `undefined` for a type missing from the index.",
+      "suggestion": "Export one `typeEn(index)` helper from api.js and use it everywhere, including homeResults."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/app.js:255-257",
+      "issue": "onError (and the fragment notFound at app.js:195) return the full page layout with status 500/404 even for HX-Request swaps, injecting a whole document into a table/div target.",
+      "suggestion": "Branch on the HX-Request header and return a small error fragment; consider a status/JSON body instead of a 'Not found' page for 500s."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/api.js:26",
+      "issue": "apiFetch uses bare fetch with no timeout, so a hung upstream request stalls the page indefinitely and the pending promise occupies the cache.",
+      "suggestion": "Pass `signal: AbortSignal.timeout(10_000)`; the existing catch-cleanup already evicts on rejection."
+    },
+    {
+      "severity": "low",
+      "location": "app/package.json:8",
+      "issue": "@hono/node-server is pinned to ^1.19 (installed 1.19.17) while current stable is 2.1.5 with peer range `hono ^4 || ^5`, i.e. an easy, low-risk major bump is being skipped.",
+      "suggestion": "Bump to ^2.1.5 and re-run the acceptance tests; the API surface used (serve, serveStatic) is unchanged."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/views.js:316",
+      "issue": "sortUrl builds the query by string concatenation with an unencoded route param, while homeResults (views.js:139-146) correctly uses URLSearchParams — inconsistent and fragile for odd inputs.",
+      "suggestion": "Build sort URLs with URLSearchParams, as homeResults already does."
+    }
+  ],
+  "summary": "A genuinely idiomatic Hono v4 + htmx app: correct current-stable versions, proper hono/html escaping, clean fragment/full-page branching, and well-organized token-driven CSS. The merge blockers are one durability bug (a failed index build is cached forever), a double-triggering and un-synced htmx form the docs specifically warn about, and static-asset wiring that only works by accident of CWD. Everything else is a small, mechanical cleanup round — approve after one round of changes."
+}
+```

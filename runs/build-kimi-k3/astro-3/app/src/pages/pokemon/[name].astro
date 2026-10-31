@@ -1,0 +1,311 @@
+---
+import Layout from '../../components/Layout.astro';
+import NotFound from '../../components/NotFound.astro';
+import TypeBadge from '../../components/TypeBadge.astro';
+import EvolutionNode from '../../components/EvolutionNode.astro';
+import { fetchJson, mapAll } from '../../lib/api.js';
+import { getTypeNameMap, getVersionGroupOrders } from '../../lib/data.js';
+import {
+  humanize,
+  englishName,
+  dexNumber,
+  latestEnglishFlavor,
+  orDash,
+  idFromUrl,
+} from '../../lib/format.js';
+
+const { name } = Astro.params;
+
+const STAT_LABELS: Record<string, string> = {
+  hp: 'HP',
+  attack: 'Attack',
+  defense: 'Defense',
+  'special-attack': 'Sp. Atk',
+  'special-defense': 'Sp. Def',
+  speed: 'Speed',
+};
+
+const METHOD_ORDER = ['level-up', 'machine', 'egg', 'tutor'];
+
+let data: any = null;
+try {
+  const species = await fetchJson(`/pokemon-species/${name}/`);
+  const defaultVariety =
+    species.varieties?.find((v: any) => v.is_default) ?? species.varieties?.[0];
+  const pokemon = await fetchJson(`/pokemon/${idFromUrl(defaultVariety.pokemon.url)}/`);
+  const typeNames = await getTypeNameMap();
+  const chain = await fetchJson(species.evolution_chain.url);
+
+  // Games (version groups) in which this Pokémon learns moves, in order.
+  const vgNames = new Set<string>();
+  for (const m of pokemon.moves ?? []) {
+    for (const d of m.version_group_details ?? []) vgNames.add(d.version_group.name);
+  }
+  const orders = await getVersionGroupOrders([...vgNames]);
+  const games = [...vgNames]
+    .map((n) => ({ name: n, order: orders.get(n) ?? Number.POSITIVE_INFINITY }))
+    .sort((a, b) => a.order - b.order || a.name.localeCompare(b.name));
+  const requestedGame = Astro.url.searchParams.get('game');
+  const selectedGame = games.some((g) => g.name === requestedGame)
+    ? (requestedGame as string)
+    : games[games.length - 1]?.name;
+
+  // Moves for the selected game, grouped by learn method.
+  const byMethod = new Map<string, Map<string, number>>();
+  for (const m of pokemon.moves ?? []) {
+    for (const d of m.version_group_details ?? []) {
+      if (d.version_group.name !== selectedGame) continue;
+      const method = d.move_learn_method.name;
+      if (!byMethod.has(method)) byMethod.set(method, new Map());
+      const mm = byMethod.get(method)!;
+      const mv = m.move.name;
+      if (!mm.has(mv) || d.level_learned_at < mm.get(mv)!) mm.set(mv, d.level_learned_at);
+    }
+  }
+  const allMoveNames = [...new Set([...byMethod.values()].flatMap((mm) => [...mm.keys()]))];
+  const moveRecords = new Map<string, any>();
+  await mapAll(allMoveNames, async (n) => moveRecords.set(n, await fetchJson(`/move/${n}/`)));
+
+  const methods = [...byMethod.keys()].sort((a, b) => {
+    const ia = METHOD_ORDER.indexOf(a);
+    const ib = METHOD_ORDER.indexOf(b);
+    if (ia !== -1 || ib !== -1) return (ia === -1 ? 99 : ia) - (ib === -1 ? 99 : ib);
+    return humanize(a).localeCompare(humanize(b));
+  });
+
+  const tables = methods.map((method) => {
+    const rows = [...byMethod.get(method)!.entries()].map(([mv, level]) => {
+      const r = moveRecords.get(mv);
+      return {
+        level,
+        name: mv,
+        enName: englishName(r.names) ?? humanize(mv),
+        type: r.type?.name ?? null,
+        category: r.damage_class?.name ?? null,
+        power: r.power,
+        accuracy: r.accuracy,
+        pp: r.pp,
+      };
+    });
+    rows.sort((a, b) =>
+      method === 'level-up'
+        ? a.level - b.level || a.enName.localeCompare(b.enName)
+        : a.enName.localeCompare(b.enName),
+    );
+    return { method, title: humanize(method), rows };
+  });
+
+  const stats = (pokemon.stats ?? []).map((s: any) => ({
+    label: STAT_LABELS[s.stat.name] ?? humanize(s.stat.name),
+    value: s.base_stat,
+  }));
+
+  data = {
+    enName: englishName(species.names) ?? humanize(species.name),
+    dexId: species.id,
+    genus: species.genera?.find((g: any) => g.language?.name === 'en')?.genus ?? null,
+    types: (pokemon.types ?? []).slice().sort((a: any, b: any) => a.slot - b.slot),
+    artwork:
+      pokemon.sprites?.other?.['official-artwork']?.front_default ??
+      pokemon.sprites?.front_default ??
+      null,
+    height: `${(pokemon.height / 10).toFixed(1)} m`,
+    weight: `${(pokemon.weight / 10).toFixed(1)} kg`,
+    flavor: latestEnglishFlavor(species.flavor_text_entries),
+    stats,
+    total: stats.reduce((a: number, s: any) => a + s.value, 0),
+    abilities: (pokemon.abilities ?? []).slice().sort((a: any, b: any) => a.slot - b.slot),
+    chain: chain.chain,
+    games,
+    selectedGame,
+    tables,
+    typeNames,
+  };
+} catch (err: any) {
+  if (err?.status === 404) {
+    Astro.response.status = 404;
+  } else {
+    throw err;
+  }
+}
+---
+
+<Layout title={data ? `${data.enName} – Pokédex` : 'Not found – Pokédex'}>
+  {
+    data ? (
+      <>
+        <div class="pokemon-summary">
+          <div class="artwork-card">
+            {data.artwork && (
+              <img src={data.artwork} alt={data.enName} width="475" height="475" />
+            )}
+          </div>
+          <div class="summary-info">
+            <p class="summary-dex">{dexNumber(data.dexId)}</p>
+            <h1>{data.enName}</h1>
+            {data.genus && <p class="genus">{data.genus}</p>}
+            <p class="summary-types">
+              {data.types.map((t: any) => (
+                <TypeBadge
+                  name={t.type.name}
+                  label={data.typeNames.get(t.type.name) ?? humanize(t.type.name)}
+                  href={`/types/${t.type.name}`}
+                />
+              ))}
+            </p>
+            <dl class="facts">
+              <dt>Height</dt>
+              <dd>{data.height}</dd>
+              <dt>Weight</dt>
+              <dd>{data.weight}</dd>
+            </dl>
+            {data.flavor && <p class="flavor">{data.flavor}</p>}
+          </div>
+        </div>
+
+        <section class="panel" aria-labelledby="stats-heading">
+          <h2 id="stats-heading">Base stats</h2>
+          <table class="stats-table">
+            <tbody>
+              {data.stats.map((s: any) => (
+                <tr>
+                  <th scope="row">{s.label}</th>
+                  <td class="stat-value">{s.value}</td>
+                  <td class="stat-bar-cell">
+                    <div class="stat-track">
+                      <div
+                        class="stat-bar"
+                        style={`width: ${Math.min(100, (s.value / 255) * 100)}%`}
+                      />
+                    </div>
+                  </td>
+                </tr>
+              ))}
+              <tr class="total">
+                <th scope="row">Total</th>
+                <td class="stat-value">{data.total}</td>
+                <td class="stat-bar-cell">
+                  <div class="stat-track">
+                    <div
+                      class="stat-bar"
+                      style={`width: ${Math.min(100, (data.total / 1530) * 100)}%`}
+                    />
+                  </div>
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </section>
+
+        <section class="panel" aria-labelledby="abilities-heading">
+          <h2 id="abilities-heading">Abilities</h2>
+          <ul class="plain-list">
+            {data.abilities.map((a: any) => (
+              <li>
+                <a href={`/abilities/${a.ability.name}`}>{humanize(a.ability.name)}</a>
+                {a.is_hidden && ' (hidden)'}
+              </li>
+            ))}
+          </ul>
+        </section>
+
+        <section class="panel" aria-labelledby="evolution-heading">
+          <h2 id="evolution-heading">Evolution</h2>
+          <ul class="evo-tree">
+            <EvolutionNode node={data.chain} />
+          </ul>
+        </section>
+
+        <section class="panel moves-panel" id="moves" aria-labelledby="moves-heading">
+          <h2 id="moves-heading">Moves</h2>
+          {data.games.length > 0 && (
+            <div class="field game-field">
+              <label for="game-select">Game</label>
+              <select id="game-select">
+                {data.games.map((g: any) => (
+                  <option value={g.name} selected={g.name === data.selectedGame}>
+                    {humanize(g.name)}
+                  </option>
+                ))}
+              </select>
+            </div>
+          )}
+          {data.tables.map((t: any) => (
+            <table class="moves-table" data-sortable>
+              <caption>{t.title}</caption>
+              <thead>
+                <tr>
+                  {t.method === 'level-up' && (
+                    <th data-type="num">
+                      <button type="button">
+                        Level<span class="sort-arrow" aria-hidden="true" />
+                      </button>
+                    </th>
+                  )}
+                  <th data-type="text">
+                    <button type="button">
+                      Move<span class="sort-arrow" aria-hidden="true" />
+                    </button>
+                  </th>
+                  <th data-type="text">
+                    <button type="button">
+                      Type<span class="sort-arrow" aria-hidden="true" />
+                    </button>
+                  </th>
+                  <th data-type="text">
+                    <button type="button">
+                      Category<span class="sort-arrow" aria-hidden="true" />
+                    </button>
+                  </th>
+                  <th data-type="num">
+                    <button type="button">
+                      Power<span class="sort-arrow" aria-hidden="true" />
+                    </button>
+                  </th>
+                  <th data-type="num">
+                    <button type="button">
+                      Accuracy<span class="sort-arrow" aria-hidden="true" />
+                    </button>
+                  </th>
+                  <th data-type="num">
+                    <button type="button">
+                      PP<span class="sort-arrow" aria-hidden="true" />
+                    </button>
+                  </th>
+                </tr>
+              </thead>
+              <tbody>
+                {t.rows.map((r: any) => (
+                  <tr>
+                    {t.method === 'level-up' && <td>{r.level}</td>}
+                    <td>
+                      <a href={`/moves/${r.name}`}>{r.enName}</a>
+                    </td>
+                    <td>
+                      {r.type ? (
+                        <TypeBadge
+                          name={r.type}
+                          label={data.typeNames.get(r.type) ?? humanize(r.type)}
+                          href={`/types/${r.type}`}
+                        />
+                      ) : (
+                        '—'
+                      )}
+                    </td>
+                    <td>{r.category ? humanize(r.category) : '—'}</td>
+                    <td>{orDash(r.power)}</td>
+                    <td>{orDash(r.accuracy)}</td>
+                    <td>{orDash(r.pp)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          ))}
+        </section>
+        <script is:inline src="/js/pokemon.js"></script>
+      </>
+    ) : (
+      <NotFound />
+    )
+  }
+</Layout>

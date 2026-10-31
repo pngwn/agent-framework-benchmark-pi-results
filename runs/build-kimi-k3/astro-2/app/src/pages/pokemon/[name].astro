@@ -1,0 +1,343 @@
+---
+import Layout from '../../layouts/Layout.astro';
+import NotFound from '../../components/NotFound.astro';
+import EvolutionNode from '../../components/EvolutionNode.astro';
+import { getRecord, idFromUrl, pool } from '../../lib/api';
+import { getTypeByName } from '../../lib/data';
+import { dexNumber, englishName, humanize, latestEnglishFlavor, orDash } from '../../lib/format';
+
+const { name } = Astro.params;
+
+const species = await getRecord('pokemon-species', name!);
+let pokemon: any = null;
+let view: any = null;
+
+if (species) {
+  const defaultVariety =
+    species.varieties.find((v: any) => v.is_default) ?? species.varieties[0];
+  pokemon = await getRecord('pokemon', defaultVariety.pokemon.name);
+
+  const typeByName = await getTypeByName();
+  const english = englishName(species.names) ?? humanize(species.name);
+  const genus = species.genera?.find((g: any) => g.language.name === 'en')?.genus;
+  const flavor = latestEnglishFlavor(species.flavor_text_entries);
+  const artwork =
+    pokemon.sprites?.other?.['official-artwork']?.front_default ?? pokemon.sprites?.front_default;
+
+  const pokemonTypes = [...pokemon.types]
+    .sort((a: any, b: any) => a.slot - b.slot)
+    .map((t: any) => typeByName.get(t.type.name) ?? { name: t.type.name, english: humanize(t.type.name) });
+
+  const STAT_LABELS: Record<string, string> = {
+    hp: 'HP',
+    attack: 'Attack',
+    defense: 'Defense',
+    'special-attack': 'Sp. Atk',
+    'special-defense': 'Sp. Def',
+    speed: 'Speed',
+  };
+  const stats = pokemon.stats.map((s: any) => ({
+    label: STAT_LABELS[s.stat.name] ?? humanize(s.stat.name),
+    value: s.base_stat,
+  }));
+  const total = stats.reduce((sum: number, s: any) => sum + s.value, 0);
+
+  const abilities = [...pokemon.abilities].sort((a: any, b: any) => a.slot - b.slot);
+
+  const chainId = idFromUrl(species.evolution_chain.url);
+  const chain = await getRecord('evolution-chain', chainId);
+
+  // Version groups in which this Pokémon learns moves, ordered by the
+  // version group's order; the default selection is the latest one.
+  const vgNames = [
+    ...new Set<string>(
+      pokemon.moves.flatMap((m: any) =>
+        m.version_group_details.map((d: any) => d.version_group.name),
+      ),
+    ),
+  ];
+  const vgRecords = await pool(vgNames, 16, (vg) => getRecord('version-group', vg));
+  const versionGroups = vgRecords.sort((a: any, b: any) => a.order - b.order);
+
+  const requestedGame = Astro.url.searchParams.get('game');
+  const selectedGame = versionGroups.length
+    ? versionGroups.some((vg: any) => vg.name === requestedGame)
+      ? requestedGame!
+      : versionGroups[versionGroups.length - 1].name
+    : null;
+
+  // Group moves by learn method for the selected version group.
+  const byMethod = new Map<string, Map<string, { name: string; level: number }>>();
+  for (const m of pokemon.moves) {
+    for (const d of m.version_group_details) {
+      if (d.version_group.name !== selectedGame) continue;
+      const method = d.move_learn_method.name as string;
+      let byMove = byMethod.get(method);
+      if (!byMove) byMethod.set(method, (byMove = new Map()));
+      const existing = byMove.get(m.move.name);
+      if (!existing || d.level_learned_at < existing.level) {
+        byMove.set(m.move.name, { name: m.move.name, level: d.level_learned_at });
+      }
+    }
+  }
+
+  const moveNames = [...new Set([...byMethod.values()].flatMap((byMove) => [...byMove.keys()]))];
+  const moveRecords = new Map<string, any>(
+    (await pool(moveNames, 24, (n) => getRecord('move', n))).map((r) => [r.name, r]),
+  );
+
+  const METHOD_ORDER = ['level-up', 'machine', 'egg', 'tutor'];
+  const methods = [...byMethod.keys()].sort((a, b) => {
+    const ia = METHOD_ORDER.indexOf(a);
+    const ib = METHOD_ORDER.indexOf(b);
+    if (ia !== -1 || ib !== -1) return (ia === -1 ? 99 : ia) - (ib === -1 ? 99 : ib);
+    return humanize(a).localeCompare(humanize(b));
+  });
+
+  const tables = methods.map((method) => {
+    const rows = [...byMethod.get(method)!.values()].map((entry) => {
+      const record = moveRecords.get(entry.name);
+      const typeName = record?.type?.name;
+      const typeInfo = typeName ? typeByName.get(typeName) : undefined;
+      return {
+        name: entry.name,
+        level: entry.level,
+        english: englishName(record?.names) ?? humanize(entry.name),
+        typeName,
+        typeEnglish: typeInfo?.english ?? (typeName ? humanize(typeName) : '—'),
+        category: record?.damage_class?.name ? humanize(record.damage_class.name) : '—',
+        power: orDash(record?.power),
+        accuracy: orDash(record?.accuracy),
+        pp: orDash(record?.pp),
+      };
+    });
+    if (method === 'level-up') {
+      rows.sort((a, b) => a.level - b.level || a.english.localeCompare(b.english));
+    } else {
+      rows.sort((a, b) => a.english.localeCompare(b.english));
+    }
+    return { method, title: humanize(method), hasLevel: method === 'level-up', rows };
+  });
+
+  view = {
+    species,
+    english,
+    pokemonHeight: pokemon.height,
+    pokemonWeight: pokemon.weight,
+    genus,
+    flavor,
+    artwork,
+    pokemonTypes,
+    stats,
+    total,
+    abilities,
+    chain,
+    versionGroups,
+    selectedGame,
+    tables,
+  };
+}
+
+if (!view) Astro.response.status = 404;
+---
+
+{
+  !view ? (
+    <NotFound />
+  ) : (
+    <Layout title={`${view.english} – Pokédex`}>
+      <div class="summary">
+        <div class="artwork">
+          {view.artwork && <img src={view.artwork} alt={view.english} />}
+        </div>
+        <div class="summary-info">
+          <span class="dex-lg">{dexNumber(view.species.id)}</span>
+          <h1>{view.english}</h1>
+          {view.genus && <p class="genus">{view.genus}</p>}
+          <div class="badges">
+            {view.pokemonTypes.map((t: any) => (
+              <a class={`badge type-${t.name}`} href={`/types/${t.name}`}>
+                {t.english}
+              </a>
+            ))}
+          </div>
+          <dl class="inline-dl">
+            <div>
+              <dt>Height</dt>
+              <dd>{(view.pokemonHeight / 10).toFixed(1)} m</dd>
+            </div>
+            <div>
+              <dt>Weight</dt>
+              <dd>{(view.pokemonWeight / 10).toFixed(1)} kg</dd>
+            </div>
+          </dl>
+        </div>
+      </div>
+      {view.flavor && <p class="flavor">{view.flavor}</p>}
+
+      <section class="panel" aria-labelledby="stats-heading">
+        <h2 id="stats-heading">Base stats</h2>
+        <table class="stats-table">
+          <tbody>
+            {view.stats.map((s: any) => (
+              <tr>
+                <th scope="row">{s.label}</th>
+                <td class="num">{s.value}</td>
+                <td>
+                  <span class="bar-track">
+                    <span class="bar-fill" style={`width:${Math.min(100, (s.value / 255) * 100)}%`} />
+                  </span>
+                </td>
+              </tr>
+            ))}
+            <tr>
+              <th scope="row">Total</th>
+              <td class="num">{view.total}</td>
+              <td>
+                <span class="bar-track">
+                  <span class="bar-fill" style={`width:${Math.min(100, (view.total / 720) * 100)}%`} />
+                </span>
+              </td>
+            </tr>
+          </tbody>
+        </table>
+      </section>
+
+      <section class="panel" aria-labelledby="abilities-heading">
+        <h2 id="abilities-heading">Abilities</h2>
+        <ul class="plain">
+          {view.abilities.map((a: any) => (
+            <li>
+              <a href={`/abilities/${a.ability.name}`}>{humanize(a.ability.name)}</a>
+              {a.is_hidden && ' (hidden)'}
+            </li>
+          ))}
+        </ul>
+      </section>
+
+      <section class="panel" aria-labelledby="evolution-heading">
+        <h2 id="evolution-heading">Evolution</h2>
+        <ul class="plain">
+          <EvolutionNode node={view.chain.chain} />
+        </ul>
+      </section>
+
+      <section class="panel" id="moves" aria-labelledby="moves-heading">
+        <h2 id="moves-heading">Moves</h2>
+        {view.selectedGame && (
+          <div class="field game-field">
+            <label for="game">Game</label>
+            <select id="game" name="game">
+              {view.versionGroups.map((vg: any) => (
+                <option value={vg.name} selected={vg.name === view.selectedGame}>
+                  {humanize(vg.name)}
+                </option>
+              ))}
+            </select>
+          </div>
+        )}
+        {view.tables.map((table: any) => (
+          <div class="table-scroll">
+            <table class="moves-table">
+              <caption>{table.title}</caption>
+              <thead>
+                <tr>
+                  {table.hasLevel && (
+                    <th>
+                      <button type="button">Level</button>
+                    </th>
+                  )}
+                  <th>
+                    <button type="button">Move</button>
+                  </th>
+                  <th>
+                    <button type="button">Type</button>
+                  </th>
+                  <th>
+                    <button type="button">Category</button>
+                  </th>
+                  <th>
+                    <button type="button">Power</button>
+                  </th>
+                  <th>
+                    <button type="button">Accuracy</button>
+                  </th>
+                  <th>
+                    <button type="button">PP</button>
+                  </th>
+                </tr>
+              </thead>
+              <tbody>
+                {table.rows.map((row: any) => (
+                  <tr>
+                    {table.hasLevel && <td>{row.level}</td>}
+                    <td>
+                      <a href={`/moves/${row.name}`}>{row.english}</a>
+                    </td>
+                    <td>
+                      {row.typeName && row.typeName !== '—' ? (
+                        <a class={`badge type-${row.typeName}`} href={`/types/${row.typeName}`}>
+                          {row.typeEnglish}
+                        </a>
+                      ) : (
+                        row.typeEnglish
+                      )}
+                    </td>
+                    <td>{row.category}</td>
+                    <td>{row.power}</td>
+                    <td>{row.accuracy}</td>
+                    <td>{row.pp}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        ))}
+      </section>
+
+      <script>
+        const gameSelect = document.getElementById('game') as HTMLSelectElement | null;
+        gameSelect?.addEventListener('change', () => {
+          const url = new URL(location.href);
+          url.searchParams.set('game', gameSelect.value);
+          url.hash = 'moves';
+          location.assign(url.toString());
+        });
+
+        // Client-side column sorting for every moves table.
+        const cellValue = (row: HTMLTableRowElement, index: number): string =>
+          row.cells[index]?.textContent?.trim() ?? '';
+
+        const compareCells = (a: string, b: string, dir: 'ascending' | 'descending'): number => {
+          const missingA = a === '—' || a === '';
+          const missingB = b === '—' || b === '';
+          if (missingA && missingB) return 0;
+          // Missing values sort last in both directions.
+          if (missingA) return 1;
+          if (missingB) return -1;
+          const numA = Number(a);
+          const numB = Number(b);
+          const result =
+            !Number.isNaN(numA) && !Number.isNaN(numB) ? numA - numB : a.localeCompare(b);
+          return dir === 'ascending' ? result : -result;
+        };
+
+        document.querySelectorAll<HTMLTableElement>('table.moves-table').forEach((table) => {
+          const headers = [...table.querySelectorAll('thead th')];
+          headers.forEach((th, index) => {
+            const trigger = th.querySelector('button') ?? th;
+            trigger.addEventListener('click', () => {
+              const dir = th.getAttribute('aria-sort') === 'ascending' ? 'descending' : 'ascending';
+              headers.forEach((other) => other.removeAttribute('aria-sort'));
+              th.setAttribute('aria-sort', dir);
+              const tbody = table.tBodies[0];
+              const rows = [...tbody.rows];
+              rows.sort((ra, rb) => compareCells(cellValue(ra, index), cellValue(rb, index), dir));
+              for (const row of rows) tbody.appendChild(row);
+            });
+          });
+        });
+      </script>
+    </Layout>
+  )
+}

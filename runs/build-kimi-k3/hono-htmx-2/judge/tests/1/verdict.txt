@@ -1,0 +1,170 @@
+## Review — test quality
+
+The app ships **zero tests of its own**. `app/package.json` has no `test` script, no test runner in devDependencies (`app/package.json:6-15`), and there are no test or spec files anywhere under `app/` (confirmed by `find` and the measured `tests: {files: 0, cases: 0}`). All verification came from leaning on the acceptance suite in `tests/`, which the agent doesn't own.
+
+That's a missed opportunity because the riskiest logic here is remarkably testable. The codebase is a clean split of pure data functions (`app/src/api.js`) and route handlers on a plain `Hono` app, and Hono's own current guidance (skill doc, `hono/testing` `testClient`, and the noted `app.request()` — "no server startup needed") means every route could be exercised in-process with `node:test` and a stubbed `apiFetch`, no browser required. The pure helpers (`humanize`, `latestEnglishFlavor`, `toSpeciesList`, `sortedRows`, pagination math) need no mocks at all.
+
+Specific untested risks I traced:
+
+- **`app/src/app.js:153-167` (`sortedRows`)** — the null-handling ("missing values sort last in both directions") plus `sign * cmp` over mixed number/string keys is exactly the kind of comparator that silently breaks on refactor. Descending string sort via negated `localeCompare` and the `va == null` short-circuit ordering are both easy to get wrong.
+- **`app/src/app.js:196-202`** — the ability hidden-flag merge (`existing.hidden && entry.is_hidden`) implements "a non-hidden entry wins when a species appears twice". It's correct today but subtle; a refactor to "last entry wins" would flip `Hidden ability` badges with no failing test in `app/`.
+- **`app/src/api.js:97-135` (`buildIndex`)** — type/generation enrichment keyed on `idFromUrl`, alternate-form exclusion via the `byId` species map, and slot-order type sorting. A regression here (e.g. dropping the `slot` sort, or matching by name instead of id) corrupts *every* list page at once.
+- **`app/src/api.js:140-151` (`toSpeciesList`)** — dedupe-by-id plus dex-number sort; the acceptance tests only spot-check a few pages, so a broken dedupe would show up as duplicated cards on large moves/types pages only.
+- **`app/src/app.js:59-66` + `app/src/views.js:145-160`** — page parsing (`parseInt`, clamp to `[1, totalPages]`) and the `pageUrl` builder that must omit default/empty params. Edge inputs (`page=abc`, `page=999`, `page=0`) have no guard tests.
+- **`app/public/app.js:3-7`** — the `htmx:configRequest` hook that strips empty form params is the only thing keeping pushed URLs free of `type=&q=`; it's one small client file with disproportionate URL-state impact and no test (a Playwright-level check exists in the acceptance suite, but nothing in `app/`).
+- **`app/src/api.js:19-25`** — cache stores the promise and deletes on rejection; a refactor that cached rejected promises (or forgot the delete) would poison every subsequent request for that resource. Also a tiny race: a concurrent `apiFetch` for the same URL in the same tick can still receive the rejected entry before the `.catch` microtask deletes it.
+- **`app/src/app.js:143-150`** — the `/pokemon/:name/moves-table` fragment route returns the full not-found *document* as the table swap body when `method` doesn't match; the error path of an htmx endpoint is untested and visibly broken if hit.
+- **`app/src/app.js:180-182`** — the effect fallback chain (`short_effect` → flavor → `—`) for moves; a reordering here changes rendered text with no local test.
+
+Per the anchored scale: no tests means `coverage_of_risk` and `regression_power` sit at what would be caught — nothing (1); `behaviour_not_implementation` is 1 for the same reason; `signal_to_noise` is 3 by the "no tests" anchor (there is no noise, because there is no signal either).
+
+```json
+{
+  "dimension": "tests",
+  "criteria": {
+    "coverage_of_risk": {
+      "score": 1,
+      "evidence": [
+        "app/package.json:6-15 — no test script, no test runner or devDependency at all",
+        "app/src/api.js:97-151 — buildIndex/toSpeciesList: highest-risk data layer, zero tests",
+        "app/src/app.js:153-167 — sortedRows comparator (missing-values-last, asc/desc) untested",
+        "app/src/app.js:196-202 — ability hidden-merge logic untested"
+      ],
+      "rationale": "No tests exist in app/, so none of the risky logic — index building, filtering, pagination, sorting comparators, fallback chains — is covered by anything the team owns."
+    },
+    "behaviour_not_implementation": {
+      "score": 1,
+      "evidence": [
+        "app/src/ — no test files found anywhere in the app"
+      ],
+      "rationale": "No tests, so nothing asserts behaviour or implementation."
+    },
+    "regression_power": {
+      "score": 1,
+      "evidence": [
+        "app/src/app.js:59-66 — page clamp logic (page=abc/999/0) has no regression guard",
+        "app/public/app.js:3-7 — htmx empty-param stripping keeps URL state clean; only acceptance tests notice if it breaks",
+        "app/src/api.js:19-25 — cache-deletes-on-rejection behavior unguarded"
+      ],
+      "rationale": "Nothing in app/ would fail if any covered behaviour broke; the acceptance suite is the only guard and it isn't part of the app."
+    },
+    "signal_to_noise": {
+      "score": 3,
+      "evidence": [
+        "app/ — zero test files, zero low-value tests"
+      ],
+      "rationale": "No tests means no noise, but per the anchor this is a neutral 3, not a virtue."
+    }
+  },
+  "overall": 1,
+  "findings": [
+    {
+      "severity": "high",
+      "location": "app/package.json:6",
+      "issue": "The app ships with no test script, no runner, and no tests, despite having a pure-function data layer and a Hono app testable in-process via app.request()/hono/testing with a stubbed API.",
+      "suggestion": "Add node:test (or vitest) cases for api.js helpers and route handlers using app.request() with an injectable apiFetch; the acceptance suite shouldn't be the only safety net."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/app.js:153",
+      "issue": "sortedRows implements missing-values-last in both directions and sign-flipped number/string comparison — classic silent-breakage territory with no unit test.",
+      "suggestion": "Table-driven test over rows with null power/accuracy asserting nulls trail in asc and desc."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/app.js:196",
+      "issue": "Subtle hidden-ability merge (non-hidden entry wins across duplicate species entries) is untested; a 'last wins' refactor would flip Hidden ability badges.",
+      "suggestion": "Unit test abilityPage data with a species listed once hidden and once normal."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/api.js:97",
+      "issue": "buildIndex enrichment (type slots, generation assignment, alternate-form exclusion via byId) feeds every list page; a regression corrupts all pages simultaneously and no local test would catch it.",
+      "suggestion": "Test buildIndex against a small fixture API payload: two types, one generation, one alternate form id above the species range."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/app.js:59",
+      "issue": "Pagination edge cases (page=abc, page=0, page beyond total) and the omit-defaults URL builder in views.js:145 are unguarded.",
+      "suggestion": "Route-level tests via app.request() asserting clamped page, 'Page n of total' text, and that page=1/default filters produce clean URLs."
+    },
+    {
+      "severity": "medium",
+      "location": "app/public/app.js:3",
+      "issue": "The htmx:configRequest hook that strips empty params is the sole guarantee that pushed URLs omit empty filters; it has no test and is easy to delete as 'boilerplate'.",
+      "suggestion": "At minimum a comment-level integration test in the app suite (or a Playwright test owned by app/) asserting the URL after typing-then-clearing search."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/api.js:24",
+      "issue": "Cache deletes rejected promises via a .catch microtask; a concurrent fetch of the same URL in the same tick can still receive the rejected entry, and any refactor that stops deleting poisons the cache permanently — untested.",
+      "suggestion": "Unit test apiFetch against a failing-then-succeeding stub asserting the second call succeeds."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/app.js:146",
+      "issue": "The /pokemon/:name/moves-table fragment route returns the full not-found document as the table swap body when the method query doesn't match — a broken, untested error path.",
+      "suggestion": "Return a minimal 404 fragment (or the unsorted table) for htmx requests, and add a route test for the mismatch case."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/app.js:180",
+      "issue": "The move effect fallback chain (short_effect → flavor text → em dash) is untested; reordering silently changes rendered text.",
+      "suggestion": "Unit test the chain with records missing effect_entries and flavor_text_entries."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/api.js:140",
+      "issue": "toSpeciesList dedupe-by-id and dex sort are only spot-checked by acceptance tests on a few pages; duplicates or misordering on large lists would slip through.",
+      "suggestion": "Unit test with refs containing an alternate form (id > 10000) and duplicate species references."
+    }
+  ],
+  "summary": "The app contains no tests of its own — no runner, no script, no cases — leaving the acceptance suite as the only guard over a substantial data layer. The code is unusually testable (pure helpers, app.request()-drivable routes), so the omission is a choice, not a constraint. Highest exposure is buildIndex, the sort comparator, pagination/URL-state logic, and the hidden-ability merge, all of which would silently regress under refactor.",
+  "wroteTests": false,
+  "testCount": 0,
+  "valuableTests": [],
+  "lowValueTests": [],
+  "untested": [
+    {
+      "area": "Index building: type/generation enrichment, alternate-form exclusion, slot ordering (app/src/api.js:97-135)",
+      "risk": "high",
+      "likelyBug": "Corrupted types or generation tags on every list/card page at once; duplicate or missing species after a refactor of idFromUrl-based matching"
+    },
+    {
+      "area": "Moves table sorting: missing-values-last in both directions, asc/desc flip, mixed number/string keys (app/src/app.js:153-167)",
+      "risk": "high",
+      "likelyBug": "Nulls sorted first in one direction, or descending string sort comparing numbers, after a comparator refactor"
+    },
+    {
+      "area": "Home filtering and pagination: search/type/generation predicates, page clamping, omit-defaults URL builder (app/src/app.js:44-66, app/src/views.js:145-160)",
+      "risk": "high",
+      "likelyBug": "Off-by-one in page slicing, page=0/NaN producing empty lists, or URLs carrying empty q=/type= params"
+    },
+    {
+      "area": "Ability hidden-flag merge across duplicate species entries (app/src/app.js:196-202)",
+      "risk": "medium",
+      "likelyBug": "'Last entry wins' refactor flips Hidden ability badges for species with both normal and hidden entries"
+    },
+    {
+      "area": "Moves data assembly: game dedupe/order, selected-game fallback, per-move level dedupe, method ordering (app/src/app.js:73-131)",
+      "risk": "medium",
+      "likelyBug": "Duplicate Level Up rows, wrong default game after an order-based refactor, or method tables falling out of Level Up/Machine/Egg/Tutor order"
+    },
+    {
+      "area": "htmx client tweaks: empty-param stripping and fragment wiring (app/public/app.js:1-8)",
+      "risk": "medium",
+      "likelyBug": "Pushed history URLs containing type=&q= after the hook is removed as boilerplate, breaking deep links"
+    },
+    {
+      "area": "API cache semantics: promise caching and rejection eviction (app/src/api.js:17-29)",
+      "risk": "low",
+      "likelyBug": "A rejected promise permanently cached poisons every later request for that resource after an API blip"
+    },
+    {
+      "area": "Error/edge paths: htmx fragment 404 returning a full document into a table swap, onError handler (app/src/app.js:143-150, 212-215)",
+      "risk": "low",
+      "likelyBug": "A malformed sort/method query replaces a moves table with an entire HTML document, visibly breaking the page"
+    }
+  ]
+}
+```

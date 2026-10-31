@@ -1,0 +1,147 @@
+The app contains **zero tests of its own** — no test files, no test script in `app/package.json:6-9` (only `dev`/`build`/`start`), no devDependencies for a runner, and no `testLoc` per the measured facts. The acceptance suite in `tests/` is thorough on rendered roles/URLs, but that's the harness's work, not the app's. Since there is nothing to evaluate as tests, per the rubric I score coverage/regression/behaviour at 1 and spend the review on what's untested in the riskiest code.
+
+Riskiest logic, with locations:
+
+- **`buildMoves`** (`app/app/pokemon/[name]/page.jsx:56-146`): the single most complex function — version-group discovery/ordering, dedup by min `level_learned_at`, method ordering via a hand-rolled comparator (line ~96), and a `recordByName` map built by **positionally zipping** `[...entriesByName.keys()]` with `[...entriesByName.values()]` (lines ~106-110) — correct today, but a silent-mismatch trap on refactor. A 404/null move record would crash `record.name` (line ~119) with no guard or test.
+- **`sortRows`** (`app/components/MovesSection.jsx:17-33`): missing-values-last in both directions, descending implemented as filter/reverse/re-append, tie-break on `moveLabel`. Classic off-by-one/direction bugs, no tests.
+- **URL state + debounce** (`app/components/HomeControls.jsx:22-42`): 300 ms debounce keyed off `term`, separate `navigate()` reading `window.location.search` (line 34), and a `useEffect` syncing from URL `q`. A pending debounce colliding with a select change, or `replace` vs `push` semantics, are untested edge behaviour.
+- **Filter/pagination** (`app/app/page.jsx:38-52`): page clamp (`Math.min(requestedPage, totalPages)`, line 47), `page=abc`/`page=999` handling, count text, default-param omission in `queryString` (line 12).
+- **`pokemonRefsToSpecies`** (`app/lib/data.js:95-110`): alternate-form cutoff (id ≥ 10000) and dedup where **first entry wins** the `extra()` payload — for abilities, a later entry with a different `is_hidden` would be silently dropped.
+- **`apiJson`** (`app/lib/api.js:12-26`): promise cache with delete-on-failure retry; non-404 API errors throw into the render (no `error.jsx`, no test), while 404s feed `notFound()`.
+- **Pure helpers** (`app/lib/format.js:1-41`): `humanize`, `dexNumber`, `latestEnglishFlavorText`, `collapseWhitespace` — exactly the functions a cheap unit test would lock down (`mr-mime → Mr Mime`, `\f` collapsing), and the ones a data-layer refactor would touch first.
+
+All of this logic is currently guarded only by the acceptance suite, which asserts rendered output on a fixed Pokémon set; refactor-level regressions (e.g. breaking the positional map zip, flipping missing-value sort order, breaking the clamp) would surface only if a test happens to hit that exact page/row.
+
+```json
+{
+  "dimension": "tests",
+  "criteria": {
+    "coverage_of_risk": {
+      "score": 1,
+      "evidence": [
+        "app/package.json:6-9 — scripts are only dev/build/start; no test script or runner",
+        "app/app/pokemon/[name]/page.jsx:56-146 — buildMoves, the riskiest transformation in the app, has no tests",
+        "app/components/MovesSection.jsx:17-33 — sortRows (missing-last, descending reversal) untested"
+      ],
+      "rationale": "The app wrote no tests at all; none of the risky logic (moves assembly, sorting, URL state, pagination) is covered by anything the agent owns."
+    },
+    "behaviour_not_implementation": {
+      "score": 1,
+      "evidence": [
+        "app/lib/format.js:1-41 — pure helpers with obvious input/output behaviour that would have been trivial to test behaviourally, left untested",
+        "app/lib/data.js:95-110 — pokemonRefsToSpecies dedup/cutoff logic untested"
+      ],
+      "rationale": "No tests exist, so nothing asserts behaviour; the pure helpers here were the easiest behavioural targets and were skipped."
+    },
+    "regression_power": {
+      "score": 1,
+      "evidence": [
+        "app/app/pokemon/[name]/page.jsx:106-110 — recordByName built by positional zip of map keys/values; nothing would fail if a refactor desynchronized it",
+        "app/app/page.jsx:47 — page clamp (page=999, page=abc) unguarded by tests",
+        "app/lib/api.js:12-26 — cache/retry/404-vs-error semantics untested"
+      ],
+      "rationale": "With zero tests, any regression in filtering, sorting, moves assembly, or caching passes silently unless an acceptance test happens to touch that exact fixture."
+    },
+    "signal_to_noise": {
+      "score": 3,
+      "evidence": [
+        "app/ — 0 test files, 0 cases (measured facts); no low-value tests either"
+      ],
+      "rationale": "No tests means no noise, which per the rubric anchors at 3; there is nothing to trim and nothing earning its keep."
+    }
+  },
+  "overall": 1,
+  "findings": [
+    {
+      "severity": "high",
+      "location": "app/package.json:6-9",
+      "issue": "No test infrastructure at all: no test script, no runner, no test files anywhere in app/.",
+      "suggestion": "Add a minimal runner (Node's built-in test or Vitest) and unit tests for lib/format.js and lib/data.js before anything else; they are pure and need no browser."
+    },
+    {
+      "severity": "high",
+      "location": "app/app/pokemon/[name]/page.jsx:106-110",
+      "issue": "recordByName is built by zipping entriesByName.keys() and .values() positionally — correct but fragile; a refactor changing iteration or insertion order silently mismatches move rows to records, and a null (404) record would crash at record.name (~line 119).",
+      "suggestion": "Carry the name through the fetch (map entries to [name, record] pairs), guard null records, and add a unit test for buildMoves covering method order, dedup by min level, and the game fallback."
+    },
+    {
+      "severity": "high",
+      "location": "app/components/MovesSection.jsx:17-33",
+      "issue": "sortRows implements missing-last in both directions and a descending path via filter/reverse/re-append; no test would catch a flipped direction or missing values leaking into reverse order.",
+      "suggestion": "Extract sortRows to a tested module and unit-test ascending, descending, all-missing, and mixed rows."
+    },
+    {
+      "severity": "medium",
+      "location": "app/components/HomeControls.jsx:22-42",
+      "issue": "URL-state + 300ms debounce interplay is untested: a pending debounce firing after a select change re-navigates from window.location.search, and the term-sync effect races the debounce.",
+      "suggestion": "Add a test (or at least a comment-documented decision) covering type-select while a debounced search is pending, and filter-change resetting page to 1."
+    },
+    {
+      "severity": "medium",
+      "location": "app/app/page.jsx:38-52",
+      "issue": "Filter conjunction, page parsing/clamping (page=abc → 1, page=999 → last page), and count/No-Pokémon-found branches have no owned tests.",
+      "suggestion": "Extract the filtering/pagination into a pure function and unit-test clamp, empty filters, and combined type+generation+q."
+    },
+    {
+      "severity": "medium",
+      "location": "app/lib/api.js:12-26",
+      "issue": "Non-404 API failures throw into the render (no error boundary or test); 404 nulls and the delete-on-failure retry semantics of the promise cache are untested.",
+      "suggestion": "Add an error.jsx and unit tests for apiJson caching (success cached, 404 cached as null, failure retried)."
+    },
+    {
+      "severity": "medium",
+      "location": "app/lib/data.js:95-110",
+      "issue": "pokemonRefsToSpecies dedups first-wins; the ability page's hidden flag comes from extra(entry) on the surviving entry, and the species-id==default-pokemon-id assumption (app/lib/data.js:20-27) is implicit and untested.",
+      "suggestion": "Unit-test with a fixture containing alternate forms (id >= 10000), duplicates, and an entry where the later record carries the hidden flag."
+    },
+    {
+      "severity": "low",
+      "location": "app/lib/format.js:1-41",
+      "issue": "Pure spec-critical helpers (humanize 'mr-mime', dexNumber padding, latestEnglishFlavorText whitespace/\\f collapse) are untested despite being the cheapest tests to write.",
+      "suggestion": "Add a handful of table-driven unit tests; these encode the spec's definitions directly."
+    }
+  ],
+  "summary": "The app ships no tests of its own — no runner, no script, no cases — so nothing the agent wrote guards its densest logic (moves assembly, sortable tables, URL-state filtering, pagination, caching). The pure helpers in lib/format.js and lib/data.js are unit-testable in minutes and encode spec definitions, making their absence the clearest miss. Until tests exist, the acceptance suite is the only guard, and a data-layer refactor could break method ordering, dedup, or sort direction without any failing test.",
+  "wroteTests": false,
+  "testCount": 0,
+  "valuableTests": [],
+  "lowValueTests": [],
+  "untested": [
+    {
+      "area": "Moves table assembly (app/app/pokemon/[name]/page.jsx:56-146): version-group ordering, dedup by min level, method order, game selection fallback, positional name/record zip",
+      "risk": "high",
+      "likelyBug": "A refactor desynchronizes the key/value zip or breaks the method comparator; rows show the wrong move's power/type or tables appear out of the mandated Level Up/Machine/Egg/Tutor order, with no failing test."
+    },
+    {
+      "area": "Client-side sorting (app/components/MovesSection.jsx:17-33): multi-column sort with missing values last in both directions and aria-sort state",
+      "risk": "high",
+      "likelyBug": "Descending sort puts missing values first, or tie-break order flips between directions; only caught if a fixture row happens to have a null in the acceptance data."
+    },
+    {
+      "area": "Home page filtering and pagination (app/app/page.jsx:38-52, 12-24): combined q/type/generation conjunction, page clamp, default-param omission, count and empty-state text",
+      "risk": "medium",
+      "likelyBug": "page=999 or page=abc renders an empty list or 'Page 0 of 22'; clamping or parseInt regressions slip through because acceptance tests only visit well-formed URLs."
+    },
+    {
+      "area": "URL-state management and debounced search (app/components/HomeControls.jsx:22-56): debounce vs select-change race, replace-vs-push, sync from URL q",
+      "risk": "medium",
+      "likelyBug": "Changing a select within 300ms of typing causes a stale q to overwrite the filter, or navigating back re-runs a stale debounced navigate; timing bugs are invisible to snapshot-style tests."
+    },
+    {
+      "area": "API client caching and error semantics (app/lib/api.js:12-32): success/404/failure caching, retry-after-failure, non-404 error surfacing",
+      "risk": "medium",
+      "likelyBug": "A failed fetch is cached (retry broken) or a 500 from the API crashes the page instead of rendering a graceful error; nothing distinguishes 404-notFound from a transient API outage."
+    },
+    {
+      "area": "Species/alternate-form mapping (app/lib/data.js:10-63, 95-110): id cutoff at 10000, slot-ordered type map, first-wins dedup with extra() (hidden-ability flag)",
+      "risk": "medium",
+      "likelyBug": "An off-by-one at the 10000 cutoff leaks Mega forms into lists, or a dedup change makes a hidden ability lose its '(hidden)' marker."
+    },
+    {
+      "area": "Formatting helpers (app/lib/format.js:1-41): humanize, dexNumber zero-padding, English-name/flavor-text selection and whitespace collapse",
+      "risk": "low",
+      "likelyBug": "A refactor breaks the \\f collapsing or pads dex numbers to 3 digits; these encode spec definitions and are trivial to lock down with table tests."
+    }
+  ]
+}
+```

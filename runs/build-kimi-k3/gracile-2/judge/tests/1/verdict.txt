@@ -1,0 +1,127 @@
+## Review — test quality
+
+The app ships **zero tests of its own**: no test files anywhere under `app/` (facts: `tests.files: 0`, `testLoc: 0`), no `test` script in `app/package.json:6-10` (only `dev`, `build`, `start`), and no test runner among the four dependencies. The acceptance suite in `tests/` is the only guard, and it exercises rendered pages end-to-end (I checked `tests/specs/*.spec.mjs` — it's actually fairly thorough), but the prompt's question is what happens once that suite isn't the only guard. The good news: the risky logic is cleanly factored into small pure helpers (`app/src/lib/util.js`, `app/src/lib/data.js`, `app/src/lib/api.js`) that would be trivially testable — the agent just didn't write them.
+
+What a refactor could break with nobody noticing:
+
+- **Pure formatters** (`app/src/lib/util.js:5-43`): `humanize` word-splitting, `latestEnglishFlavorText`'s "last English entry + `\s+` collapse (incl. `\n`/`\f`)" rule, `dexNumber` 4-digit padding, `formatMeasure`'s hectogram/decimetre ÷10 + one-decimal, `valueOrDash`. Each encodes a fiddly spec rule that would fail silently.
+- **URL filter/pagination state** (`app/src/routes/index.js:31-40`): `parseInt(...)||1` then `Math.max`/`Math.min` clamping of `page`, silent-fallback for invalid `type`/`generation` params, and the 48-per-page slice at lines 78-81. Off-by-ones and clamp regressions land directly on user-visible pages.
+- **Species mapping** (`app/src/lib/data.js:60-83`): the `< 10000` alternate-form cut, dedupe-keeps-first-`extra` (which carries the hidden-ability flag), and dex-number sort. Breakage means duplicate cards, links to alternate forms, or dropped "Hidden ability" notes — across four routes at once.
+- **Moves grouping/ordering** (`app/src/routes/pokemon/[name].js:108-160`): the `METHOD_ORDER` rank + alphabetical comparator, `level-up` sort by level-then-name, and default game = highest `order` via `versionGroups.at(-1)` (a `NaN` comparator lurks if `order` is ever missing). Untested.
+- **Client-side sorting** (`app/src/routes/pokemon/[name].client.js:45-77`): DOM-text sorting with missing-values-last in both directions and `aria-sort` reset. The Level column shifting cell indices per table is a classic regression.
+- **Fetch-and-swap enhancement** (`app/src/routes/index.client.js:34-52`): non-200 responses silently no-op (`getElementById('results')` returns null → nothing happens while the URL changed), popstate resyncs selects. Only guarded by the acceptance suite's happy paths.
+- **API client error paths** (`app/src/lib/api.js:19-57`): promise-cache eviction on failure is done right, but `idFromUrl` **throws** on a malformed URL and would 500 the whole page; a non-404 API error propagates unhandled.
+
+Scores below reflect "no tests": `coverage_of_risk`, `behaviour_not_implementation`, `regression_power` are anchored to 1 per the rubric; `signal_to_noise` gets the no-tests default of 3 (there's no noise because there's nothing).
+
+```json
+{
+  "dimension": "tests",
+  "criteria": {
+    "coverage_of_risk": {
+      "score": 1,
+      "evidence": [
+        "app/package.json:6-10 — no test script, no test runner dependency at all",
+        "app/src/lib/util.js:5-43 — humanize, latestEnglishFlavorText, dexNumber, formatMeasure, valueOrDash: the riskiest pure logic, zero tests",
+        "app/src/lib/data.js:60-83 — pokemonRefsToSpecies (alternate-form cut, dedupe, dex sort) untested",
+        "app/src/routes/index.js:31-40 — URL filter/pagination parsing and clamping untested"
+      ],
+      "rationale": "The app contains substantial testable risk logic (formatting, filtering, pagination, mapping) and covers none of it."
+    },
+    "behaviour_not_implementation": {
+      "score": 1,
+      "evidence": [
+        "app/ — no spec/test files exist anywhere in the app (facts: tests.files 0, testLoc 0)"
+      ],
+      "rationale": "No tests exist, so nothing asserts behaviour; scored 1 per the rubric for the no-tests case."
+    },
+    "regression_power": {
+      "score": 1,
+      "evidence": [
+        "app/src/routes/pokemon/[name].client.js:45-77 — DOM sorting logic would pass or fail silently with no app-level guard",
+        "app/src/routes/index.client.js:34-52 — fetch-swap race/error handling unexercised by anything the app owns"
+      ],
+      "rationale": "Nothing the agent wrote can fail; only the external acceptance suite would catch regressions, and only for the behaviours it happens to sample."
+    },
+    "signal_to_noise": {
+      "score": 3,
+      "evidence": [
+        "app/ — zero test files, so zero low-value tests"
+      ],
+      "rationale": "No noise, but only because there is no signal either; rubric's default score for a no-tests app."
+    }
+  },
+  "overall": 1,
+  "findings": [
+    {
+      "severity": "high",
+      "location": "app/src/lib/util.js:5-43",
+      "issue": "Spec-critical pure helpers (humanize word-casing, last-English flavor text with \\s+ collapse, dex padding, ÷10 measures, em-dash fallback) have no unit tests; a data-layer refactor would break them silently.",
+      "suggestion": "Add a node:test suite covering these five helpers with real edge cases (mr-mime, form-feed flavor text, null power, 0 height) — half a day, no new deps."
+    },
+    {
+      "severity": "high",
+      "location": "app/src/routes/index.js:31-40",
+      "issue": "URL state handling (page NaN/0/out-of-range clamping, invalid type/generation silently treated as default, 48-per-page slice) is untested; off-by-one or clamp regressions surface as wrong/duplicated results.",
+      "suggestion": "Extract the param parsing/filter/slice into a testable function and test clamping plus each invalid-param case."
+    },
+    {
+      "severity": "high",
+      "location": "app/src/lib/data.js:60-83",
+      "issue": "pokemonRefsToSpecies' alternate-form exclusion (<10000), dedupe-keeps-first-extra and dex sort back four routes; regressions cause duplicate cards, alternate-form links, or dropped hidden-ability notes.",
+      "suggestion": "Unit test with stubbed api() refs: one alternate form, two refs resolving to the same species with different extras."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/routes/pokemon/[name].js:108-160",
+      "issue": "Moves method ordering (rank + alphabetical), level-up sort (level then name) and default game via versionGroups.at(-1) are untested; the a.order - b.order comparator returns NaN when order is undefined.",
+      "suggestion": "Extract method-rank/table-sort into a pure function and test it; guard against undefined order in the comparator."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/routes/pokemon/[name].client.js:45-77",
+      "issue": "Client-side table sorting sorts by DOM cell text with column indices that shift depending on the Level column; easy to break, currently untested.",
+      "suggestion": "Playwright test: click Power on both a Level Up and a Machine table, assert first/last rows and aria-sort flip; assert '—' rows land last both directions."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/routes/index.client.js:34-52",
+      "issue": "Fetch-and-swap enhancement silently no-ops on non-200 responses (missing #results) while the URL has already changed, and popstate resync is untested.",
+      "suggestion": "Check res.ok before parsing and fall back to a full navigation; add a Playwright test for back/forward and a server-error case."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/lib/api.js:19-57",
+      "issue": "idFromUrl throws on malformed URLs and non-404 API errors propagate unhandled — a single odd datum 500s a whole page; no test pins the cache-eviction-on-failure behaviour either.",
+      "suggestion": "Unit test fetchJson's 404→null and error-evicts-cache paths; make idFromUrl return null (or throw a caught, per-entry error) so one bad ref doesn't kill the page."
+    },
+    {
+      "severity": "low",
+      "location": "app/package.json:6-10",
+      "issue": "No test script and no runner dependency, so CI has no app-level test step to grow into.",
+      "suggestion": "Add a `test` script (node:test needs no dependency) wired to vitest/playwright only if/when those suites appear."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/routes/pokemon/[name].js:29-37",
+      "issue": "STAT_LABELS keys fall back silently to humanize() on a typo, and the Total sum is untested.",
+      "suggestion": "Cover in the util-style unit suite: assert the six exact labels and a total for a stubbed stats array."
+    }
+  ],
+  "summary": "The agent wrote no tests at all, despite having conveniently pure, easily testable helpers in util.js, data.js and api.js. Until the acceptance suite, everything — formatting rules, filter/pagination math, species mapping, moves ordering, client-side sorting — is unguarded against refactors. Risk is medium-term: the acceptance suite is strong, but it samples rendered output at fixed URLs and won't catch edge cases like invalid page params, malformed ids or silent no-op errors in the client enhancement.",
+  "wroteTests": false,
+  "testCount": 0,
+  "valuableTests": [],
+  "lowValueTests": [],
+  "untested": [
+    { "area": "Pure formatters in util.js (humanize, latestEnglishFlavorText, dexNumber, formatMeasure, valueOrDash)", "risk": "high", "likelyBug": "Un-collapsed flavor text with \\f, wrong dex padding, mis-formatted heights/weights or missing em-dash fallback after a refactor" },
+    { "area": "URL filter/pagination state on / (q, type, generation, page parsing, clamping, 48-slice)", "risk": "high", "likelyBug": "Page off-by-one or clamp regression showing duplicate/missing species; invalid params crashing or mis-filtering" },
+    { "area": "pokemonRefsToSpecies mapping (alternate-form cut, dedupe, hidden-extra, dex sort)", "risk": "high", "likelyBug": "Duplicate cards, links to alternate-form names, or lost 'Hidden ability' notes on ability pages" },
+    { "area": "Moves table construction: method ordering, level-up sort, default game selection", "risk": "medium", "likelyBug": "Wrong table order or wrong default game after version-group order changes; NaN comparator with undefined order" },
+    { "area": "Client-side column sorting (missing-values-last, numeric vs string, aria-sort)", "risk": "medium", "likelyBug": "Sorting the wrong column when the Level column shifts indices; missing values floating to the top in descending mode" },
+    { "area": "Client fetch-and-swap + popstate enhancement on / and the moves section", "risk": "medium", "likelyBug": "Stale results after a non-200 fetch while the URL changed; selects desynced after back/forward" },
+    { "area": "API client error handling (idFromUrl throw, non-404 API errors, cache eviction)", "risk": "medium", "likelyBug": "One malformed resource URL or API 500 crashing the whole page with an unhandled promise" },
+    { "area": "Type/ability/move 404 paths beyond the one sampled missingno URL", "risk": "low", "likelyBug": "A route-level refactor that returns 200 with an empty page or throws instead of rendering the Not found page" }
+  ]
+}
+```

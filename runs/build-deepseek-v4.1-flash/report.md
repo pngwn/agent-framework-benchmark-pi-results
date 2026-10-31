@@ -34,7 +34,7 @@ Values in parentheses are the Opus 5.5 medians from Nolan Lawson's published bui
 | tanstack-start | 2127 (1697) | 930 (725) | 962 | 426 | 596 | 10.4 | 174 | 201 | 47 (53) | 11 | 0 |
 | solidstart | 2016 (1630) | 926 (720) | 919 | 507 | 565 | 11.2 | 169 | 195 | 49 (52) | 6 | 0 |
 | vanilla | 1836 (1492) | 857 (665) | 1230 | 23 | 575 | 9.2 | 138 | 243 | 6 (6) | 1 | 0 |
-| hono-htmx | 1557 (1370) | 765 (631) | 808 | 222 | 545 | 9.6 | 136 | 179 | 13 (51) | 3 | 0 |
+| hono-htmx | 1557 (1370) | 764 (631) | 808 | 222 | 545 | 7.2 | 136 | 179 | 13 (51) | 3 | 0 |
 | angular | 2310 (1944) | 1040 (885) | 1375 | 360 | 556 | 13.1 | 154 | 163 | 28 (50) | 15 | 0 |
 | next | 2055 (1539) | 868 (673) | 1096 | 438 | 576 | 9.3 | 171 | 188 | 42 (47) | 3 | 0 |
 | qwik | 2116 (1744) | 939 (733) | 999 | 474 | 595 | 10.9 | 160 | 188 | 53 (57) | 14 | 0 |
@@ -214,9 +214,9 @@ Median of samples, then of iterations. Experimentalness is descriptive, not bett
 | gracile-4 | pass | 9.68 | 0.20 | 83 | 1052 |  |
 | gracile-5 | pass | 10.80 | 0.14 | 118 | 848 |  |
 | hono-htmx-1 | pass | 3.88 | 0.11 | 47 | 835 |  |
-| hono-htmx-2 | pass | 6.90 | 0.14 | 70 | 763 |  |
+| hono-htmx-2 | pass | 6.90 | 0.14 | 70 | 762 |  |
 | hono-htmx-3 | pass | 8.58 | 0.15 | 78 | 793 |  |
-| hono-htmx-4 | pass | 7.20 | 0.12 | 84 | 765 |  |
+| hono-htmx-4 | pass | 7.20 | 0.12 | 84 | 764 |  |
 | hono-htmx-5 | pass | 10.77 | 0.17 | 100 | 718 |  |
 | next-1 | pass | 13.90 | 0.19 | 120 | 868 |  |
 | next-2 | pass | 8.65 | 0.12 | 95 | 868 |  |
@@ -229,7 +229,7 @@ Median of samples, then of iterations. Experimentalness is descriptive, not bett
 | nuxt-4 | pass | 3.97 | 0.10 | 44 | 1094 |  |
 | nuxt-5 | pass | 6.97 | 0.13 | 84 | 832 |  |
 | qwik-1 | fail | 13.80 | 0.18 | 124 | 963 |  |
-| qwik-2 | pass | 25.96 | 0.18 | 172 | 1415 |  |
+| qwik-2 | pass | 25.96 | 0.18 | 172 | 1330 |  |
 | qwik-3 | pass | 6.01 | 0.30 | 71 | 810 |  |
 | qwik-4 | pass | 13.18 | 0.20 | 118 | 863 |  |
 | qwik-5 | pass | 9.49 | 0.43 | 97 | 939 |  |

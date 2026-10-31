@@ -1,0 +1,152 @@
+I've reviewed the whole app (`app/src/shared`, `app/src/server`, `app/src/client`, `app/server/server.mjs`, `app/vite.config.js`, `app/package.json`) against the five scenarios, and checked the current stable Vite (8.3.5, Oct 2026 — the app pins `^8.3.5`, so it's current).
+
+Notable architecture: a dependency-free SSR server (`node:http` + string templates), pure shared modules (`format.js`, `components.js`, `home-view.js`) imported by both the SSR renderer and the browser bundle, and a data layer (`api.js`) that owns fetching/caching. There is no Vite dev-server integration — `npm run dev` just runs the production server with a raw-source fallback.
+
+```json
+{
+  "dimension": "editability",
+  "criteria": {
+    "removability": {
+      "score": 4,
+      "evidence": [
+        "app/src/shared/router.js:6 — abilities is one token in one route regex; delete it and /abilities/... 404s",
+        "app/src/server/pages.js:326-357 — abilityPage() is a self-contained function; nothing else calls it",
+        "app/src/server/pages.js:447-448 — one switch case to delete",
+        "app/src/server/pages.js:255-281 — the only inbound links are the Abilities section markup inlined in pokemonPage()",
+        "app/src/client/styles.css:214 — .hidden-note becomes one dead CSS rule",
+        "app/src/shared/components.js:13-24 and app/src/server/api.js:150-155 — the extra/extraFor card machinery exists only for the ability page and is orphaned after removal"
+      ],
+      "rationale": "Removal is contained in three files (router, pages, one CSS rule) with no nav link to chase; the only entanglement is that the Abilities section is inlined inside another page's renderer and the extraFor plumbing in the shared card component goes dead."
+    },
+    "changeability": {
+      "score": 4,
+      "evidence": [
+        "app/src/server/api.js:112 and app/src/server/api.js:143-147 — the only two sprite-derivation sites (buildSummaries prefers front_default, speciesForPokemonRef uses the pattern URL); both feed species.sprite",
+        "app/src/shared/components.js:13-28 — every card list renders species.sprite via one speciesCard(), so a fix in api.js covers home, move, ability and type lists with no page edits",
+        "app/src/shared/home-view.js:8-17 — filter logic shared by SSR and client, so filter bugs are fixed once",
+        "app/src/client/main.js:74 — NUMERIC_COLUMNS re-states which moves-table columns are numeric, duplicating knowledge that lives in pages.js:96-112",
+        "app/src/server/pages.js:292-294 vs app/src/server/pages.js:329-331 — English-effect-with-fallback chain duplicated verbatim for moves and abilities"
+      ],
+      "rationale": "Bugs mostly land in one obvious place (data layer or one shared module), and the sprite fix is one file for every list; but that file has two divergent derivation sites, and two concerns (effect fallback, table column semantics) are each duplicated across two files."
+    },
+    "coupling": {
+      "score": 4,
+      "evidence": [
+        "app/server/server.mjs:96-103 — clean seam: route -> {status,title,main} -> layout; server.mjs knows nothing about page internals",
+        "app/src/shared/home-view.js:8,41 — the same pure functions power SSR output and client re-render, so markup can't drift",
+        "app/src/server/api.js:5 — API_BASE_URL is read in exactly one place; no other module knows the base URL",
+        "app/src/client/main.js:14-22 — client binds to server-emitted DOM by hardcoded element IDs (species-data, filter-search, results) with no shared constant linking it to app/src/server/pages.js:55-74",
+        "app/src/client/main.js:77-85 — sorting reads th[data-sort-key] and the numeric set, coupling the client to the moves table's column contract in pages.js:96-112"
+      ],
+      "rationale": "Server, client and data layer are separated by real seams (pure shared modules, a page-descriptor return type, one env-reading data module), but the progressive-enhancement layer communicates with the SSR markup through an implicit ID/data-attribute contract and a re-stated column list — renaming any of it fails silently in two files."
+    },
+    "abstraction_design": {
+      "score": 3,
+      "evidence": [
+        "app/src/shared/components.js:4,13,29 — typeBadge/speciesCard/section are genuine primitives reused by every page",
+        "app/src/server/api.js:32,39,54,150-155 — record()/getList()/mapLimit()/speciesCardsForPokemonRefs({extraFor}) stretch well: an Items page gets fetch, caching and cards for free",
+        "app/src/server/pages.js:303,351,401,416 plus app/src/shared/home-view.js:59 — the '<count> Pokémon' + card-list markup is copy-pasted in four places instead of one cardListSection helper",
+        "app/src/server/pages.js:96-99 — movesTable grows an isLevelUp boolean that reshapes columns/rows",
+        "app/src/server/pages.js:292-294 — move facts/effect markup is inlined, so an Items page would copy the facts <dl> and the effect-fallback chain"
+      ],
+      "rationale": "The data and component primitives are designed around the app's real variation and stretch nicely (Items reuses most of the stack), but the per-page section markup is inlined and the count+card-list fragment is duplicated four times, so any change to that shared shape means four coordinated edits plus a boolean-flag column table."
+    }
+  },
+  "overall": 4,
+  "findings": [
+    {
+      "severity": "medium",
+      "location": "app/server/server.mjs:27",
+      "issue": "The dev fallback serves raw /src/client/main.js, whose `import './styles.css'` (app/src/client/main.js:4) fails Chromium's strict MIME check for module scripts — the whole client bundle silently never loads, so filtering, the game select and sorting are dead under `npm run dev`; there is no Vite dev server or HMR, and `npm start` without a prior build silently hits the same path",
+      "suggestion": "Either run Vite in middleware mode inside server.mjs for dev, or drop the raw-source fallback and make `dev` a documented `vite build && node server/server.mjs`; fail loudly when dist/ and the manifest are missing"
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/client/main.js:74",
+      "issue": "NUMERIC_COLUMNS duplicates the column semantics defined by sortableHeader/movesTable in app/src/server/pages.js:96-112; adding or renaming a move-table column requires remembering to update both files, and a miss only shows up as wrong sorting",
+      "suggestion": "Emit the column kind from the server (e.g. data-sort-type=\"number\" on the th) or move the sort keys/types into a shared module both sides import"
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/server/api.js:112",
+      "issue": "Sprite derivation is split across buildSummaries (front_default ?? pattern URL) and speciesForPokemonRef (pattern URL only, plus a speciesId-based fallback at :143-147), with two different rules for the same concept",
+      "suggestion": "Extract a single spriteForSpecies(pokemonId) helper used by both call sites so the Deoxys-style fix lands once and every card list stays consistent"
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/server/pages.js:303",
+      "issue": "The '<n> Pokémon' count line + card-grid <ul> fragment is copy-pasted at pages.js:303, :351, :401, :416 and home-view.js:59; changing the empty-state, count text or card list shape means five edits",
+      "suggestion": "Extract a cardListSection(count, cards) (or generic listSection(count, items, noun)) helper next to section() in shared/components.js"
+    },
+    {
+      "severity": "low",
+      "location": "app/src/server/api.js:15",
+      "issue": "Four separate memoization idioms (cache Map :15, listCache Map :36, summariesPromise :70, speciesMapPromise :121) each implement 'cache forever, delete on failure' by hand; a change to caching rules (TTLs, invalidation, size limits) must be re-applied four times",
+      "suggestion": "Route list and derived-aggregate caching through one memoize helper (e.g. memoizePromise(key, factory)) so the rules live in one place"
+    },
+    {
+      "severity": "low",
+      "location": "app/src/server/pages.js:292",
+      "issue": "The English short_effect + latest-flavor + em-dash fallback chain is duplicated verbatim for moves (:292-295) and abilities (:329-332)",
+      "suggestion": "Extract shortEffectOrFallback(record) into a shared module; an Items page will need the same logic"
+    },
+    {
+      "severity": "low",
+      "location": "app/src/shared/components.js:13",
+      "issue": "The `extra` option on speciesCard and the `extraFor` callback on speciesCardsForPokemonRefs (app/src/server/api.js:150-155) exist solely to serve the ability page's 'Hidden ability' note; removing abilities leaves them as unreferenced machinery in shared code",
+      "suggestion": "Either accept it as a generic card affordance or inline the hidden note where it's used, keeping the shared card primitive minimal"
+    },
+    {
+      "severity": "low",
+      "location": "app/server/server.mjs:68",
+      "issue": "The production server serves any /src/** path, exposing the app's source and keeping the dev fallback reachable in production deployments",
+      "suggestion": "Gate the /src/ handler behind an explicit NODE_ENV/DEV flag and 404 it in production"
+    },
+    {
+      "severity": "low",
+      "location": "app/src/server/pages.js:26",
+      "issue": "All five page renderers plus the moves-table machinery live in one ~450-line flat module; per-page merge conflicts and navigation cost grow with every page added",
+      "suggestion": "Split into one module per page (home/pokemon/move/ability/type) behind the same renderPage contract; the router/switch already makes the seams obvious"
+    }
+  ],
+  "summary": "This is a genuinely maintainable vanilla-JS/Vite app: a thin router, pure shared template modules that keep SSR and client markup in lockstep, and a single data layer that owns the API base URL and caching, so the five scenarios mostly land in one or two files. The costs are localized: count/card-list markup copy-pasted across four sites, sprite derivation split across two functions, an implicit DOM/column contract between pages.js and main.js, and a dev script that bypasses Vite and serves a client bundle Chromium refuses to execute. Net: changes are easy to find and mostly one-file; the rough edges are duplication rather than entanglement.",
+  "scenarios": [
+    {
+      "change": "Remove the Abilities pages and every link to them",
+      "files": [
+        "app/src/shared/router.js",
+        "app/src/server/pages.js",
+        "app/src/client/styles.css",
+        "app/src/shared/components.js",
+        "app/src/server/api.js"
+      ],
+      "difficulty": 4,
+      "notes": "One regex token (router.js:6), delete abilityPage + its switch case (pages.js:326-357, 447-448), delete the inlined Abilities section in pokemonPage (pages.js:255-281), drop .hidden-note (styles.css:214). Only wrinkle: the extra/extraFor card machinery in shared code goes dead."
+    },
+    {
+      "change": "Fix the wrong-sprite bug for species like Deoxys",
+      "files": ["app/src/server/api.js"],
+      "difficulty": 4,
+      "notes": "Every list renders cards through speciesCard (components.js:13), which just prints species.sprite, so the fix is confined to the data layer — but it must be applied to both derivation sites (api.js:112 and api.js:143-147), which currently use different rules; extracting one spriteForSpecies() makes it a one-liner."
+    },
+    {
+      "change": "Sort every Pokémon card list by name",
+      "files": ["app/src/server/api.js"],
+      "difficulty": 4,
+      "notes": "Two sorts centralize ordering: speciesCardsForPokemonRefs (api.js:157) covers the move, ability and type lists in one edit, and buildSummaries' final sort (api.js:115) covers home for both SSR and the client (the client re-renders from the same embedded array). A visible sort control would additionally touch shared/home-view.js and client/main.js."
+    },
+    {
+      "change": "Add an Items section (/items, /items/:name) shaped like Moves",
+      "files": ["app/src/shared/router.js", "app/src/server/pages.js"],
+      "difficulty": 4,
+      "notes": "record()/getList() work for any resource (api.js:32-39), and section()/format helpers/speciesCardsForPokemonRefs are reusable as-is; you add one regex token, an itemPage() modeled on movePage, and two switch cases. The reused share is high — what gets copied is the facts <dl> and effect-fallback markup that are inlined rather than extracted, plus a small items index page modeled on typesPage()."
+    },
+    {
+      "change": "Change the API base URL and caching rules",
+      "files": ["app/src/server/api.js"],
+      "difficulty": 4,
+      "notes": "The base URL is read in exactly one place (api.js:5) and no other module constructs API or media URLs except the shared spriteUrl() in the same file. Caching rules, however, are implemented four times over (cache Map :15, listCache :36, summariesPromise :70, speciesMapPromise :121), so a TTL or invalidation change means reworking all four idioms in one file."
+    }
+  ]
+}
+```

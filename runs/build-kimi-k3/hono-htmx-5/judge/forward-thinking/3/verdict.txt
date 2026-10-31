@@ -1,0 +1,112 @@
+I've read the full app, verified each framework API against current release notes, and checked the dependency versions. Here's my review.
+
+## What I found
+
+**Currency.** The lockfile pins exactly the current stable generation: `hono@4.13.14` (npm `latest`, published 2026-10-25; v5 is only at `5.0.0-rc.1`, so v4 is correct), `@hono/node-server@2.1.5` (latest, 2026-10-13), and `htmx.org@2.0.11` (2.x remains the npm `latest` line and got a release in Sept 2026, a month after htmx 4.0 shipped). The code already uses the v5-shaped patterns where they exist: it imports `serveStatic` from the separate `@hono/node-server/serve-static` adapter (which is exactly what v5 mandates for adapters), it's ESM-only, and it reads query params defensively (`c.req.query('q') ?? ''` at `app/src/app.js:55`) which matches v5's `query()` returning `undefined`. Nothing in the app is a legacy-era API; the deprecated `raw` escape hatch in `hono/html` is correctly never used.
+
+**Platform.** Native `fetch` against the API (`app/src/api.js:21`), `URLSearchParams` for URL building (`app/src/views/home.js:9`), `Map`/`Set` for indexes, `padStart` for dex numbers, ES modules everywhere, CSS grid + custom properties from `tokens.css`, `role="list"`/`role="listitem"` to restore list semantics when list styling is removed, `:focus-visible` outlines and `loading="lazy"` sprites. The one gap is no timeout on outbound fetches — a hung API request hangs forever and the cached promise never clears (`app/src/api.js:17-31`); `AbortSignal.timeout()` is the platform answer.
+
+**Dependencies.** Three runtime deps, zero dev deps, no CSS framework, htmx vendored into `public/vendor` by the build script rather than pulled from a CDN. That's about as lean as this app can be while still meeting the "update as the user types" requirement, and htmx is used as progressive enhancement over a working plain-GET form (`app/src/views/home.js:41-47`, `app/src/public/app.js:3`).
+
+**Churn.** Data access is entirely behind `app/src/api.js` and the views are pure functions over plain objects; the same templates render both full pages and htmx fragments (`app/src/views/home.js:36`, `app/src/views/pokemon.js:106`), so there's no duplicated render path to drift. The weak points: static assets are hand-listed as four literal routes (`app/src/app.js:27-29`) instead of one mounted middleware, `serveStatic({ root: './public' })` resolves against `process.cwd()` so starting from another directory breaks assets, and a view imports `API_BASE` from the data layer to build sprite URLs (`app/src/views/components.js:3,11`), coupling presentation to server config. There are no types or JSDoc on the API contract at all.
+
+```json
+{
+  "dimension": "forward-thinking",
+  "criteria": {
+    "latest_apis": {
+      "score": 5,
+      "evidence": [
+        "app/package-lock.json:28-37 — pins hono 4.13.14, @hono/node-server 2.1.5, htmx.org 2.0.11, each the current stable (v5 of Hono is RC-only per github.com/honojs/hono releases, 2026-10-10)",
+        "app/src/app.js:5,27 — serveStatic imported from the separate @hono/node-server/serve-static adapter, exactly the shape Hono v5 mandates for adapters (hono.dev/docs/guides/migrating-to-v5)",
+        "app/src/views/layout.js:1 — html tagged template from hono/html, the current non-JSX templating primitive; deprecated raw is never used",
+        "app/src/app.js:55,108,169 — c.req.query(...) ?? '' reads already match v5's undefined-returning query() (honojs/hono v5.0.0-rc.0 notes)",
+        "app/src/views/home.js:41-47 — htmx 2 attributes (hx-get/hx-trigger/hx-push-url) on the current 2.x line, which still receives releases (2.0.11, 2026-09-22)"
+      ],
+      "rationale": "Everything is at the current stable release and the app already follows the API shapes Hono's v5 RC is converging on (separate adapter package, defensive query reads, ESM-only). Nothing here is a legacy-era API."
+    },
+    "platform": {
+      "score": 4,
+      "evidence": [
+        "app/src/api.js:21 — native fetch to the API, no HTTP client dependency",
+        "app/src/views/home.js:9-16 — URLSearchParams to build pagination/filter URLs, omitting defaults",
+        "app/src/views/components.js:11 — loading=\"lazy\" and explicit width/height on sprites",
+        "app/src/views/components.js:23-25,38 — role=\"list\"/\"listitem\" to preserve AT semantics with list styling removed; app/public/styles.css:36-40 :focus-visible outlines",
+        "app/src/api.js:17-31 — fetch with no AbortSignal.timeout(); a hung API call hangs the request and the failure path only clears the cache on rejection, which a timeout would provide"
+      ],
+      "rationale": "Reaches for the platform consistently (fetch, URLSearchParams, grid, custom properties, ARIA, ESM); the only omission is a fetch timeout, where AbortSignal.timeout() is the one-line platform fix."
+    },
+    "dependencies": {
+      "score": 5,
+      "evidence": [
+        "app/package.json:6-11 — exactly three runtime deps, zero dev deps, no CSS/UI framework",
+        "app/scripts/build.mjs:8-11 — htmx is vendored into public/vendor at build time instead of a CDN script tag",
+        "app/src/api.js:37-47 — hand-rolled mapLimit for bounded concurrency instead of adding p-limit"
+      ],
+      "rationale": "Minimal, current and well-maintained: every dependency earns its place, htmx is justified by the live-search requirement, and concurrency control is hand-rolled rather than adding a package."
+    },
+    "churn_resistance": {
+      "score": 4,
+      "evidence": [
+        "app/src/api.js:1-17 — all data access (including API_BASE and the cache) sits behind one module; views never fetch",
+        "app/src/views/home.js:36-49 — the same resultsFragment renders both the full page and the htmx swap, so no duplicated render path",
+        "app/src/views/pokemon.js:106 — movesSection likewise shared between the full page and the game-change fragment",
+        "app/src/app.js:27-29 — four static assets hand-listed as literal routes; a new asset requires a source edit rather than a file drop",
+        "app/src/app.js:28 — serveStatic({ root: './public' }) resolves against process.cwd(), so assets break if the server is started from another directory",
+        "app/src/views/components.js:3,11 — a view imports API_BASE from the data layer to build sprite URLs, coupling presentation to server configuration",
+        "app/src/app.js:304-310 — app.onError returns bare text, dropping the page layout, and its (err, c) signature is the one place Hono v5 changes (hono.dev/docs/guides/migrating-to-v5)"
+      ],
+      "rationale": "The boundaries are clean — one data module, pure view functions, shared templates for page and fragment — so a framework upgrade touches few files. The deductions are the hand-maintained static route list with a cwd-relative root and the env coupling leaked into a view."
+    }
+  },
+  "overall": 4,
+  "findings": [
+    {
+      "severity": "medium",
+      "location": "app/src/app.js:27-29",
+      "issue": "Static assets are four hard-coded literal routes with serveStatic({ root: './public' }), which resolves against process.cwd(); adding an asset needs a source edit and starting the server from a different directory breaks assets entirely.",
+      "suggestion": "Serve the whole directory with one middleware — app.use('/assets/*', serveStatic({ root: pub })) — and resolve the root from import.meta.url (path.join(path.dirname(fileURLToPath(import.meta.url)), '../public')) so it is cwd-independent."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/api.js:21",
+      "issue": "apiJson's fetch has no timeout, so a hung upstream request hangs the page render forever and the cached promise never settles.",
+      "suggestion": "Pass { signal: AbortSignal.timeout(10_000) } to fetch; the existing p.catch(cache.delete) then clears the entry automatically."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/views/components.js:3",
+      "issue": "A view template imports API_BASE from the data layer to construct sprite URLs, coupling presentation to server configuration.",
+      "suggestion": "Give pokemonCard a resolved sprite URL (or a mediaBase passed in with the data) so views stay pure functions of data."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/app.js:307-310",
+      "issue": "onError returns a bare text body, dropping the page layout, and its (err, c) signature is the one signature Hono v5 changes.",
+      "suggestion": "Render the standard layout with a friendly error main; when upgrading to v5, switch to (c, next) and read c.error in one place."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/api.js:63-126",
+      "issue": "The PokeAPI response shapes are completely untyped (typeLines: 0), so a data-shape change surfaces as scattered optional-chaining failures rather than at the boundary.",
+      "suggestion": "Add JSDoc @typedef declarations for the handful of API records (species, pokemon, type, generation) in api.js so the contract lives in one file and editors catch misuse."
+    }
+  ],
+  "summary": "This is a lean, current-generation Hono app: the exact latest stable versions of hono, the node adapter and htmx, with data access isolated in one module and page/fragment rendering sharing the same templates. It already anticipates Hono v5 (separate adapter import, defensive query reads, ESM-only), so a major upgrade would touch a couple of lines. The remaining churn risks are a hand-listed, cwd-dependent static-asset setup, a missing fetch timeout, and zero typing on the API contract.",
+  "apis": [
+    { "api": "Hono (new Hono())", "location": "app/src/app.js:13", "status": "current", "replacement": "" },
+    { "api": "serveStatic from @hono/node-server/serve-static", "location": "app/src/app.js:5", "status": "current", "replacement": "" },
+    { "api": "serve from @hono/node-server", "location": "app/src/index.js:1", "status": "current", "replacement": "" },
+    { "api": "html from hono/html", "location": "app/src/views/layout.js:1", "status": "current", "replacement": "" },
+    { "api": "c.html(body, status)", "location": "app/src/app.js:32-33", "status": "current", "replacement": "" },
+    { "api": "app.notFound / app.onError(err, c)", "location": "app/src/app.js:304", "status": "current", "replacement": "current on Hono 4 (latest stable); Hono 5.0.0-rc changes onError to (c, next) with c.error — one-line change in this file" },
+    { "api": "htmx hx-* attributes (htmx 2.x)", "location": "app/src/views/home.js:41-47", "status": "current", "replacement": "htmx 4.0 exists since 2026-08 but 2.x remains the npm 'latest' tag and is still maintained (2.0.11, 2026-09-22)" },
+    { "api": "htmx:configRequest event", "location": "app/public/app.js:3", "status": "current", "replacement": "" }
+  ],
+  "dependencies": [
+    { "name": "hono", "verdict": "modern", "note": "4.13.14 is npm latest (2026-10-25); v5 is RC-only, so 4.x is the right stable" },
+    { "name": "@hono/node-server", "verdict": "modern", "note": "2.1.5 is the latest release (2026-10-13); zero transitive dependencies" },
+    { "name": "htmx.org", "verdict": "modern", "note": "2.0.11 is the latest of the still-maintained 2.x line that npm tags 'latest'; tiny, dependency-free, used as progressive enhancement over a working plain-GET form" }
+  ]
+}
+```

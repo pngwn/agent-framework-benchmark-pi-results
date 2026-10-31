@@ -1,0 +1,90 @@
+## Review
+
+The app is a server-rendered Astro 7 project (current stable — 7.4.4, released Oct 2026) with the official Node adapter in standalone mode, plain `.astro` components, and two small vanilla-JS client scripts. Structure is clean: three small lib modules (`api.js` fetch/cache, `data.js` PokeAPI-shaped aggregations, `format.js` pure helpers), five focused components, pages mirroring routes exactly (`[name].astro` dynamic params, `404.astro`).
+
+**Idiom.** Config (`app/astro.config.mjs:1-6`) is exactly what current docs prescribe: `output: 'server'`, `@astrojs/node` standalone. Data fetching in frontmatter with `await` + `Promise.all` (`app/src/pages/index.astro:23-32`) is the documented SSR pattern; `Astro.response.status = 404` (`app/src/pages/pokemon/[name].astro:130-135`) and `Astro.self` recursion for the evolution tree (`app/src/components/EvolutionNode.astro:17`) are both current APIs. Two small misses: client behavior lives as unbundled `/public` JS loaded with `is:inline` (`app/src/pages/index.astro:96`, `app/src/pages/pokemon/[name].astro:311`) instead of Astro's processed/TypeScript-checked `<script>` handling; and Astro 7's new route caching (`routeRules`/`memoryCache`) is ignored even though pages like `/pokemon/:name` do heavy, cacheable work — optional, but it's the framework's new headline feature for exactly this shape of app. The hand-rolled per-URL fetch cache (`app/src/lib/api.js:8-36`) is fine: Astro 7's cache API caches *responses*, not arbitrary data fetches, so this isn't a reinvented framework primitive.
+
+**Correctness.** Genuinely careful: in-flight promise caching prevents fetch stampedes and failed promises are evicted so transient errors can be retried (`app/src/lib/api.js:22-35`); bounded-concurrency fan-out preserves order (`app/src/lib/api.js:39-50`); the home-page AJAX has a sequence guard against out-of-order responses (`app/public/js/home.js:28-36`); pagination clamps out-of-range `page` (`app/src/pages/index.astro:41`); 404s are handled uniformly, including pre-checking excluded types to avoid pointless fetches (`app/src/pages/types/[name].astro:17-20`). Unbounded memory cache is explicitly allowed by the spec. Remaining risks are minor: no timeout/abort on upstream fetches; `home.js:36-38` silently swallows a failed refresh and leaves stale results with no user feedback; a Pokémon holding the same ability both normally and hidden would take the first entry's flag (`app/src/pages/abilities/[name].astro:33-36`); `defaultVariety` is dereferenced without a guard (`app/src/pages/pokemon/[name].astro:37`). No XSS surface: all API data flows through Astro's escaping.
+
+**Abstractions & readability.** Boundaries are good — server-only lib never leaks into client code, components are small and typed (`PokemonCard.astro:4-10`), `format.js` is pure and reusable. Two duplications will need untangling: the abilities page re-implements `pokemonRefsToSpecies` inline because it needs `is_hidden` (`app/src/pages/abilities/[name].astro:24-38` vs `app/src/lib/data.js:61-77`), and the identical 404 try/catch block is copy-pasted in four pages. The pervasive `let data: any` + `as any` style (`app/src/pages/pokemon/[name].astro:29` and throughout) throws away Astro's TS support on data the whole template depends on. The Pokémon page carries ~150 lines of data shaping inline in frontmatter; extracting it would help most.
+
+**Review cost.** I'd approve after nits: mostly typing, one extracted helper, and possibly moving scripts into Astro's bundler. Nothing structural would block merge.
+
+```json
+{
+  "dimension": "mergeability",
+  "criteria": {
+    "idiomatic": {
+      "score": 4,
+      "evidence": [
+        "app/astro.config.mjs:1-6 — output 'server' + @astrojs/node standalone, current recommended config",
+        "app/src/pages/index.astro:23-32 — awaited parallel data loading in frontmatter, the documented SSR pattern",
+        "app/src/components/EvolutionNode.astro:17 — Astro.self recursion for the evolution tree",
+        "app/src/pages/pokemon/[name].astro:131 — Astro.response.status = 404, current API",
+        "app/src/pages/index.astro:96 — client JS loaded via is:inline from /public instead of Astro's bundled <script> handling",
+        "app/astro.config.mjs:1-6 — Astro 7 route caching (routeRules/memoryCache) unused despite cacheable heavy pages"
+      ],
+      "rationale": "Current Astro 7.4 with standard server-rendered patterns throughout; only misses are unbundled public scripts and not considering Astro 7's new route caching."
+    },
+    "correctness_risks": {
+      "score": 4,
+      "evidence": [
+        "app/src/lib/api.js:8-36 — in-flight promise caching with failed-promise eviction; no fetch timeout/abort though",
+        "app/public/js/home.js:28-36 — sequence guard prevents stale out-of-order result swaps",
+        "app/src/pages/index.astro:41 — page param clamped to valid range",
+        "app/public/js/home.js:36-38 — failed refresh silently swallowed, stale results left in place",
+        "app/src/pages/abilities/[name].astro:33-36 — first-entry wins for hidden flag when a Pokémon lists the ability twice",
+        "app/src/pages/pokemon/[name].astro:37 — defaultVariety dereferenced without a guard (500 instead of 404 on malformed data)"
+      ],
+      "rationale": "Race conditions, fan-out, caching and 404s are handled with real care; remaining issues are minor edge cases and error-feedback gaps, nothing serious."
+    },
+    "global_abstractions": {
+      "score": 4,
+      "evidence": [
+        "app/src/lib/api.js:8 — single module-level fetch cache, clearly scoped and commented, allowed by spec",
+        "app/src/lib/format.js:1-34 — pure, dependency-free helpers, no utils dump",
+        "app/src/pages/abilities/[name].astro:24-38 — re-implements pokemonRefsToSpecies inline instead of extending it",
+        "app/src/pages/moves/[name].astro:22-24 — duplicated 'last English effect entry' logic also in abilities page",
+        "app/src/pages/pokemon/[name].astro:130-135 — identical 404 try/catch copy-pasted in four page files",
+        "app/src/components/PokemonCard.astro:1 — component imports server-only api.js for spriteFor; fine while all components are SSR-only, but a leaky boundary if one ever gains client JS"
+      ],
+      "rationale": "Abstractions are few with clear server/client boundaries; the duplications (species-mapping and 404 handling) are small but real and will need untangling."
+    },
+    "readability": {
+      "score": 4,
+      "evidence": [
+        "app/src/lib/format.js — well-named, single-purpose functions with spec-driven names",
+        "app/src/pages/pokemon/[name].astro:29-135 — ~150 lines of inline data shaping in frontmatter; heaviest file in the app",
+        "app/src/pages/pokemon/[name].astro:29 — 'let data: any' pattern repeated across all dynamic pages",
+        "app/src/lib/api.js:1-2 — comments explain the caching policy, the right kind of why-comment",
+        "app/src/components/PokemonCard.astro:4-10 — typed Props interface, in contrast to the untyped page data"
+      ],
+      "rationale": "Organisation and naming are consistent and easy to follow; rough spots are the oversized Pokémon page frontmatter and pervasive any-typing."
+    },
+    "review_cost": {
+      "score": 4,
+      "evidence": [
+        "app/src/pages/moves/[name].astro — clean, focused page representative of the codebase quality",
+        "app/public/js/pokemon.js:30-45 — compact, correct sortable tables with aria-sort and missing-last semantics",
+        "app/src/styles/global.css:138-155 — hand-written CSS per type token, no framework, consistent",
+        "app/src/lib/data.js:23-31 — species list derived from API, alternate forms filtered in one place"
+      ],
+      "rationale": "Approve after a round of nits: light typing on page data, extract the duplicated species/404 helpers, optionally move scripts into Astro's bundler. Nothing structural blocks merge."
+    }
+  },
+  "overall": 4,
+  "findings": [
+    { "severity": "medium", "location": "app/src/pages/pokemon/[name].astro:29", "issue": "Pervasive `data: any` / `as any` typing across all dynamic pages discards Astro's TypeScript checking on the data every template depends on", "suggestion": "Define light interfaces for the PokeAPI responses (species, move, ability, type) and the derived page data in a types file" },
+    { "severity": "medium", "location": "app/src/pages/abilities/[name].astro:24-38", "issue": "Re-implements pokemonRefsToSpecies (data.js:61-77) to capture is_hidden, producing two near-identical fan-out-and-dedupe blocks", "suggestion": "Extend pokemonRefsToSpecies to return the source entry (or a mapper callback) so both pages share one implementation" },
+    { "severity": "low", "location": "app/src/pages/pokemon/[name].astro:130-135", "issue": "Identical 404 try/catch block copy-pasted in four dynamic pages", "suggestion": "Extract a `loadOrNotFound(fn)` helper into lib/api.js or data.js" },
+    { "severity": "low", "location": "app/src/pages/pokemon/[name].astro:29-135", "issue": "~150 lines of data shaping inline in the page frontmatter make the heaviest file harder to follow", "suggestion": "Move the shaping into a lib function (e.g. getPokemonPage(name)) so the page reads like the others" },
+    { "severity": "low", "location": "app/src/pages/index.astro:96", "issue": "Client scripts live in /public and are loaded with is:inline, bypassing Astro's bundled, TypeScript-checked script handling (same in pokemon/[name].astro:311)", "suggestion": "Move them to processed <script> tags (or colocated files) so Astro bundles, minifies and type-checks them" },
+    { "severity": "low", "location": "app/src/lib/api.js:16", "issue": "No timeout or AbortController on upstream fetches; a hung API call hangs the request indefinitely", "suggestion": "Add AbortSignal.timeout() to fetch calls" },
+    { "severity": "low", "location": "app/public/js/home.js:36-38", "issue": "Failed/partial results fetch is silently ignored, leaving stale results with no user feedback", "suggestion": "Show a lightweight inline error or retry affordance on failure" },
+    { "severity": "low", "location": "app/public/js/home.js:31", "issue": "pushState on every debounced keystroke floods history with intermediate search states; back button then replays each state via reload", "suggestion": "Use replaceState while typing and pushState on filter changes" },
+    { "severity": "low", "location": "app/src/pages/abilities/[name].astro:33-36", "issue": "First-entry-wins dedupe can mislabel the 'Hidden ability' text when a Pokémon lists the same ability as both normal and hidden", "suggestion": "Track hidden separately (hidden = hidden || entry.is_hidden) during dedupe" },
+    { "severity": "low", "location": "app/astro.config.mjs:1", "issue": "Astro 7's stable route caching is unused; heavy, cacheable pages like /pokemon/:name re-render per request against a snapshot API", "suggestion": "Consider cache: memoryCache() plus routeRules maxAge for detail routes (mind the spec's live-data requirement)" }
+  ],
+  "summary": "A well-executed, current-version Astro 7 SSR app: idiomatic config, standard data-loading patterns, careful race/fan-out/404 handling, and a clean module structure. The main debts are untyped page data, a couple of copy-pasted helpers, and client JS kept outside Astro's script pipeline. I'd approve after a round of nits — nothing structural blocks merge."
+}
+```

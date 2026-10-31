@@ -1,0 +1,156 @@
+## Review — Dimension: test quality
+
+**No tests exist in `app/` at all.** `app/package.json` has no `test` script and no test runner among its five devDependencies (`app/package.json:6-19`), and `grep` for `vitest|playwright|describe(|test(|it(` across `app/src` matches nothing — the only hits are inside `app/build/` build artifacts. The measured facts confirm: 0 test files, 0 cases, 0 assertions. The acceptance suite in `tests/` (not the agent's work) is the only guard, so every finding below is about what will slip through the moment someone refactors.
+
+The app has a substantial amount of genuinely risky, easily-testable logic that is completely unguarded:
+
+- **URL state / filtering / pagination** — `app/src/routes/+page.svelte:19-58`: query parsing with parseInt fallback, page clamping (`shownPage` vs `currentPage`), `updateFilters` dropping `page` on every filter change, `pageHref` re-building params, a 150 ms debounce. This code leans on the new `goto(..., { shallow: true, replace: true })` / `page.shallow.url` API (current idiomatic SvelteKit, verified against the docs), which is exactly the kind of subtle behavior that breaks silently on framework upgrades.
+- **Table sorting** — `app/src/lib/components/MovesTable.svelte:37-61`: missing-values-last in both directions, direction flip, stable tie-breaking, and `aria-sort` on the right header (`MovesTable.svelte:66`). Classic regression territory, zero coverage.
+- **Move/method grouping** — `app/src/routes/pokemon/[name]/+page.server.js:49-96`: version-group intersection, "default = highest order" via `games.at(-1)`, the `METHOD_ORDER`-vs-alphabetical comparator, per-method row assembly with one row per `(move, version group, method)` detail — note a move learned at two different levels within one version group yields two rows (`+page.server.js:66-78`), a latent correctness question nobody would notice in a refactor.
+- **Card building / alternate-form exclusion** — `app/src/lib/server/api.js:113-142` (`speciesCardsFromRefs`: dedupe, `id >= 10000` cutoff, species mapping, hidden flag) and `api.js:104-141` (`getSpeciesMeta`: types reconstructed from *type* records in slot order — a non-obvious derivation).
+- **Pure helpers** — `app/src/lib/utils.js:1-35`: `humanize`, `englishName`, `latestEnglishFlavor`, `dexNumber`, `idFromUrl`. These are the cheapest possible unit tests and none exist.
+- **Caching** — `api.js:9-30`: 404s cached permanently as `null`, failures evicted on rejection. Untested.
+- **Error path** — `app/src/routes/+error.svelte:1-5` renders "Not found" unconditionally, so a 500 would masquerade as a 404; nothing would catch that.
+
+On the criteria as anchored for a no-test submission: `coverage_of_risk` and `regression_power` at 1, `behaviour_not_implementation` at 1 (no tests), `signal_to_noise` at 3 per the anchor.
+
+```json
+{
+  "dimension": "tests",
+  "criteria": {
+    "coverage_of_risk": {
+      "score": 1,
+      "evidence": [
+        "app/package.json:6-9 — scripts are only dev/build/start; no test script, no runner dependency",
+        "app/src/routes/+page.svelte:20-58 — filtering, pagination clamping and URL query handling entirely untested",
+        "app/src/lib/components/MovesTable.svelte:37-70 — multi-column sorting, missing-last and aria-sort untested",
+        "app/src/lib/server/api.js:104-142 — species/type aggregation and alternate-form exclusion untested"
+      ],
+      "rationale": "No tests exist, and the codebase is dense with the exact high-risk logic (URL state, sorting, data transformation) that tests should concentrate on."
+    },
+    "behaviour_not_implementation": {
+      "score": 1,
+      "evidence": [
+        "app/src — no test files anywhere; measured facts report 0 cases and 0 assertions",
+        "app/package.json:11-16 — only build tooling in devDependencies"
+      ],
+      "rationale": "No tests at all, so nothing asserts observable behaviour either."
+    },
+    "regression_power": {
+      "score": 1,
+      "evidence": [
+        "app/src/lib/components/MovesTable.svelte:37-61 — sort direction flip or missing-value handling could regress with nothing failing",
+        "app/src/routes/+page.svelte:46-56 — pageHref/updateFilters param-rebuilding bugs (e.g. pagination dropping q/type) would slip through",
+        "app/src/routes/+error.svelte:3 — all errors rendered as 'Not found', even 500s; unverified by any test"
+      ],
+      "rationale": "With zero tests, breaking any behaviour fails nothing; the acceptance suite alone guards, and only for the specific fixtures it checks."
+    },
+    "signal_to_noise": {
+      "score": 3,
+      "evidence": [
+        "app/ — no tests, hence no noise to evaluate"
+      ],
+      "rationale": "Anchor: no tests scores 3 on signal-to-noise."
+    }
+  },
+  "overall": 1,
+  "findings": [
+    {
+      "severity": "high",
+      "location": "app/package.json:6-19",
+      "issue": "The app ships with no test infrastructure whatsoever — no test script, no runner, no test files.",
+      "suggestion": "Add vitest (+ @testing-library/svelte or plain render tests) with a `test` script; at minimum unit-test the pure helpers in src/lib/utils.js, which need no mocking."
+    },
+    {
+      "severity": "high",
+      "location": "app/src/routes/+page.svelte:20-58",
+      "issue": "Filtering, 48-per-page pagination and URL query state (including the shallow-navigation `page.shallow.url` derivation) are completely untested; regressions like pagination links dropping q/type params or page clamping off-by-ones would go unnoticed.",
+      "suggestion": "Extract the filter/paginate/parse logic into a pure module (input: species array + URLSearchParams, output: filtered list, page, hrefs) and unit-test edge cases: empty q, page beyond total, page=abc, filter change resetting page."
+    },
+    {
+      "severity": "high",
+      "location": "app/src/lib/components/MovesTable.svelte:37-70",
+      "issue": "Column sorting (ascending/descending flip, missing values last, stable ties, aria-sort placement) is untested — the single most regression-prone UI logic in the app.",
+      "suggestion": "Extract the comparator into a testable function and cover: null power/accuracy sorting last in both directions, second-click reversal, and that aria-sort lands on the clicked header only."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/routes/pokemon/[name]/+page.server.js:49-96",
+      "issue": "Move-table assembly is unguarded: version-group intersection, default game via games.at(-1), METHOD_ORDER-vs-alphabetical comparator, and duplicate rows when a move is learned at multiple levels within one version group (no dedupe at +page.server.js:78).",
+      "suggestion": "Load-function tests with a small mocked API payload asserting method order, default game and row shape; decide explicitly whether multi-level duplicates are intended."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/lib/server/api.js:113-142",
+      "issue": "speciesCardsFromRefs (alternate-form exclusion at id>=10000, dedupe, hidden flag, dex ordering) has no tests; a refactor of the data layer could silently include forms or drop the Hidden ability text.",
+      "suggestion": "Unit-test with refs containing an id above 10000 and a duplicate to pin the exclusion and dedupe behaviour."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/lib/server/api.js:104-141",
+      "issue": "getSpeciesMeta reconstructs per-species types from type records (slot ordering) and generations from generation records; slot-sort or generation-mapping bugs would corrupt every list page with no failing test.",
+      "suggestion": "Test the aggregation with a fixture of two types sharing one Pokémon to verify slot ordering and the default-id assumption."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/routes/+error.svelte:1-5",
+      "issue": "The error page always renders 'Not found', so any 500 (e.g. the API being down) masquerades as a 404; no test distinguishes error statuses.",
+      "suggestion": "Branch on page.status and add a test that a thrown non-404 renders a distinct message."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/lib/utils.js:1-35",
+      "issue": "Pure, trivially testable helpers (humanize, englishName, latestEnglishFlavor whitespace collapsing, dexNumber padding, idFromUrl) have no tests — the cheapest coverage in the repo is skipped.",
+      "suggestion": "A single utils test file would pin down edge cases like 'ho-oh' -> 'Ho Oh', missing English entries and '\\f'-collapsed flavor text."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/lib/server/api.js:9-30",
+      "issue": "Cache semantics are untested: 404s are memoized as null forever and only rejected promises are evicted, so retry and staleness behaviour could change silently.",
+      "suggestion": "Add tests with a stubbed fetch asserting a 404 is not re-requested and a failed request is retried on the next call."
+    }
+  ],
+  "summary": "The app contains no tests of its own — no runner, no script, no test files — despite a data layer and UI full of high-risk, easily-testable logic (URL state, sorting, pagination, alternate-form exclusion). Everything currently rests on the externally-written acceptance suite, which exercises only specific fixtures. Any refactor of api.js, the move tables or the home-page filters would ship unverified; adding unit tests for utils.js and the load/sort logic would be cheap and high-value.",
+  "wroteTests": false,
+  "testCount": 0,
+  "valuableTests": [],
+  "lowValueTests": [],
+  "untested": [
+    {
+      "area": "Home page filtering, pagination and URL query state (q/type/generation/page), including shallow-navigation behaviour",
+      "risk": "high",
+      "likelyBug": "Pagination links dropping active filters, page clamping off-by-ones, filter changes not resetting to page 1, or debounced search races — none would fail a build"
+    },
+    {
+      "area": "MovesTable column sorting: direction flip, missing-values-last, stable ties, aria-sort",
+      "risk": "high",
+      "likelyBug": "A comparator regression sorting missing power/accuracy first or putting aria-sort on the wrong header after a refactor"
+    },
+    {
+      "area": "Move/method table assembly on the Pokémon page (version-group intersection, default game, method ordering, duplicate rows per level)",
+      "risk": "high",
+      "likelyBug": "Wrong default game after a Kit/data change, method tables out of Level Up/Machine/Egg/Tutor order, or duplicate move rows for multi-level entries"
+    },
+    {
+      "area": "speciesCardsFromRefs and getSpeciesMeta: alternate-form exclusion (id >= 10000), dedupe, slot ordering, species mapping, hidden flag",
+      "risk": "medium",
+      "likelyBug": "Alternate forms leaking into lists, cards losing 'Hidden ability' text, or types shown out of slot order after a data-layer refactor"
+    },
+    {
+      "area": "Error handling: +error.svelte renders 'Not found' for every status; 404 vs 500 indistinguishable; per-load error() calls unverified",
+      "risk": "medium",
+      "likelyBug": "An API outage rendering a 200-style 'Not found' page instead of an error, masking real failures"
+    },
+    {
+      "area": "Server cache semantics in api.js (404 memoized forever, failure eviction/retry)",
+      "risk": "low",
+      "likelyBug": "A caching refactor re-requesting 404s per render (perf regression) or serving stale failures after the API recovers"
+    },
+    {
+      "area": "Pure helpers in utils.js (humanize, englishName, latestEnglishFlavor whitespace collapse, dexNumber padding, idFromUrl)",
+      "risk": "low",
+      "likelyBug": "Display regressions like '#0025' losing padding or flavor text keeping form-feed characters"
+    }
+  ]
+}
+```

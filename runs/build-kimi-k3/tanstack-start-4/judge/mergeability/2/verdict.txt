@@ -1,0 +1,129 @@
+## Review: Pokédex on TanStack Start (stable 1.169)
+
+I verified the app's framework usage against the current stable release (TanStack Start 1.169, the first stable; app pins `@tanstack/react-start@^1.169.4`, Vite 8, Nitro):
+
+- `shellComponent: RootDocument` in `app/src/routes/__root.tsx:16` is exactly the current starter pattern.
+- `createServerFn(...).validator(...)` (`app/src/lib/server.ts:23-27`) uses the *canonical* API — `inputValidator` was deprecated in 1.168.25 and removed in 1.169, so `.validator()` is the current-stable name. Correct, not stale.
+- `nitro()` from `nitro/vite` (`app/vite.config.ts:10`) is the required replacement for the removed `@tanstack/nitro-v2-vite-plugin`. Correct.
+- `getRouter()` export (`app/src/router.tsx:4`), `notFound()` thrown from a server-fn handler (`app/src/lib/server.ts:16`), `loaderDeps` + `validateSearch` + `staleTime: Infinity`, and `head: () => ({ meta: [{ title }] })` all match the current docs.
+
+The architecture is genuinely well-layered for a data-heavy app: `api.ts` (fetch + promise cache, failures evicted at `app/src/lib/api.ts:26`), `data.ts` (server-only view models), `format.ts` (explicitly isomorphic helpers), `server.ts` (thin server-fn wrappers with 404 mapping), `components.tsx`/`MovesTable.tsx` (shared UI). Server/client boundaries are explicit and commented.
+
+The main structural gripe is that `app/src/lib/data.ts` (455 lines) holds every page's view-model builder plus five module-level promise caches (`data.ts:20-67`); it will need splitting per page before it grows. The home loader also ships the entire 1025-entry catalog to the client (`data.ts:137`, rendered into the SSR payload) — a defensible trade for instant client-side filtering, but a big page-weight cost worth flagging.
+
+Correctness looks solid: 404s handled end-to-end, no SSR/CSR mismatch risk in the sort/filter logic, no leaked listeners, cache is bounded by a fixed snapshot. Minor: the pagination clamp (`app/src/routes/index.tsx:66`) lets the URL say `?page=5` while the view shows a clamped page after a filter shrinks results; and `NotFoundPage` puts `<title>` in the body (React 19 hoists it, works, but `head()` is the idiomatic spot) while the 404 component is wired twice (`router.tsx:8` and `routes/__root.tsx:15`).
+
+```json
+{
+  "dimension": "mergeability",
+  "criteria": {
+    "idiomatic": {
+      "score": 5,
+      "evidence": [
+        "app/src/routes/__root.tsx:16 — shellComponent: RootDocument, the current stable root-document pattern (not Outlet)",
+        "app/src/lib/server.ts:23 — createServerFn().validator(): .validator() is canonical since 1.168.25 and inputValidator was removed in 1.169",
+        "app/vite.config.ts:8-10 — tanstackStart({ srcDirectory }) + nitro() from 'nitro/vite', matching the 1.169 migration guide",
+        "app/src/routes/pokemon.$name.tsx:10-15 — loaderDeps keyed on search.game with staleTime/refetch handled by the router, not hand-rolled",
+        "app/src/router.tsx:4-9 — getRouter() export as required for the memory-router SSR setup",
+        "app/src/lib/server.ts:13-20 — notFound() thrown from the server fn so the router renders the 404 component"
+      ],
+      "rationale": "The app uses the current stable TanStack Start APIs exactly as documented, including several details that changed recently (validator rename, nitro/vite plugin, shellComponent). Only wart: a <title> rendered in the body of the NotFound component instead of via head()."
+    },
+    "correctness_risks": {
+      "score": 4,
+      "evidence": [
+        "app/src/lib/api.ts:22-27 — failed fetches are evicted from the promise cache, so no poisoned-cache state",
+        "app/src/lib/data.ts:62-64 — module-level promise caches reset to null on rejection, so a transient API error isn't sticky",
+        "app/src/routes/index.tsx:66 — page is clamped to totalPages at render but the URL keeps ?page=<n>, so URL and view desync after a filter shrink",
+        "app/src/routes/index.tsx:41-49 — search updates the URL on every keystroke with no debounce (allowed by spec, ≤300ms is fine)",
+        "app/src/lib/data.ts:285 — first visit to a Pokémon's moves fans out one fetch per move (~200 for scarlet-violet); uncapped fan-out but bounded by the fixed snapshot and cached after"
+      ],
+      "rationale": "No serious bugs: 404s, cache failure handling and SSR/CSR consistency are all done properly. Two minor fragilities: URL/view page desync on clamping and per-keystroke navigation."
+    },
+    "global_abstractions": {
+      "score": 3,
+      "evidence": [
+        "app/src/lib/data.ts:137-443 — one module holds all six pages' view-model builders (buildHomeData…buildTypePageData), 455 lines",
+        "app/src/lib/data.ts:20-67 — five module-level promise caches (type/generation/version-group/species) shared by every page via hidden module state",
+        "app/src/lib/api.ts:14 — single unbounded promise cache keyed by path; fine for a fixed snapshot, but it is an implicit global",
+        "app/src/lib/data.ts:137-186 — buildHomeData returns the full 1025-entry catalog to the client, inflating the SSR payload and making every page pay for the home page's filtering model"
+      ],
+      "rationale": "Layer boundaries (api/format/data/server/components) are clean and explicit, but data.ts is a god module whose scope plus module-level caches will need per-page splitting as the app grows, and the whole catalog flows through one view-model shape."
+    },
+    "readability": {
+      "score": 4,
+      "evidence": [
+        "app/src/lib/api.ts:1-2, app/src/lib/format.ts:1, app/src/lib/server.ts:1-2 — file-header comments state each module's scope (server-only vs isomorphic)",
+        "app/src/lib/data.ts:97-105 — cardsForPokemonRefs documents the species↔default-Pokémon mapping and the alternate-form cutoff",
+        "app/src/routes/index.tsx:57 — `data.catalog as CatalogEntry[]` cast: server-fn return types are any, so the carefully built interfaces are lost at the boundary and restored by hand",
+        "app/src/lib/format.ts:51 — EM_DASH is exported but never imported (dead export); em dashes are inlined everywhere",
+        "app/src/lib/MovesTable.tsx:51-66 — sort state, missing-values-last and column defs are compact and easy to follow"
+      ],
+      "rationale": "A new teammate would find their way quickly: consistent naming, comments explain why, small components. Rough spots: the 455-line data.ts, a boundary-spanning type cast, and one dead export."
+    },
+    "review_cost": {
+      "score": 4,
+      "evidence": [
+        "app/src/lib/NotFoundPage.tsx:6 — inline <title> in the body; should be set via the route's head() option",
+        "app/src/router.tsx:8 vs app/src/routes/__root.tsx:15 — NotFoundPage wired both as defaultNotFoundComponent and root notFoundComponent; pick one",
+        "app/src/routes/index.tsx:66 — clamp should also rewrite the URL (or redirect to page 1)",
+        "app/src/lib/format.ts:51 — remove the unused EM_DASH export",
+        "app/src/routes/index.tsx:57 — type the server function's return instead of casting loader data"
+      ],
+      "rationale": "All nits; I'd approve with a comment asking for the title/404-wiring cleanup. No structural rework needed."
+    }
+  },
+  "overall": 4,
+  "findings": [
+    {
+      "severity": "medium",
+      "location": "app/src/routes/index.tsx:66",
+      "issue": "Render-time page clamp (Math.min) can leave the URL claiming a page the view doesn't show after filters shrink the result set",
+      "suggestion": "Clamp inside validateSearch, or replace-navigate to the clamped page when totalPages shrinks"
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/lib/data.ts:137",
+      "issue": "data.ts is a 455-line god module containing every page's view-model builder and five module-level caches",
+      "suggestion": "Split into per-page builders (lib/data/home.ts, pokemon.ts, …) with the shared caches in their own module"
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/lib/data.ts:137-186",
+      "issue": "The home loader ships the entire 1025-species catalog to the client in the SSR payload",
+      "suggestion": "Either filter server-side via server-fn params, or accept and document the tradeoff (payload size scales with the dataset, which the tests are allowed to grow)"
+    },
+    {
+      "severity": "low",
+      "location": "app/src/lib/NotFoundPage.tsx:6",
+      "issue": "<title> is rendered in the body of the not-found component rather than declared in head(); works because React 19 hoists it, but is non-idiomatic",
+      "suggestion": "Set the title via the root route's head() or a head on the notFound boundary, and drop the inline <title>"
+    },
+    {
+      "severity": "low",
+      "location": "app/src/router.tsx:8",
+      "issue": "NotFoundPage is registered twice: as defaultNotFoundComponent on the router and notFoundComponent on the root route",
+      "suggestion": "Keep only the root route's notFoundComponent (it also covers matched-route notFound() throws)"
+    },
+    {
+      "severity": "low",
+      "location": "app/src/routes/index.tsx:57",
+      "issue": "Loader data is typed any across the server-fn boundary and restored with a manual `as CatalogEntry[]` cast, discarding the VM interfaces",
+      "suggestion": "Type the server-function handler's return value so useLoaderData carries the type"
+    },
+    {
+      "severity": "low",
+      "location": "app/src/lib/format.ts:51",
+      "issue": "EM_DASH is exported but never used; em dash literals are written inline elsewhere",
+      "suggestion": "Delete the export or use it at the call sites"
+    },
+    {
+      "severity": "low",
+      "location": "app/src/routes/index.tsx:41-49",
+      "issue": "Search input triggers a replace-navigation on every keystroke with no debounce",
+      "suggestion": "Debounce up to the 300ms the spec allows to avoid re-render/navigate churn on long queries"
+    }
+  ],
+  "summary": "A well-executed TanStack Start 1.169 app that is fully on-idiom with the current stable APIs (shellComponent, .validator(), nitro/vite, server fns in loaders, notFound()) with clean server/client boundaries and proper 404 and cache-failure handling. The main structural debt is a 455-line view-model god module and a home loader that ships the whole catalog to the client; everything else is review nits. I'd merge after a light round of cleanups."
+}
+```

@@ -1,0 +1,86 @@
+I've reviewed the app against the spec and the framework's current stable release (Next.js 16.4.3, per `app/package.json:9`). For this dimension the picture is unambiguous: the app ships **zero tests of its own** — no test script, no runner in devDependencies, no test/spec files anywhere under `app/`.
+
+## What exists
+
+The only guard is the acceptance suite in `tests/`, which the agent didn't write. `app/package.json` has only `dev`/`build`/`start` scripts and only runtime dependencies (`app/package.json:6-14`). Static analysis confirms 0 test files, 0 assertions.
+
+## What that leaves unguarded
+
+Reading the riskiest code, these are the places a refactor of the data layer would break silently once the acceptance suite isn't the only check:
+
+- **Pure formatting helpers — `app/lib/format.js:8-42`.** `humanize`, `latestEnFlavor` (whitespace collapse + "last English entry"), `enEffect`, `dexNumber` padding. These are textbook unit-test targets; a subtle change to the `\s+` collapse or "last entry" semantics would go unnoticed. `enEffect` uses the *last* English entry where the spec says "the English `short_effect`" — with multiple entries this is a latent choice nobody would catch.
+- **Derived data layer — `app/lib/api.js:101-121`.** `getPokemonTypesMap` reconstructs every Pokémon's slot-ordered types from the *type* records (an unusual inversion), and `mapToSpecies` dedupes, drops IDs ≥ `MAX_FORM_ID`, drops species not in the index, and merges `ref.extra`. The `!(id < MAX_FORM_ID)` idiom also silently swallows `NaN` from `idFromUrl` (`app/lib/api.js:52-54`) — deliberate-looking but fragile.
+- **Filter/pagination composition — `app/app/page.js:13-58`.** Page clamping (`page > totalPages`), `PAGE_SIZE` slicing, the `pageHref` builder that must omit default/empty params, case-insensitive match against the *humanized* name, and three independently-toggleable filters. This is where "off-by-one on the last page" and "filters combined wrong" bugs live.
+- **Sort comparator — `app/app/pokemon/[name]/MovesTable.js:14-24`.** Missing-values-sort-last-in-*both*-directions, numeric-vs-`localeCompare` branch, and the toggle state machine. The `if (aMissing) return 1` path ignores `dir` entirely — correct today, easy to "fix" into a bug.
+- **Moves grouping — `app/app/pokemon/[name]/page.js:26-96`.** `METHOD_ORDER` with alphabetical fallback for unknown methods, default game = highest `order`, default sort (level then move name), and `gameParam` validation (an unlearned game silently falls back to the default without a URL update).
+- **URL state — `app/app/Controls.js:17-33`** (debounce + `router.replace`, sync effects for back/forward) and `app/app/pokemon/[name]/GameSelect.js:21-25` (`router.replace('?game=...#moves')`). Back/forward navigation races with the 300 ms debounce are exactly the kind of thing tests would catch.
+- **Error handling — `app/lib/api.js:28-30, 38-48`.** `limitedFetch` throws on any non-404 status, the promise cache evicts failed loads so a retry can succeed — but a thrown error propagates out of every `await Promise.all([...])` in `page.js:25` and 500s the whole route. Nothing exercises the 404→`notFound()` paths (`app/app/types/[name]/page.js:29` etc.) or a 500-API scenario.
+
+Given Next.js's current docs point at Vitest + Testing Library for components and Playwright for routes — and this app already had Playwright in the environment — the absence of even one unit test for `lib/format.js` is a real miss, not just a stylistic one.
+
+```json
+{
+  "dimension": "tests",
+  "criteria": {
+    "coverage_of_risk": {
+      "score": 1,
+      "evidence": [
+        "app/package.json:6-14 — no test script, no runner in devDependencies",
+        "app/lib/api.js:101-121 — untested derived data layer (mapToSpecies, getPokemonTypesMap)",
+        "app/app/page.js:36-58 — untested filtering, page clamping, pagination href building",
+        "app/lib/format.js:8-42 — untested pure helpers (humanize, latestEnFlavor, dexNumber)"
+      ],
+      "rationale": "The app contains substantial transformation, filtering, pagination and sorting logic and none of it is covered by any test the author wrote; only the acceptance suite guards it."
+    },
+    "behaviour_not_implementation": {
+      "score": 1,
+      "evidence": [
+        "app/ — zero test files anywhere (static analysis: tests.files = 0)"
+      ],
+      "rationale": "No tests exist, so there is nothing to evaluate against behaviour-vs-implementation; scoring 1 per the anchor."
+    },
+    "regression_power": {
+      "score": 1,
+      "evidence": [
+        "app/app/pokemon/[name]/MovesTable.js:14-24 — missing-values-last comparator ignores dir; nothing would fail if refactored wrong",
+        "app/lib/api.js:38-48 — promise-cache eviction on failure; untested retry path",
+        "app/app/page.js:44-46 — page > totalPages clamp untested"
+      ],
+      "rationale": "A refactor of the data layer or sorting could change rendered output with no failing test; the only safety net is the acceptance suite, which the team will not keep running on every change."
+    },
+    "signal_to_noise": {
+      "score": 3,
+      "evidence": [
+        "app/ — no tests, hence no noise"
+      ],
+      "rationale": "Per the anchor, no tests scores 3: there is no low-value padding, but also nothing earning its keep."
+    }
+  },
+  "overall": 1,
+  "findings": [
+    { "severity": "high", "location": "app/package.json:6-14", "issue": "No test script, no test runner, and no test files anywhere in app/ — the app relies entirely on the acceptance suite for correctness.", "suggestion": "Add Vitest (or Playwright component/e2e tests) per Next.js's current testing guidance; start with unit tests for lib/format.js and lib/api.js derived helpers and route-level tests for / pagination and the moves tables." },
+    { "severity": "high", "location": "app/lib/api.js:105-121", "issue": "mapToSpecies implements the core list semantics (dedup, alternate-form exclusion via id < MAX_FORM_ID, index membership, extra merge, dex ordering) with no coverage; the `!(id < MAX_FORM_ID)` idiom also silently drops NaN from idFromUrl.", "suggestion": "Unit-test against fixture refs: mega forms excluded, missing-from-index species dropped, duplicates collapsed, ordering stable; make the NaN case explicit." },
+    { "severity": "high", "location": "app/app/page.js:36-58", "issue": "Filter composition (type ∩ generation ∩ search), case-insensitive match against the humanized name, 48-per-page slicing, page clamping and the omit-defaults pageHref builder are all untested — classic spots for off-by-one and combined-filter bugs.", "suggestion": "Parametrised tests for each filter alone, combined, and the edge cases: page beyond last, empty results, q matching only the humanized name." },
+    { "severity": "medium", "location": "app/app/pokemon/[name]/MovesTable.js:14-24", "issue": "compareValues' missing-values-sort-last-in-both-directions contract and the numeric-vs-string branch are untested; the `if (aMissing) return 1` path ignores dir and is easy to break in refactor.", "suggestion": "Unit tests: sort by each column ascending/descending with missing power/accuracy mixed in; assert aria-sort toggling on click." },
+    { "severity": "medium", "location": "app/app/pokemon/[name]/page.js:47-96", "issue": "buildMovesSection encodes subtle spec rules — METHOD_ORDER with alphabetical fallback, default game = highest order, ?game= for an unlearned game falling back silently, level-then-name default sort — with no tests.", "suggestion": "Extract method ordering and table building into a testable pure function and cover each rule, including the unknown-method fallback path." },
+    { "severity": "medium", "location": "app/lib/api.js:28-30", "issue": "limitedFetch throws on any non-404 status and the error propagates through Promise.all into an unhandled route error (500); neither the throw path nor the cached() eviction/retry path is tested.", "suggestion": "Test fetchJson against a stub: 404 → null, 500 → rejects then succeeds on retry thanks to cache eviction; decide and assert the route-level behaviour on API failure." },
+    { "severity": "medium", "location": "app/app/Controls.js:24-44", "issue": "URL-state sync (debounced search, selects, back/forward navigation via the three useEffect resyncs, reset-to-page-1 on filter change) is untested; races between the 300 ms debounce and navigation are likely regression sites.", "suggestion": "Route-level Playwright tests: type and assert the URL after the debounce, change a select and assert page resets, navigate back and assert controls reflect the URL." },
+    { "severity": "low", "location": "app/lib/format.js:29-34", "issue": "enEffect returns the last English short_effect; with multiple entries this silently differs from 'the English short_effect' in the spec and is untested.", "suggestion": "Add a fixture with multiple English entries and pin the chosen semantics (first vs last) in a test." },
+    { "severity": "low", "location": "app/app/types/[name]/page.js:29", "issue": "The notFound() guards on all four resource routes are only exercised via the acceptance suite; nothing verifies they render the shared not-found page.", "suggestion": "One route test per resource type hitting a bogus name, asserting the Not found h1 and the link home." }
+  ],
+  "summary": "The app ships no tests of its own — no runner, no test script, no test files — so every risky piece of logic (derived species/type maps, filter/pagination composition, move-table sorting and method ordering, URL state, error and not-found paths) is guarded only by the acceptance suite. That suite is externally owned and will not protect a future refactor. The first, cheap win is unit tests for lib/format.js and lib/api.js; route tests for / and the moves section would cover the rest of the risk.",
+  "wroteTests": false,
+  "testCount": 0,
+  "valuableTests": [],
+  "lowValueTests": [],
+  "untested": [
+    { "area": "lib/format.js pure helpers (humanize, latestEnFlavor whitespace collapse and last-English-entry rule, enEffect, enGenus, dexNumber padding)", "risk": "high", "likelyBug": "A tweak to the flavor-text regex or entry-selection order would change rendered descriptions and headings everywhere with nothing failing" },
+    { "area": "lib/api.js mapToSpecies (dedup, alternate-form exclusion, index membership, extra merge, dex sort) and getPokemonTypesMap (types reconstructed from type records, slot order)", "risk": "high", "likelyBug": "Mega forms reappearing in Learned by / type lists, duplicate cards, or wrong slot ordering — exactly the class of bug the spec calls out" },
+    { "area": "Home page filtering and pagination (type ∩ generation ∩ search, 48/page slicing, page clamping, omit-defaults href building)", "risk": "high", "likelyBug": "Off-by-one on the last page, filters combined with AND instead of intersecting, or page param leaking into default links" },
+    { "area": "MovesTable sorting comparator (missing-values last in both directions, numeric vs localeCompare, toggle direction, aria-sort)", "risk": "medium", "likelyBug": "Descending sort putting null power/accuracy first, or aria-sort remaining on all headers after refactor" },
+    { "area": "buildMovesSection (method order with alphabetical fallback, default game = highest order, ?game= for an unlearned game, level-then-name default sort)", "risk": "medium", "likelyBug": "Method tables appearing out of Level Up / Machine / Egg / Tutor order, or an invalid game param crashing instead of falling back" },
+    { "area": "URL-state clients (Controls debounce/select sync, GameSelect router.replace with #moves)", "risk": "medium", "likelyBug": "Race between the 300 ms debounce and back/forward navigation leaving stale search text, or the game select losing the #moves anchor" },
+    { "area": "API error handling (limitedFetch throw on non-404, cached eviction/retry, notFound() on each resource route)", "risk": "medium", "likelyBug": "A transient 500 turning the whole route into an unhandled error, or the retry eviction breaking and caching a rejected promise forever" }
+  ]
+}
+```

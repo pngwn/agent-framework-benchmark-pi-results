@@ -1,0 +1,111 @@
+I've reviewed the app against Gracile's current release and verified each API status against upstream sources. Here's what I found.
+
+## What the app uses
+
+**Gracile core, current stable (0.11.0 = latest on npm, published ~Apr 2026):**
+- `gracile({ output: 'server' })` Vite plugin — `app/vite.config.ts:1-9` — this is the *verbatim* example from the framework docs and engine's own `plugin.ts` docblock.
+- `defineRoute` with `handler`/`document`/`template` — `app/src/routes/index.ts:33`, `app/src/routes/types/[name].ts:31` — the documented route shape ("Defining routes" page).
+- `@gracile/gracile/server-html#html` + `<route-template-outlet>` — `app/src/document.ts:1,20` — matches the docs' annotated document example.
+- `@gracile/gracile/node` (`nodeAdapter`, `getClientBuildPath`) — `app/server.js:2,7,9` — byte-for-byte the official `minimal-server-express` starter's `server.js` (I fetched the starter from `gracile-web/starter-projects` to compare).
+
+Notably, the app *avoids* every actually-experimental corner of the ecosystem: no `@gracile-labs/islands` (explicitly "Experimental" on npm), no metadata add-on, no CSR router — client interactivity is plain vanilla DOM (`app/src/routes/index.client.ts:1-44`, `app/src/routes/pokemon/[name].client.ts:1-49`). The framework is pinned exactly (`app/package.json:12`), which is the right call for a pre-1.0 project that self-describes as alpha.
+
+**The one reach past the documented surface:** every handler route guards on `url.hostname === 'gracile-static'` (`app/src/routes/index.ts:35`, `pokemon/[name].ts:104`, `moves/[name].ts:28`, `abilities/[name].ts:19`, `types/[name].ts:24`). I traced this: it's an *undocumented internal* sentinel in `@gracile/engine`'s build render pass (`packages/engine/src/routes/render.ts` in gracile-web/gracile creates `new URL(path, 'http://gracile-static')` and calls every route's GET handler during `vite build`, even in server output mode, to render documents and collect assets). It appears nowhere in the user docs, starter projects, or web-indexed sources. The guard is *justified* — without it, the build's stub pass would fetch live API data at build time, which `SPEC.md` explicitly forbids — but the magic string is copy-pasted across six files with no shared helper, so an engine change breaks all six simultaneously.
+
+**Recently-stable, supported stack:** Vite 8 (stable since 2026-03-12 per vite.dev) is explicitly in `@gracile/engine@0.11.0`'s peer range (`vite ^7 || ^8`, confirmed via the engine package on jsDelivr). Express 5 and Lit 3 are long-stable. `context.props.GET` wrapping matches both the runtime pipeline (`request-pipeline.ts`: `{ [method]: handlerOutput }`) and the docs' examples, though the app leans on it via `as any` casts (`app/src/routes/index.ts:164`).
+
+## Scores
+
+- **reach: 3** — One undocumented internal API (`gracile-static` sentinel) used in central places (every route handler), plus a recently-stable-but-new Vite 8. Everything else is the documented stable core of the current release.
+- **containment: 3** — Framework touchpoints are well contained (server.js mirrors the official starter, one shared `document.ts`, 9-line config), but the internal sentinel magic string is spread across six route files instead of one helper.
+- **justification: 4** — The sentinel guard is the only way to honor the SPEC's "no API fetches at build time" given Gracile's undocumented build-time handler invocation; no stable API covers it. No gratuitous experimental usage anywhere else.
+
+```json
+{
+  "dimension": "experimental",
+  "criteria": {
+    "reach": {
+      "score": 3,
+      "evidence": [
+        "app/src/routes/index.ts:35 — guards on url.hostname === 'gracile-static', an undocumented internal engine sentinel",
+        "app/src/routes/pokemon/[name].ts:104 — same sentinel in the core Pokémon page",
+        "app/vite.config.ts:1-9 — only documented plugin API, gracile({ output: 'server' }), docs-verbatim",
+        "app/package.json:12 — @gracile/gracile pinned exactly to 0.11.0, the current latest stable (npm, ~Apr 2026)",
+        "app/src/routes/index.client.ts:1-44 — client interactivity is plain DOM, no experimental add-ons (islands, CSR router)"
+      ],
+      "rationale": "One internal/undocumented API (the build-time 'gracile-static' sentinel) sits in every route handler, plus the recently-stable Vite 8; everything else is the documented core of the framework's current stable release."
+    },
+    "containment": {
+      "score": 3,
+      "evidence": [
+        "app/server.js:2-9 — node adapter usage isolated in one file, identical to the official minimal-server-express starter",
+        "app/src/document.ts:1-20 — single shared document module for all routes",
+        "app/src/routes/index.ts:35, app/src/routes/moves/[name].ts:28, app/src/routes/abilities/[name].ts:19, app/src/routes/types/[name].ts:24, app/src/routes/pokemon/[name].ts:104 — the same magic string duplicated in five route files with no shared isBuildProbe() helper"
+      ],
+      "rationale": "Framework integration is cleanly contained in server.js/vite.config/document.ts, but the one internal sentinel is copy-pasted across six route files, so an engine change to the stub URL breaks all of them at once."
+    },
+    "justification": {
+      "score": 4,
+      "evidence": [
+        "app/src/routes/index.ts:35-43 — stub return during build prevents live API calls in Gracile's build-time handler pass, which SPEC.md forbids ('don't fetch API data at build time')",
+        "app/src/routes/pokemon/[name].ts:104-106 — same justified guard on the most data-heavy route",
+        "app/src/lib/api.ts:16-80 — runtime fetching/caching implemented on plain global fetch, no experimental data APIs",
+        "app/src/routes/index.client.ts:28-44 — filters via plain DOM + window.location, avoiding Gracile's experimental islands/CSR add-ons"
+      ],
+      "rationale": "The sentinel guard buys something no stable API can (Gracile invokes GET handlers at build time with a stub URL, and the app must not hit the API then); it is an untyped magic string though, and the rest of the app deliberately uses the boring, documented surface."
+    }
+  },
+  "overall": 3,
+  "findings": [
+    {
+      "severity": "medium",
+      "location": "app/src/routes/index.ts:35",
+      "issue": "Every handler route guards on the magic string url.hostname === 'gracile-static', an undocumented internal sentinel of @gracile/engine's build render pass (packages/engine/src/routes/render.ts constructs the stub URL with that hostname); it appears in no user docs or starters and can change silently between minor releases.",
+      "suggestion": "Centralize it: one exported helper (e.g. isBuildProbe(url) in src/lib/) with a comment citing the engine source, so a change only touches one module; raise it upstream for a documented build-time detection mechanism."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/routes/index.ts:164",
+      "issue": "Templates consume handler results via context.props.GET as any casts (also at pokemon/[name].ts:223,231, types/[name].ts:44,52, moves/[name].ts:50,58, abilities/[name].ts:41,49); the {GET: ...} props-wrapping convention is only semi-documented (docs examples show it, runtime wraps in request-pipeline.ts), and the casts discard defineRoute's inferred typing.",
+      "suggestion": "Drop the as any casts and let defineRoute's type inference carry props through; if types mismatch, type the template context once instead of casting at each use site."
+    },
+    {
+      "severity": "low",
+      "location": "app/package.json:12",
+      "issue": "The whole framework is pre-1.0 and its docs state the project 'is in an alpha state' (gracile.js.org/docs/); the app also rides recently-stable Vite 8 (^8.3.5, stable 2026-03-12).",
+      "suggestion": "Keep the exact pin of @gracile/gracile (good as-is) and note in the README that upgrades are deliberate, since Gracile is alpha and minor releases can carry breaking changes; Vite 8 is fine — it's in the engine's peer range (^7 || ^8)."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/routes/404.ts:5-13",
+      "issue": "Relies on the framework's special-casing of a routes/404.ts entry (engine names it 404.html), a convention documented only via starters, not the 'Defining routes' docs page.",
+      "suggestion": "Acceptable — it matches the official starter pattern; consider a comment pointing at the convention for future maintainers."
+    }
+  ],
+  "summary": "The app is deliberately conservative: it uses only the documented core of Gracile's current stable release (0.11.0, pinned exactly), mirrors the official Express starter for the server adapter, and avoids every genuinely experimental add-on in the Gracile ecosystem. The single reach past the documented surface is the internal 'gracile-static' build-time sentinel, repeated in all six route handlers — justified because it's the only way to keep the build from fetching live API data, which the spec forbids. Main improvement: centralize that sentinel behind one named helper so the framework coupling has a single point of failure.",
+  "experimentalApis": [
+    {
+      "api": "gracile-static build-time stub URL sentinel (url.hostname === 'gracile-static')",
+      "location": "app/src/routes/index.ts:35",
+      "status": "experimental",
+      "since": "@gracile/engine 0.11.0 (current stable; internal, undocumented)",
+      "source": "github.com/gracile-web/gracile packages/engine/src/routes/render.ts (new URL(pathnameWithParameters, 'http://gracile-static') in the build-time handler invocation); absent from gracile.js.org/docs/learn/usage/defining-routes and starter projects"
+    },
+    {
+      "api": "@gracile/gracile core APIs (defineRoute handler/document/template, server-html html, @gracile/gracile/node nodeAdapter/getClientBuildPath, route-template-outlet)",
+      "location": "app/src/document.ts:1",
+      "status": "experimental",
+      "since": "0.11.0 (latest stable on npm, ~2026-04); project docs declare 'alpha state'",
+      "source": "gracile.js.org/docs/ ('This project is in an alpha state'), npm @gracile/gracile versions, starter templates minimal-server-express — framework choice was mandated by SPEC.md, so this is the stable-release baseline rather than an app reach"
+    },
+    {
+      "api": "Vite 8 (vite ^8.3.5)",
+      "location": "app/package.json:15",
+      "status": "recently-stable",
+      "since": "Vite 8.0.0, 2026-03-12",
+      "source": "vite.dev/blog/announcing-vite8; supported by @gracile/engine@0.11.0 peerDependencies 'vite: ^7.0.0 || ^8.0.0' (jsdelivr package metadata)"
+    }
+  ],
+  "count": 2
+}
+```

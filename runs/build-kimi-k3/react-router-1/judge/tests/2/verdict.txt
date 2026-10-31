@@ -1,0 +1,153 @@
+I've reviewed the spec, the app source, and the acceptance suite. The measured facts are confirmed: `app/` contains **zero test files** — no test runner dependency, no `test` script (`app/package.json:5-10` only defines build/dev/start/typecheck). So this review focuses on where the unguarded risk lives.
+
+**Where the risk is (all verified by reading):**
+
+- **Home filtering/pagination** — `app/app/routes/home.tsx:79-96` does case-insensitive substring match against humanized names, type-in-either-slot, generation membership via `Set`, and page slicing with clamping. All pure, easily testable logic, none tested. The only guard is the acceptance suite, which checks a handful of fixed URLs.
+- **URL state machinery** — `app/app/routes/home.tsx:43-77` is the classic bug nest: debounced search, `lastSubmitted` ref for back/forward sync, `next.delete("page")` on filter change, `pageHref` returning a bare `"?"` (`home.tsx:108-110`).
+- **Move table sorting** — `app/app/components/MoveTable.tsx:26-38` implements the subtle "missing values sort last in both directions" rule plus direction flip and `aria-sort`; `app/app/routes/pokemon.tsx:101-127` implements default ordering (level-up by level then name, methods Level Up → Machine → Egg → Tutor → alphabetical). These are exactly the invariants a refactor breaks silently.
+- **Data-layer index construction** — `app/app/lib/api.server.ts:76-165`: species index sort, `idFromUrl` regex, slot-ordered type map, alternate-form exclusion by "default Pokémon has same ID as species". A refactor of `getSpeciesTypeMap` (e.g., fetching per-pokemon) could reorder types or admit forms with no test failing inside `app/`.
+- **Caching semantics** — `app/app/lib/api.server.ts:44-58` caches the promise *before* resolution and never evicts on rejection: one transient API hiccup permanently poisons that URL (and the species index) until process restart. No test could catch this because none simulates failure.
+- **Error paths** — `app/app/root.tsx:47-56`: the `ErrorBoundary` renders "Not found" for *any* thrown error, so an API 500 would masquerade as a 404 page; loaders use the `data({notFound:true},{status:404})` pattern instead (`app/app/routes/pokemon.tsx:44`), so the boundary is only reachable by real errors.
+- **Pure formatters** — `app/app/lib/format.ts:1-27` (humanize, dex padding, latest-English flavor text with `\f` collapsing) are trivially unit-testable and carry spec rules, but aren't.
+
+The acceptance tests are decent behavioural coverage *today*, but they live outside `app/` and target fixed fixtures — none of the above logic has an in-repo regression guard.
+
+```json
+{
+  "dimension": "tests",
+  "criteria": {
+    "coverage_of_risk": {
+      "score": 1,
+      "evidence": [
+        "app/app/routes/home.tsx:79-96 — filter/search/pagination logic, no tests anywhere",
+        "app/app/components/MoveTable.tsx:26-38 — missing-values-last sort rule, untested",
+        "app/app/lib/api.server.ts:76-165 — species index/type map construction, untested",
+        "app/package.json:5-10 — no test script or test runner dependency at all"
+      ],
+      "rationale": "No tests exist in app/, and the riskiest logic (filtering, sorting, URL state, data indexing) is entirely unguarded by the repo itself."
+    },
+    "behaviour_not_implementation": {
+      "score": 1,
+      "evidence": ["app/package.json:5-10 — no test infrastructure; facts confirm 0 test files, 0 assertions"],
+      "rationale": "There are no tests of any kind, behavioural or otherwise."
+    },
+    "regression_power": {
+      "score": 1,
+      "evidence": [
+        "app/app/routes/pokemon.tsx:101-127 — method ordering and level-then-name sort would silently survive most refactors",
+        "app/app/lib/api.server.ts:44-58 — permanently cached rejected promises: a failure-handling fix or break is invisible"
+      ],
+      "rationale": "Nothing in app/ would fail if someone broke the filter predicate, sort invariants, or cache-failure handling; only the external acceptance suite would notice, and only for its fixed cases."
+    },
+    "signal_to_noise": {
+      "score": 3,
+      "evidence": ["app/ — no test files to evaluate for noise"],
+      "rationale": "No tests, hence no noise; neutral by the rubric."
+    }
+  },
+  "overall": 1,
+  "findings": [
+    {
+      "severity": "high",
+      "location": "app/package.json:5-10",
+      "issue": "The app ships zero tests and no test tooling; all spec-encoded logic (humanize, dex padding, sorting rules, filtering) has no in-repo regression guard.",
+      "suggestion": "Add vitest and unit-test the pure logic first: format.ts helpers, MoveTable.compareValues, and the home filter/pagination computation extracted from the component."
+    },
+    {
+      "severity": "high",
+      "location": "app/app/lib/api.server.ts:44-58",
+      "issue": "getJSON caches the promise before it settles and never evicts on rejection; a single transient API failure poisons that URL for the process lifetime (same for getSpeciesIndex at :95).",
+      "suggestion": "On rejection, delete the cache entry (and reset the singleton index promises) so the next request retries; add a test that simulates a failed fetch followed by a successful one."
+    },
+    {
+      "severity": "high",
+      "location": "app/app/routes/home.tsx:79-96",
+      "issue": "Filter, search and pagination logic (substring on humanized name, type-in-either-slot, generation set, page slice/clamp) is embedded in the component and untested.",
+      "suggestion": "Extract a pure filterSpecies(species, {q, type, generation}) and paginate() helper; unit-test edge cases (no matches, last partial page, out-of-range page)."
+    },
+    {
+      "severity": "high",
+      "location": "app/app/components/MoveTable.tsx:26-38",
+      "issue": "compareValues encodes the subtle 'missing values sort last in both directions' spec rule plus direction flip and aria-sort state, with no tests.",
+      "suggestion": "Unit-test compareValues directly or via sortedRows for power= null rows in both directions."
+    },
+    {
+      "severity": "medium",
+      "location": "app/app/root.tsx:47-56",
+      "issue": "ErrorBoundary renders 'Not found' for every thrown error, so an API 500 or a bug in a loader is presented to users as a 404 page.",
+      "suggestion": "Distinguish 404 (loader returns data with status) from real errors in the boundary, and add a test that a thrown ApiError renders an error message, not 'Not found'."
+    },
+    {
+      "severity": "medium",
+      "location": "app/app/routes/home.tsx:43-77",
+      "issue": "URL-state machinery (debounce, lastSubmitted back/forward sync, page reset on filter change, pageHref's bare '?' fallback) is the most refactor-fragile code in the app and has no coverage of rapid typing, back button, or param omission.",
+      "suggestion": "Extract URL-param building into a pure function and test it (omit empty/default params, reset page on filter change); cover the debounce with a fake-timer component test."
+    },
+    {
+      "severity": "medium",
+      "location": "app/app/lib/api.server.ts:105-135",
+      "issue": "getSpeciesTypeMap builds the home-page type data by iterating /type/ records and excluding alternate forms via id lookup, then sorting by slot; a refactor to a different source could reorder or duplicate slot entries undetected.",
+      "suggestion": "Unit-test with fixture type records: dual-slot ordering, alternate forms (id > 10000) excluded, species missing from index skipped."
+    },
+    {
+      "severity": "medium",
+      "location": "app/app/routes/pokemon.tsx:56-127",
+      "issue": "Version-group selection (highest `order` as default, ?game= override) and move-method grouping/ordering are untested; a change to the fallback chain at :69 would only surface for Pokémon lacking some games.",
+      "suggestion": "Extract and unit-test the version-group selection and grouping functions against fixture move data."
+    },
+    {
+      "severity": "low",
+      "location": "app/app/lib/format.ts:4-27",
+      "issue": "humanize and latestEnglishFlavor carry explicit spec rules (capitalization, whitespace-run collapse including \\f, last-English-entry) and are one-line tests waiting to be written.",
+      "suggestion": "Add cheap unit tests for these helpers; they encode definitions the acceptance suite only probes indirectly."
+    }
+  ],
+  "summary": "The agent wrote no tests of its own — no runner, no script, no assertions — leaving the app's riskiest logic (filtering, pagination, sort invariants, data-index construction, cache-failure handling) guarded only by the external acceptance suite. The pure helpers and loaders are cleanly extractable, so the cost of adding real coverage would have been low. As-is, a refactor of the data layer or sorting rules could regress silently for any case the acceptance fixtures don't pin.",
+  "wroteTests": false,
+  "testCount": 0,
+  "valuableTests": [],
+  "lowValueTests": [],
+  "untested": [
+    {
+      "area": "Home filtering/search/pagination (app/app/routes/home.tsx:79-96)",
+      "risk": "high",
+      "likelyBug": "A changed filter predicate, off-by-one in the page slice, or a broken generation membership Set silently drops or duplicates species from the list."
+    },
+    {
+      "area": "Move table sorting invariants (app/app/components/MoveTable.tsx:26-38)",
+      "risk": "high",
+      "likelyBug": "Missing values sorting first on descending, or the direction flip getting stuck, would pass any rendering smoke check."
+    },
+    {
+      "area": "Species index and type-map construction (app/app/lib/api.server.ts:76-165)",
+      "risk": "high",
+      "likelyBug": "Alternate forms leaking into lists, slot ordering lost, or dex ordering broken after switching the data source."
+    },
+    {
+      "area": "Cache failure semantics (app/app/lib/api.server.ts:44-58)",
+      "risk": "high",
+      "likelyBug": "A rejected promise is cached forever, so one transient API error permanently breaks a page/endpoint until server restart."
+    },
+    {
+      "area": "URL query state (q/type/generation/page, game) including debounce and back/forward sync (app/app/routes/home.tsx:43-77, pokemon.tsx:157-165)",
+      "risk": "medium",
+      "likelyBug": "Filter changes no longer reset to page 1, search box desyncs on back navigation, or empty/default params stop being omitted."
+    },
+    {
+      "area": "Version-group selection and move grouping (app/app/routes/pokemon.tsx:56-127)",
+      "risk": "medium",
+      "likelyBug": "Wrong default game (not highest `order`), method tables out of the fixed Level Up/Machine/Egg/Tutor order, or level-then-name sort regressing to insertion order."
+    },
+    {
+      "area": "Error boundaries and not-found handling (app/app/root.tsx:47-56)",
+      "risk": "medium",
+      "likelyBug": "Any API 500 or loader bug renders as 'Not found', hiding real outages from users and operators."
+    },
+    {
+      "area": "Pure formatters (app/app/lib/format.ts:4-27)",
+      "risk": "low",
+      "likelyBug": "Edge cases like empty strings, missing English entries, or form-feed whitespace in flavor text regressing unnoticed."
+    }
+  ]
+}
+```

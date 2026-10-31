@@ -1,0 +1,130 @@
+I've reviewed the app against the React Router v8 docs (via the installed skill references and reactrouter.com). Notably, the app's inline `<title>` usage and loaderData-as-component-props are both current-docs recommendations, while the soft-404 pattern and absent typegen types are deviations.
+
+```json
+{
+  "dimension": "mergeability",
+  "criteria": {
+    "idiomatic": {
+      "score": 4,
+      "evidence": [
+        "app/app/routes.ts:3-11 — config-based routes with index/route and a documented splat catch-all (route(\"*\", ...))",
+        "app/app/root.tsx:5-19 — Layout export + Links/Meta/Scripts in the documented shell; html lang=en",
+        "app/app/routes/home.tsx:93 — <title>Pokédex</title> rendered inline, which current v8 route-module docs explicitly recommend over the meta export for React 19",
+        "app/app/routes/pokemon.tsx:182 — component receives loaderData as a prop, per Route.ComponentProps docs",
+        "app/app/lib/api.server.ts:1 — server data layer isolated in a .server module, imported only from loaders (clean server/client boundary)",
+        "app/app/routes/pokemon.tsx:22 — soft-404 via data({notFound:true},{status:404}) instead of the documented throw data(\"Not Found\",{status:404}) + route ErrorBoundary",
+        "app/app/routes/move.tsx:39 — loaderData: any in 5 of 7 route components, discarding the generated Route.ComponentProps types the docs say are \"automatically typed\""
+      ],
+      "rationale": "Recognisably current-docs idiomatic (splat catch-all, Layout export, React 19 <title>, loaderData props, .server module), but it hand-rolls 404 handling instead of the documented throw/ErrorBoundary flow and skips typegen entirely."
+    },
+    "correctness_risks": {
+      "score": 3,
+      "evidence": [
+        "app/app/lib/api.server.ts:48-49 — rejected promise is cached in cache.set(url, promise) with no eviction; one transient fetch failure permanently poisons that resource until server restart (same pattern for speciesIndexPromise at :82-97)",
+        "app/app/root.tsx:47-53 — root ErrorBoundary renders 'Not found' for every error, including API 500s and unexpected exceptions; no isRouteErrorResponse/instanceof Error branching as the error-boundary doc shows",
+        "app/app/routes/pokemon.tsx:43 — getSpeciesIndex() fetched inside Promise.all but its result is never used (dead call)",
+        "app/app/lib/api.server.ts:20-27 — concurrency limiter can overshoot MAX_CONCURRENCY: release() shifts a waiter before it re-increments active, so a racing new acquire() also passes",
+        "app/app/routes/home.tsx:66-79 — debounce timer cleaned up on unmount and local q re-synced on back/forward; no leaked listeners, no SSR/client drift (q initialises from the URL)"
+      ],
+      "rationale": "No races or hydration mismatches found, and debounce cleanup is careful, but two real fragilities stand out: permanently cached rejections and an error boundary that mislabels every failure as 'Not found'."
+    },
+    "global_abstractions": {
+      "score": 4,
+      "evidence": [
+        "app/app/lib/api.server.ts — single server data module behind the .server boundary; caching and concurrency concerns stay here, not in routes",
+        "app/app/lib/format.ts — small pure formatting helpers shared by server and client, no grab-bag utils module",
+        "app/app/components/Section.tsx:13-20 — one small landmark component reused by five routes instead of duplicated section markup",
+        "app/app/routes/move.tsx:19-25 vs ability.tsx:19-27 vs type.tsx:20-24 — 'refs → dedupe by species id → sort by dex' logic duplicated across three loaders",
+        "app/app/routes/ability.tsx:31 — hidden flag serialised into hiddenBySpecies object, then rebuilt into a Map at :42-43 even though each pokemon entry already carries hidden"
+      ],
+      "rationale": "Abstractions are few, well-bounded and each earns its keep; the only untangling needed is the small three-way duplication of the species-card-list derivation and the awkward ability-page hidden round-trip."
+    },
+    "readability": {
+      "score": 4,
+      "evidence": [
+        "app/app/lib/api.server.ts:14-15,46,86 — comments explain why (concurrency limiter rationale, unhandled-rejection guard, alternate-form exclusion rule)",
+        "app/app/components/PokemonCard.tsx:8-11 — JSDoc states the card contract; components are consistently small and single-purpose",
+        "app/app/routes/pokemon.tsx:18-118 — ~100-line loader doing species+variety+chain+version-groups+moves+stats in one pass; the densest file in the repo",
+        "app/app/routes/home.tsx:55-60 — refs used to emulate a stable latest-value for the debounce; commented, but the subtlest code in the app",
+        "app/app/lib/api.server.ts:41 — getJSON<T = any> and records typed as any throughout; the API shape is never documented in types"
+      ],
+      "rationale": "A new teammate finds their way in minutes: file layout mirrors routes, naming is consistent, comments explain intent. The rough spots are the any-typed data layer and one long loader."
+    },
+    "review_cost": {
+      "score": 3,
+      "evidence": [
+        "app/app/root.tsx:47-53 — would ask for the documented three-case error boundary before approving",
+        "app/app/lib/api.server.ts:48-49 — would ask for cache eviction on failure",
+        "app/app/routes/pokemon.tsx:43 — dead fetch to delete",
+        "app/app/routes/pokemon.tsx:182 — would ask to adopt Route.ComponentProps / typed loader returns in all routes",
+        "app/app/routes/home.tsx:34-45 — filtering in the component with the whole 1025-species index serialised into every page load; works, but a reviewer would question the payload and loader-based filtering"
+      ],
+      "rationale": "One round of small, local changes (error boundary, cache eviction, dead code, typing); nothing structural needs rework, but the fixes are more than nits."
+    }
+  },
+  "overall": 4,
+  "findings": [
+    {
+      "severity": "medium",
+      "location": "app/app/lib/api.server.ts:49",
+      "issue": "Rejected fetch promises are cached forever: a single transient API failure makes that URL permanently fail until the server restarts, and the same applies to the memoised species/type/generation indexes.",
+      "suggestion": "On rejection, delete the entry from the cache (and null out the memoised index promises) so the next request retries."
+    },
+    {
+      "severity": "medium",
+      "location": "app/app/root.tsx:47",
+      "issue": "The only ErrorBoundary in the app renders 'Not found' for every error, including API 500s, network failures and unexpected exceptions, with no status/message distinction.",
+      "suggestion": "Follow the documented three-case shape: isRouteErrorResponse → status page, Error instance → message/stack, else 'Unknown Error'."
+    },
+    {
+      "severity": "medium",
+      "location": "app/app/routes/pokemon.tsx:80",
+      "issue": "Soft-404 via a returned { notFound: true } flag plus an if-branch in every component (also move.tsx:16, ability.tsx:17, type.tsx:20) instead of the framework's documented throw data(..., { status: 404 }) + ErrorBoundary flow.",
+      "suggestion": "Throw data(\"Not Found\", { status: 404 }) from loaders and render a shared not-found UI from the route ErrorBoundary, removing the union-shaped loader data."
+    },
+    {
+      "severity": "low",
+      "location": "app/app/routes/move.tsx:39",
+      "issue": "Five route components accept loaderData: any, discarding the generated Route.ComponentProps types the framework provides (types.tsx:12, type.tsx:50, pokemon.tsx:182, ability.tsx:40).",
+      "suggestion": "Use the generated ./+types/<route> types (Route.ComponentProps, Route.LoaderArgs) so loaders and components are checked against each other."
+    },
+    {
+      "severity": "low",
+      "location": "app/app/routes/pokemon.tsx:43",
+      "issue": "getSpeciesIndex() is awaited inside Promise.all but its result is never used — a dead fetch that misleads readers about the page's dependencies.",
+      "suggestion": "Remove it from the Promise.all."
+    },
+    {
+      "severity": "low",
+      "location": "app/app/routes/home.tsx:27",
+      "issue": "The home loader serialises the full species index plus every generation's species list into the loader payload, and filtering/pagination runs in the component rather than in the loader from the request URL.",
+      "suggestion": "Either accept it with a comment, or move filter parsing into the loader (params → filtered page) and slim the payload; the concurrency of both approaches is fine here."
+    },
+    {
+      "severity": "low",
+      "location": "app/app/routes/ability.tsx:31",
+      "issue": "The hidden-ability flag is serialised into a hiddenBySpecies id→string object and rebuilt into a Map in the component (:42-43), even though each pokemon entry already carries hidden.",
+      "suggestion": "Pass hidden per species and render 'Hidden ability' directly in the card list."
+    },
+    {
+      "severity": "low",
+      "location": "app/app/routes/type.tsx:20",
+      "issue": "The 'dedupe refs by species, exclude alternate forms, sort by dex number' derivation is duplicated in three loaders (type.tsx, move.tsx:19, ability.tsx:19).",
+      "suggestion": "Extract a speciesFromRefs(refs, index) helper into lib/api.server.ts."
+    },
+    {
+      "severity": "low",
+      "location": "app/app/lib/api.server.ts:20",
+      "issue": "The hand-rolled limiter can momentarily exceed MAX_CONCURRENCY because release() resolves a waiter before that waiter re-increments active, letting a concurrent new acquire() through as well.",
+      "suggestion": "Increment active before awaiting the waiter slot, or track waiters as the unit of accounting; benign in practice but easy to get right."
+    },
+    {
+      "severity": "low",
+      "location": "app/app/routes/home.tsx:150",
+      "issue": "pageHref returns a bare \"?\" when no other params exist, producing a Link with href=\"?\" on the first-page path.",
+      "suggestion": "Return the current pathname (or \"./\") when the query is empty for a cleaner href."
+    }
+  ],
+  "summary": "A clean, well-structured React Router v8 framework-mode app that tracks current docs closely (config routes, splat catch-all, Layout export, React 19 inline <title>, loaderData props, a proper .server data module). The main gaps are systemic type laxity (loaderData: any everywhere, no typegen imports) and two robustness issues: permanently cached failed fetches and a root error boundary that labels every failure 'Not found'. Mergeable after one round of small, local fixes."
+}
+```

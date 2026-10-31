@@ -1,0 +1,125 @@
+{
+  "dimension": "mergeability",
+  "criteria": {
+    "idiomatic": {
+      "score": 3,
+      "evidence": [
+        "app/package.json:8 — pins nuxt 4.6.3, the current stable release",
+        "app/app/pages/index.vue:16-33 — keyed useAsyncData with a hand-rolled fetch inside the handler, the documented pattern for custom data layers",
+        "app/app/pages/pokemon/[name].vue:134-158 — second useAsyncData with { watch: [selectedGame] }, a correct use of the watch option",
+        "app/app/pages/pokemon/[name].vue:172-173, app/app/pages/moves/[name].vue:24-25 — 404 via useRequestEvent() + event.node.res.statusCode mutation instead of the documented throw createError({ statusCode: 404 })",
+        "app/app/plugins/api-base.ts:4-5 + app/app/utils/poke.ts:61-69 — module-global setApiBase seeded by a plugin instead of reading runtimeConfig at the point of use",
+        "app/app/pages/index.vue:104-119 — <option :selected> instead of v-model/:value on the <select> (search input does use v-model)"
+      ],
+      "rationale": "Solidly idiomatic Nuxt 4 (app/ srcDir, auto-imports, keyed useAsyncData, useHead with computed getters, runtimeConfig.public), but a few places hand-roll what the framework provides: raw res.statusCode mutation for 404s, a plugin-fed module global for config, and attribute-driven select state."
+    },
+    "correctness_risks": {
+      "score": 3,
+      "evidence": [
+        "app/app/pages/index.vue:62-71 — debounce timer never cleared on unmount; navigating away within 250 ms makes router.replace({query}) fire against the next route, polluting its URL",
+        "app/app/pages/moves/[name].vue:24-25 — error from useAsyncData is never inspected; an upstream PokeAPI 500/null result renders 'Not found' and sets status 404, masking outages",
+        "app/app/pages/pokemon/[name].vue:37 — fetchApi on the default variety throws unhandled on non-404 failures; data falls back to the NotFound branch",
+        "app/app/pages/index.vue:93-97 — currentPage clamps to totalPages while the URL keeps page=N, so displayed 'Page x of y' diverges from the query string",
+        "app/app/utils/poke.ts:71-83 — apiCache is an unbounded Map, but keyed by a finite endpoint set and spec permits runtime caching; failures are evicted correctly",
+        "app/app/pages/pokemon/[name].vue:132 — mapLimit(...,16, ...) fan-out of up to ~900 move fetches per game change, bounded by concurrency and cached after first run"
+      ],
+      "rationale": "No hydration mismatches or races in the data flow (param-route navigations remount pages, and the game re-fetch is watch-driven), but three real gaps: the leaked debounce timer, error-swallowing that turns upstream failures into fake 404s, and a display/URL divergence on bad page numbers."
+    },
+    "global_abstractions": {
+      "score": 3,
+      "evidence": [
+        "app/app/utils/poke.ts:70-126 — single 258-line data module every page depends on: fetch+cache, three indexes, card models, helpers",
+        "app/app/utils/poke.ts:61-69 — module-level resolvedApiBase and apiCache are hidden global state shared across all server requests; the comment acknowledges and justifies it",
+        "app/app/pages/pokemon/[name].vue:168-174, app/app/pages/moves/[name].vue:24-25, app/app/pages/abilities/[name].vue:25-26, app/app/pages/types/[name].vue:43-44 — near-identical useHead/useRequestEvent/404 boilerplate duplicated across four pages",
+        "app/app/utils/poke.ts:196-232 — getTypeIndex fetches all 18 type records (each with full Pokémon lists) to derive names and slot types; heavy but cached and shared"
+      ],
+      "rationale": "The one data module is locally cohesive (a single API, a single domain) with clear section boundaries, and the global cache is spec-sanctioned and documented; but it is the app's chokepoint with module-global state, and the NotFound/status boilerplate is copy-pasted across every detail page instead of one composable."
+    },
+    "readability": {
+      "score": 4,
+      "evidence": [
+        "app/app/utils/poke.ts:15-52 — small, well-named helpers (humanize, dexNumber, collapseWhitespace, latestEnglishFlavorText) matching spec vocabulary",
+        "app/app/utils/poke.ts:71-73 — comments that explain why (failure eviction: 'Don't cache failures: the API is a live service')",
+        "app/app/assets/css/main.css:1-200 — sectioned by feature with banner comments, token-driven, no framework",
+        "app/app/components/MovesTable.vue:8-18 — explicit column/sort model, easy to follow",
+        "app/app/utils/poke.ts:70,119 — fetchApi/fetchRecord return Promise<any>; API responses are untyped, so data.value is any in every page (partially mitigated by MoveRow/PokemonCardModel interfaces)"
+      ],
+      "rationale": "A new teammate would find their way in minutes: page files named after routes, small functions, why-comments, and consistent naming. The rough spot is the untyped any boundary at the API layer, which shifts type-checking to runtime casts scattered through the pages."
+    },
+    "review_cost": {
+      "score": 3,
+      "evidence": [
+        "app/app/pages/index.vue:62-71 — must add onUnmounted cleanup for the debounce before approving",
+        "app/app/pages/pokemon/[name].vue:172-173 and 3 sibling pages — must convert res.statusCode mutation to createError/showError and actually handle the useAsyncData error ref",
+        "app/app/pages/index.vue:104-119, app/app/pages/pokemon/[name].vue:200-204 — selects should bind value/v-model",
+        "app/app/pages/index.vue:16-33 — home payload ships all 1025 species with types to the client; trimming or lazy-loading the filter data is worth discussing",
+        "app/nuxt.config.ts:2 — compatibilityDate '2025-01-01' is ten months stale"
+      ],
+      "rationale": "Approvable in one round: the required changes (debounce cleanup, createError-based 404s plus error surfacing, controlled selects, a .gitignore for app/.nuxt and app/.output) are each small but touch several files, so it is more than nits."
+    }
+  },
+  "overall": 3,
+  "findings": [
+    {
+      "severity": "medium",
+      "location": "app/app/pages/moves/[name].vue:24-25",
+      "issue": "The error ref of useAsyncData is never inspected; any upstream API failure (timeout, 500, network) collapses to data=null and is rendered as the 'Not found' page with a 404 status, masking outages from users and ops. Same pattern in pokemon/[name].vue, abilities/[name].vue, types/[name].vue.",
+      "suggestion": "Destructure error from useAsyncData and throw createError({ statusCode: 404 }) only for genuine 404s (fetchRecord already distinguishes them); propagate other failures to the error page."
+    },
+    {
+      "severity": "medium",
+      "location": "app/app/pages/index.vue:62-71",
+      "issue": "The 250 ms debounce timer for the search box is never cleared on unmount, so a navigation within the debounce window fires router.replace({query: buildQuery(...)}) against the new route and pollutes its URL with q/type/generation params.",
+      "suggestion": "Clear the timer in onBeforeUnmount (or use a composable-scoped timer) and guard the replace against the current route path."
+    },
+    {
+      "severity": "low",
+      "location": "app/app/utils/poke.ts:70,119",
+      "issue": "fetchApi/fetchRecord return Promise<any>, so every page's model is untyped and API shapes are re-declared with inline casts (e.g. species.varieties, pokemon.moves) at each call site; refactors of the data layer get no compile-time protection.",
+      "suggestion": "Declare interfaces for the consumed API resources in poke.ts and have fetchRecord return them, keeping MoveRow/PokemonCardModel as the app-facing models."
+    },
+    {
+      "severity": "low",
+      "location": "app/app/pages/index.vue:104-119",
+      "issue": "The Type and Generation selects reflect state via :selected on <option> instead of binding the select's value; after back/forward navigation the selection is only updated through attribute patching, which is unreliable once the user has interacted with the control. Same pattern for the Game select in pokemon/[name].vue:200-204.",
+      "suggestion": "Use v-model bound to a computed backed by route.query, or :value on the <select>, and drive the router update from a watcher."
+    },
+    {
+      "severity": "low",
+      "location": "app/app/utils/poke.ts:61-69",
+      "issue": "Config is threaded through a module-level mutable global (resolvedApiBase) seeded by a plugin, hiding where the API base comes from and coupling the data layer to plugin execution order; the client bundle also bakes the build-time env value.",
+      "suggestion": "Read useRuntimeConfig().public.apiBaseUrl inside the fetch helpers (they run in a Nuxt context within useAsyncData), or use useRequestFetch, removing the setApiBase plugin entirely."
+    },
+    {
+      "severity": "low",
+      "location": "app/app/pages/index.vue:16-33",
+      "issue": "The home model ships all 1025 species with humanized names, generation and types in the SSR payload on every full page load, inflating the HTML/JS payload for a page that renders 48 cards.",
+      "suggestion": "Keep the full index server-side and return only the current page plus filter metadata, or compute matches in a server-only layer and pass page slices."
+    },
+    {
+      "severity": "low",
+      "location": "app/app/pages/pokemon/[name].vue:132",
+      "issue": "The moves table fetches one record per move (up to ~900 requests at concurrency 16) the first time each game is selected, which is slow on the client even though results are then cached.",
+      "suggestion": "Consider a cached batched endpoint or lazy-load the tables on client navigation only, keeping the SSR pass for the initially selected game."
+    },
+    {
+      "severity": "low",
+      "location": "app/.gitignore",
+      "issue": "app/ has no .gitignore while .nuxt/ and .output/ build outputs exist in the directory; the root .gitignore only covers /data/, /.data-cache/ and node_modules/, so build artifacts are one 'git add .' away from being committed. The empty app/server/ directory is also dead weight.",
+      "suggestion": "Add app/.gitignore with .nuxt, .output, .data, node_modules and remove the empty server/ directory."
+    },
+    {
+      "severity": "low",
+      "location": "app/app/pages/pokemon/[name].vue:168-174",
+      "issue": "The NotFound handling (conditional title, NotFound child component, status mutation) is copy-pasted across four detail pages with small variations, so a fix has to be applied four times.",
+      "suggestion": "Extract a composable (e.g. useResourceOr404(useAsyncData result)) that owns the title, the status and the NotFound branch once."
+    },
+    {
+      "severity": "low",
+      "location": "app/nuxt.config.ts:2",
+      "issue": "compatibilityDate is pinned to 2025-01-01, ten months in the past; it gates framework behavior flags, so the app silently opts out of a year of fixes.",
+      "suggestion": "Set it to the current date (or the release date of the pinned Nuxt version)."
+    }
+  ],
+  "summary": "A clean, recognizably idiomatic Nuxt 4.6.3 app: correct project layout, keyed useAsyncData, watch-driven re-fetching, and tidy token-driven CSS, with no hydration or routing races found. The blocking issues are all small but real: upstream API failures are masked as 404 'Not found' pages, the search debounce leaks across navigation, and 404 handling bypasses the documented createError pattern in four places. I'd merge after one round of changes."
+}

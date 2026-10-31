@@ -1,0 +1,173 @@
+I've read the spec, all of `app/src/`, `app/package.json`, and confirmed the measured facts. Summary of what I found before scoring:
+
+**No tests exist in `app/` at all.** The agent didn't write a single test: no `*.test.*` files anywhere in `app/src`, no test runner among devDependencies (`app/package.json:14-18` — only `@types/node`, `typescript`, `vite`), no `test` script, and no vitest/playwright config inside `app/`. The only tests in the repo are the provided acceptance suite in `tests/`, which is not the agent's work. Meanwhile the app contains a large amount of dense, pure, easily-testable logic — exactly the kind of code that unit tests pay off on.
+
+What's unguarded (with locations):
+
+- **`app/src/lib/format.ts:8-47`** — `humanize`, `dexNumber`, `englishName`, `collapseWhitespace`, `latestEnglishFlavorText`, `orDash`. Pure functions with spec-exact outputs (`mr-mime` → `Mr Mime`, `#0025`, `—` for missing, `\n`/`\f` collapsing). Zero-cost to test; a one-character regex change would go unnoticed.
+- **`app/src/routes/index.tsx:39-71`** — the combination of search/type/generation filters, the 48-per-page slice, page clamping (`if (page > totalPages) page = totalPages`) and the "no matches → `No Pokémon found`" branch. Off-by-one pagination or a broken filter intersection would only be caught if the acceptance suite happens to hit that exact URL.
+- **`app/src/routes/index.tsx:99-107`** — debounced search input. The timer is never cleared on unmount, so a stale debounce can call `nav()` after the user navigated away; a race like that is precisely what a focused test would catch.
+- **`app/src/routes/pokemon/[name]/index.tsx:74-137`** — the densest logic in the app: game-version collection, default-game selection (highest `order`), the `move::method` dedupe keeping the *minimum* level, method ordering (`METHOD_ORDER` then alphabetical), and the level-up vs alphabetical default sorts. All untested.
+- **`app/src/components/moves-table.tsx:36-52, 86-96`** — client-side sorting with "missing sorts last in both directions" and the ascending/descending flip plus `aria-sort`. The comparator is correct today; any refactor of `compareValues` (e.g. dropping the null special-case) would silently pass.
+- **`app/src/lib/api.ts:14-33, 80-135`** — the in-memory promise cache (successes cached forever, 404s/failures evicted) and the type/generation index builders (alternate-form filtering via `isDefaultPokemonId`, slot ordering). A regression here silently corrupts *every* list page.
+- **404 paths** — `app/src/routes/[...all]/index.tsx:3-5` and the `status(404); return null` branches in each route loader; the not-found page is only protected by one acceptance case (`/pokemon/missingno`).
+- **Latent bug found while reading** — `app/src/routes/abilities/[name]/index.tsx:29-33`: `if (!byId.has(id)) byId.set(id, !!entry.is_hidden)` is first-wins, so a Pokémon listed with an ability both normally *and* hidden would lose its `Hidden ability` note. Nothing would catch this today.
+- **Evolution recursion** — `app/src/routes/pokemon/[name]/index.tsx:139-143` (`EvoNode`/`toNode`) handles branching chains (Eevee) untested.
+
+The code itself is well-factored for testability — pure helpers isolated in `lib/`, heavy logic hoisted into `routeLoader$` bodies that could be extracted and tested without a browser — which makes the complete absence of tests more of a choice than an obstacle.
+
+```json
+{
+  "dimension": "tests",
+  "criteria": {
+    "coverage_of_risk": {
+      "score": 1,
+      "evidence": [
+        "app/package.json:14-18 — no test runner in devDependencies, no test script",
+        "app/src/routes/index.tsx:39-71 — filter intersection, 48/page slicing, page clamping: untested",
+        "app/src/routes/pokemon/[name]/index.tsx:74-137 — moves dedupe, default game, method order: untested",
+        "app/src/lib/format.ts:8-47 — all pure spec-exact helpers untested"
+      ],
+      "rationale": "Zero tests exist; the riskiest logic (filtering, pagination, sorting, data transformation) has no coverage beyond the provided acceptance suite."
+    },
+    "behaviour_not_implementation": {
+      "score": 1,
+      "evidence": [
+        "app/src/ — no test files anywhere (confirmed by measurement: tests.files = 0)"
+      ],
+      "rationale": "No tests, so nothing is asserted at all."
+    },
+    "regression_power": {
+      "score": 1,
+      "evidence": [
+        "app/src/components/moves-table.tsx:36-52 — missing-values-last comparator; regression would pass silently",
+        "app/src/lib/api.ts:80-135 — index builders; alternate-form filtering regression corrupts all list pages undetected",
+        "app/src/routes/index.tsx:52 — page>totalPages clamp unguarded"
+      ],
+      "rationale": "Nothing the agent wrote would fail on any regression; only the acceptance suite guards behavior, and only for the URLs it visits."
+    },
+    "signal_to_noise": {
+      "score": 3,
+      "evidence": [
+        "app/src/ — no test files; no noise by definition"
+      ],
+      "rationale": "No tests means no padding, but also nothing earning its keep; per the anchor this scores 3."
+    }
+  },
+  "overall": 1,
+  "findings": [
+    {
+      "severity": "high",
+      "location": "app/package.json",
+      "issue": "No test infrastructure whatsoever: no test script, no vitest/playwright devDependency, zero test files despite ~1000 LOC of dense pure logic.",
+      "suggestion": "Add vitest and unit tests for app/src/lib/format.ts and app/src/lib/api.ts helpers, plus component tests for MovesTable sorting."
+    },
+    {
+      "severity": "high",
+      "location": "app/src/routes/pokemon/[name]/index.tsx:74-137",
+      "issue": "Densest, most fragile logic in the app (game selection, move::method dedupe keeping min level, method ordering, per-table default sorts) is completely untested.",
+      "suggestion": "Extract the moves assembly into a pure function taking (pokemon, versionGroups, query) and test it against fixtures (e.g. level-up ordering, invalid ?game fallback, method order Level Up/Machine/Egg/Tutor)."
+    },
+    {
+      "severity": "high",
+      "location": "app/src/routes/index.tsx:39-71",
+      "issue": "Filter combination, pagination slicing, and page clamping are only guarded for the specific URLs the acceptance suite visits.",
+      "suggestion": "Unit-test the filtering/pagination as a pure function: multi-filter intersection, page beyond range, page=0/NaN, empty results."
+    },
+    {
+      "severity": "high",
+      "location": "app/src/components/moves-table.tsx:36-52",
+      "issue": "Client-side sort comparator ('missing last in both directions', asc/desc flip) and aria-sort state have no tests; a comparator refactor would regress silently.",
+      "suggestion": "Add a vitest component/render test asserting row order and aria-sort for each column click sequence, including null power/accuracy/PP."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/lib/api.ts:14-33",
+      "issue": "Cache semantics (successes cached forever, 404s and failures evicted) are untested; a change to eviction would change behavior against the live-data overlay without failing anything.",
+      "suggestion": "Test apiGet with a stubbed fetch: 404 then success, throw-then-retry, idempotent promise reuse."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/routes/index.tsx:99-107",
+      "issue": "Debounced search timer is never cleared on unmount; a stale timer can fire nav() after navigation. No test would catch this race.",
+      "suggestion": "Clear the timer in cleanup, and add a test that rapid typing plus immediate navigation doesn't trigger a late URL update."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/routes/[...all]/index.tsx:3-5",
+      "issue": "404 paths (status(404) wiring in every route loader plus the catch-all route) rely on one acceptance case.",
+      "suggestion": "Add tests for unknown moves/abilities/types/excluded types (stellar) and unknown species returning the Not found page."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/routes/abilities/[name]/index.tsx:29-33",
+      "issue": "First-wins hidden-ability flag: a Pokémon with the same ability as both normal and hidden loses its 'Hidden ability' note. Latent bug nothing would catch.",
+      "suggestion": "OR the is_hidden flags across entries (byId.set(id, byId.get(id) || !!entry.is_hidden)) and add a fixture test."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/routes/pokemon/[name]/index.tsx:139-143",
+      "issue": "Recursive evolution-tree building (branching chains like Eevee) is untested.",
+      "suggestion": "Test toNode against a branching chain fixture asserting nested list structure."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/lib/format.ts:21-23",
+      "issue": "Humanize/dexNumber edge cases (empty segments, ids > 9999 padding) untested despite being trivially testable.",
+      "suggestion": "A five-case table-driven vitest suite for format.ts would cost minutes and lock down spec-exact formatting."
+    }
+  ],
+  "summary": "The agent wrote no tests at all — no runner, no script, no cases — while shipping roughly 1000 LOC of dense, pure, easily-testable data logic (filtering, pagination, move dedupe, sorting, formatting). The acceptance suite is currently the only guard, so a refactor of the data layer or sort comparator would regress silently. On the plus side the code is well-factored for testability, so backfilling tests would be cheap.",
+  "wroteTests": false,
+  "testCount": 0,
+  "valuableTests": [],
+  "lowValueTests": [],
+  "untested": [
+    {
+      "area": "Home filtering, pagination and URL state (q/type/generation/page)",
+      "risk": "high",
+      "likelyBug": "Broken multi-filter intersection or off-by-one in the 48-per-page slice; page beyond range not clamped after filters shrink results"
+    },
+    {
+      "area": "Pokémon moves assembly (game select, move::method dedupe, method ordering, default sorts)",
+      "risk": "high",
+      "likelyBug": "Wrong default game after an invalid ?game, duplicate rows, or Level Up table losing its level-then-name order"
+    },
+    {
+      "area": "Moves table client-side sorting and aria-sort",
+      "risk": "high",
+      "likelyBug": "Missing power/accuracy/PP values sorting first instead of last, or the asc/desc flip breaking on second click"
+    },
+    {
+      "area": "Pure formatting helpers (humanize, dexNumber, flavor text collapse, orDash)",
+      "risk": "medium",
+      "likelyBug": "Spec-exact outputs drifting (Mr Mime vs Mr. Mime, #0025 vs #25, em dash replaced) after an 'innocent' regex change"
+    },
+    {
+      "area": "API cache and type/generation index builders (alternate-form exclusion, slot ordering)",
+      "risk": "high",
+      "likelyBug": "Alternate forms leaking into lists or types displayed out of slot order, silently corrupting every list page"
+    },
+    {
+      "area": "404 / not-found paths across all routes",
+      "risk": "medium",
+      "likelyBug": "A renamed loader returning data without status(404) would render an empty page instead of the Not found page"
+    },
+    {
+      "area": "Debounced search lifecycle",
+      "risk": "medium",
+      "likelyBug": "Stale timer navigating the URL after the user already left the page or changed filters"
+    },
+    {
+      "area": "Hidden-ability flag aggregation",
+      "risk": "medium",
+      "likelyBug": "First-wins semantics dropping the 'Hidden ability' note for Pokémon that have the ability both normally and hidden"
+    },
+    {
+      "area": "Evolution chain recursion (branching chains)",
+      "risk": "low",
+      "likelyBug": "Nested list structure flattening or infinite loop on malformed chain data"
+    }
+  ]
+}
+```

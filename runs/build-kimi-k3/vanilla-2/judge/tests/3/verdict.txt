@@ -1,0 +1,186 @@
+I have a complete picture. Confirmed facts: `app/` contains **zero test files** (no test runner in devDependencies, no `test` script in `app/package.json:5-8`, no spec/assert/test imports anywhere in `app/src`). The app is a server-rendered vanilla-JS site with a genuinely testable architecture — pure, side-effect-free helpers in `app/src/shared/` (`format.js`, `home-view.js`, `router.js`, `components.js`) deliberately shared between SSR and client — but not one of them has a unit test, and all protection comes from the harness-owned `tests/` suite.
+
+## Review notes
+
+**What exists.** The one smart decision from a testability standpoint is the `shared/` layer: filtering, pagination, URL-state parsing and all formatting helpers are pure functions usable in Node with no DOM or network (`app/src/shared/home-view.js:8,19,29,38`, `app/src/shared/format.js:3-40`). Writing tests for these would have cost minutes and caught real regressions; the agent wrote none.
+
+**The highest-risk untested logic** (what breaks once someone refactors the data layer):
+
+- **Home filtering/pagination/URL state** — `filterSummaries`/`homeResultsHtml`/`parseHomeState`/`homeQueryString` (`app/src/shared/home-view.js:8-59`). The `slice((page-1)*48, page*48)` off-by-one, `Math.ceil` total-pages, the clamp at `home-view.js:44` (a URL with `?page=999` renders page 1's content but keeps `page=999` in the query — an inconsistency no test pins down), `q` values containing `&`/`+`/`#`, and default-param omission would all regress silently.
+- **Client-side table sorting** (`app/src/client/main.js:73-102`) — numeric-vs-text dispatch, missing-values-sort-last in *both* directions, direction flip, and `aria-sort` housekeeping. Any of the three acceptance tests touching sorting covers only one happy path; a refactor of this comparator would pass on the cases the suite samples while breaking missing-value ordering or descending numeric sorts.
+- **Species↔Pokémon mapping and alternate-form exclusion** (`app/src/server/api.js:138-155`) — the `id >= 10000` threshold, and the fallback branch at `api.js:144-147` (Pokémon id with no matching species id) which is effectively dead in the shipped data — precisely the kind of path a data-layer refactor breaks with no signal.
+- **Hidden-ability marker mismatch** (`app/src/server/pages.js:335-342`) — the map is keyed by **Pokémon id** (`idFromUrl(entry.pokemon.url)`) but looked up by **species id** (`hiddenBySpecies.get(species.id)`). These coincide only because of the default-variety convention; on the fallback path in `speciesForPokemonRef` (where `species.id` comes from `pokemon.species.url`) the "Hidden ability" marker silently disappears. No test would catch this.
+- **Route matching** (`app/src/shared/router.js:7`) — `decodeURIComponent` throws `URIError` on malformed escapes (`/pokemon/%`), which escapes to the 500 handler in `app/server/server.mjs:85-88` instead of the 404 page. Not-found handling is tested only for well-formed names.
+- **Debounce ↔ popstate race** (`app/src/client/main.js:36-59`) — type "cha", immediately hit Back: the pending 200 ms debounce fires after the `popstate` render and re-renders with the stale query while the URL shows the previous state. Timing-sensitive and completely unguarded.
+- **Cache/eviction logic** (`app/src/server/api.js:15-40,72-76`) — the `promise.catch(() => cache.delete(path))` retry-on-failure pattern and the `summariesPromise` reset are exactly the lines a refactor of `getJson` would drop (leaving a permanently rejected cached promise), with no test to notice.
+- **API-failure paths** — every render failure collapses to a bare `text/plain` 500 (`app/server/server.mjs:87`). Nothing exercises what a user sees when the API is down or returns 500s.
+- **Text/number formatting** (`app/src/shared/format.js:8-40`) — `collapseWhitespace` on `\f`, `latestEnglishFlavor` mixed-language ordering, `formatMeters` rounding, `dexNumber` padding: all trivially fuzzable, all untested.
+
+**Scoring.** Per the rubric, `coverage_of_risk` and `regression_power` are 1 (nothing in `app/` would fail), `behaviour_not_implementation` 1 (no tests), and `signal_to_noise` 3 (no tests). `overall` is 1: a ~700-LOC app with substantial pure logic, an untestable-by-accident-free client layer, and multiple known-sharp edges, shipped with zero safety net of its own.
+
+```json
+{
+  "dimension": "tests",
+  "criteria": {
+    "coverage_of_risk": {
+      "score": 1,
+      "evidence": [
+        "app/package.json:5-8 — no test runner among devDependencies (vite only) and no test script",
+        "app/src/shared/home-view.js:8 — filterSummaries: pure filtering/sorting-critical logic, zero tests",
+        "app/src/client/main.js:73 — table-sort comparator (numeric parse, missing-last, direction flip) untested",
+        "app/src/server/api.js:138 — speciesForPokemonRef alternate-form exclusion and fallback branch untested"
+      ],
+      "rationale": "The app contains zero tests of its own; none of the risky data-transformation, pagination, URL-state or error paths are covered by anything the team owns."
+    },
+    "behaviour_not_implementation": {
+      "score": 1,
+      "evidence": [
+        "app/src/ — grep for test/spec/assert/expect finds only unrelated identifiers; no test files exist",
+        "tests/ — the only behavioural coverage is the harness-owned acceptance suite, not app work"
+      ],
+      "rationale": "No tests exist in app/, so there is nothing to assess as behavioural or implementation-focused."
+    },
+    "regression_power": {
+      "score": 1,
+      "evidence": [
+        "app/src/shared/home-view.js:44 — page clamping vs retained ?page=999 in the URL: no test would fail if the clamp broke",
+        "app/src/server/pages.js:335 — hidden-ability map keyed by Pokémon id but read by species id; a refactor here passes silently",
+        "app/src/shared/router.js:7 — decodeURIComponent throws on malformed escapes, yielding a 500, not a 404; untested"
+      ],
+      "rationale": "With no app-owned tests, any regression in the pure logic or the client interactivity would be caught only if the external acceptance suite happens to sample that exact case."
+    },
+    "signal_to_noise": {
+      "score": 3,
+      "evidence": [
+        "app/src/ — no test files, so no noise; the shared/ pure-function layer (format.js, home-view.js, router.js) shows the code was factored to be easily testable but never tested"
+      ],
+      "rationale": "No tests means no low-value tests; scored 3 per the rubric, but the absence is a missed opportunity rather than a virtue."
+    }
+  },
+  "overall": 1,
+  "findings": [
+    {
+      "severity": "high",
+      "location": "app/package.json:5-8",
+      "issue": "No test runner, no test script, and zero test files anywhere in app/ (~700 significant LOC of non-trivial logic)",
+      "suggestion": "Add vitest (already a vite project) and unit-test the shared/ pure modules first: filterSummaries, homeResultsHtml, parseHomeState, homeQueryString, humanize, latestEnglishFlavor, matchRoute"
+    },
+    {
+      "severity": "high",
+      "location": "app/src/shared/home-view.js:8",
+      "issue": "Filtering, 48-per-page slicing, total-pages math, page clamping and default-omitting URL construction are untested; off-by-one or clamp bugs and ?page=999 inconsistencies would slip through",
+      "suggestion": "Table-driven unit tests over filterSummaries/homeResultsHtml/parseHomeState covering page 0, page > total, non-numeric page, empty results, and q with URL-reserved characters"
+    },
+    {
+      "severity": "high",
+      "location": "app/src/client/main.js:73",
+      "issue": "Client-side sort comparator untested: numeric-vs-text dispatch, missing-values-sort-last in descending order, direction flip and aria-sort housekeeping can all regress under refactor",
+      "suggestion": "Extract the comparator into shared/ and unit-test it (missing values, numeric strings, em-dash cells, ascending/descending), plus a DOM-level test that aria-sort moves between headers"
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/server/pages.js:335",
+      "issue": "Hidden-ability marker is keyed by Pokémon id (idFromUrl(entry.pokemon.url)) but looked up by species.id; they diverge on the fallback mapping path, silently dropping the 'Hidden ability' text",
+      "suggestion": "Key the map by the resolved species id, and add a test with a Pokémon whose species id differs from its Pokémon id"
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/client/main.js:36",
+      "issue": "Debounce (200 ms) races with the popstate handler: type then immediately press Back and the stale debounce re-renders content that no longer matches the URL",
+      "suggestion": "Clear the pending debounce in the popstate handler; add an integration test for type-then-back"
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/shared/router.js:7",
+      "issue": "decodeURIComponent(match[2]) throws URIError on malformed percent-encoding (/pokemon/%), turning a should-be-404 into a 500",
+      "suggestion": "Wrap in try/catch (or validate the segment) and return the not-found route; unit-test matchRoute with malformed input"
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/server/api.js:15",
+      "issue": "Promise-cache eviction/retry pattern (cache.delete on rejection, summariesPromise reset) is unguarded; a getJson refactor that caches rejected promises or drops the reset would leave the app permanently broken after one API hiccup",
+      "suggestion": "Unit-test getJson against a stubbed fetch: 404 → NotFoundError, 500 → error, then success on retry (cache must not hold the rejection)"
+    },
+    {
+      "severity": "medium",
+      "location": "app/server/server.mjs:85",
+      "issue": "All API failures collapse to a bare text/plain 500; no user-facing error page and no test exercises API-down behaviour",
+      "suggestion": "Render an in-app error page for render failures and add an integration test with an unreachable API_BASE_URL"
+    },
+    {
+      "severity": "low",
+      "location": "app/src/shared/format.js:22",
+      "issue": "latestEnglishFlavor / collapseWhitespace (\\f and \\n runs, mixed-language entries), formatMeters rounding and dexNumber padding are untested despite being spec-defined",
+      "suggestion": "Cheap property/table tests over the format helpers; they are pure and already exported"
+    },
+    {
+      "severity": "low",
+      "location": "app/src/server/api.js:72",
+      "issue": "buildSummaries fetches ~1,025 pokemon records on first home request (concurrency 32) with no persistence; per-process warm-up cost and partial-failure behaviour are untested",
+      "suggestion": "Add a warm-up on server start plus a test that a mid-build fetch failure is retried rather than cached"
+    }
+  ],
+  "summary": "The app ships with no tests of its own — no runner, no script, no spec files — so all regression protection comes from the harness-owned acceptance suite. Ironically, the architecture is well set up for testing: filtering, pagination, URL state and formatting live in pure shared modules that would be trivial to unit-test. Until those are covered, a refactor of the data layer or the client sort comparator could break pagination edge cases, the hidden-ability marker, sorting of missing values, and not-found handling with no failing test in the repo.",
+  "wroteTests": false,
+  "testCount": 0,
+  "valuableTests": [],
+  "lowValueTests": [],
+  "untested": [
+    {
+      "area": "Home filtering, 48-per-page pagination and URL state (filterSummaries, homeResultsHtml, parseHomeState, homeQueryString)",
+      "risk": "high",
+      "likelyBug": "Off-by-one in the slice or total-pages math; page clamped for display but ?page=999 kept in the URL; q containing &, + or # round-tripping wrong; default params no longer omitted"
+    },
+    {
+      "area": "Client-side sortable move tables (comparator, missing-values-last, aria-sort management)",
+      "risk": "high",
+      "likelyBug": "Descending numeric sort or em-dash cells sorting first instead of last; aria-sort left stale on the previous header, breaking the accessible sort indication"
+    },
+    {
+      "area": "Species↔Pokémon mapping and alternate-form exclusion (speciesForPokemonRef, speciesCardsForPokemonRefs)",
+      "risk": "high",
+      "likelyBug": "The id >= 10000 threshold drifting (Mega forms appearing in lists), or the dead-looking fallback branch at api.js:144 being broken by a refactor with no signal"
+    },
+    {
+      "area": "Hidden-ability marker mapping on the ability page",
+      "risk": "medium",
+      "likelyBug": "Map keyed by Pokémon id but read by species id: 'Hidden ability' silently missing for any Pokémon whose ids diverge"
+    },
+    {
+      "area": "Route matching and not-found paths, including malformed input",
+      "risk": "medium",
+      "likelyBug": "decodeURIComponent throwing on /pokemon/% produces a 500 instead of the Not found page; case-sensitivity changes silently altering which URLs 404"
+    },
+    {
+      "area": "Search debounce and history/popstate interaction on the home page",
+      "risk": "medium",
+      "likelyBug": "Stale debounce firing after Back re-renders results that don't match the URL; select values not restored on popstate"
+    },
+    {
+      "area": "In-memory API cache: eviction of rejected promises, retry behaviour, summaries rebuild",
+      "risk": "medium",
+      "likelyBug": "A refactor caches a rejected promise forever, so one transient API failure permanently breaks the home page until restart"
+    },
+    {
+      "area": "API-down / 5xx error handling end to end",
+      "risk": "medium",
+      "likelyBug": "Users get a bare text/plain 500; no error page, no recovery, and nothing in CI would notice the difference"
+    },
+    {
+      "area": "Text and number formatting helpers (humanize, collapseWhitespace, latestEnglishFlavor, formatMeters/Kilograms, dexNumber)",
+      "risk": "medium",
+      "likelyBug": "\\f not collapsed in flavor text, wrong rounding at .05 boundaries, or dex padding regressing from #0025 to #25"
+    },
+    {
+      "area": "Move-page method ordering and per-method row ordering; type-page move alphabetical sort",
+      "risk": "low",
+      "likelyBug": "METHOD_ORDER tie-break or the level-up (level, then name) comparator regressing; acceptance tests sample only a few orderings"
+    },
+    {
+      "area": "Empty-data edges: move with no effect entries or learned_by_pokemon, ability with no holders, type with no Pokémon",
+      "risk": "low",
+      "likelyBug": "A null/undefined deref (e.g. rec.names on a sparse record) throwing a 500 on a resource the fixtures happen to populate"
+    }
+  ]
+}
+```

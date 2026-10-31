@@ -1,0 +1,125 @@
+## Review
+
+The app is a compact, well-layered Hono 4 + htmx 2 application (`app/package.json` pins `hono@^4.13.14` and `@hono/node-server@^2.1.5`, both current stable today), so the version choices and imports (`@hono/node-server/serve-static`) are correct for the present release. Rendering uses the officially documented `hono/html` tagged-template helper (hono.dev/docs/helpers/html) with `c.html()`, and the server-side half of the htmx integration — `HX-Request` detection returning fragments (`app/src/app.js:37`, `:75`, `:177`) — is the canonical pattern, wrapped in real `GET` forms so the app degrades gracefully without JS (`app/src/views/home.js:36-45`). Escaping is delegated to `hono/html` (only `raw()` would bypass it; the app never uses `raw()`), and 404s are handled both at the API-call layer (`apiJson` maps 404 → `null`) and at the router (`app.notFound`, `app/src/app.js:303`). I verified the two subtlest htmx claims against current sources: `from:` with a plain CSS selector attaches to **all** matching elements (htmx `querySelectorAllExt`; the "first match only" caveat applies only to `find`/`closest`/`next`/`previous` extended selectors — github.com/bigskysoftware/htmx#1597), so `change from:select` correctly covers both filter selects; and mutating `event.detail.parameters` in `htmx:configRequest` (`app/public/app.js:6-10`) does shape the pushed URL, so the "clean URL" trick works.
+
+The main issue I'd flag is a latent type-shape bug: `pokemonCard` reads the `typeLabels` prop as a plain object (`app/src/views/components.js:21`), but the home route passes the `Map` from `typeEnglishByName()` (`app/src/app.js:72`); the lookup always misses and silently falls back to `humanize()` — correct today only because the 18 type English names equal their humanized names. One call site papers over the same inconsistency with `Object.fromEntries` (`app/src/app.js:297`), while `typePage`'s relations expect an object (`app/src/views/details.js:68`). Beyond that: rapid filter changes have no out-of-order response guard (no `hx-sync`/abort handling), `search from:#q` fires an extra request on top of the debounced `input` on clear, `fetch` has no timeout so a hung request stays cached forever (`app/src/api.js:13-19`), and htmx 2's default `responseHandling` refuses to swap 4xx/5xx — so an API hiccup during a filter change silently does nothing while `onError` returns plain text (`app/src/app.js:305-308`). Structure, naming and comments are genuinely good: a clean `api.js` data layer with promise-caching, tiny pure helpers in `format.js`, per-page view modules, and why-comments at each non-obvious choice; nits are the dead `speciesList` import (`app/src/app.js:7`), the 50-line move-assembly function living in the router file (`app/src/app.js:95`), and the per-path `serveStatic` loop (`app/src/app.js:33-34`).
+
+```json
+{
+  "dimension": "mergeability",
+  "criteria": {
+    "idiomatic": {
+      "score": 4,
+      "evidence": [
+        "app/src/app.js:37 — canonical HX-Request fragment detection for htmx, returning page fragments at :75 and :177",
+        "app/src/views/home.js:36-45 — real GET form wrapping htmx triggers: idiomatic progressive enhancement, works without JS",
+        "app/src/views/layout.js:1 — hono/html tagged template, the officially documented non-JSX rendering path (hono.dev/docs/helpers/html)",
+        "app/src/app.js:303-308 — app.notFound/app.onError per current Hono best practice",
+        "app/package.json:9-11 — hono ^4.13.14 and @hono/node-server ^2.1.5 are the current stable releases; serve-static import path is correct for v2",
+        "app/src/app.js:33-34 — serveStatic registered in a per-path loop instead of serving the public root once",
+        "app/src/app.js:95-148 — 50-line move-data assembly function lives in the routing module rather than the data/view layers"
+      ],
+      "rationale": "Recognisably current Hono + htmx: correct stable versions, fragment-per-request pattern, documented html helper, graceful no-JS forms. Held back from 5 by the clunky static-asset loop and data-shaping logic sitting in the router file."
+    },
+    "correctness_risks": {
+      "score": 3,
+      "evidence": [
+        "app/src/app.js:72 with app/src/views/components.js:21 — a Map is passed where pokemonCard does object property access (typeLabels[t.name]); the English label lookup always misses and only looks right because humanized type names equal the English names",
+        "app/src/views/home.js:42 — no hx-sync/abort handling: rapid search or select changes can have out-of-order responses swap stale results into #results",
+        "app/src/views/home.js:42 — 'search from:#q' fires an immediate request on clear while 'input changed delay:250ms' fires a second duplicate one",
+        "app/src/api.js:13-19 — fetch with no timeout: a hung request's promise is cached indefinitely; cache only clears on rejection",
+        "app/src/app.js:42 — renderNotFound returns a full layout document; sent to an htmx fragment target it would inject a whole page into #moves, and htmx 2's default responseHandling skips swapping 4xx/5xx so an API error during filter changes silently does nothing (app/src/app.js:305-308 returns plain text)"
+      ],
+      "rationale": "No escaping or 404 problems (hono/html escapes, apiJson maps 404 to a not-found page), but the Map/object label bug is a real latent defect masked by name coincidence, and the htmx request-lifecycle gaps (no ordering guard, silent failure swaps, no fetch timeout) would bite under load or API flakiness."
+    },
+    "global_abstractions": {
+      "score": 4,
+      "evidence": [
+        "app/src/api.js — single well-bounded data layer: promise cache (:11-19), memoized derived indexes (:45-94), nothing leaks into views except API_BASE",
+        "app/src/views/components.js:2 — a view module imports API_BASE (server config) from the data layer, a small leaky boundary",
+        "app/src/app.js:72 vs app/src/app.js:297 vs app/src/views/components.js:14 — the typeLabels prop is variously a Map, a plain object and {} — same concept, three shapes",
+        "app/src/api.js:11, :45 — module-level cache Map and memo promises are hidden global state, but commented and appropriate for server-side caching per the spec"
+      ],
+      "rationale": "The layering (api.js / format.js / views per page) earns its keep and has clear boundaries. The deductions are the config leaking into a view and the typeLabels shape being normalised ad hoc at each call site."
+    },
+    "readability": {
+      "score": 4,
+      "evidence": [
+        "app/src/api.js:94-118 — speciesIndex builds its indexes with named maps and inline why-comments; easy to follow",
+        "app/src/views/components.js:11-13, :26-31 — pokemonCard and section have comments explaining exactly what spec concepts they implement",
+        "app/src/format.js — small, pure, one purpose per function, named after the spec's terms",
+        "app/src/app.js:7 — dead import of speciesList, never used in the file",
+        "app/src/app.js:95-148 — pokemonMovesData is the one long function; its body is clear but it belongs next to the other data builders in api.js"
+      ],
+      "rationale": "A new teammate would find their way in minutes: consistent naming, small view modules, why-comments on every non-obvious choice. Only rough spots are the dead import and the one oversized function."
+    },
+    "review_cost": {
+      "score": 4,
+      "evidence": [
+        "app/src/app.js:72 + app/src/views/components.js:21 — the Map/object fix is a one-line change (pass Object.fromEntries or make the component Map-aware)",
+        "app/src/views/home.js:42 — adding hx-sync=\"this:abort\" and dropping the redundant 'search from:#q' is a small attribute edit",
+        "app/src/app.js:303-308 — nits: serve the public dir in one middleware, drop the dead import at :7, render the 500 through the layout"
+      ],
+      "rationale": "Approve with one round of small, localised changes — nothing structural needs rework."
+    }
+  },
+  "overall": 4,
+  "findings": [
+    {
+      "severity": "medium",
+      "location": "app/src/app.js:72 / app/src/views/components.js:21",
+      "issue": "Home route passes the typeEnglishByName() Map into pokemonCard, which reads it with typeLabels[t.name] as a plain object; the label lookup always misses and silently falls back to humanize(), correct only because the 18 type English names equal their humanized names.",
+      "suggestion": "Pick one shape for typeLabels (e.g. always a plain object, or always a Map with .get()) and convert at a single boundary; add a comment or test asserting English labels are actually used."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/views/home.js:42",
+      "issue": "Rapid search/select changes issue overlapping htmx requests with no ordering guard; a slow earlier response can swap stale results over a newer one.",
+      "suggestion": "Add hx-sync=\"this:abort\" (or abort on htmx:configRequest via htmx.config handling) so a new filter request cancels the in-flight one."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/views/home.js:42",
+      "issue": "The 'search from:#q' trigger fires an immediate request on clear, then the 'input changed delay:250ms from:#q' trigger fires a duplicate request for the same state 250ms later.",
+      "suggestion": "Drop 'search from:#q' and rely on the debounced input (the input event fires on the clear button too), or debounce both."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/api.js:13-19",
+      "issue": "fetch() has no timeout, so a hung API request's promise stays in the cache forever (the cache only clears on rejection, which never comes).",
+      "suggestion": "Wrap fetch in AbortSignal.timeout(...) or a manual AbortController, so failures reject and the cache entry is dropped."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/app.js:42, :305-308",
+      "issue": "For htmx requests, renderNotFound returns a full layout document (which would be swapped into a fragment target), and onError returns plain text; with htmx 2's default responseHandling not swapping 4xx/5xx, an API failure during a filter change silently does nothing.",
+      "suggestion": "Return fragment-shaped 404s for HX-Request (and a styled error fragment), and consider configuring htmx responseHandling to swap a friendly error for 5xx on the filter target."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/app.js:33-34",
+      "issue": "Static assets are served by registering serveStatic once per hard-coded path in a loop, duplicating the middleware registration.",
+      "suggestion": "Serve the public root once (e.g. app.use('/(styles.css|tokens.css|app.js|vendor/*)', serveStatic({ root: './public' }))) or mount public/ under a single prefix."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/app.js:95-148",
+      "issue": "pokemonMovesData is ~50 lines of view-model/data assembly living in the routing module, unlike every other data builder which sits in api.js.",
+      "suggestion": "Move it into src/api.js (or a small view-model module) so app.js stays routing + orchestration only."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/app.js:297",
+      "issue": "typePage normalises labels with Object.fromEntries(labels) ad hoc, papering over the Map/object inconsistency rather than fixing the shape once.",
+      "suggestion": "Normalise typeLabels at the data layer (export both a Map and a plain object with one canonical name) and use one accessor style everywhere."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/app.js:7",
+      "issue": "speciesList is imported but never used in app.js.",
+      "suggestion": "Delete the dead import."
+    }
+  ],
+  "summary": "A clean, current-idiom Hono 4 + htmx 2 app with genuinely good layering, escaping and 404 handling, and graceful no-JS fallbacks. The notable defects are a latent Map/object typeLabels bug at the home-page cards and a set of htmx request-lifecycle gaps (no ordering guard, duplicate clear request, silent 4xx/5xx swaps, un-timed fetch). I'd merge after one small round of fixes."
+}
+```

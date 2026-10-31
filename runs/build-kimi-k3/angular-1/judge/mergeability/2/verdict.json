@@ -1,0 +1,129 @@
+{
+  "dimension": "mergeability",
+  "criteria": {
+    "idiomatic": {
+      "score": 4,
+      "evidence": [
+        "app/src/app/app.routes.ts:17-22 — resolvers + withComponentInputBinding, the documented data-loading pattern",
+        "app/src/app/app.routes.server.ts:5-9 — RenderMode.Server with a comment explaining why no prerendering",
+        "app/src/app/not-found.component.ts:14-18 — RESPONSE_INIT 404 status, current SSR API",
+        "app/src/app/app.config.ts:13-15 — provideClientHydration(withEventReplay()), OnPush everywhere",
+        "app/src/app/server.ts:15 — allowedHosts: ['*'] contradicts official SSR guidance to keep an explicit list",
+        "app/src/app/pokemon.page.ts:33, move.page.ts:86, ability.page.ts:47, type.page.ts:110 — Title service + effect duplicated in 4 components instead of route title/TitleStrategy",
+        "app/src/app/home.page.ts:31, pokemon.page.ts:29 — afterNextRender 'ready' gate is a home-grown hydration workaround"
+      ],
+      "rationale": "Reads like current Angular 22 documentation almost everywhere (resolvers feeding component inputs, signals, new control flow, SSR tokens), with two spots that fight the docs: the wildcard allowedHosts and a hand-rolled, four-times-duplicated title mechanism."
+    },
+    "correctness_risks": {
+      "score": 3,
+      "evidence": [
+        "app/src/app/catalog.service.ts:69-73 — rejected catalog promise is cached forever; one transient API error permanently breaks every catalog page in the process",
+        "app/src/app/page-data.ts:161-162, 300-301, 338-339, 385-386 — catch-all 'return null' renders 5xx/timeouts as Not found",
+        "app/src/app/page-data.ts:196-208 — follow-up fetches (pokemon, evolution, version-groups, moves) are unwrapped; a failure rejects the resolver",
+        "app/src/app/app.config.ts:14 — no withNavigationErrorHandler, so failed resolvers leave the client silently on the old page",
+        "app/src/app/server.ts:33-37 — a throwing resolver falls through to Express's default 404, not an app error page",
+        "app/src/app/home.page.ts:60-61 — debounce timer never cancelled on destroy; can fire router.navigate('/') and hijack a just-started navigation",
+        "app/src/app/home.page.html:6 — value=\"{{ q() }}\" binding can clobber characters typed during the 200 ms debounce"
+      ],
+      "rationale": "Several real failure-path bugs, none catastrophic: the permanently-cached rejected catalog promise is the most serious, followed by unhandled mid-resolver errors that manifest as a bare server 404 and silent client-side stuck navigation."
+    },
+    "global_abstractions": {
+      "score": 4,
+      "evidence": [
+        "app/src/app/catalog.service.ts:61-67 — CatalogService fan-out is deliberate and documented (avoids 1025 per-species requests)",
+        "app/src/app/pokeapi.service.ts:35-53 — module-level cross-request response cache: hidden global state, no TTL, unbounded",
+        "app/src/app/util.ts:1-50 — small, coherent helpers, not a grab-bag utils module",
+        "app/src/app/page-data.ts:1-400 — all five pages' resolvers and view models in one file; organized but a near-god module",
+        "app/src/app/catalog.service.ts:39, app/src/app/page-data.ts:71 — TypeResource interface duplicated with different shapes"
+      ],
+      "rationale": "Abstractions are few and mostly earn their keep with clear boundaries; the deductions are the module-scope promise cache shared across SSR requests, the 400-line page-data module, and duplicated API-shape interfaces that will drift."
+    },
+    "readability": {
+      "score": 5,
+      "evidence": [
+        "app/src/app/ — file names map 1:1 to routes (home.page, pokemon.page, type.page, types.page)",
+        "app/src/app/catalog.service.ts:37-56 — doc comments explain intent, typed view models with field docs",
+        "app/src/app/app.routes.server.ts:3-4, app/src/app/server.ts:13-14 — comments explain *why*, not what",
+        "app/src/app/util.ts — one well-named pure function per API-definition rule",
+        "app/src/app/move-table.component.ts:14-22 — sorting rules named and documented"
+      ],
+      "rationale": "A new teammate can find any page in seconds; naming is consistent, functions are small, and the few comments that exist explain decisions rather than mechanics."
+    },
+    "review_cost": {
+      "score": 3,
+      "evidence": [
+        "app/src/app/catalog.service.ts:69-73 — must add failure reset for catalogPromise",
+        "app/src/app/app.config.ts:14 — must add withNavigationErrorHandler and resolver-level error handling",
+        "app/src/app/server.ts:15 — must replace wildcard allowedHosts with an explicit list",
+        "app/src/app/pokemon.page.ts:33 et al. — consolidate four Title effects into a title strategy",
+        "app/package.json:8 — 'ng test' with zero test files; pure helpers in util.ts and move-table sorting are untested"
+      ],
+      "rationalE": "",
+      "rationale": "Approve-able architecture, but I'd require one round: fix the two failure-path bugs, add a navigation error handler, and consolidate the title code before merging. Tests are a standing ask, not a blocker."
+    }
+  },
+  "overall": 4,
+  "findings": [
+    {
+      "severity": "high",
+      "location": "app/src/app/catalog.service.ts:69",
+      "issue": "catalog() caches a rejected promise with ??= and never clears it, so a single transient API failure permanently breaks home, types and all detail pages for the life of the SSR process.",
+      "suggestion": "Reset catalogPromise when load() rejects (retry on next call), or wrap load() with a retry/backoff so the catalog self-heals."
+    },
+    {
+      "severity": "high",
+      "location": "app/src/app/page-data.ts:161",
+      "issue": "Only the first request of each resolver is wrapped in try/catch, and the catch-all turns every error (including 5xx/timeouts) into 'Not found'; failures in follow-up fetches reject the resolver, which the server surfaces as Express's default 404 and the client as a silently cancelled navigation.",
+      "suggestion": "Distinguish 404 from other failures, add withNavigationErrorHandler (per the data-resolvers guidance) or RedirectCommand fallbacks, and render an app-level error page for non-404 failures."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/app/pokeapi.service.ts:35",
+      "issue": "Module-level response cache is hidden global state shared across all SSR requests, with no TTL or size bound, so 'live' API data is frozen for the process lifetime and memory grows with the API surface.",
+      "suggestion": "Move the cache into the service, bound it (LRU or entry limit) and add a TTL, or rely on HttpClient's transfer cache plus per-request scoping."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/app/home.page.ts:60",
+      "issue": "The 200 ms search debounce timer is never cancelled on destroy; typing then immediately clicking a Pokémon card lets the timer fire router.navigate('/') and hijack the navigation.",
+      "suggestion": "Register a cleanup with DestroyRef (or takeUntilDestroyed) that clears searchTimer."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/app/home.page.html:6",
+      "issue": "value=\"{{ q() }}\" is a controlled binding: once the debounced navigation lands it resets the input, clobbering characters typed in the meantime (and trimming the user's trailing whitespace).",
+      "suggestion": "Bind only once from the URL (e.g. plain readonly attribute or compare against the input's current value) instead of re-binding on every change."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/app/server.ts:15",
+      "issue": "allowedHosts: ['*'] disables the SSR host check; official guidance says keep an explicit production list and never use a wildcard.",
+      "suggestion": "Read an explicit host list from an env var (with localhost for dev) and keep the DNS-rebinding protection on."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/app/pokemon.page.ts:33",
+      "issue": "The Title-service + effect title block is copy-pasted in four page components (also move.page.ts:86, ability.page.ts:47, type.page.ts:110) and only takes effect after hydration, unlike the two routes with static route titles.",
+      "suggestion": "Use the router's route title (static for /types, a small title resolver for detail routes) or a custom TitleStrategy, so titles are set in one place and before SSR serialization."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/app/catalog.service.ts:39",
+      "issue": "API-shape interfaces are duplicated (TypeResource here vs. page-data.ts:71 with different fields; MoveResource only in page-data.ts), inviting drift as the API evolves.",
+      "suggestion": "Extract the PokeAPI response interfaces into one shared types file (e.g. pokeapi.types.ts) consumed by both."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/app/page-data.ts:80-401",
+      "issue": "One 400-line module holds resolvers and view models for all five pages; fine now, but it will become the file every feature change touches.",
+      "suggestion": "Split per route (pokemon.resolver.ts, move.resolver.ts, …) once a second contributor works here; page-data.ts already has section dividers to cut along."
+    },
+    {
+      "severity": "low",
+      "location": "app/package.json:8",
+      "issue": "ng test script, Vitest/jsdom dev-dependencies and a spec tsconfig are all configured, but the app ships zero unit tests.",
+      "suggestion": "Add Vitest specs for the pure logic (util.ts helpers, pokemonRefsToCards, catalog filtering/sorting, move-table compareValues) — cheap to test and where regressions will land."
+    }
+  ],
+  "summary": "This is a tidy, genuinely current-Angular codebase — resolvers feeding component inputs, signals throughout, modern SSR with a real 404 status and event replay — that I'd be happy to own. The merge-blocking work is all in the failure paths: a permanently cached rejected catalog promise, unhandled mid-resolver errors with no navigation error handler, and a couple of small client-side races in the search. One focused round of changes plus a handful of shared tests and this is an easy approve."
+}

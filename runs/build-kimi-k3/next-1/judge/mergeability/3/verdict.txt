@@ -1,0 +1,125 @@
+I have enough evidence. Let me finalize my review.
+
+The app is on Next.js 16.4.3 (current stable, Oct 2026), uses the App Router with async `params`/`searchParams`, RSC data loading, root `not-found.js`, and a metadata title template — all current idioms. It deliberately stays on the classic rendering model (`force-dynamic`) rather than the newly recommended Cache Components, which is still fully supported in 16.x (and arguably required here, since the spec forbids build-time fetching and permits only runtime in-memory caching).
+
+```json
+{
+  "dimension": "mergeability",
+  "criteria": {
+    "idiomatic": {
+      "score": 4,
+      "evidence": [
+        "app/app/pokemon/[name]/page.js:66 — awaits `params`/`searchParams`, the required async-request-API pattern in Next 15/16",
+        "app/app/page.js:12 — `export const dynamic = 'force-dynamic'` correctly guarantees request-time fetching (spec forbids build-time prerender); classic model still supported in 16.4",
+        "app/app/layout.js:5 — metadata `title.template` used for the `– Pokédex` suffix instead of string concatenation",
+        "app/app/not-found.js:1 — root not-found plus `notFound()` in every dynamic route (types/[name]/page.js:21) gives 404s the framework way",
+        "app/app/Controls.js:1 — minimal, correctly-scoped 'use client' islands; everything else stays server-rendered",
+        "app/lib/api.js:14 — hand-rolled `globalThis` promise cache + concurrency limiter instead of 16.4's recommended `use cache`/`cacheLife` (Cache Components); justified by spec but is a home-grown layer the framework now ships",
+        "app/components/PokemonCard.js:18 — `prefetch={false}` on every link forgoes 16.x prefetch/instant-navigation improvements"
+      ],
+      "rationale": "Recognisably current Next.js: async params, RSC loading, metadata templates, notFound routing. It stays on the classic model rather than the 16.4-recommended Cache Components and hand-rolls caching/prefetch decisions, which is defensible for this spec but will need a 17 migration."
+    },
+    "correctness_risks": {
+      "score": 3,
+      "evidence": [
+        "app/app/Controls.js:13-15 — prop→state sync via useEffect: typed-ahead search text is reverted when the debounced `router.replace` round-trip lands, a classic lost-keystroke race",
+        "app/lib/api.js:30 — non-404 API failures throw inside server components with no `error.js` boundary anywhere in app/, so a 500 bubbles raw",
+        "app/lib/api.js:78 — `data?.results ?? []` silently yields an empty species index on a malformed API response, rendering `No Pokémon found` instead of failing loudly",
+        "app/app/pokemon/[name]/MovesTable.js:79 — row key embeds array index; harmless today but fragile if rows are ever reordered before render",
+        "app/app/Controls.js:23-27 — debounce timer is cleaned up on unmount; no leaked listeners found",
+        "app/lib/api.js:54-58 — `cached()` shares in-flight promises and evicts failures for retry; the one real race-prone spot (double fetch) is handled"
+      ],
+      "rationale": "No serious bugs, but three real fragilities the tests didn't exercise: a URL-driven input that can clobber in-progress typing, no error boundary for API failures, and a silent-empty fallback masking API malformation."
+    },
+    "global_abstractions": {
+      "score": 4,
+      "evidence": [
+        "app/lib/api.js:14 — a single module-global cache on `globalThis.__pokedexStore` is hidden global state, though it is commented, dev-HMR-safe and bounded by the dataset",
+        "app/lib/api.js:96-112 — `getPokemonTypesMap` derives every Pokémon's types from the 18 type records so one cached fetch covers the whole app; a good cross-cutting decision",
+        "app/app/types/[name]/page.js:32 and app/app/pokemon/[name]/page.js:137 — the same `typeLabel` closure is defined twice; app/app/pokemon/[name]/MovesTable.js:3 re-declares `MISSING` instead of importing lib/format",
+        "app/components/Section.js:5 — one small, spec-aligned Section primitive shared by all pages; components are appropriately extracted, not a god layer"
+      ],
+      "rationale": "Boundaries are clean: a cohesive data layer, tiny format helpers, small shared components. Only nits: duplicated `typeLabel`/`MISSING` helpers and the implicit global cache."
+    },
+    "readability": {
+      "score": 4,
+      "evidence": [
+        "app/lib/api.js:10-20 — comments explain *why* (MAX_FORM_ID rationale, concurrency limiter, cache eviction of failed loads), not what",
+        "app/lib/format.js:4-10 — tiny, well-named helpers with inline examples (`mr-mime` -> `Mr Mime`)",
+        "app/app/pokemon/[name]/page.js:38-113 — `buildMovesSection` is ~75 lines mixing grouping, ordering and row shaping; the largest wart in the codebase",
+        "app/app/page.js:60-69 — `pageHref` and filter composition are clear and local",
+        "app/app/globals.css:141-159 — token-driven CSS, one file per concern, responsive block at the end"
+      ],
+      "rationale": "A new teammate finds their way in minutes: consistent naming, file layout mirrors routes, comments carry rationale. One over-long builder function keeps it from exemplary."
+    },
+    "review_cost": {
+      "score": 4,
+      "evidence": [
+        "app/app/Controls.js:13-15 — reviewer would ask for the prop-sync pattern to be fixed or justified",
+        "app/lib/api.js:30 — reviewer would ask for an error boundary",
+        "app/app/types/[name]/page.js:32 — trivial dedup requests",
+        "app/lib/api.js:75 — getSpeciesIndex error handling: one-line ask"
+      ],
+      "rationale": "Approve after a round of small, well-localized changes; nothing structural needs rework."
+    }
+  },
+  "overall": 4,
+  "findings": [
+    {
+      "severity": "medium",
+      "location": "app/app/Controls.js:13",
+      "issue": "Syncing URL props into local state with useEffect means a landing RSC response resets the input, so text typed during the server round-trip is momentarily reverted (lost-keystroke race).",
+      "suggestion": "Track the last-applied value and only sync when the prop differs from it, or make the input uncontrolled and read the query via useSearchParams."
+    },
+    {
+      "severity": "medium",
+      "location": "app/lib/api.js:30",
+      "issue": "Any non-404 API error throws inside server components and there is no error.js anywhere, surfacing an unstyled 500 instead of a recoverable state.",
+      "suggestion": "Add an app/error.js (and per-route if needed) with a retry action."
+    },
+    {
+      "severity": "low",
+      "location": "app/lib/api.js:78",
+      "issue": "A malformed index response silently becomes an empty list, so the home page shows `No Pokémon found` instead of an error.",
+      "suggestion": "Treat a missing/empty result set as a failure (throw) rather than an empty collection."
+    },
+    {
+      "severity": "low",
+      "location": "app/lib/api.js:14",
+      "issue": "Hand-rolled global promise cache; Next 16.4 recommends Cache Components (`use cache` + `cacheLife`) which makes caching declarative and enables instant navigations, and it becomes the default in 17.",
+      "suggestion": "Note the migration path in a comment, or adopt `use cache` on the derived loaders so the codebase is ready for Next 17."
+    },
+    {
+      "severity": "low",
+      "location": "app/components/PokemonCard.js:18",
+      "issue": "`prefetch={false}` is applied uniformly to every link, disabling prefetch/instant navigation with no comment explaining why.",
+      "suggestion": "Keep it only where it's justified (48-card dynamic grids) and add a comment, or drop it if Cache Components is adopted."
+    },
+    {
+      "severity": "low",
+      "location": "app/app/types/[name]/page.js:32",
+      "issue": "`typeLabel` is duplicated in types/[name] and pokemon/[name] pages, and `MISSING` is re-declared in MovesTable.js instead of importing lib/format.",
+      "suggestion": "Move `typeLabel` into lib/format (or a small lib/types helper) and import MISSING everywhere."
+    },
+    {
+      "severity": "low",
+      "location": "app/app/pokemon/[name]/MovesTable.js:79",
+      "issue": "Row key includes the array index (`${row.moveHref}:${row.level}:${index}`).",
+      "suggestion": "Use a stable composite key such as move name + level + method."
+    },
+    {
+      "severity": "low",
+      "location": "app/app",
+      "issue": "The repo's .gitignore has no entry for `.next` and app/ has no .gitignore of its own, so the committed-looking build output in app/.next risks being checked in.",
+      "suggestion": "Add an app/.gitignore (or a root `.next/` rule) covering build output."
+    },
+    {
+      "severity": "low",
+      "location": "app/app/pokemon/[name]/page.js:38",
+      "issue": "buildMovesSection mixes grouping, version-group ordering and row shaping in one ~75-line function, and no route has loading.js, so dynamic navigations show the previous page until the server responds.",
+      "suggestion": "Split into groupByGame/orderMethods/buildRows helpers and consider a simple loading.tsx for the heavy Pokémon page."
+    }
+  ],
+  "summary": "A clean, current-idiom App Router implementation: async params, RSC data loading, proper 404s, tiny client islands, and a well-factored data layer with a thoughtful derived-types cache. The main merge blockers are minor: a URL-sync race in the search input, no error boundary for API failures, and small helper duplication; the hand-rolled cache and blanket prefetch={false} will need revisiting when Next 17 makes Cache Components the default. I'd approve after one round of small changes."
+}
+```

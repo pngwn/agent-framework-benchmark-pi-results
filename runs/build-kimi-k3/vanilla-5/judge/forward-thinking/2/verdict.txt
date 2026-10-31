@@ -1,0 +1,131 @@
+I've reviewed the whole app (`app/src/*`, `server.mjs`, `vite.config.ts`, configs) and verified the framework facts against current releases: **Vite 8** shipped stable 2026-03-12 with Rolldown (vite.dev/blog/announcing-vite8), and the app pins `vite ^8.3.5` with a fully current plugin API (`defineConfig`, `configureServer`, `server.middlewares` — unchanged in v8 per the migration guide). **TypeScript 7.0** (the native port) has been the stable major since Aug 2026, so `typescript ^5.9.3` is one major behind, though it's dev-only and low-risk.
+
+**What ages well:** all HTTP access is behind one module (`app/src/api.ts` + `data.ts`, with a promise cache and error eviction), the runtime `API_BASE_URL` is injected via `/config.js` rather than baked at build time (so one build serves any environment), zero runtime dependencies, and a lean ~70-line `node:http` static server with a proper path-traversal guard. Platform usage is strong: `fetch`, `URL`/`URLSearchParams`, `Map`/`Set`, `??=`, `loading="lazy"`, `:focus-visible`, CSS custom properties.
+
+**What will cause churn:** the API boundary is untyped (`any` everywhere in `data.ts`/`util.ts`), the moves-table sorting reconstructs typed rows by scraping rendered DOM text and regexing `href`s (a second source of truth for the column layout), no `AbortController` cancels in-flight requests on navigation, sprite URLs are hardcoded to the media layout instead of read from `pokemon.sprites`, and the `/config.js` serving logic is copy-pasted between `vite.config.ts` and `server.mjs`.
+
+```json
+{
+  "dimension": "forward-thinking",
+  "criteria": {
+    "latest_apis": {
+      "score": 4,
+      "evidence": [
+        "app/package.json:12 — vite ^8.3.5, current stable major (Vite 8 shipped 2026-03-12, vite.dev/blog/announcing-vite8)",
+        "app/vite.config.ts:5-19 — current Vite 8 plugin API (defineConfig + configureServer + server.middlewares), unchanged in v8 per migration guide",
+        "app/tsconfig.json:1-12 — modern options: strict, moduleResolution bundler, isolatedModules, noEmit",
+        "app/src/main.ts:45-46 — direct history API + popstate, still the standard; Chromium's Navigation API not required",
+        "app/package.json:11 — typescript ^5.9.3, one major behind current stable TS 7.0 (Aug 2026), dev-only impact"
+      ],
+      "rationale": "The build stack is the current stable generation and the plugin/TS config are idiomatic for it; the only lag is the TypeScript compiler being a major behind, which doesn't affect the shipped code."
+    },
+    "platform": {
+      "score": 4,
+      "evidence": [
+        "app/src/api.ts:31-37 — fetch with a promise cache and 404-aware ApiError, no XHR or hand-rolled JSONP",
+        "app/src/pages/home.ts:19-30 — URLSearchParams for all query state; app/src/pages/pokemon.ts:282 — new URL(...) for game param",
+        "app/src/data.ts:9-13 — ??=, Map/Set used throughout; app/src/pages/pokemon.ts:134 — Set dedupe of version groups",
+        "app/src/components.ts:11 — <img loading=\"lazy\" width height> on ~1000 sprite cards",
+        "app/src/style.css:54-58 — :focus-visible; grid + custom properties everywhere, no legacy float hacks",
+        "app/src/api.ts:31 — no AbortController: navigation and filter changes never cancel in-flight fetches",
+        "app/src/pages/pokemon.ts:147-157 — hand-rolled method grouping instead of Map.groupBy (ES2024, Chrome 117)"
+      ],
+      "rationale": "Reaches for the platform first (fetch, URL, URLSearchParams, lazy images, CSS custom properties) with only two missed conveniences: request cancellation and ES2024 grouping/sorting helpers."
+    },
+    "dependencies": {
+      "score": 5,
+      "evidence": [
+        "app/package.json:9-13 — zero runtime dependencies; only typescript + vite as devDependencies",
+        "app/server.mjs:27-70 — ~70-line node:http static server with MIME map, SPA fallback, HEAD support and path-traversal guard instead of pulling in express/sirv",
+        "app/src/util.ts:1-4 — hand-rolled esc() instead of a sanitizer library; appropriate for a string-template app",
+        "app/src/tokens.css — copies design tokens as plain CSS custom properties, no CSS framework per spec"
+      ],
+      "rationale": "Two current, well-maintained dev dependencies and nothing at runtime; the server and helpers are small enough that hand-rolling them is the right call."
+    },
+    "churn_resistance": {
+      "score": 3,
+      "evidence": [
+        "app/src/api.ts:9-43 — all HTTP behind one module with cache and error eviction; app/src/data.ts:8-14 — memoized loaders: API changes touch few files",
+        "app/server.mjs:10-11 + app/vite.config.ts:6-19 — /config.js generation duplicated in two places (dev plugin vs prod server)",
+        "app/src/pages/pokemon.ts:285-298 — sort state rebuilt by scraping rendered DOM textContent and regexing hrefs instead of retaining the typed MoveRow[]",
+        "app/src/data.ts:26-47 + app/src/util.ts:24-40 — pervasive any at the API boundary; response shape changes fail at runtime, not compile time",
+        "app/src/api.ts:38 — spriteUrl hardcodes /media/sprites/pokemon/<id>.png instead of reading pokemon.sprites.front_default",
+        "app/src/pages/home.ts:138 — history.pushState called directly, bypassing nav.ts navigate(); two history-mutation paths",
+        "app/src/components.ts:55 — module-level sectionCounter generates heading ids from mutable global state",
+        "app/src/main.ts:22-49 — renderToken guard is correct but stale in-flight requests are never aborted"
+      ],
+      "rationale": "Data access, configuration and routing are well centralized so a framework or API change would touch few files, but the untyped API boundary, DOM-derived sort state and duplicated config injection are real churn surface."
+    }
+  },
+  "overall": 4,
+  "findings": [
+    {
+      "severity": "medium",
+      "location": "app/src/pages/pokemon.ts:285",
+      "issue": "Sortable move tables rebuild MoveRow data by parsing the rendered DOM (textContent and href-regexes), creating a second, fragile source of truth for the column layout; any change to display formatting (e.g. num()/DASH) or link structure breaks sorting.",
+      "suggestion": "Keep the typed MoveRow[] per table in a closure or WeakMap keyed by the table element, and re-render tbody from that data."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/api.ts:31",
+      "issue": "No AbortController: navigation, filter typing and game switches never cancel in-flight fetches, so rapid routes pile up requests and rely solely on the renderToken race guard.",
+      "suggestion": "Thread an AbortSignal per navigation (new AbortController on each render; abort the previous one) into apiJson."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/data.ts:26",
+      "issue": "API responses are typed as any throughout (getSpeciesList, getTypeRecords, getGenerations, ability/move/type records), so changes in the API surface as runtime errors rather than compile errors.",
+      "suggestion": "Define interfaces for the PokeAPI resources (species, pokemon, type, generation, version-group) at the api.ts/data.ts boundary and use them instead of any."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/api.ts:38",
+      "issue": "spriteUrl() hardcodes the /media/sprites/pokemon/<id>.png layout instead of reading pokemon.sprites.front_default from the API, coupling the app to the server's media arrangement.",
+      "suggestion": "Prefer the sprite URL returned in the Pokémon record, falling back to the derived pattern only when it is null."
+    },
+    {
+      "severity": "low",
+      "location": "app/vite.config.ts:6",
+      "issue": "The /config.js runtime-config logic is duplicated between the dev plugin here and the production server in app/server.mjs:30.",
+      "suggestion": "Extract a shared config.js emitter (e.g. a small module both the Vite plugin and server.mjs import) so the two paths can't drift."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/pages/home.ts:138",
+      "issue": "history.pushState/replaceState is called directly here while every other route change goes through nav.ts navigate(), leaving two history-mutation paths to keep in sync.",
+      "suggestion": "Route filter updates through navigate(url, replace) so nav.ts remains the single choke point."
+    },
+    {
+      "severity": "low",
+      "location": "app/package.json:11",
+      "issue": "typescript ^5.9.3 is a major behind the current stable TypeScript 7.0 (native port, Aug 2026); dev-only, but the caret range will never pick up 7.x.",
+      "suggestion": "Evaluate typescript@^7 for the 10x faster native compiler; Vite doesn't type-check, so the migration risk is confined to tsc."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/components.ts:55",
+      "issue": "section() derives heading ids from a module-level mutable counter, making ids depend on render order and unbounded across a long session.",
+      "suggestion": "Derive the id from the section title alone (it's already slugified) or accept an explicit id parameter."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/pages/pokemon.ts:147",
+      "issue": "Hand-rolled per-method grouping Map plus [...new Set()] where Map.groupBy (ES2024, in Chrome 117 and Vite 8's default target) expresses the same intent more directly.",
+      "suggestion": "Use Map.groupBy on version_group_details and toSorted() for the row order to cut a few lines of index bookkeeping."
+    }
+  ],
+  "summary": "A deliberately lean, current-generation setup: Vite 8 (the Rolldown-based stable release) with a plain node:http production server, zero runtime dependencies, and all data access funneled through one cached, well-guarded API module. The platform is used well (fetch, URL/URLSearchParams, lazy images, custom properties), with request cancellation being the notable omission. The main things that will age poorly are the any-typed API boundary and the moves table rebuilding its sort data from the rendered DOM.",
+  "apis": [
+    { "api": "Vite defineConfig + plugin configureServer/server.middlewares", "location": "app/vite.config.ts:5", "status": "current", "replacement": "" },
+    { "api": "fetch / Response.json", "location": "app/src/api.ts:31", "status": "current", "replacement": "" },
+    { "api": "History.pushState / popstate", "location": "app/src/nav.ts:14", "status": "current", "replacement": "Navigation API exists in Chromium but history/popstate is not deprecated and is the cross-browser standard" },
+    { "api": "URL / URLSearchParams", "location": "app/src/pages/home.ts:19", "status": "current", "replacement": "" },
+    { "api": "node:http + node:fs/promises static serving", "location": "app/server.mjs:27", "status": "current", "replacement": "" },
+    { "api": "import.meta.url / fileURLToPath", "location": "app/server.mjs:5", "status": "current", "replacement": "" }
+  ],
+  "dependencies": [
+    { "name": "vite", "verdict": "modern", "note": "^8.3.5 — current stable major (Vite 8 shipped 2026-03-12); confirms via vite.dev/blog/announcing-vite8" },
+    { "name": "typescript", "verdict": "established", "note": "^5.9.3 — solid but one major behind current stable TypeScript 7.0 (native port); dev-only, caret range won't reach 7.x" }
+  ]
+}
+```

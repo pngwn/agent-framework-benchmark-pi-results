@@ -1,0 +1,154 @@
+# Review: Pokédex app (Hono + htmx)
+
+I verified every framework fact against current release notes before judging: **hono** stable is v4.13.14 (2026-10-25; v5 is RC only) — the app pins exactly that. **@hono/node-server** stable is **2.1.5** (2026-10-13) and the app is on the superseded **1.x** line (last 1.x release 1.19.17, 2026-07-27, which **predates** the Sept 2026 `serveStatic` path-decoding security fix GHSA-rmxm-3fg6-px4f, shipped in 2.1.3 / hono 4.13.11). **htmx** 2.0.11 (2026-09-22) is still the npm `latest`; htmx 4.0.0 shipped 2026-08-28 but the team explicitly did *not* mark it `latest`, so pinning 2.x is the correct current choice, not a legacy one.
+
+## What's strong
+
+- **Stack is genuinely current.** `hono ^4.13.14`, `html` from `hono/html` (the documented non-JSX idiom), `serve`/`serveStatic` import paths unchanged in the current majors, htmx 2.x pinned to the exact latest patch, and only current core `hx-*` attributes plus the documented `htmx:configRequest` event (`app/src/app.js:1-2`, `app/src/views.js:99-103`, `app/public/app.js:3`).
+- **Data access is centralized and pure.** Every upstream call funnels through `apiFetch` with in-memory caching and a single `getIndex()` module-level promise (`app/src/api.js:10-25, 79-118`); views are pure functions of plain data. Changing the API base URL or caching strategy touches one file.
+- **Platform-first.** Native `fetch` (no axios), `URLSearchParams` for filter URLs, native form controls + htmx instead of a client framework, `loading="lazy"` with explicit sprite dimensions (`app/src/views.js:60`), spec-mandated CSS custom properties throughout (`app/public/styles.css:3-70`).
+
+## What won't age well
+
+1. The `@hono/node-server` 1.x pin is the standout staleness issue — you're on a line that stopped receiving releases two months before a published security advisory for the very `serveStatic` you use (not exploitable here since all three paths are hardcoded literals, `app/src/app.js:42-44`, but it's a signal).
+2. The `htmx.org` dependency is dead weight: `app/public/htmx.min.js` is vendored and served statically, and `npm run build` is a no-op echo, so nothing ever syncs the package to the file — they will drift silently.
+3. `<option ... ${cond ? 'selected' : ''}>` (`app/src/views.js:115, 125, 291`) only works because hono's auto-escape happens to be a no-op for the literal `selected`. That's undocumented behavior leaning on an escape round-trip; hono's docs prescribe `raw()` for unescaped insertion. One escaping change upstream and this breaks silently.
+4. Spec-defined logic is duplicated: `views.js:181-184` re-derives genus and latest-English-flavor inline while `api.js:43-49` exports exactly those helpers — drift risk when the spec is next touched.
+5. Zero types at the API boundary (`typeLines: 0`); PokeAPI shapes flow through untyped, so a data-shape change surfaces at runtime instead of at the boundary.
+6. The sorting endpoint rebuilds the *entire* Pokémon page (species + Pokémon + evolution chain + all version-group/move fan-out) via `loadPokemonPageData` just to re-sort one table (`app/src/app.js:186-192`), when the rows are already in the client and `buildMovesData` alone would do; the cache makes it tolerable, not free.
+
+```json
+{
+  "dimension": "forward-thinking",
+  "criteria": {
+    "latest_apis": {
+      "score": 4,
+      "evidence": [
+        "app/package.json:9 — hono ^4.13.14, exactly the current stable (v4.13.14 released 2026-10-25; v5 only RC, per github.com/honojs/hono/releases)",
+        "app/src/views.js:1 — html from 'hono/html', the current documented non-JSX rendering helper (hono.dev/docs/helpers/html)",
+        "app/src/server.js:1 — serve() from @hono/node-server, current API",
+        "app/src/views.js:99-103 — hx-get/hx-trigger/hx-target/hx-swap/hx-push-url, all current htmx 2.x core attributes",
+        "app/src/app.js:2 — serveStatic import path '@hono/node-server/serve-static', still correct in v2 of the adapter",
+        "app/package.json:10 — @hono/node-server ^1.19.0, superseded 1.x major; current is 2.1.5 and the 1.x line stopped before the Sept 2026 serve-static security fix",
+        "app/src/views.js:115 — interpolates the bare string 'selected' into a tag, relying on hono/html's escaping being a no-op for that literal (undocumented; docs prescribe raw())"
+      ],
+      "rationale": "Consistently on the current generation (hono 4.13.14, hono/html, htmx 2.0.11 — htmx 4.0 is not npm 'latest'), with one stale major: @hono/node-server is pinned to the 1.x line whose last release predates a published serve-static security advisory, and the 'selected' attribute trick leans on undocumented escape behavior."
+    },
+    "platform": {
+      "score": 4,
+      "evidence": [
+        "app/src/api.js:16 — native global fetch for all upstream calls, no axios/node-fetch",
+        "app/src/views.js:137-146 — URLSearchParams builds filter/pagination URLs",
+        "app/src/views.js:97-103 — native form controls + htmx rather than a client framework",
+        "app/src/views.js:60 — loading=\"lazy\" with explicit width/height on sprites",
+        "app/public/styles.css:3-70 — CSS custom properties for tokens; media query at styles.css:589",
+        "app/src/api.js:27-30 — hand-rolled regex idFromUrl instead of new URL().pathname",
+        "app/src/views.js:314-320 — sort URLs hand-concatenated as strings rather than URLSearchParams like the rest",
+        "app/src/api.js:16 — no AbortSignal.timeout on upstream fetch; a slow API hangs page renders"
+      ],
+      "rationale": "Reaches for the platform first (fetch, URLSearchParams, native forms, lazy images), with small regressions: regex-based URL parsing, one hand-built query string, and no fetch timeout."
+    },
+    "dependencies": {
+      "score": 3,
+      "evidence": [
+        "app/package.json:9-11 — exactly three runtime deps, no bundler, no CSS framework, no dev deps: lean overall",
+        "app/package.json:10 — @hono/node-server ^1.19.0 is a questionable pick: current major is 2.1.5 (2026-10-13) and v2.0.0 notes say the public API is unchanged, so the upgrade is free",
+        "app/package.json:11 vs app/src/app.js:43 — htmx.org is declared but unused at runtime: htmx.min.js is vendored in public/ and build is a no-op echo (app/package.json:6), so the dep and the served file can drift",
+        "app/src/api.js:61-75 — hand-rolled mapLimit instead of pulling a concurrency-limit package: correct restraint"
+      ],
+      "rationale": "Minimal and mostly modern, but two questionable picks: an adapter pinned to the superseded 1.x major (missing a security fix shipped in 2.1.3), and an htmx dependency that nothing consumes because the file is vendored."
+    },
+    "churn_resistance": {
+      "score": 3,
+      "evidence": [
+        "app/src/api.js:10-25 — all upstream I/O behind one apiFetch with runtime caching; single config point at api.js:3",
+        "app/src/api.js:79-118 — getIndex() module-level promise centralizes the derived species/type/generation index used by every page",
+        "app/src/views.js:181-184 — re-implements genus/latest-English-flavor inline although api.js:43-49 exports englishGenus/latestEnglishFlavor: spec logic in two places",
+        "app/src/views.js:186,349,379,426 and app/src/app.js:112 — identical typeEn fallback helper re-derived five times",
+        "app/package.json + app/src/api.js:10 — zero type annotations anywhere; API responses cross the boundary untyped, so shape changes surface at runtime",
+        "app/src/app.js:186-192 — the moves-table sort endpoint calls loadPokemonPageData, rebuilding species/pokemon/chain and all move fetches to re-sort one table; buildMovesData alone would do",
+        "app/src/app.js:42-44 — three hand-listed serveStatic middlewares; adding an asset means editing server code",
+        "app/src/views.js:115 — 'selected' interpolation depends on hono escaping being a no-op: breaks silently if escaping behavior changes"
+      ],
+      "rationale": "The data-access layer is genuinely well-factored and views are pure, but there is zero typing at the API boundary, spec-critical helpers are duplicated across modules, and a couple of patterns (bare-string attributes, a full-data-rebuild sort endpoint) will need touching on the next framework or requirement move."
+    }
+  },
+  "overall": 4,
+  "findings": [
+    {
+      "severity": "medium",
+      "location": "app/package.json:10",
+      "issue": "@hono/node-server pinned to ^1.19.0 (superseded 1.x major; last 1.x release 1.19.17 on 2026-07-27 predates the serveStatic path-decoding advisory GHSA-rmxm-3fg6-px4f fixed in 2.1.3 on 2026-09-29).",
+      "suggestion": "Bump to ^2.1.5 — v2.0.0 release notes state the public API stays the same, so the change is a version edit."
+    },
+    {
+      "severity": "medium",
+      "location": "app/package.json:11",
+      "issue": "htmx.org is declared as a dependency but never used: app/public/htmx.min.js is vendored and served statically (app/src/app.js:43) and `npm run build` is a no-op, so the pinned version and the served file can drift silently.",
+      "suggestion": "Either copy node_modules/htmx.org/dist/htmx.min.js in the build script, or drop the dependency and document the vendored file's version."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/views.js:115",
+      "issue": "Bare-string 'selected' injected inside a tag works only because hono/html's auto-escape is a no-op for that literal — undocumented behavior; hono docs prescribe raw() for unescaped insertion.",
+      "suggestion": "Use ${raw('selected')} (or build the attribute conditionally) so the pattern survives escaping changes; it already leans on a near-invisible invariant."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/views.js:181-184",
+      "issue": "Genus and latest-English-flavor logic is re-implemented inline even though api.js exports englishGenus and latestEnglishFlavor — spec-defined behavior now lives in two files.",
+      "suggestion": "Import the helpers from api.js and delete the inline copies."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/api.js:10",
+      "issue": "No types at the API boundary (zero type annotations in the app); PokeAPI shapes flow through apiFetch untyped, so a data-shape change manifests as runtime errors scattered across views.",
+      "suggestion": "Add JSDoc @typedefs for the handful of API records (Species, Pokemon, Move, Type) and annotate apiFetch's return; pure JavaScript needs no build step to get this."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/app.js:192",
+      "issue": "The table-sort endpoint rebuilds the entire Pokémon page (species, default variety, evolution chain, version-group and move fan-out) via loadPokemonPageData just to re-sort rows the client already has.",
+      "suggestion": "Call only buildMovesData, or sort the rendered rows client-side — sorting is pure over data already in the DOM."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/api.js:16",
+      "issue": "Upstream fetch has no AbortSignal/timeout; a slow or hung API stalls every page render with no failure mode.",
+      "suggestion": "Pass AbortSignal.timeout(...) to fetch and fall through to the error handler on abort."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/app.js:42-44",
+      "issue": "Static assets are wired as three individually declared serveStatic middlewares with hardcoded paths; every new asset is a server-code edit.",
+      "suggestion": "One serveStatic({ root: './public' }) mounted on a static path."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/api.js:27-30",
+      "issue": "idFromUrl parses Pokémon/species ids with a regex, and API_BASE is de-slashed with another regex, instead of the URL API the rest of the file already embraces.",
+      "suggestion": "Use new URL(url).pathname (and pathname-based matching) for parsing."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/views.js:186",
+      "issue": "The typeEn fallback helper (index.typeEn.get(n) ?? humanize(n)) is re-derived identically in five places (views.js:186,349,379,426 and app.js:112).",
+      "suggestion": "Export one typeEn(index) helper and reuse it."
+    }
+  ],
+  "summary": "This is a current-generation Hono + htmx app: hono 4.13.14 (the exact latest stable), the documented hono/html helper, htmx 2.0.11 (still npm 'latest'; htmx 4 is deliberately not latest), native fetch/URLSearchParams and a lean three-dependency tree. The data-access layer is well-factored and views are pure, so most future changes stay local. The deductions are a superseded 1.x pin on @hono/node-server (whose line predates a serve-static security fix), an htmx dependency that nothing consumes, an undocumented bare-string attribute trick, and zero typing at the API boundary with some duplicated spec logic.",
+  "apis": [
+    { "api": "Hono (hono)", "location": "app/src/app.js:1", "status": "current", "replacement": "" },
+    { "api": "html (hono/html)", "location": "app/src/views.js:1", "status": "current", "replacement": "" },
+    { "api": "serve (@hono/node-server)", "location": "app/src/server.js:1", "status": "current", "replacement": "" },
+    { "api": "serveStatic (@hono/node-server/serve-static)", "location": "app/src/app.js:2", "status": "current", "replacement": "Import path is unchanged in adapter v2; only the package version is stale (see dependencies)" },
+    { "api": "hx-get/hx-trigger/hx-target/hx-swap/hx-push-url (htmx core attributes)", "location": "app/src/views.js:99-103", "status": "current", "replacement": "" },
+    { "api": "htmx:configRequest event", "location": "app/public/app.js:3", "status": "current", "replacement": "" }
+  ],
+  "dependencies": [
+    { "name": "hono", "verdict": "modern", "note": "Pinned to ^4.13.14, the current stable released 2026-10-25; v5 is RC only." },
+    { "name": "@hono/node-server", "verdict": "outdated", "note": "^1.19.0 sits on the superseded 1.x line (last release 2026-07-27) while 2.1.5 (2026-10-13) is current; 1.x misses the serve-static security fix GHSA-rmxm-3fg6-px4f and the ~2.3x throughput of v2, whose public API is unchanged." },
+    { "name": "htmx.org", "verdict": "unnecessary", "note": "Version is current (2.0.11 is npm 'latest'; htmx 4.0.0 was not marked latest), but the dependency is unused: htmx.min.js is vendored into public/ and the build never copies from node_modules, so the two can drift." }
+  ]
+}
+```

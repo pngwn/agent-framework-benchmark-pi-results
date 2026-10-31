@@ -1,0 +1,122 @@
+{
+  "dimension": "mergeability",
+  "criteria": {
+    "idiomatic": {
+      "score": 4,
+      "evidence": [
+        "app/vite.config.ts:6-8 — tanstackStart() + nitro() + viteReact() matches the current official start-basic example exactly",
+        "app/src/lib/server.ts:9-32 — every page's data flows through createServerFn GET handlers called from loaders, the documented pattern",
+        "app/src/routes/index.tsx:14-24 — validateSearch with defaults stripped, loaderDeps {} so filters stay client-side",
+        "app/src/routes/pokemon/$name.tsx:13-17 — notFound() thrown from the loader on API 404, rendered by the root notFoundComponent",
+        "app/src/routes/pokemon/$name.tsx:47-55 — hand-rolled scrollIntoView via rAF + 150ms setTimeout instead of the router's scrollRestoration option",
+        "app/src/routes/__root.tsx:22-25 — document.title set from a useEffect rather than head management; works only after hydration"
+      ],
+      "rationale": "Reads like the framework's own examples for routing, data loading and head handling; the only home-grown workarounds are the manual hash-scroll hack and the useEffect-based 404 title, both of which have framework-level answers."
+    },
+    "correctness_risks": {
+      "score": 3,
+      "evidence": [
+        "app/src/lib/pokeapi.ts:16-21 — a rejected fetch promise stays in the cache forever, so one transient API error poisons that URL for the process lifetime",
+        "app/src/lib/pokeapi.ts:17-18 — 404 results (null) are cached indefinitely, contradicting the spec's 'treat the API as live, data can change' requirement",
+        "app/src/lib/data.ts:25-44 — species map and version-group orders are single-shot module promises; a name that appeared later in the live API stays unknown until restart",
+        "app/src/routes/__root.tsx:22-25 — not-found SSR title is 'Pokédex', only corrected client-side after hydration",
+        "app/src/router.tsx:7-11 — no defaultErrorComponent; a non-OK API response (pokeapi.ts:18 throws) surfaces as the unstyled framework default"
+      ],
+      "rationale": "No race conditions or hydration mismatches found, and the fan-out is bounded by the snapshot size, but the never-evicted rejection cache plus indefinite 404 caching are genuine fragilities under the spec's own live-data scenario."
+    },
+    "global_abstractions": {
+      "score": 4,
+      "evidence": [
+        "app/src/lib/pokeapi.ts:8-21 — a single module-level promise cache is a hidden global, but it's documented, server-only, and explicitly permitted by the spec",
+        "app/src/lib/data.ts:1-420 — one god data module holds every page's builder; cohesive today, but each route would be better with its own builder as the app grows",
+        "app/src/routes/pokemon/$name.tsx:4 — client components reach into server-only data.ts via type-only imports; one slip to a value import leaks process.env/fetch into the client bundle",
+        "app/src/lib/format.ts:1-45 — shared helpers are small, pure, and clearly marked safe for both environments; no premature generic layers"
+      ],
+      "rationale": "Boundaries are clean (server functions wall off the server data layer, format.ts is isomorphic) and abstractions earn their keep; the risks are the all-pages data module and the discipline-only type-only import boundary."
+    },
+    "readability": {
+      "score": 4,
+      "evidence": [
+        "app/src/lib/data.ts:23-31, 103-106 — section banners and why-comments (e.g. filters-in-URL rationale at app/src/routes/index.tsx:26-28) explain intent",
+        "app/src/lib/MovesTable.tsx:56-73 — missing-values-last sort rule called out in a comment and implemented clearly",
+        "app/src/lib/data.ts:91,202,215,259 — the data layer leans on `any` throughout, so readers must know the raw PokeAPI shapes",
+        "app/src/routes/pokemon/$name.tsx:46-55 — stray eslint-disable comment though the project has no ESLint config"
+      ],
+      "rationale": "A new teammate finds their way in minutes: consistent naming, short components, mirror-structured routes; the pervasive `any` in the data layer is the one thing that makes shapes opaque."
+    },
+    "review_cost": {
+      "score": 4,
+      "evidence": [
+        "app/src/lib/components.tsx:95-97 — dead Missing component, never used (routes render MISSING directly)",
+        "app/src/routes/index.tsx:59-68 — typesByName re-derives humanized type labels that data.ts already shaped for the home cards",
+        "app/src/lib/data.ts:259-262 — per-move record fetch fan-out is unbounded, acceptable for a local snapshot but worth a comment",
+        "app/vite.config.ts:7-8 — nitro() placed before viteReact() instead of last as in the official example; harmless but inconsistent with the template"
+      ],
+      "rationale": "Everything I'd raise is nits: delete dead code, tighten cache eviction, replace the scroll hack with scrollRestoration. Nothing structurally wrong to block merging."
+    }
+  },
+  "overall": 4,
+  "findings": [
+    {
+      "severity": "medium",
+      "location": "app/src/lib/pokeapi.ts:16-21",
+      "issue": "Rejected promises are cached permanently: one transient API failure (network blip, 5xx) makes that URL fail for the rest of the process lifetime",
+      "suggestion": "Delete the cache entry when the fetch rejects, e.g. cached.catch(() => cache.delete(url))"
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/lib/pokeapi.ts:17-18",
+      "issue": "404 results are cached for the process lifetime, but the spec requires treating the API as live data that can change (the test overlay adds a Pokémon)",
+      "suggestion": "Only cache successful responses, or give 404s a short TTL so newly added resources resolve without a restart"
+    },
+    {
+      "severity": "low",
+      "location": "app/src/routes/pokemon/$name.tsx:47-55",
+      "issue": "Hash navigation handled with a rAF + 150ms setTimeout double scrollIntoView workaround",
+      "suggestion": "Set scrollRestoration: true in createRouter (app/src/router.tsx:7-11) as the docs recommend, and drop the effect"
+    },
+    {
+      "severity": "low",
+      "location": "app/src/routes/__root.tsx:22-25",
+      "issue": "Not-found page title is set via useEffect, so the SSR'd response ships the wrong title until hydration",
+      "suggestion": "Expose the title through router state/head so the server render includes 'Not found – Pokédex'"
+    },
+    {
+      "severity": "low",
+      "location": "app/src/routes/pokemon/$name.tsx:4",
+      "issue": "Client files depend on the server-only data.ts via type-only imports; a careless value import would silently bundle process.env/API-fetching code into the client",
+      "suggestion": "Move shared interfaces (CardData, EvoNode, MoveRow) into a lib/types.ts that has no runtime imports"
+    },
+    {
+      "severity": "low",
+      "location": "app/src/lib/data.ts:91",
+      "issue": "The whole data layer types API responses as `any`, hiding PokeAPI shapes behind untyped property access (record.pokemon ?? [], species.varieties?.find)",
+      "suggestion": "Define minimal response interfaces for the endpoints actually consumed, keeping the loader outputs typed end-to-end"
+    },
+    {
+      "severity": "low",
+      "location": "app/src/router.tsx:7-11",
+      "issue": "No defaultErrorComponent, so a thrown API error renders the framework's unstyled default page with no title or recovery link",
+      "suggestion": "Add a styled defaultErrorComponent that offers a link back to /"
+    },
+    {
+      "severity": "low",
+      "location": "app/src/lib/components.tsx:95-97",
+      "issue": "Missing() is dead code; routes render the MISSING constant directly",
+      "suggestion": "Delete the component"
+    },
+    {
+      "severity": "low",
+      "location": "app/src/routes/index.tsx:59-68",
+      "issue": "typesByName re-maps raw type names through humanize on the client, duplicating label shaping that data.ts already does for cards",
+      "suggestion": "Have buildHomeData ship pre-shaped type labels per species and delete the client-side map"
+    },
+    {
+      "severity": "low",
+      "location": "app/src/lib/data.ts:259-262",
+      "issue": "One unbounded Promise.all per distinct move (can be 100+ concurrent requests) when building a moves table",
+      "suggestion": "Fine for the local snapshot; note the assumption or add a small concurrency limit if the API is remote"
+    }
+  ],
+  "summary": "This is a clean, idiomatic TanStack Start app that mirrors the current stable docs and official examples: file routes, server functions called from loaders, typed URL search state, and proper notFound handling. The costs of merging are the fragile fetch cache (permanently poisoned rejections and cached 404s that conflict with the live-data requirement) and two hand-rolled workarounds where framework features exist. I'd approve after one small round of fixes, none of them structural."
+}

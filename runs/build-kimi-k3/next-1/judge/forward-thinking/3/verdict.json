@@ -1,0 +1,167 @@
+{
+  "dimension": "forward-thinking",
+  "criteria": {
+    "latest_apis": {
+      "score": 3,
+      "evidence": [
+        "app/package.json:8 — next 16.4.3, current stable line (canaries at 16.5.0-canary.34 per vercel/next.js releases)",
+        "app/app/page.js:18 — awaits searchParams, the required Next 15+/16 API",
+        "app/app/pokemon/[name]/page.js:86 — awaits params; current",
+        "app/app/Controls.js:4 — useRouter from next/navigation, the current router hook",
+        "app/app/page.js:17 — export const dynamic = 'force-dynamic' repeated in all 6 routes; Next 16 docs (migrating-to-cache-components) say route segment configs are replaced by 'use cache'/'cacheLife' under Cache Components",
+        "app/app/layout.js:4-9 — metadata template '%s – Pokédex'; current Metadata API",
+        "components/PokemonCard.js:21-27 — plain <img> with width/height/lazy instead of next/image"
+      ],
+      "rationale": "The stack is pinned to the current stable generation and every per-page API (async params/searchParams, generateMetadata, notFound, next/navigation) is current. But the app leans on the older route-segment-config model (`force-dynamic` × 6) that Next 16's Cache Components migration explicitly replaces, skips next/image, and has no Suspense boundaries — acceptable today, behind the curve tomorrow."
+    },
+    "platform": {
+      "score": 4,
+      "evidence": [
+        "app/lib/api.js:28 — native fetch with an accept header; no axios/polyfill",
+        "app/lib/api.js:14 — globalThis promise-cache with failure eviction",
+        "app/app/page.js:73-82 — URLSearchParams to build query hrefs server-side",
+        "app/app/Controls.js:24-32 — URLSearchParams mirrored on the client",
+        "app/lib/format.js:37 — String.prototype.padStart for dex numbers",
+        "app/lib/api.js:22-43 — hand-rolled concurrency limiter; reasonable (no direct platform primitive)",
+        "app/lib/api.js:28 — fetch has no AbortSignal.timeout/AbortController; a hung API call stalls SSR forever",
+        "app/lib/api.js:61-63 — idFromUrl parses URLs by regex instead of new URL(url).pathname"
+      ],
+      "rationale": "Reaches for the platform consistently (fetch, URLSearchParams, globalThis, Map/Set, native form controls, CSS custom properties — no polyfills). The one material gap is the missing timeout/abort signal on outbound fetches, which is a resilience issue, not a style one."
+    },
+    "dependencies": {
+      "score": 5,
+      "evidence": [
+        "app/package.json:8-10 — exactly next, react, react-dom, nothing else",
+        "app/package.json:6-9 — 'type': 'module' and plain npm scripts; no lockfile drift",
+        "app/next.config.mjs:1-4 — three-line config, nothing vendored or shimmed"
+      ],
+      "rationale": "Three dependencies, all framework-mandated, all pinned to the current stable generation. Zero optional/heavy packages; the concurrency limiter, cache and formatting are hand-rolled in ~100 LOC rather than pulled from npm, which is the right call here."
+    },
+    "churn_resistance": {
+      "score": 4,
+      "evidence": [
+        "app/lib/api.js:1-146 — every PokeAPI call funnels through one module (fetchJson + resource factories); an API/base-URL change touches one file",
+        "app/lib/api.js:4-13 — API_BASE_URL/MAX_FORM_ID/MEDIA_BASE_URL as single exported constants",
+        "app/lib/format.js:1-38 — all display rules centralized, not inlined in pages",
+        "app/app/page.js:17 — force-dynamic duplicated in 6 route files (app/types/page.js:5, app/moves/[name]/page.js:8, app/abilities/[name]/page.js:7, app/types/[name]/page.js:9, app/pokemon/[name]/page.js:10)",
+        "app/app/page.js:73 — pageHref builds q/type/generation/page query; duplicated in app/app/Controls.js:20-32 — adding a filter edits two files",
+        "app/app/pokemon/[name]/page.js:104-120 — deep optional-chained access to untyped API JSON; no JSDoc/TS types anywhere (typeLines: 0)",
+        "app/app/Controls.js:13-15 — prop-to-state syncing via three effects; React docs prefer a key-reset or derived state"
+      ],
+      "rationale": "The data layer is genuinely well-isolated — framework or upstream changes would mostly touch lib/api.js, and constants/config live in one place. Docked for zero types at the API boundary (the whole app trusts untyped JSON) and for the URL-filter contract being maintained in two places."
+    }
+  },
+  "overall": 4,
+  "findings": [
+    {
+      "severity": "medium",
+      "location": "app/lib/api.js:28",
+      "issue": "limitedFetch issues fetches with no timeout or abort handling; a single slow/hung PokeAPI response stalls a server render indefinitely, and cached failure only triggers after rejection",
+      "suggestion": "Pass AbortSignal.timeout(ms) (or AbortController wired to request abort) in limitedFetch, and evict from the store on timeout"
+    },
+    {
+      "severity": "medium",
+      "location": "app/app/page.js:17",
+      "issue": "export const dynamic = 'force-dynamic' is repeated in all six routes and is the exact surface Next 16's Cache Components migration replaces with 'use cache'/'cacheLife' (per nextjs.org/docs/app/guides/migrating-to-cache-components)",
+      "suggestion": "Either adopt cacheComponents + 'use cache' on the shared data loaders, or at least centralize the opt-out (a shared layout export) so the eventual migration touches one file instead of six"
+    },
+    {
+      "severity": "medium",
+      "location": "app/lib/api.js:64-146",
+      "issue": "PokeAPI JSON is consumed completely untyped across all pages (deep optional chains like app/app/pokemon/[name]/page.js:104-120); no TS or JSDoc anywhere",
+      "suggestion": "Convert to TypeScript (Next 16 supports it out of the box) or at least add JSDoc typedefs for species/pokemon/move/type records at the lib/api.js boundary"
+    },
+    {
+      "severity": "low",
+      "location": "app/app/Controls.js:20-32",
+      "issue": "The q/type/generation/page URL contract is implemented twice: server-side in pageHref (app/app/page.js:73-82) and client-side in apply()",
+      "suggestion": "Extract a shared serializeFilters(params) helper in lib/ so adding a filter edits one place"
+    },
+    {
+      "severity": "low",
+      "location": "app/app/page.js:17",
+      "issue": "No loading.js or Suspense boundaries anywhere; with force-dynamic every navigation blocks on the full data fetch (1025 species + 19 type records on the home page)",
+      "suggestion": "Add a route-level loading.js or Suspense boundary around the list — this also pre-shapes the app for Cache Components validation"
+    },
+    {
+      "severity": "low",
+      "location": "components/PokemonCard.js:21-27",
+      "issue": "Plain <img> for sprites/artwork instead of next/image; defensible given the env-configured remote host, but loses format negotiation and the framework's image pipeline",
+      "suggestion": "Either document the tradeoff in a comment or use next/image with images.unoptimized/remotePatterns derived from API_BASE_URL"
+    },
+    {
+      "severity": "low",
+      "location": "app/.next/",
+      "issue": "Build output sits inside the reviewed app directory with no .gitignore present in app/",
+      "suggestion": "Add app/.gitignore covering .next/ and node_modules so build artifacts never land in the repo"
+    },
+    {
+      "severity": "low",
+      "location": "app/next.config.mjs:1",
+      "issue": "next.config.mjs in plain JS; current Next 16 scaffolds and docs use next.config.ts with type-checked NextConfig",
+      "suggestion": "Rename to next.config.ts with the /** @type {import('next').NextConfig} */ replaced by a typed object — free once TypeScript is adopted"
+    }
+  ],
+  "summary": "A lean, current-generation Next.js 16 app: three dependencies, every page API current, and all data access funneled through a single well-designed lib/api.js that made the live-data swap painless. It sits mostly on the pre-Cache-Components model (force-dynamic × 6, no Suspense boundaries) that Next 16 has publicly earmarked for replacement, and it consumes the API entirely untyped. Solid 4 — the gaps are named, enumerable, and cheap to fix before they compound.",
+  "apis": [
+    {
+      "api": "await params / await searchParams",
+      "location": "app/app/pokemon/[name]/page.js:86",
+      "status": "current",
+      "replacement": ""
+    },
+    {
+      "api": "useRouter from next/navigation",
+      "location": "app/app/Controls.js:4",
+      "status": "current",
+      "replacement": ""
+    },
+    {
+      "api": "generateMetadata / metadata template",
+      "location": "app/app/layout.js:4",
+      "status": "current",
+      "replacement": ""
+    },
+    {
+      "api": "notFound (next/navigation)",
+      "location": "app/app/moves/[name]/page.js:16",
+      "status": "current",
+      "replacement": ""
+    },
+    {
+      "api": "next/link with prefetch={false}",
+      "location": "components/PokemonCard.js:20",
+      "status": "current",
+      "replacement": ""
+    },
+    {
+      "api": "export const dynamic = 'force-dynamic'",
+      "location": "app/app/page.js:17",
+      "status": "legacy",
+      "replacement": "Cache Components ('use cache' + cacheLife) per nextjs.org/docs/app/guides/migrating-to-cache-components — still supported with cacheComponents disabled, but the only route-segment-config surface slated for removal"
+    },
+    {
+      "api": "<img> for remote sprites",
+      "location": "components/PokemonCard.js:21",
+      "status": "current",
+      "replacement": "next/image (optional; requires remotePatterns/unoptimized given the env-based media host)"
+    }
+  ],
+  "dependencies": [
+    {
+      "name": "next",
+      "verdict": "modern",
+      "note": "16.4.3, current stable line (canaries at 16.5.0-canary.34 as of 2026-10-30)"
+    },
+    {
+      "name": "react",
+      "verdict": "modern",
+      "note": "19.3.1, current React 19.x"
+    },
+    {
+      "name": "react-dom",
+      "verdict": "modern",
+      "note": "19.3.1, paired with react; no extraneous packages anywhere"
+    }
+  ]
+}

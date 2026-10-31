@@ -1,0 +1,161 @@
+I've reviewed the app end to end. Here's my assessment.
+
+## Architecture overview
+
+The app follows a clean layering: `lib/api.server.ts` (server-only data access + caching, correctly named for the framework's server-module exclusion), `lib/format.ts` (pure, shared), five small presentational components, and seven route modules whose loaders fetch/shape data and whose components render props. That layering is idiomatic React Router framework mode on the current stable version (8.5.1 — verified against the changelog; `data()` for 404s, `ssr: true`, `react-router-serve` are all current).
+
+## Scenario walkthroughs
+
+**1. Remove Abilities.** Delete `app/app/routes/ability.tsx`, drop one line in `app/app/routes.ts:6`, and remove the `abilities` loader field (`routes/pokemon.tsx:135`) plus the Abilities section (`routes/pokemon.tsx:242-250`). No nav links (root.tsx nav only links Pokémon/Types), no ability-specific CSS, no orphaned helpers. Self-contained; the only touch outside the route is the Pokémon page's cross-link, which is inherent to the feature.
+
+**2. Sprite fix.** Every card renders through one component: `components/PokemonCard.tsx:30` builds `${spriteBase}/sprites/pokemon/${species.id}.png`, and all four lists funnel into it (`home.tsx:152`, `PokemonCard.tsx:65`). One rendering fix covers every list. The catch: `CardSpecies` (`PokemonCard.tsx:12-16`) carries only species id/name, and `home.tsx:18-20` re-maps loader data into fresh object literals, so if the fix needed the default Pokémon's identity, you'd widen `SpeciesIndex` in `api.server.ts:86-108` and re-thread through home's mapping — a few places, but findable, and today the species-id↔Pokémon-id invariant holds.
+
+**3. Name-sort every card list.** This is where duplication bites. The refs→dedupe→sort-by-id block is copy-pasted in three loaders (`move.tsx:22-27`, `ability.tsx:14-24`, `type.tsx:22-29`), home orders implicitly via the index, and home duplicates the card-list markup inline (`home.tsx:149-156`) instead of using `PokemonCardList` (`PokemonCard.tsx:60-74`). You'd touch four routes, or add a prop to the list component *and* still fix home separately.
+
+**4. Items section.** Most of the Moves code is shared primitives rather than Moves-specific: `getRecordOrNull` (`api.server.ts:146`), `englishName`/`latestEnglishFlavor` (`format.ts`), `Section`, `NotFound`, `PokemonCardList`, `TypeBadgeLink`, `mediaBase`. A new `items` route reuses all of it; what you'd copy is the loader boilerplate from finding #2 and the per-route notFound branch.
+
+**5. API base URL / caching.** Fully centralized: `API_BASE`/`API_V2` (`api.server.ts:6-7`), the promise cache (`api.server.ts:28`), and the four index caches (lines 82, 104, 118, 130) all live in one file; loaders only call `mediaBase()`. One file, nothing else knows the URL.
+
+## Main weaknesses
+
+- **Type safety is off where it matters.** `tsconfig.json` is wired for typegen (`.react-router/types`) and there's a `typecheck` script, but no route imports `./+types/...`. Loaders hand-roll params (`move.tsx:9`) and components take `loaderData: any` (`types.tsx:12`, `move.tsx:39`, `type.tsx:50`, `ability.tsx:40`, `pokemon.tsx:182`). Renaming a loader field or a param compiles silently — the framework's flagship feature, unused.
+- **Not-found handling is repeated per route.** Each loader returns `data({notFound:true},{status:404})` and each component branches (`move.tsx:11,41`), and the NotFound markup is duplicated between `components/NotFound.tsx` and the root `ErrorBoundary` (`root.tsx:46-56`) instead of throwing and rendering one boundary (the documented pattern).
+- **Small DRY gaps:** the "– Pokédex" title suffix appears in 8 files; `spriteUrl` is dead code (`api.server.ts:63`) while `PokemonCard.tsx:30` rebuilds the URL; `hiddenBySpecies` is serialized as an object and re-Mapped in the component (`ability.tsx:35,43`).
+
+On the plus side, `MoveTable` is a genuinely well-designed abstraction (column descriptors + missing-values-last comparator, `MoveTable.tsx:16-46`), `Section`'s aria-labelledby derivation is a nice touch, and `pokemon.tsx`'s loader does the heavy moves shaping server-side where it belongs.
+
+```json
+{
+  "dimension": "editability",
+  "criteria": {
+    "removability": {
+      "score": 4,
+      "evidence": [
+        "app/app/routes.ts:6 — abilities route is a single declarative line; delete it",
+        "app/app/routes/ability.tsx:1-58 — feature lives entirely in one route file",
+        "app/app/root.tsx:20-23 — nav links only Pokémon and Types; no ability links to hunt down",
+        "app/app/routes/pokemon.tsx:135 — only outside reference: the abilities field in the pokemon loader",
+        "app/app/routes/pokemon.tsx:242-250 — and its Section; no ability-specific CSS in app.css"
+      ],
+      "rationale": "Dropping Abilities is one deleted file, one routes.ts line and two small edits in pokemon.tsx; nothing else in the app (nav, CSS, helpers) knows the feature exists."
+    },
+    "changeability": {
+      "score": 3,
+      "evidence": [
+        "app/app/components/PokemonCard.tsx:30 — sprite URL built in one component, so one fix covers home.tsx:152, move.tsx:76, ability.tsx:53 and type.tsx:74",
+        "app/app/components/PokemonCard.tsx:12-16 — but CardSpecies only carries species id; a real Pokémon-id fix needs widening SpeciesIndex (api.server.ts:86-108) and home's re-mapping (home.tsx:18-20)",
+        "app/app/routes/move.tsx:22-27 — refs→dedupe→sort-by-id block copy-pasted; identical in ability.tsx:14-24 and type.tsx:22-29, so an order change is 3+1 edits",
+        "app/app/routes/types.tsx:12 — loaderData typed any (also move.tsx:39, type.tsx:50, ability.tsx:40, pokemon.tsx:182), so loader-field renames break silently",
+        "app/app/root.tsx:46-56 — NotFound markup duplicated instead of reusing components/NotFound.tsx; title suffix '– Pokédex' repeated in 8 files"
+      ],
+      "rationale": "Rendering fixes land in one obvious component, but loader-level changes hit N copy-pasted blocks, and the absent generated route types make loader↔component edits unsafe rather than merely findable."
+    },
+    "coupling": {
+      "score": 4,
+      "evidence": [
+        "app/app/lib/api.server.ts:6-7 — API base URL, caching and concurrency live in one server-only module; components never import it",
+        "app/app/lib/format.ts:1-28 — pure helpers shared across the boundary with no API knowledge",
+        "app/app/components/PokemonCard.tsx:17-24 — components take props (species, spriteBase, showTypes, extras) and render; no fetching or globals",
+        "app/app/routes/home.tsx:39-46 — filter state lives in the URL via useSearchParams, the framework-idiomatic shared state",
+        "app/app/routes/ability.tsx:35 — one awkward seam: hidden flags serialized as hiddenBySpecies then re-Mapped in the component (ability.tsx:43)"
+      ],
+      "rationale": "Server/client separation is clean and enforced by the *.server.ts naming convention; components depend on narrow prop contracts. Docked a point for the any-typed loaderData seam and the Map round-trip in the ability page."
+    },
+    "abstraction_design": {
+      "score": 3,
+      "evidence": [
+        "app/app/components/MoveTable.tsx:16-46 — column descriptors plus a missing-values-last comparator; genuinely reusable and the strongest abstraction in the app",
+        "app/app/components/PokemonCard.tsx:27-45 — showTypes/extras props model the real variation between card lists without flag creep",
+        "app/app/components/Section.tsx:8-17 — one place for the section/aria-labelledby convention",
+        "app/app/routes/home.tsx:149-156 — card-list markup duplicated inline instead of using PokemonCardList (components/PokemonCard.tsx:62-72)",
+        "app/app/lib/api.server.ts:63-65 — spriteUrl() is dead code while PokemonCard.tsx:30 rebuilds the same URL"
+      ],
+      "rationale": "The primitives (cards, sections, badges, sortable table, formatters) stretch well to a new Items resource, but the per-loader dedupe/sort pipeline is copy-paste rather than a shared helper, and home bypasses its own list component."
+    }
+  },
+  "overall": 3,
+  "findings": [
+    {
+      "severity": "high",
+      "location": "app/app/routes/move.tsx:39",
+      "issue": "No route uses the framework's generated Route.LoaderArgs/Route.ComponentProps types (tsconfig is wired for typegen but unused); every component takes loaderData: any and every loader hand-rolls params (move.tsx:9), so loader↔component contract changes compile silently.",
+      "suggestion": "Import type { Route } from './+types/move' (etc.) and use Route.LoaderArgs / Route.ComponentProps; delete the hand-written parameter and any annotations."
+    },
+    {
+      "severity": "medium",
+      "location": "app/app/routes/move.tsx:22-27",
+      "issue": "The refs→species dedupe→sort-by-dex block is copy-pasted in three loaders (move.tsx, ability.tsx:14-24, type.tsx:22-29); adding items or changing card order means editing each one.",
+      "suggestion": "Extract a shared helper in api.server.ts, e.g. refsToSpeciesList(refs: any[]): Promise<SpeciesEntry[]>, and call it from each loader."
+    },
+    {
+      "severity": "medium",
+      "location": "app/app/routes/home.tsx:149",
+      "issue": "Home re-implements the card-grid list markup inline instead of using PokemonCardList, so any card-list change (sorting, markup, classes) needs a second edit here.",
+      "suggestion": "Render <PokemonCardList species={pageItems} spriteBase={spriteBase} showTypes /> and delete the inline <ul>."
+    },
+    {
+      "severity": "medium",
+      "location": "app/app/root.tsx:46-56",
+      "issue": "Not-found UI exists twice: the root ErrorBoundary re-implements components/NotFound.tsx (including its title), and each detail route repeats the data({notFound:true},{status:404}) + component branch instead of throwing and letting one boundary render it.",
+      "suggestion": "throw data(null, { status: 404 }) from loaders, render <NotFound /> from the root ErrorBoundary, and delete the per-route notFound discriminants and branches."
+    },
+    {
+      "severity": "low",
+      "location": "app/app/components/NotFound.tsx:6",
+      "issue": "The document-title convention '<h1> – Pokédex' is duplicated in eight files (NotFound.tsx:6, root.tsx:50, home.tsx:111, types.tsx:15, move.tsx:45, ability.tsx:46, type.tsx:55, pokemon.tsx:187) via inline <title> tags rather than a meta export or shared helper.",
+      "suggestion": "Add a pageTitle(text) helper (or route meta exports) so the suffix and format live in one place."
+    },
+    {
+      "severity": "low",
+      "location": "app/app/lib/api.server.ts:63",
+      "issue": "spriteUrl() is dead code; PokemonCard.tsx:30 builds the identical URL client-side, so the sprite path pattern is known in two places.",
+      "suggestion": "Either delete spriteUrl() or pass the computed sprite URL per card from loaders so the pattern lives in the server data layer."
+    },
+    {
+      "severity": "low",
+      "location": "app/app/routes/ability.tsx:35",
+      "issue": "The loader flattens per-Pokémon hidden flags into a hiddenBySpecies object that the component re-converts to a Map (ability.tsx:43) — an awkward, double-encoded contract for what is already a per-item boolean.",
+      "suggestion": "Keep hidden on each item in the pokemon array and render the extra text from it (or compute extras in the loader as a plain list), removing the object→Map round trip."
+    },
+    {
+      "severity": "low",
+      "location": "app/app/components/Section.tsx:17",
+      "issue": "Section derives the heading id from the title string, so renaming a section title silently changes its aria-labelledby/id (only pokemon.tsx's Moves passes an explicit id).",
+      "suggestion": "Require (or default to) an explicit id prop and derive the heading id from it, so text changes can't break anchors."
+    }
+  ],
+  "summary": "A cleanly layered React Router framework-mode app: server-only data access, pure formatters, small presentational components and presentational props, with the API base URL and caching fully centralized. The big miss is that the framework's generated route types are never used — every component takes any-typed loaderData — so loader↔component edits compile silently, and the per-loader dedupe/sort boilerplate, duplicated NotFound markup and the unused typegen make routine changes more scattered than they need to be. Solid, easy to navigate, but one refactor away from being a codebase you'd point to.",
+  "scenarios": [
+    {
+      "change": "Remove the Abilities pages and every link to them",
+      "files": ["app/app/routes/ability.tsx", "app/app/routes.ts", "app/app/routes/pokemon.tsx"],
+      "difficulty": 4,
+      "notes": "One deleted route file, one routes.ts line, and two small removals in pokemon.tsx (loader field at 135, Section at 242). Nav, CSS and helpers have no knowledge of abilities; nothing dead remains."
+    },
+    {
+      "change": "Fix the card sprite for species whose default Pokémon has a different name (e.g. Deoxys)",
+      "files": ["app/app/components/PokemonCard.tsx", "app/app/lib/api.server.ts", "app/app/routes/home.tsx"],
+      "difficulty": 3,
+      "notes": "The URL is built in exactly one component (PokemonCard.tsx:30) that every list funnels through, so the rendering fix is single-site; but CardSpecies carries only the species id, so supplying a Pokémon-keyed sprite means widening SpeciesIndex (api.server.ts:86-108) and home's explicit object mapping (home.tsx:18-20) — a few files, all findable."
+    },
+    {
+      "change": "Add sorting by name to every list of Pokémon cards",
+      "files": ["app/app/routes/move.tsx", "app/app/routes/ability.tsx", "app/app/routes/type.tsx", "app/app/routes/home.tsx"],
+      "difficulty": 2,
+      "notes": "Ordering is copy-pasted as .sort((a,b)=>a.id-b.id) in three loaders (move.tsx:19, ability.tsx:24, type.tsx:29) and implicit in home's index order, and home duplicates the list markup instead of using PokemonCardList — so either four edits or a shared helper plus a home-specific one."
+    },
+    {
+      "change": "Add an Items section (/items, /items/:name) shaped like Moves",
+      "files": ["app/app/routes/item.tsx", "app/app/routes.ts", "app/app/root.tsx"],
+      "difficulty": 4,
+      "notes": "Almost everything is reusable primitives (getRecordOrNull, englishName/humanize, Section, NotFound, PokemonCardList, TypeBadgeLink, mediaBase); only the per-loader dedupe/sort boilerplate and the notFound branch would be copied, plus a nav link and one routes.ts line."
+    },
+    {
+      "change": "Change the API base URL and caching rules",
+      "files": ["app/app/lib/api.server.ts"],
+      "difficulty": 5,
+      "notes": "API_BASE/API_V2, the getJSON promise cache, the concurrency limiter and the four index caches all live in one file; loaders only pass mediaBase() through, so no other module knows the URL or cache policy."
+    }
+  ]
+}
+```

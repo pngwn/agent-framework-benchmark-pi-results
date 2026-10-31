@@ -1,0 +1,128 @@
+I've read the spec, all 12 source files, the build script, and cross-checked the Hono/htmx APIs against current docs (Hono v4 `hono/html` for HTML responses, `serveStatic` from `@hono/node-server/serve-static` v2, `app.notFound`/`app.onError`, htmx 2 `hx-*` attributes and the `htmx:configRequest` event). Assessment:
+
+**Strengths**
+- Clean layering: `api.js` (data + caching), `format.js` (pure helpers), `views/*` (HTML), `app.js` (routes). `hono/html`'s auto-escaping is used consistently, so no XSS surface even with user input interpolated (`app/src/views/home.js:44` `value="${q}"`).
+- htmx is used the way its docs intend: one swappable fragment per interaction (`#results`, `#moves`), `hx-push-url`, `htmx:configRequest` to strip empty params so pushed URLs stay clean (`app/public/app.js:5-9`), and event delegation so htmx-swapped tables keep working (`app/public/app.js:14`). Forms still work as native GET forms without JS — genuine progressive enhancement (`app/src/views/home.js:34-38`, `pokemon.js:64-69`).
+- 404 handling is thorough: `app.notFound` plus per-resource null checks returning status 404 (`app/src/app.js:56, 95, 96-97, 144, 185, 214-215`).
+- Concurrency is bounded (`mapLimit`, 24 workers for move fetches — `app/src/app.js:118-119`, `api.js:20-30`), and failed fetches are evicted from the promise cache (`app/src/api.js:24`).
+
+**Rough spots**
+- Static assets are registered one explicit route per file (`app/src/app.js:26-28`) instead of the documented `app.use('/static/*', serveStatic(...))` pattern; every new asset needs a code edit and there are no cache headers.
+- `renderPage(c, h1, …)` is misleadingly named — the home handler passes `'Pokédex'` purely for the `<title>` while the real `h1` lives inside the fragment (`app/src/app.js:43-44` vs `views/home.js:42`).
+- `pokemonMovesData` (~60 lines of data shaping) lives in the route file (`app/src/app.js:66-129`) — it's an api/service concern and bloats the route module.
+- The `typeLabels.get(x) ?? humanize(x)` fallback is duplicated six times across `app.js` and once more in `components.js:18`.
+- The home form lists both `search from:#q` and `input changed delay:250ms from:#q`; Chromium's native clear button fires both, so one clear produces two htmx requests (`app/src/views/home.js:38-39`).
+- `views/components.js:3` imports `API_BASE` from the data layer, so a view knows server config.
+
+```json
+{
+  "dimension": "mergeability",
+  "criteria": {
+    "idiomatic": {
+      "score": 4,
+      "evidence": [
+        "app/src/views/layout.js:1 — hono/html tagged templates for full-page HTML, the documented non-JSX approach",
+        "app/src/app.js:236-241 — app.notFound / app.onError exactly as the Hono skill shows",
+        "app/src/views/home.js:34-38 — hx-get/hx-target/hx-swap/hx-push-url plus native form GET fallback, idiomatic htmx 2",
+        "app/public/app.js:5-9 — htmx:configRequest to drop empty params, the right hook for clean pushed URLs",
+        "app/src/app.js:26-28 — per-file app.get() loop for static assets instead of the documented app.use('/static/*', serveStatic()) pattern"
+      ],
+      "rationale": "Recognisably the framework's own style throughout (hono/html, serveStatic from node-server, notFound/onError, htmx partial swaps); the only deviation is the hand-rolled explicit list of static routes instead of a single wildcard middleware."
+    },
+    "correctness_risks": {
+      "score": 4,
+      "evidence": [
+        "app/src/api.js:24 — failed fetches are evicted from the promise cache, so no poisoned entries persist",
+        "app/src/api.js:20-30 — mapLimit bounds fan-out (concurrency 24 for moves, 8 for lists)",
+        "app/src/app.js:72 — page clamped to [1, totalPages] on both ends",
+        "app/src/app.js:56,95-97,144,185,214-215 — every resource lookup has a null → 404 path, plus app.notFound for unmatched URLs",
+        "app/src/views/home.js:38-39 — 'search from:#q' and 'input changed delay:250ms from:#q' both fire on native clear, issuing a duplicate request (same URL, so no user-visible corruption)"
+      ],
+      "rationale": "Careful look found no XSS (html auto-escapes everywhere), no unbounded fan-out, and solid 404 handling; the only flaws are the doubled trigger on search-clear and minor duplicate-request waste, both harmless with this local API."
+    },
+    "global_abstractions": {
+      "score": 4,
+      "evidence": [
+        "app/src/api.js — clean data layer: memo() caches, apiJson/apiList, idFromUrl, all derived indexes in one place",
+        "app/src/format.js — pure, dependency-free display helpers",
+        "app/src/views/components.js:3 — view imports API_BASE from the data layer, a small boundary leak (sprite URL construction belongs behind api.js)",
+        "app/src/app.js:66-129 — pokemonMovesData is ~60 lines of data shaping living in the route file",
+        "app/src/app.js:66,117,144,197,224,232 — 'typeLabels.get(name) ?? humanize(name)' fallback repeated six times"
+      ],
+      "rationale": "The layering is genuinely good and each module earns its keep; the deductions are for data-shaping logic in the router, a view reaching into the data layer's config, and one helper fallback duplicated half a dozen times."
+    },
+    "readability": {
+      "score": 4,
+      "evidence": [
+        "app/src/api.js:1-3, 20, 34, 103 — file headers and inline comments explain intent, not mechanics",
+        "app/src/views/components.js:17-19 — card contract documented (types for home, hidden for abilities)",
+        "app/src/app.js:43-44 — renderPage(c, h1, …) param is really the title source; home passes 'Pokédex' while the real h1 is inside the fragment",
+        "app/src/app.js:131-133 — speciesCardsFor comment explains the two reference shapes it normalises"
+      ],
+      "rationale": "A new teammate finds their way in minutes: tiny files, descriptive names, consistent style, comments that explain why. The only confusion point is renderPage's misnamed 'h1' parameter."
+    },
+    "review_cost": {
+      "score": 4,
+      "evidence": [
+        "app/src/app.js:26-28 — replace static loop with a single serveStatic wildcard (one-liner)",
+        "app/src/app.js:43-44 — rename renderPage's second param to 'title'",
+        "app/src/app.js:26-28 — no Cache-Control headers on vendored htmx/CSS",
+        "app/scripts/build.mjs:9-11 — public/vendor/htmx.min.js is both committed and build-generated; risk of drift"
+      ],
+      "rationale": "I'd approve after a round of nits: static-route consolidation, one rename, one extracted label helper, and a cache header. Nothing structural needs rework."
+    }
+  },
+  "overall": 4,
+  "findings": [
+    {
+      "severity": "medium",
+      "location": "app/src/app.js:26-28",
+      "issue": "Static assets registered as an explicit per-file loop of app.get() routes; adding an asset means editing code, and no Cache-Control/ETag handling is configured.",
+      "suggestion": "Use the documented pattern: app.use('/assets/*', serveStatic({ root: './public/assets' })) (or a single wildcard with rewriteRequestPath), so assets are picked up without route edits."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/app.js:43-44",
+      "issue": "renderPage's 'h1' parameter is actually the document-title source; the home route passes 'Pokédex' while the visible h1 ('Pokémon') lives inside the fragment, so the name actively misleads.",
+      "suggestion": "Rename the parameter to 'title' (or pass an explicit pageTitle) and let each view own its h1 unambiguously."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/views/home.js:38-39",
+      "issue": "Both 'search from:#q' and 'input changed delay:250ms from:#q' triggers fire when the native search-clear button is clicked, producing two identical htmx requests.",
+      "suggestion": "Drop the 'search' trigger (the delayed 'input changed' already covers clearing), or add hx-sync='this replace' on the form to coalesce."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/app.js:66-129",
+      "issue": "pokemonMovesData, ~60 lines of API data fetching and shaping, lives in the route module, blurring the api.js boundary the rest of the code respects.",
+      "suggestion": "Move it (with speciesCardsFor) into api.js or a small service module so app.js stays route-and-render only."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/views/components.js:3",
+      "issue": "A view component imports API_BASE from the data layer to build sprite URLs, coupling presentation to server configuration.",
+      "suggestion": "Have api.js export a spriteUrl(id) helper (or pass the base in) so views stay free of runtime config."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/app.js:66",
+      "issue": "The 'typeLabels.get(name) ?? humanize(name)' fallback is repeated six times across app.js (lines 66, 117, 144, 197, 224, 232) and again in components.js:18.",
+      "suggestion": "Add one typeLabel(map, name) helper in format.js and use it everywhere."
+    },
+    {
+      "severity": "low",
+      "location": "app/scripts/build.mjs:9-11",
+      "issue": "public/vendor/htmx.min.js is both committed and regenerated by the build step, so the copy can drift from node_modules.",
+      "suggestion": "Either gitignore public/vendor and let the build own it, or serve it straight from node_modules via serveStatic's path option."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/app.js:238-240",
+      "issue": "onError returns bare 'Internal Server Error' text, dropping the page landmarks users see everywhere else.",
+      "suggestion": "Render the layout with a 500 status (and log the error as it already does) so error pages keep header/footer navigation."
+    }
+  ],
+  "summary": "A clean, idiomatic Hono + htmx app: proper layering, auto-escaped hono/html rendering, thorough 404 handling, bounded fetch fan-out, and real progressive enhancement with native form fallbacks. The main merge frictions are cosmetic — a hand-rolled static-route list instead of a wildcard, a misnamed renderPage parameter, data shaping inside the route file, and a few duplicated fallbacks. I'd approve after one round of small changes."
+}
+```

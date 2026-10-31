@@ -1,0 +1,156 @@
+I've read the full app. Versions check out as current stable (hono 4.13.x, @hono/node-server 2.1.5, htmx.org 2.0.11 — no deprecated APIs in use), so I'm judging structure, not currency. Here's my review.
+
+## Review notes
+
+**Structure.** A clean four-layer split: `api.js` (fetch + memoized caches, one `API_BASE`), `format.js` (naming/formatting rules), `app.js` (routes + data assembly), `views/` (pure templates taking plain props). The htmx partials reuse the exact view functions the full pages use (`movesSection` in `views/pokemon.js`, `resultsFragment` in `views/home.js`), so there's one template per surface, not two.
+
+**Strongest seams.** `pokemonCard` (`views/components.js:14`) is the single sprite/card construction point — every list of cards (home, moves, abilities, types) routes through it, so the Deoxys-style sprite fix lands in one line (`views/components.js:17`). `speciesCardsFor` (`app.js:208-222`) is genuinely designed around the real variation in the data (bare `{name,url}` refs vs `entry.pokemon`-wrapped, plus an `extra` callback for the hidden-ability note).
+
+**Weaknesses.** (1) A latent shape mismatch: `app.js:72` passes the `Map` from `typeEnglishByName()` into `pokemonCard`, which does `typeLabels[t.name] ?? humanize(...)` (`components.js:21`) — bracket access on a `Map` is always `undefined`, so home cards silently fall back to `humanize`. It only passes tests because all 18 type names are single words. Meanwhile `typePage` receives `Object.fromEntries(labels)` (`app.js:297`) — three different shapes for one concept. (2) The view layer imports `API_BASE` from the data layer to build sprite URLs (`components.js:2,17`), so a data-source change reaches a view. (3) `labels.get(x) ?? humanize(x)` is repeated at ~6 call sites, and card-list construction exists in two places (home route `app.js:58-72` vs `speciesCardsFor`), so cross-list changes are a two-site edit. (4) The ability feature isn't self-contained: removing it touches `app.js` (import, route, data prep), `pokemon.js` (section), `components.js` (hidden flag).
+
+```json
+{
+  "dimension": "editability",
+  "criteria": {
+    "removability": {
+      "score": 3,
+      "evidence": [
+        "app/src/app.js:253-267 — ability route lives in the single flat route file, not a feature module",
+        "app/src/app.js:28 — abilityPage import must be pruned by hand",
+        "app/src/app.js:193-197 — abilities data prep is inlined in the pokemon route, not next to the ability code",
+        "app/src/views/pokemon.js:55-62,128 — the pokemon page's Abilities section links to /abilities and must be dropped too",
+        "app/src/views/components.js:14,22 — the 'hidden' flag in the shared pokemonCard exists only for the ability page and would be left dead"
+      ],
+      "rationale": "Removing Abilities is a findable handful of scattered edits across three files (app.js, pokemon.js, components.js) with a risk of leaving a dead flag in a shared component — exactly the 3 anchor, not the 'delete a route and a nav link' case."
+    },
+    "changeability": {
+      "score": 3,
+      "evidence": [
+        "app/src/views/components.js:17 — sprite URL built in one place; all four card lists route through pokemonCard (app/src/app.js:72, 222)",
+        "app/src/app.js:88,142,190,244 — type-label resolution 'labels.get(x) ?? humanize(x)' duplicated at ~6 sites with no shared helper",
+        "app/src/app.js:72 + app/src/views/components.js:21 — Map passed where an object is indexed; the latent fallback only works because type names are single words",
+        "app/src/views/home.js:5-15 — pageUrl is a single place for filter-URL building, a good counter-example",
+        "app/src/app.js:58-72 vs 208-222 — card lists are constructed in two independent places, so cross-list changes are a two-site fix"
+      ],
+      "rationale": "The headline bug fix (sprite per species) lands in one obvious line and covers every list, but several other behaviours (type labels, card-list assembly) are duplicated across 2-6 sites, and the Map/object mismatch shows duplication already producing a latent defect."
+    },
+    "coupling": {
+      "score": 3,
+      "evidence": [
+        "app/src/views/components.js:2,17 — a view template imports API_BASE from the data layer and constructs media URLs itself",
+        "app/src/views/details.js:59,68 vs app/src/app.js:72,297 — the same 'typeLabels' concept is passed as a Map in one route and Object.fromEntries in another, with pokemonCard defaulting to {}",
+        "app/src/app.js:19-20 vs app/src/views/layout.js:12-15 — static asset paths are listed in both the route loop and the layout head",
+        "app/src/public/app.js:31-60 — client script is standalone, event-delegated, no server knowledge (good)",
+        "app/src/views/pokemon.js:95-141 + app/src/app.js:167-169 — movesSection serves both the page and the htmx fragment through one seam (good)"
+      ],
+      "rationale": "Views get plain props and server/client code are cleanly separated, but the view layer reaches into the data layer for the API base URL, and one prop is passed in three different shapes depending on the route — tangles a maintainer can trip on."
+    },
+    "abstraction_design": {
+      "score": 4,
+      "evidence": [
+        "app/src/app.js:208-222 — speciesCardsFor is designed around the data's real variation (bare vs wrapped refs, extra-note callback) instead of three copied loops",
+        "app/src/views/components.js:26-30 — section() encodes the region/aria-labelledby convention exactly once",
+        "app/src/views/home.js:17-31 — resultsFragment doubles as the htmx partial; app/src/views/pokemon.js:88-141 does the same for moves",
+        "app/src/format.js — every naming rule (humanize, dexNumber, latestEnglishFlavor, orMissing) centralized",
+        "app/src/views/components.js:14 — minor flag creep: pokemonCard carries page-specific optional flags (types, hidden, typeLabels)",
+        "app/src/views/details.js:32,38,77 — 'count Pokémon + cardList' snippet inlined three times rather than a countedList helper"
+      ],
+      "rationale": "The abstractions (speciesCardsFor, section, the partial-seam views, format.js) stretch to new cases with little copying — an Items section would reuse most of the Moves machinery — held back only by small flag creep in pokemonCard and a thrice-inlined count/list snippet."
+    }
+  },
+  "overall": 4,
+  "findings": [
+    {
+      "severity": "medium",
+      "location": "app/src/app.js:72",
+      "issue": "A Map is passed to pokemonCard, which indexes it with bracket syntax (app/src/views/components.js:21); the lookup is always undefined and silently falls back to humanize, working only because all type names are single words",
+      "suggestion": "Pick one shape for type labels (e.g. always a plain object, or always a Map with .get()) and have pokemonCard/its callers agree on it"
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/views/components.js:2",
+      "issue": "A view template imports API_BASE from the data layer and hand-builds media URLs, so a change to the data source's URL scheme requires editing a view",
+      "suggestion": "Add a spriteUrl(id) helper in api.js (or pass sprite URLs as data) so views never know the API origin"
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/app.js:88",
+      "issue": "Type-label resolution 'typeEnglishByName().get(x) ?? humanize(x)' is duplicated at ~6 call sites (app.js:88,142,190,244,290 and views/components.js:21)",
+      "suggestion": "Export a single typeLabel(name) helper (backed by the memoized map) and call it everywhere"
+    },
+    {
+      "severity": "low",
+      "location": "app/src/app.js:58-72",
+      "issue": "Card lists are constructed in two independent places — the home route (filter/slice/map) and speciesCardsFor (app.js:208-222) — so cross-list behaviour like sorting or sprite fixes needing more data must be applied twice",
+      "suggestion": "Route the home page through a shared card-list builder (or give speciesCardsFor a sort/transform option) so all lists share one seam"
+    },
+    {
+      "severity": "low",
+      "location": "app/src/views/components.js:14",
+      "issue": "pokemonCard accumulates page-specific optional flags (types=null, hidden=false, typeLabels={}), and 'hidden' exists solely for the ability page — removing that feature leaves dead parameters in a shared component",
+      "suggestion": "Accept a single optional 'footer' slot (badges or note) instead of named per-page flags"
+    },
+    {
+      "severity": "low",
+      "location": "app/src/app.js:19-20",
+      "issue": "Static asset paths are enumerated in the route loop and duplicated again in the layout head (app/src/views/layout.js:12-15); adding an asset is a two-file edit",
+      "suggestion": "Serve /public via one wildcard route (app.use('*', serveStatic({root:'./public'}))) and keep the asset list only in the layout"
+    },
+    {
+      "severity": "low",
+      "location": "app/src/views/details.js:32",
+      "issue": "The '<count> Pokémon' + cardList section markup is inlined three times (details.js:32,38,77) rather than one countedCardSection helper",
+      "suggestion": "Extract a small helper like sectionWithCount(slug, title, countText, cards) and reuse it for future Items-style pages"
+    }
+  ],
+  "summary": "This is a genuinely editable codebase: one data layer, one formatting module, shared components, and htmx partials that reuse the page templates rather than duplicating them, all on current stable API versions with no dead code. The named sprite bug would be a one-line fix in pokemonCard that covers every card list. The main risks are a latent Map/object typeLabels mismatch that already silently mis-resolves labels, duplicated type-label and card-list logic that makes some changes two-to-six-site edits, and the ability feature being spread across three files instead of being self-contained.",
+  "scenarios": [
+    {
+      "change": "Remove the Abilities pages and every link to them",
+      "files": [
+        "app/src/app.js",
+        "app/src/views/pokemon.js",
+        "app/src/views/components.js",
+        "app/src/views/details.js"
+      ],
+      "difficulty": 3,
+      "notes": "Edits are scattered but greppable: route + import + englishName/effect prep in app.js:28,253-267, the Abilities section in pokemon.js:55-62,128, the hidden-ability data mapping in app.js:259, the dead 'hidden' flag in components.js:14,22, and the abilityPage template in details.js:35-39. No nav link, since nav only lists Pokémon and Types."
+    },
+    {
+      "change": "Fix the sprite shown for species whose default Pokémon has a different name (e.g. Deoxys)",
+      "files": [
+        "app/src/views/components.js"
+      ],
+      "difficulty": 4,
+      "notes": "Every card list renders through pokemonCard, and the sprite URL is built in exactly one line (components.js:17) from the id that speciesCardsFor (app.js:208-222) already resolves from the pokemon reference while mapping to the species name — so one fix covers home, moves, abilities and types. Only if the fix needs the API's own sprite URL per Pokémon would you additionally touch speciesCardsFor and the home index."
+    },
+    {
+      "change": "Add sorting by name to every list of Pokémon cards",
+      "files": [
+        "app/src/app.js",
+        "app/src/views/home.js"
+      ],
+      "difficulty": 3,
+      "notes": "Card lists are assembled in two places: speciesCardsFor's out.sort((a,b)=>a.id-b.id) (app.js:221) covers move/ability/type lists, while home builds its own list from the index (app.js:58-72). Both are in app.js and the card markup itself is shared, so it's a two-site change (plus a small UI/query-param hook), not one."
+    },
+    {
+      "change": "Add an Items section (/items, /items/:name) shaped like Moves",
+      "files": [
+        "app/src/app.js",
+        "app/src/views/details.js"
+      ],
+      "difficulty": 4,
+      "notes": "Most machinery is reusable as-is: apiJson/memoized apiList, renderPage/renderNotFound (app.js:34-39), englishName/collapseWhitespace/orMissing from format.js, section() and cardList from components.js. What gets written rather than reused is the ~25-line route (copy of the move route shape at app.js:228-247) and an itemPage template modelled on movePage (details.js:15-33); typeListPage is type-styled so an /items index page needs its own small list template."
+    },
+    {
+      "change": "Change the API base URL and caching rules",
+      "files": [
+        "app/src/api.js",
+        "app/src/views/components.js"
+      ],
+      "difficulty": 4,
+      "notes": "The base URL is read in one place (api.js:4) and the cache is a single Map inside apiJson with failure eviction (api.js:8-25), so TTL/entry-limit changes are one-file. The one leak is components.js:17, which imports API_BASE to build sprite URLs — a scheme change there means touching a view too."
+    }
+  ]
+}
+```

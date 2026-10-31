@@ -1,0 +1,164 @@
+# Review — Test quality
+
+**Verdict: the app shipped with zero tests.** There is no test runner in `app/package.json:5-10` (only `build`, `start`, `dev`, `typecheck`), no test dependencies, no test files anywhere under `app/` (confirmed by grep across `**/*.{ts,tsx,js,mjs}`), and the measured facts agree (`tests: {files: 0, cases: 0}`). The only `test`-matching strings are in the build output (`app/build/`) and incidental comments. The acceptance suite in `tests/` (Playwright specs for home/layout/pokemon/details) is the sole safety net, and it won't exist once someone refactors.
+
+That's a shame, because the app concentrates substantial risk in exactly the kind of logic that deserves tests:
+
+- **Pure transforms begging for unit tests** — `app/app/lib/format.ts:16` (`humanize` word-splitting/capitalization), `format.ts:26` (`idFromUrl` regex, returns `NaN` on no match), `format.ts:33` (`dexNumber` zero-padding), `format.ts:38` (`latestEnglishFlavor` — "last English entry" + `\s+` collapse, a spec-pinned detail). All are dependency-free functions; not one has a test.
+- **URL-state filtering/pagination** — `app/app/routes/home.tsx:34-66`: the client-side filter predicate (case-insensitive humanized substring, type-in-either-slot, generation), 48-per-page slice, page clamping, `pageHref` param omission at defaults, and `updateFilter`'s page-reset. And there's a live bug risk here: `q` is local state initialized once (`home.tsx:28`) with no resync effect, so after browser Back the URL and the applied filter can disagree — precisely the class of bug a URL-state test would catch.
+- **Server data aggregation** — `app/app/lib/pokeapi.server.ts:118-184` (`buildIndex`): deriving per-species types from the type records, slot sorting, alternate-form exclusion (`id >= 10000`), generation back-mapping. `pokeapi.server.ts:191-220` (`pokemonRefsToCards`): form exclusion, dedupe, and the `existing.hidden || hidden` merge — a flipped comparison would silently drop or duplicate cards on the move/ability/type pages.
+- **Moves table** — `app/app/routes/pokemon.tsx:68-130`: per-move min-level dedupe, the `FIXED_METHODS`-then-alphabetical method ordering, default game = highest `order`. And `pokemon.tsx:214-237`: client-side sortable headers with "missing last in both directions" and `aria-sort` — classic off-by-one territory, fully untested.
+- **Error paths** — `app/app/lib/pokeapi.server.ts:14-35`: the promise cache, failure-eviction, `isNotFound` 404 discrimination; loaders' `data({notFound:true},{status:404})` branches in every route (`pokemon.tsx:48-51`, `move.tsx:11-15`, `ability.tsx:10-14`, `type.tsx:13-20`). A regression here blanks every 404 page at once.
+- **Smaller drift risks** a test would have surfaced: `humanize` is used where the spec calls for English names (`pokemon.tsx:145` move-type label, `move.tsx:30`), and a move with no damage class yields an empty `category` (`pokemon.tsx:146`) instead of the spec's `—`.
+
+The one mitigation is `app/package.json:9` — a `typecheck` script (react-router typegen + tsc) — which catches some refactor breakage, but nothing behavioural.
+
+Scores follow the anchors: no tests means `coverage_of_risk`, `behaviour_not_implementation`, `regression_power` all get 1; `signal_to_noise` gets the anchored 3 for "no tests".
+
+```json
+{
+  "dimension": "tests",
+  "criteria": {
+    "coverage_of_risk": {
+      "score": 1,
+      "evidence": [
+        "app/package.json:5-10 — only build/start/dev/typecheck scripts; no test runner, no test deps",
+        "app/app/lib/format.ts:16-45 — humanize/dexNumber/idFromUrl/latestEnglishFlavor: pure, risky transforms, untested",
+        "app/app/routes/home.tsx:34-66 — filter predicate, pagination, page clamping, URL param handling, all untested",
+        "app/app/lib/pokeapi.server.ts:118-220 — buildIndex and pokemonRefsToCards aggregation (forms, dedupe, slot order), untested",
+        "app/app/routes/pokemon.tsx:68-130,214-237 — moves aggregation and client sortable tables, untested"
+      ],
+      "rationale": "No tests exist, and the riskiest logic (filtering, pagination, URL state, data aggregation, error paths) is entirely uncovered."
+    },
+    "behaviour_not_implementation": {
+      "score": 1,
+      "evidence": [
+        "app/package.json:5-10 — no test infrastructure whatsoever",
+        "app/build/server/index.js — only 'test'-like code found is compiled output, not tests"
+      ],
+      "rationale": "No tests at all, so nothing is asserted behaviourally or otherwise."
+    },
+    "regression_power": {
+      "score": 1,
+      "evidence": [
+        "app/package.json:9 — typecheck script is the only automated check; it catches type breakage, not behaviour",
+        "app/app/routes/home.tsx:28 — q held in useState initialized once with no URL resync; a desync bug on back-navigation could ship unnoticed",
+        "app/app/lib/pokeapi.server.ts:191-220 — pokemonRefsToCards dedupe/hidden-merge logic would silently break on refactor with nothing failing"
+      ],
+      "rationale": "Nothing the app itself owns can fail when behaviour breaks; only the external acceptance suite guards it."
+    },
+    "signal_to_noise": {
+      "score": 3,
+      "evidence": [
+        "app/ — zero test files, zero low-value tests, zero noise",
+        "app/package.json:9 — typecheck exists as a minimal non-test guard"
+      ],
+      "rationale": "Anchor for no tests: 3. No noise, but no signal either."
+    }
+  },
+  "overall": 1,
+  "findings": [
+    {
+      "severity": "high",
+      "location": "app/package.json:5-10",
+      "issue": "No test script, no test runner, no test dependencies anywhere in app/ — the acceptance suite in tests/ is the only guard",
+      "suggestion": "Add Vitest plus @testing-library/react; unit-test the pure helpers (format.ts, urls.ts) and loader/client logic, and a couple of Playwright smoke tests for home filtering/pagination"
+    },
+    {
+      "severity": "high",
+      "location": "app/app/routes/home.tsx:34-66",
+      "issue": "Filtering, 48-per-page pagination, page clamping and URL-param omission are untested, and q local state (line 28) is initialized once with no sync back from searchParams, so Back/forward navigation can desync URL and applied filter",
+      "suggestion": "Test /?q&type&generation&page directly (render home with stubbed loader data): counts, page slice, 'Page n of total', param omission at defaults, filter-change resets page; add an effect or derive q from searchParams to fix the desync"
+    },
+    {
+      "severity": "high",
+      "location": "app/app/lib/pokeapi.server.ts:191-220",
+      "issue": "pokemonRefsToCards hides the trickiest invariants — id>=10000 form exclusion, dedupe by id, hidden-ability merge — with no test",
+      "suggestion": "Unit test with fixture refs: alternate forms dropped, duplicates collapse, species resolved from the species list, hidden flag merged, output sorted by id"
+    },
+    {
+      "severity": "high",
+      "location": "app/app/routes/pokemon.tsx:68-130",
+      "issue": "Moves aggregation is untested: per-move/method min-level dedupe, FIXED_METHODS-then-alphabetical table order, default game = highest order, ?game selection",
+      "suggestion": "Unit test the aggregation with a small synthetic pokemon payload (two version groups, duplicate move entries with different levels, machine/egg methods) and assert table order, row order and default selection"
+    },
+    {
+      "severity": "medium",
+      "location": "app/app/routes/pokemon.tsx:214-237",
+      "issue": "Client-side sortable table headers (missing-values-last in both directions, aria-sort, toggle on second click) have no regression coverage",
+      "suggestion": "Component test: click Power header with null power rows — nulls stay last ascending and descending; aria-sort flips; other headers get none"
+    },
+    {
+      "severity": "medium",
+      "location": "app/app/lib/format.ts:26-45",
+      "issue": "Pure spec-pinned helpers (idFromUrl regex/NaN fallback, latestEnglishFlavor 'last en entry + whitespace collapse', dexNumber padding) are trivially testable yet untested",
+      "suggestion": "Five-line Vitest cases for each; these encode spec rules most likely to be 'simplified' away in a refactor"
+    },
+    {
+      "severity": "medium",
+      "location": "app/app/lib/pokeapi.server.ts:14-35",
+      "issue": "ApiError/isNotFound discrimination, promise-cache reuse and failure eviction are untested; a regression here breaks 404 pages and recovery from transient API failures app-wide",
+      "suggestion": "Unit test with a fetch stub: 404 throws ApiError and evicts from cache so the next call retries; 200 result is cached"
+    },
+    {
+      "severity": "medium",
+      "location": "app/app/lib/pokeapi.server.ts:118-184",
+      "issue": "buildIndex derives species->types from type records and species->generation from generation records, with slot sorting and id>=10000 exclusion; untested, and the live-data overlay test only exercises it end-to-end",
+      "suggestion": "Unit test with fixture list/type/generation payloads: slot order, excluded types (stellar/unknown/shadow), generation back-mapping, species sorted by id"
+    },
+    {
+      "severity": "low",
+      "location": "app/app/routes/pokemon.tsx:145-146",
+      "issue": "Type and category labels use humanize() instead of English names, and a missing damage class renders an empty string rather than the spec's '—' — drift no test would catch",
+      "suggestion": "Use englishName/detail.name lookups (or resolve type English names centrally in buildIndex) and render EM_DASH for a missing category; a behaviour test on the moves table would have flagged both"
+    }
+  ],
+  "summary": "The app contains no tests of its own — no runner, no dependencies, no scripts — despite housing dense, spec-pinned transformation logic in format.ts, pokeapi.server.ts and the home/pokemon routes. Everything currently relies on the external Playwright acceptance suite, which cannot guard the data layer or URL-state edge cases (e.g. the q-state/URL desync in home.tsx) once refactoring starts. Only the typecheck script offers any automated safety net.",
+  "wroteTests": false,
+  "testCount": 0,
+  "valuableTests": [],
+  "lowValueTests": [],
+  "untested": [
+    {
+      "area": "Home filtering/pagination/URL state (q, type, generation, page) — app/app/routes/home.tsx:34-66",
+      "risk": "high",
+      "likelyBug": "Back-navigation desyncs local q state from the URL (filters applied that aren't in the address bar); broken page clamping or page-reset-on-filter-change; 'Previous page'/'Next page' shown on the wrong boundary"
+    },
+    {
+      "area": "Pokémon-reference mapping (alternate forms, dedupe, hidden merge) — app/app/lib/pokeapi.server.ts:191-220",
+      "risk": "high",
+      "likelyBug": "Mega/forms leak into Learned by / ability / type lists, duplicate cards, or hidden-ability flag lost — silent, data-dependent regressions"
+    },
+    {
+      "area": "Moves aggregation (min-level dedupe, method/table ordering, default game) — app/app/routes/pokemon.tsx:68-130",
+      "risk": "high",
+      "likelyBug": "Wrong default game selected, duplicate move rows, Level Up not sorted by level, methods in the wrong order or empty tables not skipped"
+    },
+    {
+      "area": "Sortable move tables (missing-last, aria-sort) — app/app/routes/pokemon.tsx:214-275",
+      "risk": "medium",
+      "likelyBug": "Null power/accuracy rows sort first in one direction; aria-sort missing or stuck; second click doesn't flip direction"
+    },
+    {
+      "area": "Pure format helpers (humanize, dexNumber, idFromUrl, latestEnglishFlavor) — app/app/lib/format.ts:16-45",
+      "risk": "medium",
+      "likelyBug": "Flavor-text whitespace collapse dropped, #0025 padding broken, idFromUrl returning NaN on odd URL shapes causing species lookups to fail"
+    },
+    {
+      "area": "API error handling and promise cache (404 discrimination, eviction, retry) — app/app/lib/pokeapi.server.ts:14-35",
+      "risk": "high",
+      "likelyBug": "Non-404 API errors rendered as Not Found, or failed requests cached forever so a page never recovers after an API blip"
+    },
+    {
+      "area": "Pokedex index construction (types per species, generation mapping, excluded types) — app/app/lib/pokeapi.server.ts:75-184",
+      "risk": "high",
+      "likelyBug": "Type slots out of order on cards, stellar/unknown/shadow leaking into selectors, species missing generation so the generation filter drops them"
+    },
+    {
+      "area": "Not-found paths across routes (unknown pokemon/move/ability/type, excluded types) — app/app/routes/type.tsx:13-20, pokemon.tsx:48-51, move.tsx:11-15, not-found.tsx",
+      "risk": "medium",
+      "likelyBug": "404s crash with an error boundary instead of the Not found page, or the meta title leaks 'undefined – Pokédex'"
+    }
+  ]
+}
+```

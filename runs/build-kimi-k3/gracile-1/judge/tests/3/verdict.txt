@@ -1,0 +1,121 @@
+## Review: test quality (dimension: tests)
+
+**The agent wrote no tests.** `app/` contains no test files, no test runner in dependencies (`app/package.json:6-16` lists only `@gracile/gracile`, `express`, `lit`, `vite`), and no `test` script. Everything that guards this app's behaviour is the external acceptance suite in `tests/`, which the agent didn't write and doesn't ship with the app. The facts confirm: `tests.files: 0`, `testLoc: 0`.
+
+That's a real cost here, because this app is unusually testable. Almost all of its risky logic lives in small, pure, dependency-light modules that could be unit-tested with zero browser infrastructure:
+
+- `app/src/lib/format.ts:7-14` — `humanize` (the `mr-mime` → `Mr Mime` rule every list, heading and search depends on), `dexNumber` zero-padding, `latestFlavorText`'s whitespace-collapse + "last English entry" scan (`:33-41`), `orMissing`/`isAlternateForm`.
+- `app/src/routes/index.ts:18-30` — `pageUrl` (omitting `page=1`/empty params), and the whole filter pipeline at `:57-114`: type-slot matching via an id≤10000 set (`:66-79`), generation membership, substring search, the `Math.min/Math.max` page clamp and the `slice((page-1)*48, page*48)` pagination math.
+- `app/src/routes/pokemon/[name].ts:196-206` — the learn-method ordering comparator (Level Up/Machine/Egg/Tutor then alphabetical, with the `ai === -1 ? length : ai` sentinel trick — exactly the kind of code that breaks silently when someone "simplifies" it).
+- `app/src/lib/species-cards.ts:28-46` — alternate-form exclusion, Pokémon→species mapping (`deoxys-normal` → Deoxys), per-species dedup and dex-number sort.
+
+None of it has a single assertion behind it.
+
+The second-order problem is that the error handling is *silently lossy*, so regressions won't crash — they'll just render wrong numbers. `app/src/lib/species-cards.ts:33` swallows fetch failures per Pokémon (`.catch(() => null)`), so the `<count> Pokémon` shown at `app/src/routes/moves/[name].ts:117` / `abilities/[name].ts:56` derives from `cards.length` — a transient API failure under-renders the list *and* the count, with nothing failing loudly. Likewise `app/src/routes/pokemon/[name].ts:107-109` (and the parallel catches in `moves`, `abilities`, `types` routes) turn *any* API error — a 500 or a network blip — into a 404 "Not found" page; no test distinguishes "resource doesn't exist" from "upstream is down". The concurrency pool in `app/src/lib/api.ts:25-48` (waiter queue + `release`) and the cache-eviction dance at `:83-87` are classic deadlock/stale-rejection territory with no coverage. The client-side column sorter (`app/src/routes/pokemon/[name].client.ts:24-56`, missing-values-last both directions, `aria-sort` flip) is only exercised by two acceptance tests and would be the easiest thing in the world to break in a refactor.
+
+A minimal, high-leverage package would have been: `node:test` (zero new deps) against `format.ts`, `pageUrl`/the filter pipeline (with the API mocked), the method-order comparator, `speciesCards`' form exclusion/dedup, and the client sorter extracted into a testable function. The agent skipped all of it.
+
+### Scores
+
+- **coverage_of_risk: 1** — no tests at all, and the riskiest logic (filtering, pagination, sorting, URL state) is exactly what's unguarded (`app/src/routes/index.ts:57-114`, `app/src/routes/pokemon/[name].client.ts:24-56`).
+- **behaviour_not_implementation: 1** — no tests to assess.
+- **regression_power: 1** — nothing the app ships would fail if any covered behaviour broke; only the external acceptance suite stands in the way.
+- **signal_to_noise: 3** — per the anchor, no tests = no noise; a clean 3.
+- **overall: 1** — the app passes because someone else's tests say so; nothing in `app/` protects it after merge.
+
+```json
+{
+  "dimension": "tests",
+  "criteria": {
+    "coverage_of_risk": {
+      "score": 1,
+      "evidence": [
+        "app/package.json:6-16 — only dev/build/start scripts, no test script, no test runner in deps",
+        "app/src/lib/format.ts:7-14 — humanize/dexNumber/flavor-text logic, pure and high-risk, untested",
+        "app/src/routes/index.ts:57-114 — filter pipeline, page clamp and slice pagination math, untested",
+        "app/src/lib/species-cards.ts:28-46 — alternate-form exclusion, species mapping and dedup, untested"
+      ],
+      "rationale": "The app contains zero tests; none of the risky logic (filtering, pagination, sorting, URL state, error paths) is covered by anything shipping in app/."
+    },
+    "behaviour_not_implementation": {
+      "score": 1,
+      "evidence": ["app/src — no test files anywhere in the source tree (tests.files: 0)"],
+      "rationale": "There are no tests to judge; behaviour-vs-implementation cannot be better than the floor."
+    },
+    "regression_power": {
+      "score": 1,
+      "evidence": [
+        "app/src/routes/pokemon/[name].client.ts:24-56 — client-side sort with missing-last and aria-sort flip, guarded only by external acceptance tests",
+        "app/src/routes/pokemon/[name].ts:196-206 — method-order comparator with -1 sentinel arithmetic, trivially breakable by a refactor",
+        "app/src/lib/api.ts:25-48 — hand-rolled concurrency pool with waiter queue, no test for error-path liveness"
+      ],
+      "rationale": "No shipped test would fail if any behaviour broke; the only safety net lives outside the app and the team won't own it in-repo."
+    },
+    "signal_to_noise": {
+      "score": 3,
+      "evidence": ["app/ — no tests, hence no low-value tests either"],
+      "rationale": "No noise, because there is no signal: the anchored neutral 3 for an empty test suite."
+    }
+  },
+  "overall": 1,
+  "findings": [
+    {
+      "severity": "high",
+      "location": "app/package.json:6-16",
+      "issue": "No test script, runner, or test files anywhere in the app; all risky logic (filters, pagination, sorting, URL state) ships unguarded.",
+      "suggestion": "Add node:test (no new dependency) unit tests for format.ts, pageUrl/filter logic, speciesCards, and the method-order comparator; wire an npm run test script."
+    },
+    {
+      "severity": "high",
+      "location": "app/src/routes/index.ts:57-114",
+      "issue": "The filter/search/pagination pipeline (type-slot set matching, generation membership, page clamping, slice math) is untested; a refactor could silently return wrong pages or counts.",
+      "suggestion": "Extract the pipeline into a pure function taking (speciesIndex, typeData, generationData, query) and unit-test the edge cases: empty q, page beyond total, NaN page, type matching second slot."
+    },
+    {
+      "severity": "high",
+      "location": "app/src/lib/species-cards.ts:33",
+      "issue": "Per-Pokémon fetch failures are swallowed (.catch(() => null)), silently dropping cards and skewing the '<count> Pokémon' totals derived from cards.length (moves/[name].ts:117, abilities/[name].ts:56).",
+      "suggestion": "Distinguish fetch errors from missing records (propagate or log), and unit-test that a failed fetch does not silently under-report the count."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/routes/pokemon/[name].client.ts:24-56",
+      "issue": "Client-side column sorting (ascending-first flip, missing-values-last in both directions, aria-sort management) is untested DOM logic that acceptance tests only touch lightly.",
+      "suggestion": "Extract the row comparator into a pure function over cell values and test missing-last in both directions, numeric vs string columns, and the aria-sort flip."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/routes/pokemon/[name].ts:104-109 (and moves/abilities/types equivalents)",
+      "issue": "Any API error (500, network blip) is rendered as a 404 'Not found' page; nothing tests that a transient upstream failure is distinguishable from a genuinely missing resource.",
+      "suggestion": "Unit-test the error branch with a mocked ApiError of status 500 vs 404, and surface upstream failures as 502/500 rather than Not found."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/lib/api.ts:25-48",
+      "issue": "Hand-rolled concurrency pool (acquire/release waiter queue) and cache rejection-eviction (:83-87) are untested; a release-path regression deadlocks every request after 24 in-flight.",
+      "suggestion": "Add a unit test driving >MAX_CONCURRENT fetches including rejections, asserting the pool drains and rejected promises are evicted from the cache."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/lib/format.ts:33-41",
+      "issue": "latestFlavorText (last English entry, whitespace-run collapse) and humanize's capitalization rule are untested despite being used on every page and in search matching.",
+      "suggestion": "Table-driven unit tests: 'mr-mime' → 'Mr Mime', '\\f'/'\\n' collapsing, entries with no English text."
+    }
+  ],
+  "summary": "The agent shipped a working app with zero tests of its own: no runner, no script, no files. This is a missed opportunity because the riskiest logic (filtering, pagination, sorting, species mapping, URL state) is concentrated in small pure modules that node:test could cover without a browser. Once the acceptance suite stops being the only guard, silent-lossy error handling (.catch(() => null), API errors rendered as Not found) means regressions will render wrong counts and pages without anything failing loudly.",
+  "wroteTests": false,
+  "testCount": 0,
+  "valuableTests": [],
+  "lowValueTests": [],
+  "untested": [
+    { "area": "Home filtering pipeline: type-slot match, generation membership, substring search, page clamp, 48-per-page slice (app/src/routes/index.ts:57-114)", "risk": "high", "likelyBug": "Off-by-one in slice math or a filter that matches only slot 1, producing wrong pages/counts that still render plausibly" },
+    { "area": "pageUrl construction and default-param omission (app/src/routes/index.ts:18-30)", "risk": "medium", "likelyBug": "Emitting '?page=1' or dropping an active filter from Previous/Next links, breaking URL round-tripping" },
+    { "area": "speciesCards: alternate-form exclusion, Pokémon→species mapping, dedup, dex sort (app/src/lib/species-cards.ts:28-46)", "risk": "high", "likelyBug": "A refactor reintroduces 'Deoxys Normal' into Learned by/Pokémon lists or duplicates a species after a merge" },
+    { "area": "Client-side moves-table sorting: ascending-first flip, missing-values-last, numeric vs string columns (app/src/routes/pokemon/[name].client.ts:24-56)", "risk": "high", "likelyBug": "Missing values sort first in one direction or a numeric column sorts lexicographically ('9' before '80')" },
+    { "area": "Learn-method table ordering: Level Up/Machine/Egg/Tutor then alphabetical, and level-up level-then-name sort (app/src/routes/pokemon/[name].ts:196-206)", "risk": "medium", "likelyBug": "Sentinel-arithmetic change puts an unordered method first or breaks tie-breaking by move name" },
+    { "area": "Error handling: API 500/network errors collapsed into Not found; per-record fetch failures silently dropped (app/src/routes/pokemon/[name].ts:104-109, app/src/lib/species-cards.ts:33)", "risk": "medium", "likelyBug": "An upstream outage renders 'Not found' with HTTP 404, and counts silently under-report during partial failures" },
+    { "area": "API client: concurrency pool waiter queue, cache eviction of rejected promises (app/src/lib/api.ts:25-87)", "risk": "medium", "likelyBug": "A release-path or catch-path regression deadlocks the server after 24 concurrent requests or caches a rejection forever" },
+    { "area": "format helpers: humanize capitalization, dex-number padding, flavor-text whitespace collapse (app/src/lib/format.ts:7-41)", "risk": "low", "likelyBug": "A formatting tweak breaks search matching ('mr mime' no longer finds Mr. Mime) or shows '#25' instead of '#0025'" }
+  ]
+}
+```

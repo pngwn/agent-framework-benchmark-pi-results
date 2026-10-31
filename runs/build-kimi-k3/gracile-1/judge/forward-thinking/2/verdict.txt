@@ -1,0 +1,141 @@
+I've read the whole app, verified Gracile's current APIs against the 0.11.0 package (npm's latest stable, published ~6 months ago) and the `@gracile/engine` sources, and confirmed the official "Minimal server (Express)" starter. Here's my review.
+
+## Review notes
+
+**What's current.** `app/server.js` is a near-verbatim match for the official `minimal-server-express` starter (`gracile.getClientBuildPath` + `gracile.nodeAdapter`, confirmed against `@gracile/gracile@0.11.0/dist/node.d.ts` and `starter-projects/templates/minimal-server-express/server.js`). Route modules use the current `defineRoute({ handler, document, template })` shape with `responseInit.status` for 404s — exactly the pattern in the docs' annotated example. `@gracile/gracile/server-html` for the document vs `lit` for route templates matches the docs too. Deps are all at the latest stable: Vite 8.3.5 (current, Mar 2026), Lit 3.3.3 (current, May 2026), Express 5.3.0 (current). Four runtime deps, zero extras.
+
+**The one framework-internal coupling.** Five route handlers guard build-time probe renders with `url.hostname === 'gracile-static'`. I traced this to `packages/engine/src/routes/render.ts` in the Gracile repo: `renderRoutes()` invokes `handler.GET` with `new URL(pattern, 'http://gracile-static')` at build time even in server mode (to collect page assets), and the file is marked `@internal`. The public `constants` (`@gracile/engine/server/constants`) do not export this sentinel, and no docs mention it — so it's reverse-engineered behaviour, and it's duplicated across five files rather than centralized.
+
+**Inconsistency.** `/types/` (`app/src/routes/types/index.ts:14`) has no such guard, so `vite build` performs a live `/type/` fetch — a build-time API dependency the spec explicitly discourages, and the one route that behaves differently from its five siblings.
+
+**Typing.** `context.props.GET as any` appears in 8 places (plus `let species: any` etc.), defeating the type inference `defineRoute` is designed to provide — largely because handlers return two shapes (stub + real) so the inferred union can't be narrowed. And there's no `tsconfig.json`, no `typescript` devDependency and no check script in `app/package.json`, so the `.ts` sources are only ever transpiled by Vite, never checked.
+
+```json
+{
+  "dimension": "forward-thinking",
+  "criteria": {
+    "latest_apis": {
+      "score": 4,
+      "evidence": [
+        "app/server.js:5-12 — nodeAdapter + getClientBuildPath wiring, byte-for-byte the official minimal-server-express starter pattern",
+        "app/src/routes/index.ts:17 — defineRoute handler/document/template trio, the current route API (docs annotated example)",
+        "app/src/document.ts:1 — html from @gracile/gracile/server-html for the document, current split vs lit's html in templates",
+        "app/src/routes/pokemon/[name].ts:108 — responseInit.status = 404, the documented way to set status",
+        "app/vite.config.ts:5-7 — gracile({ output: 'server' }) via the plugin, current config option (engine user-config.d.ts)",
+        "app/package.json:9 — @gracile/gracile pinned at 0.11.0, npm's latest stable"
+      ],
+      "rationale": "Consistently on the current generation of Gracile APIs (0.11.0, verified against the published package and the official starter), with current Vite 8 / Lit 3.3 / Express 5.3 underneath. Not a 5 only because it wires the server through dist/server/entrypoint.js while the current engine also documents a newer server.entry option, and because five handlers key off an internal sentinel rather than a public API (see churn_resistance)."
+    },
+    "platform": {
+      "score": 4,
+      "evidence": [
+        "app/src/lib/api.ts:48-53 — WHATWG fetch with response.ok check, no axios/node-fetch",
+        "app/src/routes/index.ts:22-29 — URLSearchParams for filter URLs; app/src/routes/pokemon/[name].client.ts:24 — new URL for the game query",
+        "app/src/routes/index.ts:91-95 — native <form method=\"get\"> so filtering works before JS loads",
+        "app/src/routes/pokemon/[name].client.ts:31-47 — native table sort via aria-sort + tBodies, no library",
+        "app/public/styles/global.css:1 — CSS custom properties from tokens.css, plain modern CSS, no preprocessor",
+        "app/src/lib/api.ts:27-45 — hand-rolled acquire/release semaphore with a waiters array",
+        "app/src/lib/api.ts:48-55 — no AbortSignal.timeout()/AbortController on upstream calls"
+      ],
+      "rationale": "Reaches for the platform first (fetch, URL/URLSearchParams, native forms as a no-JS baseline, native table sorting, CSS custom properties) and ships no polyfills. Misses a 5 because a server app that calls an upstream API on every request has no fetch deadline at all (a hung PokeAPI hangs SSR), and because 20 lines of hand-rolled semaphore duplicate a job undici's connection pooling largely already does."
+    },
+    "dependencies": {
+      "score": 5,
+      "evidence": [
+        "app/package.json:8-13 — exactly four runtime deps, no devDependencies",
+        "app/package.json:9 — @gracile/gracile 0.11.0, exact pin: sensible for a pre-1.0 framework",
+        "app/package.json:10-12 — express ^5.3.0 / lit ^3.3.3 / vite ^8.3.5, all npm's latest stable today",
+        "app/src/document.ts:22 — route-template-outlet from the framework, no hand-rolled layout machinery"
+      ],
+      "rationale": "Minimal and fully current: framework, Lit (required by the framework's template model), Vite (required build), Express (the officially documented server option). No UI/CSS library, no client router, no state library. The only gap — no typescript/@types devDeps to type-check the .ts sources — is a tooling omission I score under churn_resistance, not bloat."
+    },
+    "churn_resistance": {
+      "score": 3,
+      "evidence": [
+        "app/src/lib/api.ts:63 — every API call funnels through one api() module (single point to change when the API or cache policy moves)",
+        "app/src/routes/index.ts:35, pokemon/[name].ts:104, types/[name].ts:24, moves/[name].ts:28, abilities/[name].ts:19 — url.hostname === 'gracile-static' duplicated across five handlers",
+        "app/src/routes/types/index.ts:14-19 — the sixth handler lacks the guard, so vite build performs a live /type/ fetch",
+        "app/src/routes/index.ts:164, pokemon/[name].ts:223/231, moves/[name].ts:50/58, abilities/[name].ts:41/49, types/[name].ts:44/52, types/index.ts:22 — context.props.GET as any in 8 places",
+        "app/package.json:6-11 — no tsconfig, no typescript, no check script: .ts sources are transpiled by Vite but never type-checked",
+        "app/src/routes/pokemon/[name].ts:85-96 — data-v/data-n/data-missing attribute contract consumed by app/src/routes/pokemon/[name].client.ts:31-44",
+        "app/src/routes/index.ts:74-77, 90-94 — invalid type/generation filters silently become empty result sets, masking API outages"
+      ],
+      "rationale": "The data layer is genuinely well isolated (one api module, one format module, shared card/section helpers), so an API change touches few files. But the framework's build probe is detected by a string-compare against an undocumented internal sentinel copy-pasted into five routes — a rename in @gracile/engine's render.ts breaks every page silently — and the pervasive `as any` plus a total absence of type checking means prop-shape changes between handler and template won't be caught by any tool. A 3: good module boundaries, fragile edges."
+    }
+  },
+  "overall": 4,
+  "findings": [
+    {
+      "severity": "medium",
+      "location": "app/src/routes/index.ts:35 (also pokemon/[name].ts:104, types/[name].ts:24, moves/[name].ts:28, abilities/[name].ts:19)",
+      "issue": "Build-probe detection compares url.hostname to the literal 'gracile-static', an internal sentinel of @gracile/engine (renderRoutes uses `new URL(pattern, 'http://gracile-static')`, file marked @internal; it is absent from the public constants and from the docs), duplicated across five handlers.",
+      "suggestion": "Move the check into one helper in src/lib/ (e.g. isBuildProbe(url) or a shared stub-props constant), so an engine change is a one-file fix; ideally also file an upstream request to expose the probe officially."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/routes/types/index.ts:14-19",
+      "issue": "Unlike its five siblings, the /types/ handler has no build-probe guard, so `vite build` issues a live request to /type/ — the build now depends on a running API, which the spec explicitly rules out and which makes `npm run build` fail whenever the API is down.",
+      "suggestion": "Apply the same (centralized) probe guard used by the other routes so no route handler fetches during the build."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/routes/index.ts:164 (and 7 more `as any` sites)",
+      "issue": "context.props.GET is cast to any in every route, discarding defineRoute's typed-props inference; the root cause is that each handler returns two different shapes (build stub + real props), so the inferred union can't be narrowed.",
+      "suggestion": "Give each handler a single discriminated return type ({ notFound: true } | PageProps) or type the stub through the same shape, then let defineRoute infer — template and document props become compile-checked."
+    },
+    {
+      "severity": "medium",
+      "location": "app/package.json:6-11",
+      "issue": "The sources are TypeScript but the project has no tsconfig.json, no typescript dependency and no check script, so Vite transpiles without ever type-checking; the `as any` casts above will never be caught.",
+      "suggestion": "Add a tsconfig (Gracile ships tsconfigs/ for exactly this), typescript + @types/node/@types/express as devDependencies, and a `check` script wired into build or CI."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/lib/api.ts:48-55",
+      "issue": "Upstream fetches have no deadline: a slow or hung PokeAPI response stalls the SSR render indefinitely with nothing to bound it.",
+      "suggestion": "Pass AbortSignal.timeout(ms) to fetch and map the timeout to a 502-ish error page; it is one line and a platform API."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/lib/api.ts:27-45",
+      "issue": "A 20-line hand-rolled semaphore (acquire/release with a waiters array) guards concurrency that undici already manages per origin, adding stateful code a future reader must reason about (including the subtle count-after-await ordering).",
+      "suggestion": "Either drop it and rely on undici's pooling, or batch requests in fixed-size chunks — either removes the bespoke bookkeeping."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/routes/pokemon/[name].ts:85-96",
+      "issue": "The client sort script (pokemon/[name].client.ts:31-44) depends on an implicit data-v/data-n/data-missing attribute contract with the server template; renaming or dropping an attribute silently breaks sorting with no error.",
+      "suggestion": "Name the contract once (a shared constant or a typed column descriptor used by both sides), or note the pairing in a comment at both ends."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/routes/index.ts:74-77",
+      "issue": "A failed type/generation lookup is swallowed into an empty result set, so an API outage renders a friendly 'No Pokémon found' page with HTTP 200 instead of surfacing failure.",
+      "suggestion": "Distinguish 404 (unknown filter value) from transport errors (rethrow → framework error page); keep the cache's rejection-cleanup behaviour you already have in api()."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/routes/index.client.ts:11",
+      "issue": "Every debounced keystroke triggers a full window.location.assign navigation and a complete server re-render; acceptable and spec-compliant, but it is the one place where a requirements change (snappier filtering) would force a rewrite.",
+      "suggestion": "Keep the native method=\"get\" form as the base (it already is one — good), and if UX requirements move, add pushState + premises-based fetching via the framework's pages.premises data rather than a bespoke client router."
+    }
+  ],
+  "summary": "This is a current, lean Gracile app: every framework API in use matches 0.11.0's documented surface and the official Express starter, and the four dependencies are each the latest stable with nothing gratuitous. The forward-looking weak spots are all in the seams: five handlers detect Gracile's build-time probe by string-matching an undocumented internal hostname (with a sixth route missing the guard entirely), props flow to templates through `as any`, and the TypeScript sources are never actually type-checked. Fixing those seams — one shared probe helper, one discriminated props type, a tsconfig and a `check` script — would make this a codebase that rides a Gracile upgrade cheaply.",
+  "apis": [
+    { "api": "defineRoute (@gracile/gracile/route)", "location": "app/src/routes/index.ts:17", "status": "current", "replacement": "" },
+    { "api": "html from @gracile/gracile/server-html (route document)", "location": "app/src/document.ts:1", "status": "current", "replacement": "" },
+    { "api": "gracile.nodeAdapter / getClientBuildPath (@gracile/gracile/node)", "location": "app/server.js:9-12", "status": "current", "replacement": "engine 0.12 also documents server.entry + import { handler } from 'gracile:handler' as an alternative wiring; the dist/entrypoint.js shape remains the official starter pattern" },
+    { "api": "gracile({ output: 'server' }) plugin option", "location": "app/vite.config.ts:5-7", "status": "current", "replacement": "" },
+    { "api": "route-template-outlet", "location": "app/src/document.ts:22", "status": "current", "replacement": "" },
+    { "api": "context.responseInit.status", "location": "app/src/routes/pokemon/[name].ts:108", "status": "current", "replacement": "" },
+    { "api": "url.hostname === 'gracile-static' (build-probe detection)", "location": "app/src/routes/index.ts:35", "status": "legacy", "replacement": "undocumented internal of @gracile/engine's renderRoutes; no public equivalent exists — centralize it and/or request an official probe flag upstream" },
+    { "api": "Lit html / nothing / ?attribute bindings", "location": "app/src/lib/components.ts:1", "status": "current", "replacement": "" }
+  ],
+  "dependencies": [
+    { "name": "@gracile/gracile", "verdict": "modern", "note": "0.11.0 is npm's latest stable (published ~6 months ago); the exact pin is the right call for a pre-1.0 framework" },
+    { "name": "lit", "verdict": "modern", "note": "^3.3.3 is the latest Lit (May 2026); needed for the framework's template model, used only server-side" },
+    { "name": "vite", "verdict": "modern", "note": "^8.3.5 is the current Vite major (Rolldown-based, Mar 2026) and is what Gracile's plugin targets" },
+    { "name": "express", "verdict": "modern", "note": "^5.3.0 is current Express 5; matches the framework's documented 'Minimal server (Express)' path, used only for static serving + the adapter" }
+  ]
+}
+```

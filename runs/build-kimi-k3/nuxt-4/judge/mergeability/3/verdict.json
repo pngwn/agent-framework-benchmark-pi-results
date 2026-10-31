@@ -1,0 +1,110 @@
+{
+  "dimension": "mergeability",
+  "criteria": {
+    "idiomatic": {
+      "score": 4,
+      "evidence": [
+        "app/package.json:4-8 — Nuxt 4.6.3 (current stable, released 2026-10-27) with Nuxt 4's app/ srcDir layout",
+        "app/app/pages/pokemon/[name].vue:151-154 — useAsyncData with watch: [() => route.params.name] per docs pattern for param-driven pages",
+        "app/app/pages/[...slug].vue:3-7 — catch-all 404 route with useRequestEvent + setResponseStatus, matching the docs' 404-page example",
+        "app/app/composables/useApiBase.ts:1-9 — runtime config via useState, reads API_BASE_URL at request time (Nuxt's NUXT_ prefixed override doesn't apply to the spec's env var)",
+        "app/app/pages/[name].vue:47-52 — useHead with computed title per page, layout/banner/contentinfo landmarks in app/layouts/default.vue",
+        "app/app/pages/pokemon/[name].vue:1 — `import { setResponseStatus } from 'h3'` bypasses the auto-imported Nuxt utility and reaches into an undeclared transitive dependency"
+      ],
+      "rationale": "Reads like the Nuxt 4 docs: file routing, useAsyncData/useHead/useState, layouts, NuxtLink, per-environment caches. The hand-rolled fetch layer is justified (needs a shared in-memory cache across a page's many parallel sub-fetches, which useFetch's per-component key doesn't give), and the only non-idiomatic touch is importing h3 directly instead of using the framework's auto-import."
+    },
+    "correctness_risks": {
+      "score": 3,
+      "evidence": [
+        "app/app/lib/pokeapi.ts:77-86 — the rejected promise is stored in the module cache before resolution; a transient 5xx/network error poisons that URL for the process lifetime (server) or page session (client), with no eviction on failure",
+        "app/app/lib/pokeapi.ts:75-76 — non-404 upstream errors are thrown raw; SSR then renders a generic error page instead of a graceful fallback, and useAsyncData's error is never inspected in any page",
+        "app/app/pages/index.vue:85-90 — the 200 ms debounce timer is never cleared on unmount; a keystroke followed by quick navigation fires router.push('/') from the dead page and hijacks the route",
+        "app/app/pages/pokemon/[name].vue:151-154 — changing the game select refetches the whole species+pokemon+evolution payload, and stale data is shown while it reloads with no loading state (a hard, race-free reload, but janky)",
+        "app/app/pages/pokemon/[name].vue:156-158 / [name].vue (all) — 404 is correctly guarded with useRequestEvent() undefined on client, so no false status writes"
+      ],
+      "rationale": "Careful 404 handling, keyed caches, concurrency limiting and clamped pagination are all there, but the poisoned-cache-on-failure issue and the un-cleared debounce timer are the kind of fragility that only shows up under a flaky upstream or fast clicking."
+    },
+    "global_abstractions": {
+      "score": 4,
+      "evidence": [
+        "app/app/lib/pokeapi.ts:1-3 — single data layer with an explicit header comment declaring its boundary (HTTP fetch at request time, per-environment in-memory cache); pure helpers vs cached fetch are cleanly separated",
+        "app/app/lib/pokeapi.ts:96-142 / 147-211 — getTypes/getIndex are cached aggregated indexes, one place owns the 'alternate forms excluded' and '18 types' rules",
+        "app/app/pages/abilities/[name].vue:14-24 — reimplements the species de-dup/mapping that speciesCardsForRefs already owns, because of the extra `hidden` flag — a small duplication of a near-identical helper",
+        "app/app/lib/pokeapi.ts:82-83 — exported spriteUrl is dead code (PokemonCard.vue:17 builds the URL inline)"
+      ],
+      "rationale": "The one big module (lib/pokeapi.ts) earns its keep and has clear, documented boundaries; the only structural wobble is the ability page's hand-rolled variant of the shared card mapping and a couple of tiny duplicated helpers, not a god-layer problem."
+    },
+    "readability": {
+      "score": 4,
+      "evidence": [
+        "app/app/lib/pokeapi.ts:13-15 / 42-46 — humanize/latestEnFlavor are named for the spec's own definitions, with doc comments",
+        "app/app/components/MoveTable.vue:42-52 — missing-values-sort-last comparator carries a comment explaining the non-obvious branch",
+        "app/app/pages/pokemon/[name].vue:19-90 — load() is ~70 lines doing fan-out, grouping and mapping in one pass; workable but the biggest function in the app",
+        "app/app/pages/pokemon/[name].vue:52-88 — pervasive `any` in move processing (rec?.type, rawRows) despite the typed MoveRow interface in MoveTable.vue:2-11"
+      ],
+      "rationale": "Consistent naming, predictable page structure (load() → useAsyncData → template), comments that explain why. The main rough spot is the amount of untyped intermediate data in the big load functions, which fights the otherwise good TypeScript hygiene."
+    },
+    "review_cost": {
+      "score": 4,
+      "evidence": [
+        "app/app/lib/pokeapi.ts:80-86 — add cache eviction on rejection (one small change, the only must-fix)",
+        "app/app/pages/index.vue:85-90 — onBeforeUnmount(() => clearTimeout(debounce))",
+        "app/app/pages/pokemon/[name].vue:1 (and moves/abilities/types) — drop the h3 import, use the auto-imported setResponseStatus",
+        "app/app/lib/pokeapi.ts:82-83 — delete dead spriteUrl; app/app/pages/moves/[name].vue:44 and MoveTable.vue:57 — dedupe the `show` em-dash helper"
+      ],
+      "rationale": "One real fix (cache eviction) plus genuine nits; nothing structural needs rework, so this is an approve-with-comments rather than a round of changes."
+    }
+  },
+  "overall": 4,
+  "findings": [
+    {
+      "severity": "medium",
+      "location": "app/app/lib/pokeapi.ts:77-86",
+      "issue": "A failed (rejected) fetch promise is cached permanently, so one transient upstream error makes that API URL unusable for the rest of the server process / browser session.",
+      "suggestion": "Evict the cache entry on rejection (e.g. hit.catch(() => cache.delete(url))) so the next request retries."
+    },
+    {
+      "severity": "low",
+      "location": "app/app/pages/index.vue:85-90",
+      "issue": "The search debounce timer is never cleared on unmount; it can call router.push('/') after the user has already navigated away, hijacking the route.",
+      "suggestion": "Clear it in onBeforeUnmount (or use a watchEffect/watchOnScopeCleanup so it auto-disposes)."
+    },
+    {
+      "severity": "low",
+      "location": "app/app/pages/pokemon/[name].vue:1",
+      "issue": "setResponseStatus is imported from 'h3', an undeclared transitive dependency, instead of using Nuxt's auto-imported utility shown in the docs.",
+      "suggestion": "Remove the import and rely on Nuxt's auto-import (or add h3 to package.json dependencies if a direct import is preferred)."
+    },
+    {
+      "severity": "low",
+      "location": "app/app/pages/pokemon/[name].vue:52-88",
+      "issue": "Move/version-group processing is done entirely on `any` values despite typed row shapes existing in MoveTable.vue, defeating the app's own types.",
+      "suggestion": "Define interfaces for the API payloads in lib/pokeapi.ts and type the load() functions."
+    },
+    {
+      "severity": "low",
+      "location": "app/app/pages/abilities/[name].vue:14-24",
+      "issue": "Reimplements the species-mapping/dedup that speciesCardsForRefs already owns, differing only in the extra `hidden` flag — near-duplicate helpers will drift.",
+      "suggestion": "Extend speciesCardsForRefs (optional flag extractor) or accept a per-entry transformer so the rule lives in one place."
+    },
+    {
+      "severity": "low",
+      "location": "app/app/lib/pokeapi.ts:82-83",
+      "issue": "Exported spriteUrl helper is dead code; PokemonCard.vue builds the sprite URL inline.",
+      "suggestion": "Delete spriteUrl or have PokemonCard use it."
+    },
+    {
+      "severity": "low",
+      "location": "app/app/pages/moves/[name].vue:44",
+      "issue": "The em-dash 'show' helper is duplicated verbatim in MoveTable.vue:57.",
+      "suggestion": "Move it into lib/pokeapi.ts and import it in both places."
+    },
+    {
+      "severity": "low",
+      "location": "app/nuxt.config.ts:10-13",
+      "issue": "runtimeConfig.public.apiBaseUrl is evaluated from process.env at build time and baked in; it only works at runtime because useApiBase.ts:5-7 re-reads the env var on the server, which is subtle and easy to break in future edits.",
+      "suggestion": "Add a short comment in nuxt.config.ts pointing at useApiBase as the runtime source of truth, or read the env var only in the composable."
+    }
+  ],
+  "summary": "A solid, idiomatic Nuxt 4 submission on the current stable release: clean file routing, correct useAsyncData/param-watching, proper landmark/a11y structure and a well-documented single data layer with sensible caching. The one merge-blocking-ish issue is the never-evicted rejected promise in the API cache; the rest are genuine nits (an uncleared debounce timer, an h3 import from an undeclared dependency, pervasive `any` in the load functions, and a couple of duplicated/dead helpers). I'd approve with the cache fix and a handful of comments addressed."
+}

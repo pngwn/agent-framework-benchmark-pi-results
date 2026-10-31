@@ -1,0 +1,122 @@
+{
+  "dimension": "mergeability",
+  "criteria": {
+    "idiomatic": {
+      "score": 5,
+      "evidence": [
+        "app/src/lib/data.js:119-122 — query() from @solidjs/router with \"use server\", exactly the current docs' recommended server-query pattern",
+        "app/src/lib/data.js:447-450 — exports keyed queries (\"home\", \"pokemon\", …) consumed by route-level preload",
+        "app/src/routes/index.jsx:10-12 — route preload wired to location.search; createAsync in the component",
+        "app/vite.config.ts:1-7 — solidStart() + nitro() from nitro/vite, matching the SolidStart v2 reference config",
+        "app/src/entry-server.jsx:1-3 and app/src/entry-client.jsx:1-3 — createHandler/StartServer and mount/StartClient, current entrypoint APIs",
+        "app/package.json:12-19 — vite 8, Node >=24 engines, vite dev/build scripts: matches the v2 migration guide",
+        "app/src/components/NotFound.jsx:4 — HttpStatusCode from @solidjs/start sets a real 404",
+        "app/src/routes/pokemon/[name].jsx:40-45 — onMount + scrollIntoView for #moves is a justified workaround: solid-router only scrolls to hash on router set(), not initial load of streamed SSR content"
+      ],
+      "rationale": "This reads like the framework's own examples: current query/createAsync/preload idioms, correct v2 build setup, and the one hand-rolled bit (hash scroll) fills a real router gap."
+    },
+    "correctness_risks": {
+      "score": 3,
+      "evidence": [
+        "app/src/lib/data.js:27-33 — apiFetch caches the rejected/failed promise: a transient API hiccup becomes a permanent null (rendered as 'Not found') for the life of the process",
+        "app/src/routes/index.jsx:37-41 — debounce timer is never cleared on unmount (no onCleanup); typing then clicking a card fires navigate() ~250ms later, yanking the user off the page they just navigated to",
+        "app/src/routes/index.jsx:66 — search input value is bound to d().q from the server query; if the user keeps typing while the refetch resolves, the fetched value clobbers the in-progress input",
+        "app/src/routes/pokemon/[name].jsx:25-31 — EvoNode dereferences props.node.evolutions unguarded; if the evolution-chain fetch fails (null), the template throws",
+        "app/src/lib/data.js:151-153 — page silently clamped to totalPages while the URL keeps ?page=99, so URL and rendered state disagree"
+      ],
+      "rationale": "No single serious bug, but several real fragilities the tests can't see: a permanent failure cache, a leaked timer that mis-navigates, and an input that can revert under the user."
+    },
+    "global_abstractions": {
+      "score": 4,
+      "evidence": [
+        "app/src/lib/data.js:1-45 — one data module holds the shared fetch/cache plus every page's query; cohesive and clearly sectioned, but every route funnels through it",
+        "app/src/lib/data.js:18 — hidden module-level Map cache with no invalidation or bound (acceptable for a fixed snapshot, but implicit global state)",
+        "app/src/lib/data.js:96-110 — cardsFromPokemonRefs is a good shared abstraction: dedupes forms to species and is reused by move/ability/type pages",
+        "app/src/routes/moves/[name].jsx:31 and app/src/components/MoveTables.jsx:49 — num() EM_DASH helper duplicated in two files",
+        "app/src/components/Section.jsx:1-11 — Section earns its keep by encoding the spec's region-role rule in one place"
+      ],
+      "rationale": "The layering is sound (lib/data + lib/util + small components) with clear server/client boundaries; the god-ish data module and unbounded hidden cache are the only things that will need untangling as it grows."
+    },
+    "readability": {
+      "score": 4,
+      "evidence": [
+        "app/src/lib/data.js:96-99 — comment explains the non-obvious species-vs-pokemon collapse rule",
+        "app/src/lib/util.js:20-26 — docblocks state the exact spec rule each helper implements",
+        "app/src/lib/data.js:60-69 — comment-style section headers make the 460-line module navigable",
+        "app/src/routes/pokemon/[name].jsx:27-31 — short, named sub-components per concern inside the route file",
+        "app/src/routes/index.jsx:60-70 — dense JSX lines (select + option loops inline) take a second read",
+        "app/src/lib/data.js:31-33 — data?.results ?? [] style null-swallowing hides API errors from the reader"
+      ],
+      "rationale": "A new teammate would find their way in minutes: file layout mirrors the framework's, comments explain why, names match the spec's vocabulary. Only rough spots are the dense one-liner JSX and the accessor-style d() indirection in longer templates."
+    },
+    "review_cost": {
+      "score": 4,
+      "evidence": [
+        "app/src/lib/data.js:27-33 — reviewer must ask for failure caching to be fixed before merge",
+        "app/src/routes/index.jsx:37-41 — reviewer must ask for onCleanup on the timer",
+        "app/src/routes/pokemon/[name].jsx:25-31 — reviewer must ask for a null guard on the evolution node",
+        "app/src/components/MoveTables.jsx:37-62 — sorting/aria-sort logic is correct and spec-faithful, needs no changes",
+        "app/src/app.css:114-220 — organized, token-driven, single stylesheet; nothing to request"
+      ],
+      "rationale": "Structure, idioms and CSS are approve-as-is; the remaining asks are a single round of small fixes (failure caching, timer cleanup, two null guards), none structural."
+    }
+  },
+  "overall": 4,
+  "findings": [
+    {
+      "severity": "medium",
+      "location": "app/src/lib/data.js:27",
+      "issue": "apiFetch permanently caches failed fetches (res.ok false or network rejection), so a transient API error turns any resource into a permanent null — rendered as 'Not found' or blank data until the process restarts.",
+      "suggestion": "Only cache successful results: on non-2xx or rejection, delete the cached promise so the next call retries; optionally cap the cache with an LRU."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/routes/index.jsx:40",
+      "issue": "The 250ms debounce timer is never cleared when the component unmounts; typing in Search then immediately clicking a card causes a delayed navigate() back to the filtered home URL.",
+      "suggestion": "Add onCleanup(() => clearTimeout(searchTimer))."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/routes/index.jsx:66",
+      "issue": "The search input's value is bound to the server-fetched d().q, so a refetch resolving mid-typing reverts the field's contents.",
+      "suggestion": "Keep the input value in a local createSignal, initialised from the URL, and only re-sync from the URL on navigation (not from query results)."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/routes/pokemon/[name].jsx:25",
+      "issue": "EvoNode dereferences props.node.evolutions without a guard; a failed evolution-chain fetch (evolution: null) throws in the template.",
+      "suggestion": "Wrap the tree in <Show when={d().evolution}> or default evolutions to []."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/lib/data.js:151",
+      "issue": "Out-of-range ?page is silently clamped to totalPages while the URL keeps the old value, so the URL and the rendered 'Page n of m' disagree.",
+      "suggestion": "Either clamp visibly by navigating to the clamped page, or leave the page indicator consistent with the URL."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/lib/data.js:18",
+      "issue": "Hidden module-level Map cache with no bound or invalidation; fine for this fixed snapshot but a leak-shaped pattern if reused elsewhere.",
+      "suggestion": "Document the cache's scope and lifetime, or move it behind a small named cache helper with a size cap."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/routes/moves/[name].jsx:31",
+      "issue": "The EM_DASH num() helper is duplicated between the move route and MoveTables.",
+      "suggestion": "Move num()/EM_DASH formatting into lib/util.js next to EM_DASH."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/routes/index.jsx:28",
+      "issue": "updateParams and pageHref both hand-build URLSearchParams from location.search; duplicated query-plumbing that a future filter would have to change in two places.",
+      "suggestion": "Extract a single buildHref(patch) helper used by both the handlers and the pagination links."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/app.jsx:35",
+      "issue": "The root Suspense has no fallback, so during data streaming the main landmark is empty (header/footer pop in first).",
+      "suggestion": "Add a minimal loading fallback inside main for first paint; not a correctness issue."
+    }
+  ],
+  "summary": "A genuinely idiomatic SolidStart v2 app — server queries, preloads, file routing and build config all match the current docs, with the one hand-rolled hash-scroll workaround being justified by a real router gap. The main merge blockers are correctness nits the acceptance tests can't see: permanently cached fetch failures, an uncleaned debounce timer that can hijack navigation, and an input that can revert under fast typing. I'd merge after one small round of fixes."
+}

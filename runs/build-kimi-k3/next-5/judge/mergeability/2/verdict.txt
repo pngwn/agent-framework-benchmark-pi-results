@@ -1,0 +1,90 @@
+I've read the whole app (16 source files, ~670 significant LOC), checked it against Next 16 conventions, and verified the two framework-behavior claims I was least sure about (stale query params around `router.replace` — a real, documented fragility class in Next 16; and Cache Components as the current recommended caching model). Here's my review.
+
+## What's good
+
+- **Server-first architecture**: every page is an async Server Component; `'use client'` appears exactly twice, on the two components that genuinely need interactivity (`app/components/HomeControls.jsx:1`, `app/components/MovesSection.jsx:1`). That's the shape the App Router docs push you toward.
+- **Current API usage**: `params`/`searchParams` are awaited promises (`app/app/page.jsx:22-24`, `app/app/pokemon/[name]/page.jsx:56-58` — correct for Next 15+), `generateMetadata` with a title template (`app/app/layout.jsx:5-10`), `notFound()` for all bad resources, `next/link` everywhere, no `useRouter` for what a `Link` does.
+- **Data layer**: the in-memory promise cache (`app/lib/api.js:7-29`) is deliberate and clean — rejections are evicted from the cache (`app/lib/api.js:22-25`), 404s resolve to `null`, and `getSpecies` dedupes across the `generateMetadata` + page double call. The spec explicitly allows runtime caching, and it keeps every request live against the API.
+- **No leaks found**: effect cleanup in the debounce (`app/components/HomeControls.jsx:51-53`), no SSR/CSR mismatch risk (search term is prop-synced, not read from `window` during render), fetch fan-out on the Pokémon page is bounded and memoized per process.
+
+## What I'd ask about
+
+1. **`HomeControls.navigate` reads `window.location.search`** (`app/components/HomeControls.jsx:66`) while a debounced 300 ms timer and `router.replace` transitions are in flight. The q value is safely captured via `termRef`, but type/generation can be dropped or resurrected depending on when history actually updates — a known-fragile pattern in the App Router (see vercel/next.js#92187 for the class of bug). Deriving params from the props would be race-free.
+2. **Descending sort flips the tie-break** (`app/components/MovesSection.jsx:31-35`): reversing the ascending array inverts the move-name tie-break order too. Cosmetic, but wrong.
+3. **`buildMoves` can throw on a 404 move record** — `apiJson` returns `null` but `record.name` is dereferenced unconditionally (`app/app/pokemon/[name]/page.jsx:145-151`).
+4. **`PokemonCard` imports from the server-only `lib/api.js`** (`app/components/PokemonCard.jsx:3`) just for `apiUrl`. Works today (card is only used in server pages), but it's a boundary a future client reuse would trip over. Extracting the URL builder to a shared module would make the server/client split explicit.
+5. Nits: `force-dynamic` + `cache: 'no-store'` are redundant together; no `error.jsx` boundary so an API outage renders the stock 500; the app directory has no `.gitignore`, so `.next/` build output sits untracked in the repo.
+
+None of these block merge. Naming, comments-that-say-why, file layout and consistency are all well above the bar I'd expect for a codebase others will own.
+
+```json
+{
+  "dimension": "mergeability",
+  "criteria": {
+    "idiomatic": {
+      "score": 4,
+      "evidence": [
+        "app/app/page.jsx:22-24 — awaits `searchParams`, correct Next 15+/16 async API",
+        "app/app/layout.jsx:5-10 — `generateMetadata` with title template matching the docs pattern",
+        "app/components/HomeControls.jsx:1, app/components/MovesSection.jsx:1 — `'use client'` only where interactivity is needed",
+        "app/app/pokemon/[name]/page.jsx:59 — `notFound()` for bad resources instead of home-grown 404 handling",
+        "app/app/page.jsx:11 — `export const dynamic = 'force-dynamic'` on every route (previous-model segment config; Next 16 recommends Cache Components/`use cache`, though it remains opt-in)",
+        "app/lib/api.js:12 — `cache: 'no-store'` redundant next to `force-dynamic`"
+      ],
+      "rationale": "Reads like the framework's own App Router examples: server components by default, async params, metadata API, notFound. The one home-grown layer — the in-memory fetch cache — is justified by the spec's live-API requirement and explicitly permitted, but it bypasses Next 16's recommended caching primitives."
+    },
+    "correctness_risks": {
+      "score": 3,
+      "evidence": [
+        "app/components/HomeControls.jsx:66 — `navigate` reads `window.location.search` while a 300 ms debounce and router transitions are in flight; params can be dropped or resurrected (vercel/next.js#92187 documents this fragility class)",
+        "app/components/MovesSection.jsx:31-35 — descending sort reverses the array, flipping the move-name tie-break order",
+        "app/app/pokemon/[name]/page.jsx:145-151 — `apiJson` returns null on 404 but `record.name` is dereferenced without a guard",
+        "app/lib/api.js:22-25 — cache eviction on rejection is handled correctly (no poisoned cache)",
+        "app/components/HomeControls.jsx:51-53 — debounce timer is cleaned up; no leaked listeners found"
+      ],
+      "rationale": "No serious bugs — 404s, cache poisoning, listener leaks and hydration mismatches are all handled — but there are three genuine minor fragilities, the worst being the query-string race in the search controls."
+    },
+    "global_abstractions": {
+      "score": 4,
+      "evidence": [
+        "app/lib/api.js:7 — module-level `globalThis.__pokedexStore` cache is hidden global state, but bounded by the API's resource count, documented, and spec-sanctioned",
+        "app/lib/data.js:22-70 — promise-memoized derived datasets (types, generations, species map) with clear doc comments and one consumer shape each",
+        "app/components/PokemonCard.jsx:3 — imports `apiUrl` from the server-only `lib/api.js`, coupling a reusable component to the server data layer",
+        "app/lib/format.js:1 — pure helpers with an explicit 'safe to use on server and client' boundary note"
+      ],
+      "rationale": "Abstractions are few and earn their keep; the only real untangling risk is the server/client boundary leak through PokemonCard's import of the server-only API module."
+    },
+    "readability": {
+      "score": 5,
+      "evidence": [
+        "app/lib/format.js:4-40 — small pure helpers, each with a doc comment stating the spec rule it implements",
+        "app/components/Section.jsx:1-12 — one-liner wrapper with a comment explaining the aria pattern",
+        "app/app/pokemon/[name]/page.jsx:68-160 — `buildMoves` is the longest function (~90 lines) but decomposes cleanly and is the page's only complex part",
+        "app/app/page.jsx:14-23 — filter/pagination logic is linear and self-explanatory"
+      ],
+      "rationale": "A new teammate finds their way in minutes: consistent naming, comments that explain why (spec rules), small files, no cleverness."
+    },
+    "review_cost": {
+      "score": 4,
+      "evidence": [
+        "app/components/HomeControls.jsx:66 — the one change I'd actually request (build params from props, not window.location)",
+        "app/components/MovesSection.jsx:31 — tie-break nit, two-line fix",
+        "app/app/pokemon/[name]/page.jsx:145 — one-line null guard",
+        "app/.next/ — build output has no .gitignore entry in the app directory"
+      ],
+      "rationale": "Approve after a round of small fixes; nothing structural needs rework, and the risky bits are isolated to the two client components."
+    }
+  },
+  "overall": 4,
+  "findings": [
+    { "severity": "medium", "location": "app/components/HomeControls.jsx:66", "issue": "`navigate()` reads `window.location.search` to merge params while a debounced search timer and router.replace transitions may be in flight; concurrent updates can drop or resurrect query params (known App Router fragility, cf. vercel/next.js#92187)", "suggestion": "Derive the full param set from the `q`/`type`/`generation` props plus the local term state, and build the URL from those instead of reading window.location" },
+    { "severity": "low", "location": "app/components/MovesSection.jsx:31", "issue": "Descending sort reverses the whole ascending array, which also inverts the move-name tie-break order within equal keys", "suggestion": "Sort with a direction-aware comparator instead of reversing, so the tie-break stays stable" },
+    { "severity": "low", "location": "app/app/pokemon/[name]/page.jsx:145", "issue": "`apiJson` returns null on 404, but `record.name`/`record.type` are dereferenced without a guard, so a single missing move record crashes the page", "suggestion": "Filter out null records (or fall back to humanized name) before building rows" },
+    { "severity": "low", "location": "app/components/PokemonCard.jsx:3", "issue": "Reusable card component imports `apiUrl` from the server-only `lib/api.js`, leaking the server data layer into a shared component", "suggestion": "Move `apiUrl` (a one-line URL joiner) into `lib/format.js` or a shared constants module" },
+    { "severity": "low", "location": "app/app/page.jsx:11", "issue": "`force-dynamic` on every route plus `cache: 'no-store'` in the fetch wrapper are redundant; both opt out of caching, and Next 16's recommended model is now Cache Components (`use cache`)", "suggestion": "Keep one mechanism (the segment config), and consider migrating to `cacheComponents` + `use cache` with `cacheLife` when touching this next" },
+    { "severity": "low", "location": "app/app/layout.jsx:1", "issue": "No `error.jsx`/`global-error.jsx` boundary, so an API failure (non-404) surfaces Next's stock 500 page with no way back", "suggestion": "Add a minimal `error.jsx` with a retry action and a link home" },
+    { "severity": "low", "location": "app/.next/", "issue": "Build output directory sits inside the app with no `.gitignore` entry (root .gitignore doesn't cover it)", "suggestion": "Add `app/.gitignore` with `.next/`, `node_modules/`" }
+  ],
+  "summary": "A well-shaped Next 16 App Router app: server components everywhere except two justified client islands, awaited async params, metadata API, proper notFound handling, and a deliberate spec-compliant in-memory data cache. The real merge blockers are absent; the notable fragility is the search controls reading `window.location.search` across in-flight router transitions, which can drop or resurrect filter params. I'd approve after one round of small fixes."
+}
+```

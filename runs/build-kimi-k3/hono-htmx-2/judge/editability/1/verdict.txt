@@ -1,0 +1,153 @@
+I've reviewed the app against the current stable Hono (v4.13.14, the exact version pinned in `app/package.json`; v5 is still RC, so `hono/html`, `c.html`, and `@hono/node-server/serve-static` are all current APIs). Here's my assessment for editability.
+
+## Structure
+
+The app is four small modules with a clean layering: `server.js` (boot) → `app.js` (routes + data assembly) → `views.js` (pure rendering via `hono/html`) → `api.js` (the only module that knows the API's base URL, cache, and index). Client JS is 8 lines of htmx config (`app/public/app.js:1-7`), so server/client separation is crisp.
+
+## Scenario walkthroughs
+
+1. **Remove Abilities** — touch `app/src/app.js:214-231` (route), `app/src/views.js:377-393` (`abilityPage`), `app/src/views.js:242-253` (the Abilities section on the Pokémon page links to `/abilities/...`), `app/src/views.js:62,70` (`hidden` card option becomes dead), and `app/public/styles.css:305` (`.hidden-ability` becomes dead). Scattered but all findable → difficulty 3.
+2. **Sprite fix** — every card list on every page renders through one component, `pokemonCard` (`app/src/views.js:62`), which builds its image with `spriteUrl` (`app/src/api.js:81`). One fix covers home, move, ability and type lists → difficulty 5.
+3. **Sort cards by name** — card *rendering* is centralized, but ordering is per-route: home (with filters + pagination in `app/src/app.js:56-71`), move (`app.js:206`), ability (`app.js:229`), type (`app.js:245`). Home would need sorting before pagination → difficulty 3.
+4. **Items section** — `apiFetch`, `layout`, `section`, `cardGrid`, `humanize`/`englishName` are all reusable; you'd add a route in `app.js` and an `itemPage` in `views.js`, mirroring `/moves/:name` (`app.js:203-210`). Mostly new code, little copying → difficulty 4.
+5. **Change data source** — `API_BASE`, the promise cache, and the media-URL constructors (`app/src/api.js:3-6,81-84`) are the only places that know about them → difficulty 5.
+
+## Notable duplication
+
+The main editability cost is a few helpers that exist in `api.js` but are re-implemented or half-used elsewhere: `latestEnglishFlavor` (`api.js:46`) is re-implemented inline in `pokemonPage` (`views.js:181-185`), `englishGenus` (`api.js:42`) is exported and never used (genus is inlined at `views.js:180`), and the ability route re-implements `toSpeciesList`'s ref→species mapping with a hidden flag (`app.js:223-228` vs `api.js:128-142`). A fix to the whitespace-collapse rule or the alternate-form-exclusion rule lands in two places.
+
+```json
+{
+  "dimension": "editability",
+  "criteria": {
+    "removability": {
+      "score": 3,
+      "evidence": [
+        "app/src/app.js:214-231 — abilities route is one self-contained block",
+        "app/src/views.js:377-393 — abilityPage deletes cleanly",
+        "app/src/views.js:242-253 — Pokémon page Abilities section links to /abilities and must be edited separately",
+        "app/src/views.js:62,70 — pokemonCard 'hidden' option becomes dead code with the feature",
+        "app/public/styles.css:305 — .hidden-ability rule left orphaned"
+      ],
+      "rationale": "Two source files and a stylesheet, but the feature leaks: the Pokémon page's Abilities section and the card component's hidden-ability support are separate edits, and removing the pages strands the typeEn variable and CSS."
+    },
+    "changeability": {
+      "score": 4,
+      "evidence": [
+        "app/src/views.js:62 — every card list funnels through pokemonCard, so the sprite fix is one place",
+        "app/src/api.js:81-84 — sprite/artwork URL construction centralized in the data module",
+        "app/src/views.js:181-185 — latest-flavor-text logic re-implemented inline despite latestEnglishFlavor existing (api.js:46)",
+        "app/src/views.js:180 — genus lookup inlined while englishGenus (api.js:42) is exported and unused",
+        "app/src/app.js:223-228 — ability route duplicates toSpeciesList's ref-to-species mapping (api.js:128-142)"
+      ],
+      "rationale": "Rendering-level fixes are one-place (single card component, single URL helper), but two data-shaping rules — flavor-text extraction and Pokémon-reference-to-species mapping — exist in two copies each, so those fixes must land twice."
+    },
+    "coupling": {
+      "score": 4,
+      "evidence": [
+        "app/src/api.js:3-6 — API base URL and cache known only to the api module",
+        "app/src/views.js:14-45 — every page goes through one layout; nav edits touch one function",
+        "app/public/app.js:1-7 — client JS is 8 lines of htmx config, fully separated from server code",
+        "app/src/views.js:10,160 — PAGE_SIZE (pagination policy) lives in the view module but is consumed by the router (app.js:66-70)",
+        "app/src/views.js:151 — typeEn passed as index.typeEn.get.bind(...) here, but as closures at views.js:186,349,379,426 — inconsistent seam"
+      ],
+      "rationale": "Layering is clean and views are pure functions of route-assembled data, but the typeEn lookup is threaded three different ways (often pointlessly — it is dead at views.js:379-392) and one routing policy constant lives on the wrong side of the seam."
+    },
+    "abstraction_design": {
+      "score": 4,
+      "evidence": [
+        "app/src/views.js:136-158 — homeResults renders both the full page and the htmx fragment, avoiding a parallel partial template",
+        "app/src/views.js:309-343 — movesTable reused by the full page, the game-swap fragment, and the sort fragment (app.js:186-199)",
+        "app/src/views.js:82-87 — section()/cardGrid() give every page the same panel and card-list shape",
+        "app/src/views.js:62-76 — pokemonCard grows boolean flags (showTypes, hidden) and requires typeEn only conditionally",
+        "app/src/views.js:388-392 — abilityPage hand-rolls <ul class=\"cards\"> instead of using cardGrid"
+      ],
+      "rationale": "The abstractions track the app's real variation well — fragment views double as htmx partials and the sort endpoint reuses the table renderer — with only minor flag creep and one bypassed helper."
+    }
+  },
+  "overall": 4,
+  "findings": [
+    {
+      "severity": "medium",
+      "location": "app/src/views.js:181-185",
+      "issue": "Latest-English-flavor-text extraction is duplicated: latestEnglishFlavor exists in api.js:46-51 but pokemonPage re-implements it inline; englishGenus (api.js:42) is exported and never used, with the genus lookup inlined at views.js:180.",
+      "suggestion": "Delete the inline copies and call latestEnglishFlavor/englishGenus from pokemonPage (or drop the unused exports)."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/app.js:223-228",
+      "issue": "The ability route re-implements toSpeciesList's Pokémon-reference-to-species mapping (dedupe, alternate-form exclusion, dex ordering) just to attach a hidden flag, so changes to those rules must be made in two places.",
+      "suggestion": "Generalize toSpeciesList(refs, index, decorate) or have it return the matched ref alongside the species so the flag can be attached without duplicating the mapping."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/views.js:186",
+      "issue": "The typeEn closure (n => index.typeEn.get(n) ?? humanize(n)) is defined five times (app.js:112; views.js:186,349,379,426) and threaded as an option through pokemonCard, where it is dead on the move and ability pages (views.js:368,388-392).",
+      "suggestion": "Export one typeEnglish(index, name) helper from api.js and drop the per-view closures and the dead threading."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/views.js:10",
+      "issue": "PAGE_SIZE, a routing/pagination policy, is defined and re-exported from the view module (views.js:160) and imported by the router (app.js:66-70).",
+      "suggestion": "Move PAGE_SIZE into app.js next to the pagination logic."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/app.js:42-44",
+      "issue": "serveStatic uses cwd-relative './public/...' paths, so npm start only works when run from app/; serving from any other directory 404s the stylesheet and htmx.",
+      "suggestion": "Resolve paths from import.meta.url (e.g. new URL('../public/styles.css', import.meta.url).pathname) or serve a root."
+    },
+    {
+      "severity": "low",
+      "location": "app/public/htmx.min.js",
+      "issue": "htmx.min.js is vendored into public/ while htmx.org is also a package.json dependency, so upgrading htmx requires remembering to re-copy.",
+      "suggestion": "Serve it straight from node_modules/htmx.org/dist/htmx.min.js, or drop the dependency."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/views.js:388-392",
+      "issue": "abilityPage bypasses cardGrid and hand-rolls the same <ul class=\"cards\"> markup, so a change to the card-list wrapper must be made twice.",
+      "suggestion": "Extend cardGrid to accept a per-item options mapper, or use cardGrid with the hidden flag folded into the species entry."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/views.js:62",
+      "issue": "pokemonCard's typeEn option has no default but is only read when showTypes is true, so omitting it crashes at render time instead of degrading.",
+      "suggestion": "Default typeEn to a humanize-based fallback inside the component."
+    }
+  ],
+  "summary": "This is a well-layered four-module app whose seams mostly line up with the features: one card component, one URL/cache module, one layout, and htmx fragments that reuse the full-page renderers. The costs are concentrated in a handful of half-used helpers — duplicated flavor-text and species-mapping logic, a typeEn lookup defined five ways, and a couple of constants and options on the wrong side of the seams. None of it would slow a maintainer down for long, but the duplications are exactly where the next data-rule change would land twice.",
+  "scenarios": [
+    {
+      "change": "Remove the Abilities pages and every link to them",
+      "files": ["app/src/app.js", "app/src/views.js", "app/public/styles.css"],
+      "difficulty": 3,
+      "notes": "Route and abilityPage delete cleanly, but the Pokémon page's Abilities section (views.js:242-253), the card 'hidden' option (views.js:62,70) and the .hidden-ability CSS rule are separate follow-up edits; forgetting them leaves dead code, not breakage."
+    },
+    {
+      "change": "Fix the sprite shown on Pokémon cards (Deoxys-style default-Pokémon mismatch)",
+      "files": ["app/src/views.js", "app/src/api.js"],
+      "difficulty": 5,
+      "notes": "Every list of cards on every page renders through pokemonCard (views.js:62) using spriteUrl (api.js:81), so one change covers home, move, ability and type lists; the app currently derives the URL from the species ID, which the spec guarantees equals the default Pokémon's ID."
+    },
+    {
+      "change": "Add sorting by name to every list of Pokémon cards",
+      "files": ["app/src/app.js", "app/src/views.js"],
+      "difficulty": 3,
+      "notes": "Card rendering is centralized but ordering is per-route (home app.js:56-71, move app.js:206, ability app.js:229, type app.js:245); home also needs sorting applied before slicing/pagination, and a sort control would repeat the URL-param plumbing home already has."
+    },
+    {
+      "change": "Add an Items section (/items, /items/:name) shaped like Moves",
+      "files": ["app/src/app.js", "app/src/views.js"],
+      "difficulty": 4,
+      "notes": "apiFetch, layout, section, cardGrid and the name helpers are all reusable as-is; you write a new route mirroring /moves/:name (app.js:203-210) and a new itemPage view, so it's mostly new code with little copying — but there is no generic 'detail page' factory to inherit from."
+    },
+    {
+      "change": "Change the API base URL and caching rules",
+      "files": ["app/src/api.js"],
+      "difficulty": 5,
+      "notes": "API_BASE, the promise cache, the media-URL pattern and the global index build all live in api.js; no other module knows where data comes from."
+    }
+  ]
+}
+```

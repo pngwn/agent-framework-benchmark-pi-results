@@ -1,0 +1,86 @@
+I've reviewed the app thoroughly and verified the Gracile APIs against the current published package (`@gracile/gracile@0.11.0`, route `ModuleOptions{handler,document,template}`, `context.props.GET`, `context.responseInit`, `404.js` fallback route, `nodeAdapter`/`getClientBuildPath`/`printUrls` — all idiomatic for the current stable release).
+
+# Review: editability
+
+**Architecture at a glance.** `app/src/document.js` is the single layout seam; `app/src/lib/{api,data,util,views}.js` is a clean four-layer split (transport / domain shaping / pure formatting / reusable markup); each route file is a self-contained `defineRoute({handler, document, template})` plus optional `.client.js` progressive enhancement that talks to the server only through element ids and query params. This is idiomatic Gracile and mostly a pleasure to change. The main friction: `pokemonCard`'s `typeNames` Map parameter leaks into every card-list handler (even ones that never render badges), the filter-URL serialization is duplicated between server and client, route skeletons are copy-paste, and `app/dist/` build output sits unignored in the tree, so every grep hits stale compiled duplicates of the source.
+
+**Scenario walk-throughs (all verified against files):**
+
+1. *Remove Abilities* — delete `app/src/routes/abilities/` (one file, handler+template together, no nav link to update: `app/src/document.js:17-20` only links `Pokémon`/`Types`), then remove the Abilities section from the Pokémon page in both its handler (`app/src/routes/pokemon/[name].js:199-205`) and template (`:291-300`), plus `.ability-list` CSS (`app/public/styles/app.css:386-395`) and the now-orphaned `options.note` card param (`app/src/lib/views.js:20`). Scattered but all findable.
+2. *Sprite bug* — one seam: `spriteUrl` (`app/src/lib/views.js:6-9`) used only by `pokemonCard` (`views.js:29`), which every one of the four card lists (home, moves, abilities, types) renders through, so one fix covers all lists. Caveat: card inputs carry only `{speciesId, speciesName}`; a fix needing the default *Pokémon* resource (rather than the id-based URL pattern) would also touch `app/src/lib/data.js:57-77` and `app/src/routes/index.js:126-131`.
+3. *Sort cards by name* — no single ordering seam: `pokemonRefsToSpecies` sorts by dex id (`app/src/lib/data.js:77`, covering moves/abilities/types) while the home list gets its order from `getSpeciesList` (`data.js:47`) and is paginated in dex order (`app/src/routes/index.js:117-121`), so the sort rule must be changed twice, and the home change interacts with pagination semantics.
+4. *Items section* — copy `app/src/routes/moves/[name].js` (~110 lines) and edit; the real reuse is `document.js`, `lib/api.js`, `lib/util.js`, `pokemonRefsToSpecies`, `cardList`/`notFoundContent` — roughly 60% reusable, 40% skeleton copy-paste (fetch→404 branch→title→`document` wiring repeated at e.g. `moves/[name].js:26-28,58,60`).
+5. *API base/caching* — base URL, `/api/v2/` prefix and the promise-cache live in one module (`app/src/lib/api.js:5-10,20-46`), though the media path pattern lives in the *view* layer (`views.js:6-9`) and the cache-miss/error-handling mechanics are written twice (`api()` vs `apiList()`).
+
+```json
+{
+  "dimension": "editability",
+  "criteria": {
+    "removability": {
+      "score": 4,
+      "evidence": [
+        "app/src/routes/abilities/[name].js — entire feature is one self-contained route file (handler, 404 branch and template together); deleting the directory removes it",
+        "app/src/document.js:17-20 — nav contains only Pokémon/Types, so there is no Abilities link to unhook",
+        "app/src/routes/pokemon/[name].js:199-205 and :291-300 — inbound links to /abilities exist in two spots of the Pokémon page (data assembly + template section)",
+        "app/public/styles/app.css:386-395 — .ability-list rules would be left behind as dead CSS",
+        "app/src/lib/views.js:12,20 — pokemonCard's options.note exists solely for the abilities 'Hidden ability' case and would become dead generality"
+      ],
+      "rationale": "The ability route deletes cleanly and there is no nav link, but the Pokémon page's Abilities section, feature-scoped CSS and a one-consumer view parameter all leave residue, so removal is slightly more than 'delete a directory and a link'."
+    },
+    "changeability": {
+      "score": 4,
+      "evidence": [
+        "app/src/lib/views.js:6-9,29 — spriteUrl is the single sprite source for pokemonCard, which renders every card list (home index.js:128, moves [name].js:84, abilities [name].js:69, types [name].js:98), so the sprite bug is a one-place fix",
+        "app/src/routes/index.js:101-110 vs app/src/routes/index.client.js:15-23 — the 'omit empty/default params' URL serialization is duplicated between server pagination links and the client URL builder",
+        "app/src/routes/index.js:17-21 vs app/src/routes/pokemon/[name].js:30-34 — the option() helper is copy-pasted",
+        "app/src/lib/api.js:20-27,32-46 — the promise-cache/evict-on-error mechanics are written twice (api() and apiList()); a TTL change touches both",
+        "app/src/lib/util.js:4-50 — pure single-purpose helpers make formatting fixes one-place"
+      ],
+      "rationale": "The specific bug scenario lands in one obvious seam, and data/formatting logic is well factored; the deduction is for genuinely duplicated filter-URL logic on both sides of the server/client boundary and a few repeated micro-helpers."
+    },
+    "coupling": {
+      "score": 3,
+      "evidence": [
+        "app/src/lib/views.js:6-9 — the view layer imports apiBase and hardcodes the /media/sprites/pokemon/<id>.png layout, so a media-path change belongs in a template module, not the API client",
+        "app/src/routes/abilities/[name].js:28,46,57 — handler fetches all 18 type resources and serializes them purely to satisfy pokemonCard's typeNames param, which that page never uses (cards render no badges)",
+        "app/src/routes/index.js:86,99, app/src/routes/moves/[name].js:58,69, app/src/routes/abilities/[name].js:46,57, app/src/routes/types/[name].js:64,75, app/src/routes/pokemon/[name].js:209,220 — the Map→Object→Map typeNames round-trip boilerplate is repeated in all five routes",
+        "app/src/routes/index.client.js:31-38, app/src/routes/pokemon/[name].client.js:15-24 — client enhancements are cleanly separated: they import no server modules and couple only via element ids (#results, #moves-tables) and query params",
+        "app/src/lib/data.js:57-77 — pokemonRefsToSpecies gives routes a narrow, uniform card input shape instead of each route reshaping API entities"
+      ],
+      "rationale": "Server/client separation and the lib layering are genuinely good, but pokemonCard's typeNames Map parameter is a leak that forces every card-list handler (current and future) to fetch and thread data it doesn't need, and the media-URL knowledge sits in the wrong layer."
+    },
+    "abstraction_design": {
+      "score": 4,
+      "evidence": [
+        "app/src/lib/data.js:57-77 — pokemonRefsToSpecies(refs, extraOf) captures the real variation across three pages (alternate-form exclusion, species dedup, dex ordering, per-caller extra payload) without flag parameters",
+        "app/src/lib/views.js:14-46 — pokemonCard takes an options object (types/note) instead of booleans, covering the home page's badges and abilities' hidden-ability note in one component",
+        "app/src/routes/moves/[name].js:21-28 vs app/src/routes/abilities/[name].js:22-30 — resource-detail routes are near-identical skeletons (fetch → 404 branch → title → sections), so an Items page is a copy-paste-and-edit rather than a parameterization",
+        "app/src/routes/*/​*.js (7 sites, e.g. app/src/routes/types/index.js:35) — 'document: (context) => document({...context, title: context.props.GET.title})' wiring and the '${enName} – Pokédex' title pattern are repeated in every route instead of centralized in document.js",
+        "app/src/document.js:3 — a single layout seam that all pages share, correctly parameterized on title only"
+      ],
+      "rationale": "The core abstractions (card rendering, ref→species resolution, layout, pure formatters) stretch to new cases well and avoid flag creep; the cost is copy-paste at the route-skeleton level, which is conventional in Gracile but adds real duplication for the next similar resource."
+    }
+  },
+  "overall": 4,
+  "findings": [
+    { "severity": "high", "location": "app/dist/", "issue": "The production build output sits in the source tree and is not gitignored (root .gitignore only covers /data/, /.data-cache/, node_modules/), so every grep/find hits stale compiled duplicates of your own source (e.g. dist/server/chunk/_name_3.js:152 mirroring app/src/routes/pokemon/[name].js) and a 'git add .' would commit generated code that will rot.", "suggestion": "Add 'app/dist/' (or 'dist/') to .gitignore and rely on 'npm run build' before 'npm start', as package.json already specifies." },
+    { "severity": "medium", "location": "app/src/routes/abilities/[name].js:28,46,57", "issue": "The handler fetches and serializes all 18 type resources solely to satisfy pokemonCard's typeNames parameter, which this page never renders (its cards have no type badges); every future card-list page inherits this needless fetch-and-thread.", "suggestion": "Make typeNames an optional third argument (default null) and short-circuit in pokemonCard when no types are requested, or resolve type labels inside a shared typeName() helper so routes never pass the Map." },
+    { "severity": "medium", "location": "app/src/routes/index.js:101-110 / app/src/routes/index.client.js:15-23", "issue": "The filter query-string encoding rules (omit empty values, omit page at 1) are duplicated between the server's pagination link builder and the client's currentUrl(); adding or renaming a filter parameter must be done twice or the two views of the URL drift.", "suggestion": "Extract a shared buildListUrl(params) pure function into app/src/lib/ (client route files can import plain JS) and use it from both the route template and the client script." },
+    { "severity": "medium", "location": "app/src/lib/views.js:6-9", "issue": "The media URL layout (/media/sprites/pokemon/<id>.png) and the API base are knowledge of the data source, but they live in the view layer, so changing where media is served means editing a template module.", "suggestion": "Move spriteUrl into app/src/lib/api.js (or data.js) next to base(), keeping views.js free of transport details." },
+    { "severity": "low", "location": "app/src/routes/moves/[name].js:26-28,58-60 (same pattern in abilities, types, pokemon, index)", "issue": "The resource-page skeleton — 404 branch (status + notFound props), '${enName} – Pokédex' title assembly and the document wiring — is copy-pasted across five routes; an Items page would clone it a sixth time.", "suggestion": "Add tiny helpers: notFoundProps() in lib/views.js and a title-computing document wrapper (or compute the title inside document.js from props), so new routes share them." },
+    { "severity": "low", "location": "app/src/lib/api.js:20-27 vs :32-46", "issue": "The cache-a-promo-them/evict-on-error mechanics are written twice (api() and apiList()); introducing TTLs, key prefixes or invalidation means editing both implementations.", "suggestion": "Factor a single memoize(path, loader) helper used by both functions so caching rules live in one place." },
+    { "severity": "low", "location": "app/src/routes/index.js:17-21 and app/src/routes/pokemon/[name].js:30-34", "issue": "The option() helper is duplicated verbatim in two route files.", "suggestion": "Move it to app/src/lib/views.js next to the other markup helpers." },
+    { "severity": "low", "location": "app/src/routes/index.js:86,99 (and 4 other routes, 10 sites total)", "issue": "The Map→Object.fromEntries→new Map(Object.entries()) round-trip for typeNames is repeated in every route because props must be serializable, adding boilerplate to each handler/template pair.", "suggestion": "Standardize on a serializable shape (array of [name, label] pairs) with a small toTypeNames() helper, or drop the threading entirely per the pokemonCard fix above." },
+    { "severity": "low", "location": "app/public/styles/app.css:386-395", "issue": "Feature-scoped selectors (.ability-list) in one global stylesheet mean removing a feature leaves dead CSS unless someone greps for the class names.", "suggestion": "Keep the section comments (they help), but group feature styles under clearly-named banners, or consider Gracile's per-route CSS imports so styles travel with their route." },
+    { "severity": "low", "location": "app/src/lib/views.js:12-20", "issue": "pokemonCard's options.note exists for exactly one caller (abilities' 'Hidden ability'); after removal of that feature the parameter becomes dead generality in a shared component.", "suggestion": "Acceptable as-is for one option; if more per-card variants appear, prefer composing a small slot/append function over growing the options object." }
+  ],
+  "summary": "A well-layered, idiomatic Gracile app that is easy to change at the bottom and only moderately so at the top: transport, domain shaping, formatting and shared markup each live in one module, and every card list funnels through a single pokemonCard seam, so the sprite bug is a one-line fix. The main debts are pokemonCard's typeNames Map leaking into every handler, duplicated filter-URL serialization across the server/client boundary, copy-pasted route skeletons, and unignored build output polluting the tree. I'd approve with the first four findings addressed.",
+  "scenarios": [
+    { "change": "Remove the Abilities pages and every link to them", "files": ["app/src/routes/abilities/[name].js", "app/src/routes/pokemon/[name].js", "app/public/styles/app.css", "app/src/lib/views.js"], "difficulty": 3, "notes": "The route directory deletes cleanly and there is no nav link, but the Pokémon page must be edited in two places (handler data at :199-205 and the template section at :291-300), plus feature CSS and the now-orphaned card 'note' option." },
+    { "change": "Fix the wrong-sprite bug for species whose default Pokémon has a different name", "files": ["app/src/lib/views.js"], "difficulty": 4, "notes": "spriteUrl (views.js:6-9) is the only sprite source and pokemonCard renders every card list, so one fix covers all four lists; but card inputs carry only {speciesId, speciesName}, so a fix needing the default Pokémon resource rather than the id-based URL pattern would also touch data.js:57-77 and index.js:126-131." },
+    { "change": "Add sorting by name to every list of Pokémon cards", "files": ["app/src/lib/data.js", "app/src/routes/index.js"], "difficulty": 3, "notes": "pokemonRefsToSpecies's sort (data.js:77) covers moves/abilities/types, but the home list gets its order from getSpeciesList (data.js:47) and is paginated in dex order, so the rule lives in two places and the home change interacts with pagination slicing." },
+    { "change": "Add an Items section (/items, /items/:name) shaped like Moves", "files": ["app/src/routes/items/[name].js", "app/src/document.js", "app/src/lib/api.js", "app/src/lib/data.js", "app/src/lib/util.js", "app/src/lib/views.js"], "difficulty": 3, "notes": "Layout, API client, ref→species resolution, card list and 404 content are all reusable as-is; the route file itself is a ~110-line copy of moves/[name].js with the skeleton (fetch, 404 branch, title, document wiring, dl facts) re-typed." },
+    { "change": "Change the API base URL and caching rules", "files": ["app/src/lib/api.js", "app/src/lib/views.js"], "difficulty": 4, "notes": "API_BASE_URL, the /api/v2/ prefix and the cache Map live in one module (api.js:5-46); only the sprite media-path pattern leaks into views.js, and the cache mechanics are duplicated between api() and apiList() so a TTL needs two small edits." }
+  ]
+}
+```

@@ -1,0 +1,132 @@
+{
+  "dimension": "mergeability",
+  "criteria": {
+    "idiomatic": {
+      "score": 4,
+      "evidence": [
+        "app/src/routes/pokemon/[name]/index.tsx:31 — routeLoader$ with fetch + status(404), the exact documented data-loading pattern",
+        "app/src/routes/pokemon/[name]/index.tsx:318 — DocumentHead via resolveValue(usePokemonData), per qwik.dev/docs/route-loader",
+        "app/src/entry.node-server.ts:14 — createQwikCity + staticFile/router/notFound chain, byte-for-byte the scaffold idiom",
+        "app/adapters/node-server/vite.config.ts:1 — nodeServerAdapter with extendConfig, as create-qwik generates",
+        "app/src/routes/index.tsx:117 — useNavigate for URL-driven filter state instead of local component state",
+        "app/src/routes/index.tsx:127 — `selected` on <option> for SSR-correct select defaults (the correct Qwik approach; value-on-select is unreliable in SSR)",
+        "app/package.json:14 — vite pinned to ^5.4.0 while Qwik's own starters moved to Vite 7 at 1.16 (still inside the >=5<8 peer range)",
+        "app/package.json — no eslint-plugin-qwik / prettier config, which the starter ships and which enforces resumability rules"
+      ],
+      "rationale": "Data loading, routing, 404s, head metadata and the node adapter all read like the framework's own examples at the current stable version (1.20.3). Only tooling-level deviations: a two-major-old Vite pin and no Qwik lint setup."
+    },
+    "correctness_risks": {
+      "score": 3,
+      "evidence": [
+        "app/src/lib/api.ts:8 — module-level `cache = new Map<string, Promise<any>>()` keyed by path, unbounded",
+        "app/src/lib/api.ts:37 — 404s are cached as `null` forever, and the key includes user input",
+        "app/src/routes/pokemon/[name]/index.tsx:33 — `/pokemon-species/${encodeURIComponent(params.name)}/` puts attacker-controlled strings into that cache",
+        "app/src/lib/api.ts:36 — fetch with no AbortSignal/timeout; a hung API hangs the whole render",
+        "app/src/routes/index.tsx:87,105 — debounce timer stored in a signal, never cleared on unmount; fires nav after the route is left",
+        "app/src/routes/index.tsx:101 — `value={d.q}` from loader data can clobber in-flight typing when the SPA loader response lands mid-debounce",
+        "app/src/lib/api.ts:43 — rejected promises are evicted from the cache to allow retries (good, non-obvious failure handling)",
+        "app/src/components/moves-table.tsx:71-82 — sort state is a per-table signal, null on server and on first client render, so no SSR/CSR mismatch"
+      ],
+      "rationale": "The hard failure paths (404s, rejected promises, form-ID→species mapping, alternate-form exclusion) are handled carefully, but the unbounded user-keyed cache, missing fetch timeout and the un-cleared debounce timer are the exact fragilities the spec warns about."
+    },
+    "global_abstractions": {
+      "score": 4,
+      "evidence": [
+        "app/src/lib/api.ts — server-only fetch + cache + concurrency pool in one 56-line module, nothing else imports process.env",
+        "app/src/lib/data.ts:53-59 — cardsForPokemonRefs centralizes the Pokémon→species mapping used by three routes, with a documented rationale",
+        "app/src/lib/format.ts — five pure helpers, no dependencies",
+        "app/src/lib/urls.ts:14 — one homeUrl() builder shared by links, pagination and nav handlers",
+        "app/src/routes/pokemon/[name]/index.tsx:48, moves/[name]/index.tsx:22, types/[name]/index.tsx:20 — the same typeEn Map boilerplate is copy-pasted into three loaders",
+        "app/src/components/moves-table.tsx — one-off component for one page, justified by sortable state"
+      ],
+      "rationale": "Boundaries are clean and server/client code doesn't leak (verified in the client bundle). The only untangling I'd predict is the triplicated type-name-mapping logic drifting out of sync between the three loaders."
+    },
+    "readability": {
+      "score": 3,
+      "evidence": [
+        "app/src/lib/api.ts:1-3 — module docstring states the caching/HTTP-at-request-time contract",
+        "app/src/lib/data.ts:52-58 — doc comment explains why refs map to species and how forms are excluded",
+        "app/src/lib/data.ts:8, app/src/lib/api.ts:32 — `record: any` / `Promise<any>` throughout the data layer despite `strict: true` in tsconfig.json",
+        "app/src/routes/pokemon/[name]/index.tsx:31-200 — ~170-line loader mixing species, chain, version-groups, moves and stats concerns",
+        "app/src/components/moves-table.tsx:95 — row key embeds the array index (`${r.move}-${r.level ?? ''}-${i}`)",
+        "app/src/global.css — 580 lines organized by page/feature with consistent token usage"
+      ],
+      "rationale": "Naming, organisation and why-comments are good, but the entire API surface is `any`, so TypeScript checks almost none of the app's most intricate transformations — a new teammate gets no compiler help where they most need it."
+    },
+    "review_cost": {
+      "score": 3,
+      "evidence": [
+        "app/dist/, app/server/ — committed build output with no app/.gitignore covering them (root .gitignore only lists /data/, node_modules)",
+        "app/src/lib/api.ts:8 — one-line fix available (cap/TTL the cache) but it must be asked for",
+        "app/package.json:14 — vite ^5.4.0 vs the framework's Vite 7 toolchain",
+        "app/src/routes/[...all]/index.tsx:6 — catch-all 404 route already correct, no rework needed",
+        "app/src/routes/layout.tsx:1-27 — landmark structure correct on first read, nothing to change"
+      ],
+      "rationale": "The architecture needs no rework; I'd approve after one round: gitignore build output, bound the cache, add a fetch timeout, type the API layer, add eslint-plugin-qwik."
+    }
+  },
+  "overall": 4,
+  "findings": [
+    {
+      "severity": "medium",
+      "location": "app/src/lib/api.ts:8",
+      "issue": "The in-memory promise cache is unbounded and its keys include user-supplied path segments (e.g. /pokemon-species/<params.name>/ at app/src/routes/pokemon/[name]/index.tsx:33); 404 results are cached as null forever (api.ts:37), so repeated fuzzed URLs grow memory without bound.",
+      "suggestion": "Only cache negative results for a closed set of names, or add an LRU cap / TTL; key the cache by canonical endpoint and validate route params against fetched lists before hitting the API."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/lib/api.ts:36",
+      "issue": "No timeout or AbortController on upstream fetches; a slow or hung API blocks the routeLoader$ and the page render indefinitely, and there is no error page beyond Qwik's default 500.",
+      "suggestion": "Pass AbortSignal.timeout(ms) to fetch and surface a friendly error state (loader-returned error object or a documented error route)."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/lib/data.ts:8",
+      "issue": "The whole data layer is typed `any` (`record: any`, `Promise<any>` at api.ts:32) despite `strict: true`, so the most transformation-heavy code has no compiler coverage and hover/refactor support is lost.",
+      "suggestion": "Define minimal interfaces for the API payloads actually consumed (Species, Pokemon, Type, Move, Ability, Generation) and have apiFetch be generic."
+    },
+    {
+      "severity": "medium",
+      "location": "app/server/ (and app/dist/)",
+      "issue": "Committed build output (server/*.js, dist/build/*, dist/404.html, sitemap.xml) sits in the tree with no app-level .gitignore; the root .gitignore doesn't cover them, so a `git add .` commits megabytes of generated bundles.",
+      "suggestion": "Delete the build artifacts and add an app/.gitignore with dist/, server/, tmp/ and types/ (the standard create-qwik starter set)."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/routes/index.tsx:87",
+      "issue": "The debounce timer signal is never cleared on unmount (no cleanup hook), so navigating away within 250ms of a keystroke still fires useNavigate afterwards; a stale timer can also fire a second navigation after a newer one.",
+      "suggestion": "Clear the pending timeout on unmount (useOn('qunmount') / cleanup task) and track the latest value to ignore superseded timers."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/routes/index.tsx:101",
+      "issue": "The search input's value is bound to loader data (`value={d.q}`), so when the debounced navigation resolves mid-typing, the re-render can reset the input to the older server-side value and swallow the extra characters.",
+      "suggestion": "Keep the live text in a local signal and only reconcile from the URL on external navigation, or compare against the signal before writing value."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/routes/moves/[name]/index.tsx:22",
+      "issue": "The `typeEn` Map construction is duplicated in three loaders (moves/[name]/index.tsx:22, types/[name]/index.tsx:20, pokemon/[name]/index.tsx:48); the English-name fallback logic will drift if one is changed.",
+      "suggestion": "Add a single `getTypeNameMap()` helper in lib/data.ts (or have getTypes() return both maps) and reuse it."
+    },
+    {
+      "severity": "low",
+      "location": "app/package.json:14",
+      "issue": "vite is pinned to ^5.4.0 while Qwik's own starters and toolchain moved to Vite 7 at Qwik 1.16; Vite 5 is in maintenance-only support.",
+      "suggestion": "Bump to vite ^7 (within the >=5<8 peer range) and re-run the build/tests."
+    },
+    {
+      "severity": "low",
+      "location": "app/package.json",
+      "issue": "No ESLint (eslint-plugin-qwik) or prettier configuration, so the framework's resumability rules (e.g. capturing props into QRLs, useTask$ misuse) are unenforced in CI.",
+      "suggestion": "Add the standard starter .eslintrc.cjs with eslint-plugin-qwik and wire `npm run lint` into review."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/components/moves-table.tsx:95",
+      "issue": "Row keys embed the array index, making keys non-stable under sorting and masking reorder bugs in the DOM.",
+      "suggestion": "Key rows by a stable composite like `${method}:${r.move}:${r.level ?? 'x'}` (the move+level pair is already deduplicated upstream)."
+    }
+  ],
+  "summary": "This is a genuinely idiomatic Qwik City 1.20 app: routeLoader$-driven SSR data loading, correct 404 handling, a scaffold-standard node adapter and a clean lib/api-data-format split with no server/client leakage. The merge blockers are operational rather than structural: an unbounded cache keyed partly by user input, no fetch timeout, an entirely `any`-typed API layer, and committed build output with no .gitignore. I'd merge after one round of targeted fixes, not a rewrite."
+}

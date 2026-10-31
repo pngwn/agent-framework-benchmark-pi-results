@@ -1,0 +1,162 @@
+## Review: test quality
+
+**The facts on the ground.** The app ships **zero tests of its own.** `app/angular.json:75-77` wires the `@angular/build:unit-test` (Vitest) builder, `app/package.json` declares `"test": "ng test"` plus `vitest` and `jsdom` devDependencies, and `app/tsconfig.spec.json:12` globs `src/**/*.spec.ts` — but a repo-wide search finds no `*.spec.ts` or `*.test.ts` under `app/src`. The scaffolding is entirely Angular-CLI boilerplate (`app/README.md:39-44` still promises "Running unit tests"), and `ng test` would report zero suites. All protection comes from the acceptance tests in `tests/`, which the agent didn't write and doesn't own.
+
+That's a real loss here, because this app's center of gravity is exactly the kind of pure transformation logic unit tests are cheapest on: `util.ts` (humanize, `idFromUrl`, flavor-text collapsing), `catalog.service.ts` (species→type-slot derivation, ref→species dedupe, hidden-ability flags), `page-data.ts` resolvers (move grouping, method ordering, totals), and `move-table.component.ts` (sort comparators with null-last semantics). None of it is covered by anything the team will keep after the acceptance suite stops being the contract.
+
+**Bugs the missing tests are already hiding.** Reading the riskiest code surfaced latent defects that a handful of focused unit tests would likely have flushed out:
+
+- `app/src/app/page-data.ts:170-174` — only the initial `pokemon-species/` fetch is inside the resolver's `try/catch` (`page-data.ts:158-164`). The default-Pokémon, evolution-chain, version-group and move fetches (`page-data.ts:171`, `:188`, `:198`) run unguarded; any 404/500 on them throws during route resolution (SSR: an unhandled 500 instead of the "Not found" page the spec requires).
+- `app/src/app/home.page.ts:60-66` with `app/src/app/home.page.html:7` — the select handlers pass `this.q()` (the URL-derived input) into `applyFilters`, so if a user types then changes Type/Generation inside the 200 ms debounce window (`home.page.ts:55-58`), the typed text is dropped *and* the input re-renders with the stale value, visibly wiping the user's keystrokes.
+- `app/src/app/home.page.ts:55-58` — the debounce timer is never cleared on destroy; clicking a card within 200 ms of typing triggers a global `router.navigate(['/'])` afterwards, hijacking the navigation.
+- `app/src/app/catalog.service.ts:150-180` — the first-entry-wins dedupe means the `hidden` flag only lands when a *later* duplicate carries it, and `page-data.ts:332-348` re-scans the whole ability list per ref (O(n²)); a refactor here could double-count cards or flip the "Hidden ability" label with no test failing.
+- `app/src/app/pokeapi.service.ts:56-70` — `normalize()` trailing-slash/query handling underpins every request; a one-line regression breaks all fetching, and it's a two-line unit test.
+
+**Verdict.** Coverage of risk, behaviour-focus and regression power are all at the floor: nothing in `app/` would fail if someone broke the filtering, pagination math (`home.page.ts:45-53`), null-last sorting (`move-table.component.ts:18-28`), or catalog derivation (`catalog.service.ts:91-135`). Signal-to-noise is neutral by rubric (no tests → 3). Given how much spec-encoded, easily-unit-testable logic is here and the bugs already visible in the untested paths, the overall score is 1.
+
+```json
+{
+  "dimension": "tests",
+  "criteria": {
+    "coverage_of_risk": {
+      "score": 1,
+      "evidence": [
+        "app/angular.json:75-77 — Vitest unit-test builder configured but zero spec files exist anywhere under app/src",
+        "app/src/app/catalog.service.ts:91-135 — riskiest logic (type-slot derivation, id>=10000 exclusion, generation mapping) has no first-party test",
+        "app/src/app/home.page.ts:37-53 — filtering/pagination math untested",
+        "app/src/app/page-data.ts:158-304 — move grouping/method ordering/evolution nesting untested"
+      ],
+      "rationale": "No tests were written at all; the riskiest transformation and URL-state logic is covered only by the external acceptance suite the team doesn't own."
+    },
+    "behaviour_not_implementation": {
+      "score": 1,
+      "evidence": [
+        "app/tsconfig.spec.json:12 — spec glob matches no files; there are no assertions, behavioural or otherwise",
+        "app/package.json — 'ng test' script and vitest devDependency exist as unused scaffolding"
+      ],
+      "rationale": "With zero tests there is nothing to classify; the floor score applies."
+    },
+    "regression_power": {
+      "score": 1,
+      "evidence": [
+        "app/src/app/move-table.component.ts:18-28 — compareValues null-last semantics could be broken silently",
+        "app/src/app/pokeapi.service.ts:56-70 — normalize() URL handling could regress with no failing test",
+        "app/src/app/util.ts:9-32 — humanize/idFromUrl/latestEnglishFlavor untested"
+      ],
+      "rationale": "No app-owned test can fail; any regression in filtering, sorting, pagination or data mapping sails through unless an acceptance test happens to touch it."
+    },
+    "signal_to_noise": {
+      "score": 3,
+      "evidence": [
+        "app/README.md:39-44 — boilerplate 'Running unit tests' section documents a suite that doesn't exist"
+      ],
+      "rationale": "No tests means no noise; the neutral score applies per rubric, though the stale README is mildly misleading."
+    }
+  },
+  "overall": 1,
+  "findings": [
+    {
+      "severity": "high",
+      "location": "app/src/app/page-data.ts:170-174",
+      "issue": "Only the pokemon-species fetch is in the resolver's try/catch; the default-Pokémon, evolution-chain, version-group and move fetches run unguarded, so any 404/500 throws during route resolution (SSR 500) instead of showing Not found",
+      "suggestion": "Wrap the follow-up fetches (or the whole resolver body) in try/catch returning null, and add a resolver unit test with an API stub that fails mid-chain"
+    },
+    {
+      "severity": "high",
+      "location": "app/angular.json:75-77",
+      "issue": "Unit-test infra is fully configured (Vitest builder, tsconfig.spec.json, devDependencies) but the app contains zero spec files; all logic relies on the external acceptance suite",
+      "suggestion": "Add unit tests for util.ts, catalog.service.ts mapping functions, page-data.ts resolvers and move-table sorting — all are pure/cheap to test"
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/app/home.page.ts:60-66",
+      "issue": "Select handlers read the URL-derived q(); typed search text still inside the 200 ms debounce window is dropped and the input re-renders (home.page.html:7 value binding) with the stale value, wiping user input",
+      "suggestion": "Read the live input value (e.g. a signal or viewChild) or flush the pending debounce before applying select-driven filter changes; unit-test the interplay"
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/app/home.page.ts:55-58",
+      "issue": "The debounce timer is never cleared on destroy; navigating away (card click) within 200 ms of typing fires a global router.navigate(['/']) afterwards",
+      "suggestion": "Clear the timer in ngOnDestroy and unit-test that filter navigation only happens while the component is alive"
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/app/catalog.service.ts:150-180",
+      "issue": "First-entry-wins dedupe means the hidden flag only applies via later duplicates, and page-data.ts:332-348 rescans the ability list per ref; a refactor could double-count cards or mislabel hidden abilities with nothing failing",
+      "suggestion": "Unit-test pokemonRefsToCards against tricky inputs (alternate forms, same species twice with differing is_hidden, unknown ids)"
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/app/move-table.component.ts:18-28",
+      "issue": "Null-last-in-both-directions comparator and per-column aria-sort state are only exercised by one acceptance interaction; descending sort with missing power/accuracy values is unverified",
+      "suggestion": "Add component tests covering ascending/descending on each column including null values, and that aria-sort is null on non-sorted headers"
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/app/pokeapi.service.ts:56-70",
+      "issue": "normalize() trailing-slash and query-string handling underpins every API request but has no tests; a regression silently breaks all fetching",
+      "suggestion": "Write a table-driven unit test for normalize/get URL construction and the cache-hit/failure-eviction behaviour"
+    },
+    {
+      "severity": "low",
+      "location": "app/src/app/home.page.ts:45-48",
+      "issue": "Page-param parsing and clamping (?page=abc, 0, 999, negative) is untested edge-of-URL-state logic",
+      "suggestion": "Unit-test the currentPage/totalPages computeds with out-of-range inputs"
+    },
+    {
+      "severity": "low",
+      "location": "app/README.md:39-44",
+      "issue": "Boilerplate README documents a 'Running unit tests' workflow that runs zero tests, misleading future contributors",
+      "suggestion": "Either add real tests or remove/replace the boilerplate section with the actual test strategy"
+    },
+    {
+      "severity": "low",
+      "location": "app/src/app/util.ts:9-32",
+      "issue": "Spec-critical pure helpers (humanize, idFromUrl, whitespace-run collapsing in latestEnglishFlavor, dexNumber padding) have no edge-case coverage",
+      "suggestion": "Cheap table-driven unit tests: '\\f' runs, URLs without trailing slash, ids below 1000"
+    }
+  ],
+  "summary": "The app contains no tests of its own despite fully wired-up Vitest scaffolding, leaving the acceptance suite as the only guard over dense, easily-unit-testable transformation logic. Reading the untested code surfaced several latent bugs a small unit suite would plausibly have caught: unguarded follow-up fetches in the Pokémon resolver that bypass the Not-found path, a debounce/URL-state race that can wipe typed search text, and fragile dedupe/hidden-flag logic. Once anyone refactors the data layer, filtering, sorting, pagination and card mapping are all unprotected.",
+  "wroteTests": false,
+  "testCount": 0,
+  "valuableTests": [],
+  "lowValueTests": [],
+  "untested": [
+    {
+      "area": "Catalog construction: type-slot derivation from type resources, id>=10000 exclusion, generation mapping (catalog.service.ts:91-135)",
+      "risk": "medium",
+      "likelyBug": "A refactor could misorder type slots or leak alternate forms, mislabeling badges and type filters for hundreds of species while acceptance only spot-checks a few cards"
+    },
+    {
+      "area": "Resolver error paths for valid species with failing follow-up fetches (page-data.ts:170-198)",
+      "risk": "high",
+      "likelyBug": "A 404/500 on the default-Pokémon, evolution-chain, version-group or move fetch throws during route resolution, producing a 500/blank SSR page instead of Not found"
+    },
+    {
+      "area": "Search/filter URL-state interplay and debounce lifecycle (home.page.ts:52-88)",
+      "risk": "medium",
+      "likelyBug": "Typed-but-undebounced search text is lost when a select changes within 200 ms, and a stray timer navigates to '/' after the component is destroyed"
+    },
+    {
+      "area": "Move-table sorting: null-last comparators, per-column aria-sort, tie-breaking (move-table.component.ts:18-137)",
+      "risk": "medium",
+      "likelyBug": "Missing power/accuracy could sort first in one direction, or aria-sort could leak onto other headers, without any test failing"
+    },
+    {
+      "area": "Pokémon-ref to species-card mapping: dedupe, hidden-ability flagging, dex ordering (catalog.service.ts:150-180, page-data.ts:332-348)",
+      "risk": "medium",
+      "likelyBug": "Duplicate cards or a flipped 'Hidden ability' label on ability/move/type pages after a data-layer refactor"
+    },
+    {
+      "area": "API client URL normalization and in-process response cache (pokeapi.service.ts:49-70)",
+      "risk": "medium",
+      "likelyBug": "A regression in trailing-slash/query handling or cache eviction silently breaks every request or serves stale failures"
+    },
+    {
+      "area": "Pagination param parsing and clamping (home.page.ts:45-48)",
+      "risk": "low",
+      "likelyBug": "?page=abc/0/999 handled incorrectly (NaN pages, negative start index) without detection"
+    }
+  ]
+}
+```

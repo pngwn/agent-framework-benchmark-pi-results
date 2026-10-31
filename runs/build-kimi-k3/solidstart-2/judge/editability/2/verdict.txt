@@ -1,0 +1,155 @@
+I've reviewed the app against the current SolidStart v2 stable guidance (the app's stack — `vite.config.ts` with `solidStart()` + `nitro()` from `nitro/vite`, Node ≥24, `query`/`"use server"` server functions, `createAsync` + route `preload` — matches the docs' current recommendations exactly, so none of my findings are about outdated framework usage).
+
+## How the scenarios played out
+
+1. **Remove Abilities** — delete `app/src/routes/abilities/[name].jsx`, delete `getAbilityPage` (`app/src/lib/data.js:382`), remove the Abilities section (`app/src/routes/pokemon/[name].jsx:97`). Nav (`app/src/app.jsx:15-17`) has no ability link. Leftovers: `CardList`'s `extra` prop (`app/src/components/Card.jsx:39`) and `.hidden-note`/`.ability-list` styles (`app/src/app.css:272,435`) become dead.
+2. **Sprite fix** — `spriteUrl()` at `app/src/lib/data.js:83` is the only place the URL rule lives; every card list goes through `cardsFromPokemonRefs` (`data.js:103`) or the home query (`data.js:176`), both of which call it, and the card markup is shared (`app/src/components/Card.jsx:21`). One fix covers every list, though card *construction* is duplicated in two places in the same file.
+3. **Sort cards by name** — `CardList` (`app/src/components/Card.jsx:38-41`) is the single component behind all four lists (`index.jsx:86`, `moves/[name].jsx:52`, `abilities/[name].jsx:24`, `types/[name].jsx:37`); one edit covers everything (or two spots in `data.js` if done at the data layer).
+4. **Add Items** — new routes + a new query in `data.js`; `Section`, `CardList`, `NotFound`, `util.js` all reuse cleanly, but the page shell (NotFound-fallback + `Title` + wrapper) and the `detail-list` markup must be copied from `moves/[name].jsx:61-66` — the third/fourth copy of that pattern.
+5. **Data source change** — `apiBase()` and the cache live only in `app/src/lib/data.js:18-30`. One file.
+
+```json
+{
+  "dimension": "editability",
+  "criteria": {
+    "removability": {
+      "score": 4,
+      "evidence": [
+        "app/src/routes/abilities/[name].jsx:1 — entire feature is a single route file",
+        "app/src/lib/data.js:382 — getAbilityPage is one self-contained query; shared helpers (cardsFromPokemonRefs, util.js) used by moves/types stay alive",
+        "app/src/routes/pokemon/[name].jsx:97-107 — the only inbound links to /abilities are this one Section block",
+        "app/src/app.jsx:15-17 — nav links are only Pokémon and Types, so no nav pruning needed",
+        "app/src/components/Card.jsx:39 — CardList's extra render prop becomes dead code after removal",
+        "app/src/app.css:272,435 — .hidden-note and .ability-list rules orphaned"
+      ],
+      "rationale": "Removal is a delete-a-file plus two contained edits with no nav tangles, but it does leave a dead render prop and dead CSS behind, which keeps it off the top mark."
+    },
+    "changeability": {
+      "score": 4,
+      "evidence": [
+        "app/src/lib/data.js:83-84 — spriteUrl is the single source of the sprite URL rule, called from data.js:103 (moves/abilities/type cards) and data.js:176 (home cards)",
+        "app/src/lib/util.js:3-31 — humanize/englishName/dexNumber/latestEnglishFlavor each live in exactly one shared helper",
+        "app/src/components/MoveTables.jsx:31-52 — table sorting logic in one comparator, not per-column",
+        "app/src/lib/data.js:165-179 — home rebuilds card objects inline instead of reusing cardsFromPokemonRefs (data.js:87-104), so card-shape changes need two edits in one file",
+        "app/src/components/MoveTables.jsx:77-84 — re-implements the type-badge link instead of TypeBadgeLink (app/src/components/Card.jsx:10-15), a second place to fix badge markup"
+      ],
+      "rationale": "Nearly every real bug class (sprite, filtering, pagination, names, sorting) lands in one obvious helper, but the duplicated card construction and duplicated badge markup mean some fixes are two-for-one in the same area."
+    },
+    "coupling": {
+      "score": 4,
+      "evidence": [
+        "app/src/lib/data.js:1-14 — explicit comment marks the file as server-only queries; every fetcher is a \"use server\" query (data.js:112, 210, 320, 382), so server/client code is clearly split",
+        "app/src/lib/util.js:1 — comment marks helpers safe for both sides; components import nothing from data.js",
+        "app/src/components/Card.jsx:21-33 — PokemonCard takes a plain card object, knows nothing about fetching or routes beyond the link",
+        "app/src/components/Section.jsx:4-9 — Section is pure props (title/anchor/children)",
+        "app/src/routes/index.jsx:23-34 — filter state is explicit in the URL query string, no hidden shared store",
+        "app/src/lib/data.js:98-104 vs app/src/components/Card.jsx:22-29 — the card shape is an implicit, untyped contract between data layer and component (typeLines: 0 despite strict tsconfig)"
+      ],
+      "rationale": "Loose coupling with clean seams: components are dumb props-in, the data layer is server-only, state is the URL. The untyped implicit card contract is the only real tangle."
+    },
+    "abstraction_design": {
+      "score": 3,
+      "evidence": [
+        "app/src/components/Section.jsx:4-9 — good generic section (title, anchor, auto heading-id)",
+        "app/src/components/Card.jsx:38-41 — CardList with extra render prop stretches to the ability page's hidden note without flags",
+        "app/src/lib/data.js:87-104 — cardsFromPokemonRefs with an extra callback is the right abstraction for the move/ability/type variation",
+        "app/src/lib/data.js:165-179 — home page duplicates the card construction inline because the shared builder is shaped around pokemon refs, not species ids",
+        "app/src/routes/moves/[name].jsx:61-66, app/src/routes/abilities/[name].jsx:37-42, app/src/routes/types/[name].jsx:59-64, app/src/routes/pokemon/[name].jsx:141-146 — the detail-page shell (NotFound fallback + Title + wrapper) is copy-pasted four times",
+        "app/src/routes/pokemon/[name].jsx:116-118 — the Moves section re-implements Section's markup because Section can't forward a ref",
+        "app/src/lib/data.js:395-400 — ability page bypasses the existing extra seam and mutates cards post-hoc to attach the hidden flag"
+      ],
+      "rationale": "The abstractions map to the app's real variation (Section, CardList, cardsFromPokemonRefs, MoveTables) and are neither over- nor under-general, but card construction is copied for the home page, the page shell is boilerplate in every route, and two existing seams (Section's ref, cardsFromPokemonRefs' extra) are bypassed."
+    }
+  },
+  "overall": 4,
+  "findings": [
+    {
+      "severity": "medium",
+      "location": "app/src/lib/data.js:165-179",
+      "issue": "The home page builds card objects inline, duplicating the shape and logic already in cardsFromPokemonRefs (data.js:87-104); the shared builder can't be reused because it's keyed to pokemon refs rather than species ids.",
+      "suggestion": "Make cardsFromPokemonRefs (or a sibling buildSpeciesCards) work from ids/species, and have the home query pass its type lookup through the existing extra seam so card construction lives in one place."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/routes/moves/[name].jsx:61-66",
+      "issue": "The detail-page shell (Show-NotFound fallback, Title, content wrapper, d() accessor) is copy-pasted in four routes; any new section like Items copies it a fifth time.",
+      "suggestion": "Extract a <AsyncPage data={data}>{(d) => ...}</AsyncPage> (or a withNotFound helper) that renders NotFound on null and the Title from a name prop."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/routes/pokemon/[name].jsx:116-118",
+      "issue": "The Moves section hand-writes the same section/aria-labelledby/panel markup as Section because Section can't forward a ref for scrollIntoView.",
+      "suggestion": "Forward props (including ref) from Section, or accept a ref prop, and use <Section anchor=\"moves\" title=\"Moves\"> here."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/components/MoveTables.jsx:77-84",
+      "issue": "MoveTable re-implements the type-badge link markup (class composition, href pattern) instead of reusing TypeBadgeLink from Card.jsx.",
+      "suggestion": "Render <TypeBadgeLink type={{ name: row.typeName, en: row.typeEn }} /> or move TypeBadgeLink into a shared badges module."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/lib/data.js:395-400",
+      "issue": "The ability page attaches the hidden flag by mutating the cards array after cardsFromPokemonRefs returns, bypassing the extra callback designed for exactly this.",
+      "suggestion": "Use the existing extra(ref) seam to capture is_hidden (it receives the pokemon ref), deleting the post-hoc mutation."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/components/Card.jsx:39",
+      "issue": "CardList's extra render prop is only used by the ability page; if Abilities is ever removed it becomes dead code, and .hidden-note/.ability-list CSS (app.css:272,435) is orphaned with it.",
+      "suggestion": "Acceptable as-is; note the coupled cleanup when removing the Abilities feature."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/routes/index.jsx:23-43",
+      "issue": "updateParams and pageHref each hand-build URLSearchParams from location.search; query-string encoding rules are written twice in one file.",
+      "suggestion": "One buildHref(patch) helper that both the navigate call and the pagination links use."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/lib/data.js:25-29",
+      "issue": "The in-memory promise cache has no TTL or size bound and permanently caches null for failed/unreachable endpoints for the process lifetime.",
+      "suggestion": "Store the response, not the promise, with a small TTL (or at least don't cache nulls), so changing caching rules later is a tweak to one function rather than a rewrite."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/lib/data.js:98-104",
+      "issue": "The card object is an untyped implicit contract consumed by PokemonCard (sprite/id/human/name/types) across the RPC boundary; tsconfig is strict but every file is .jsx.",
+      "suggestion": "Add a JSDoc typedef (or convert data.js to TS) for the card shape so changes to it surface all consumers at edit time."
+    }
+  ],
+  "summary": "A well-organized SolidStart v2 app on current stable idioms: a single server-only data layer, small prop-driven components, and shared helpers for exactly the things that vary. Its editability costs are concentrated and small — duplicated card construction for the home page, a copy-pasted detail-page shell across four routes, and two existing seams (Section's ref, cardsFromPokemonRefs' extra callback) that were bypassed instead of used. Every scenario I traced came out as one or two contained edits in one file.",
+  "scenarios": [
+    {
+      "change": "Remove the Abilities pages and every link to them",
+      "files": ["app/src/routes/abilities/[name].jsx", "app/src/lib/data.js:382-403", "app/src/routes/pokemon/[name].jsx:97-107", "app/src/components/Card.jsx:39", "app/src/app.css:272"],
+      "difficulty": 4,
+      "notes": "Delete the route dir and one query, remove one Section from the Pokémon page; nav needs no change. Only friction is remembering the extra render prop and two CSS rules that go dead."
+    },
+    {
+      "change": "Fix the card sprite for species whose default Pokémon has a different name (e.g. Deoxys)",
+      "files": ["app/src/lib/data.js:83-84"],
+      "difficulty": 5,
+      "notes": "The URL rule lives in one spriteUrl() function that every card path calls (cardsFromPokemonRefs at data.js:103, home at data.js:176), and the card markup is shared, so one fix covers every list; the home fallback at data.js:176 already prefers front_default."
+    },
+    {
+      "change": "Add sorting by name to every list of Pokémon cards",
+      "files": ["app/src/components/Card.jsx:38-41"],
+      "difficulty": 5,
+      "notes": "CardList is the single component behind all four lists (home, move, ability, type pages); sort there and done. Doing it in the data layer instead would mean two edits (data.js:104 and the species-index order), a small sign of the duplicated card construction."
+    },
+    {
+      "change": "Add an Items section (/items, /items/:name) shaped like Moves",
+      "files": ["app/src/routes/items/index.jsx", "app/src/routes/items/[name].jsx", "app/src/lib/data.js"],
+      "difficulty": 4,
+      "notes": "Section, CardList, NotFound, util helpers and apiFetch all reuse cleanly, but the page shell and the detail-list dl markup must be copied from moves/[name].jsx — the third copy of that boilerplate."
+    },
+    {
+      "change": "Change the API base URL and caching rules",
+      "files": ["app/src/lib/data.js:18-30"],
+      "difficulty": 5,
+      "notes": "apiBase(), apiFetch and the cache Map are confined to one file and everything routes through them; base URL and cache policy each have exactly one home. Only caveat: the cache stores promises forever with no TTL, so a rules change is an edit to one function."
+    }
+  ]
+}
+```

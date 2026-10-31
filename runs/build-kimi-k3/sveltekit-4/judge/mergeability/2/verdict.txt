@@ -1,0 +1,128 @@
+I've reviewed the app thoroughly against the current SvelteKit 3 release (Oct 2026) and the official Svelte skills in the repo. Key verifications:
+
+- `vite.config.js` with `sveltekit({ adapter })` is exactly the new SvelteKit 3 idiom (`svelte.config.js` is no longer supported) — the app is current.
+- `$app/state` (`page`), `goto(..., { reset, replace })` new option names, `error()` without `throw`, runes everywhere, `{@render}` snippets, self-import recursion — all match current docs and the best-practices skill.
+- One idiom gap: SvelteKit 3 replaces `$lib` with `#lib` subpath imports; the app instead uses deep relative imports (`../../../lib/utils.js`) in every route.
+- I traced the home-page search flow and found a real race: `afterNavigate` clears `typed` unconditionally, so characters typed while a debounced navigation is in flight are dropped from the input when the navigation settles, and a pending debounce can fire `goto` after the user has navigated away via a card click.
+- `spriteFor()` fabricates a sprite URL when the API returns `null`, contradicting the spec's "null means not shipped" contract.
+
+```json
+{
+  "dimension": "mergeability",
+  "criteria": {
+    "idiomatic": {
+      "score": 4,
+      "evidence": [
+        "app/vite.config.js:6 — adapter passed to the sveltekit() Vite plugin, the SvelteKit 3 config idiom (svelte.config.js is no longer supported)",
+        "app/src/routes/+page.svelte:59 — goto(url, { reset: false, replace: true }) uses the current v3 goto option names",
+        "app/src/routes/pokemon/[name]/+page.server.js:21 — error(404, ...) called without throw, correct since Kit 2",
+        "app/src/routes/+error.svelte:2 — $app/state page, the recommended replacement for $app/stores",
+        "app/src/lib/components/EvolutionNode.svelte:2 — self-import instead of <svelte:self>, per skill guidance",
+        "app/src/routes/pokemon/[name]/+page.svelte:7 — ../../../lib/utils.js deep relative imports in every route instead of the SvelteKit 3 #lib subpath-import alias"
+      ],
+      "rationale": "Reads like the current docs — SvelteKit 3 plugin config, $app/state, new goto options, runes, snippets, keyed eachs — with one gap: no #lib alias in package.json, so every route carries ../../ chains to lib."
+    },
+    "correctness_risks": {
+      "score": 3,
+      "evidence": [
+        "app/src/routes/+page.svelte:33-36 — afterNavigate unconditionally clears typed, so keystrokes typed while a debounced navigation is in flight are lost when it settles",
+        "app/src/routes/+page.svelte:56-63 — the debounce timer is never cancelled on unmount; a pending goto can hijack a card click made within 250ms",
+        "app/src/lib/server/data.js:49-50 — spriteFor fabricates /media/sprites/pokemon/<id>.png when the API returns null, breaking the spec's null contract and risking broken <img>s",
+        "app/src/lib/server/api.js:38-47 — cache stores resolved data, not promises, so concurrent calls for the same URL (e.g. /type/fire via getTypes and the type filter in one request) double-fetch",
+        "app/src/routes/+error.svelte:8-13 — non-404 title says 'Error – Pokédex' while the h1 says 'Something went wrong', violating the title-mirrors-h1 rule"
+      ],
+      "rationale": "The search/typeahead flow has a genuine input-loss race the acceptance tests don't catch (they type slowly), plus a spec-contradicting sprite fallback and a small error-title mismatch; the rest of the app (404s, missing-value handling, dedup) is careful."
+    },
+    "global_abstractions": {
+      "score": 4,
+      "evidence": [
+        "app/src/lib/server/api.js:18-48 — one module-level cache + concurrency limiter; deliberate, documented, appropriate for a server-side snapshot API",
+        "app/src/lib/server/data.js:60-83 — speciesFromPokemonRefs cleanly shared by move, ability and type loads instead of three near-identical helpers",
+        "app/src/lib/server/ vs app/src/lib/utils.js — clean server/client boundary; utils.js is pure and importable from both sides",
+        "app/src/lib/server/data.js:66 — augment callback relies on index-aligned parallel arrays (entries[index]), a subtle coupling",
+        "app/src/lib/server/api.js:18 — unbounded Map cache; acceptable for a fixed data snapshot but worth noting"
+      ],
+      "rationale": "Abstractions are few and each earns its keep with a clear server/client split; only minor fragility in the augment-by-index callback and an unbounded (but bounded-in-practice) cache."
+    },
+    "readability": {
+      "score": 4,
+      "evidence": [
+        "app/src/lib/utils.js:1-42 — small, named, JSDoc'd pure helpers; obvious what each does",
+        "app/src/lib/server/api.js:1-17 — header comments explain the caching and limiter design decisions",
+        "app/src/routes/pokemon/[name]/+page.server.js:1-137 — load is 130 lines doing many things (header, stats, abilities, evolution, moves assembly); linear and commented but long",
+        "app/src/lib/components/MoveTable.svelte:30-31,62 — sort-key default logic duplicated between sortKey derived and the rows derived.by",
+        "app/src/app.css:124-222 — component styles (.pokemon-card, .pill) live globally rather than scoped in the components that own them"
+      ],
+      "rationale": "A new teammate would find their way in minutes: consistent naming, five small components, commented server modules. Rough spots are the oversized Pokémon load function and styles split between global CSS and scoped blocks."
+    },
+    "review_cost": {
+      "score": 3,
+      "evidence": [
+        "app/src/routes/+page.svelte:33-63 — reviewer must request a fix for the typed/afterNavigate race and the uncancelled debounce timer before approving",
+        "app/src/lib/server/data.js:49 — reviewer would ask that null sprites render a placeholder instead of a fabricated URL",
+        "app/src/routes/+error.svelte:8 — one-line title fix",
+        "app/package.json — add #lib subpath imports and shorten route imports (nit)"
+      ],
+      "rationale": "One focused round of changes: fix the search race, honor null sprites, align the error title; the rest are nits I'd mention but not block on."
+    }
+  },
+  "overall": 4,
+  "findings": [
+    {
+      "severity": "medium",
+      "location": "app/src/routes/+page.svelte:33",
+      "issue": "afterNavigate clears `typed` unconditionally, so characters typed while a debounced search navigation is still in flight are wiped from the input when it settles; the debounce timer is also never cancelled, so a pending goto can navigate away after the user clicks a Pokémon card.",
+      "suggestion": "Cancel the timer in an $effect cleanup (or onDestroy), and only reset `typed` when it matches the settled `data.q` (or track the value the pending goto was built from)."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/lib/server/data.js:49",
+      "issue": "spriteFor fabricates /media/sprites/pokemon/<id>.png when the API returns null front_default, contradicting the spec's 'null means the set isn't shipped' contract — the fallback may 404 and render a broken image.",
+      "suggestion": "Return null when the API says null and render a text/placeholder element in PokemonCard."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/lib/server/api.js:38",
+      "issue": "The cache stores resolved data, not promises, so concurrent requests for the same URL within one load (e.g. /type/fire from getTypes() and the type filter) each fetch over HTTP.",
+      "suggestion": "Cache the in-flight promise (cache.set(url, promise) before awaiting) so parallel calls dedupe."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/routes/+error.svelte:8",
+      "issue": "For non-404 errors the title is 'Error – Pokédex' while the h1 is 'Something went wrong'; the spec requires the title to mirror the h1.",
+      "suggestion": "Use 'Something went wrong – Pokédex' in the non-404 branch."
+    },
+    {
+      "severity": "low",
+      "location": "app/package.json",
+      "issue": "No '#lib' subpath-import alias, so all route files use deep relative chains like ../../../lib/utils.js — the exact thing SvelteKit 3's #lib alias (package.json imports field) was introduced to avoid.",
+      "suggestion": "Add \"imports\": { \"#lib/*\": \"./src/lib/*\" } and switch routes to #lib/server/... imports."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/lib/server/data.js:66",
+      "issue": "The augment callback receives an index into a parallel array (ability.pokemon), and the ability load then reads entries[index].is_hidden — a subtle, undocumented coupling that breaks silently if refs are filtered or reordered.",
+      "suggestion": "Pass the original entry itself (or a Map from ref url to entry) instead of relying on index alignment."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/routes/pokemon/[name]/+page.svelte:139",
+      "issue": "{#key data.selectedGame} unmounts and re-creates every MoveTable on game change; the official skill warns #key is expensive and unnecessary when child state is derived from props.",
+      "suggestion": "Drop the #key block — the tables' rows are already $derived from the new table data."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/lib/components/MoveTable.svelte:30",
+      "issue": "The default sort key expression (sortOverride ?? (hasLevel ? 'level' : 'move')) is duplicated in both the sortKey derived and the rows $derived.by, and sortOverride never resets back to the default order.",
+      "suggestion": "Reuse `sortKey` inside the rows derived and clear sortOverride when the user re-clicks the active default column."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/app.css:141",
+      "issue": "Component-specific styles (.pokemon-card, .hidden-note) live in the global stylesheet while sibling components use scoped <style> blocks, splitting ownership across two places and risking class-name collisions.",
+      "suggestion": "Move .pokemon-card styles into PokemonCard.svelte's scoped <style>, keeping only genuinely shared primitives (.pill, tokens) global."
+    }
+  ],
+  "summary": "A genuinely current, well-structured SvelteKit 3 app: new plugin-based config, $app/state, runes, snippets, clean lib/server boundaries and a small component set — most of it reads like the framework's own docs. The blocking items are localized: a real keystroke-loss race in the home-page search (afterNavigate clearing typed mid-navigation, uncancelled debounce timer) and a sprite fallback that fabricates URLs the spec says should stay null. I'd merge after one focused round fixing those, with the rest as nits."
+}
+```

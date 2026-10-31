@@ -1,0 +1,127 @@
+I've reviewed the app against Gracile 0.11.0 (current stable, per npm) and its docs (`gracile.js.org/docs/learn/usage/defining-routes/`, the annotated `/src/document.ts` + `index.client.ts` examples, and the `@gracile/server`/`@gracile/engine` type definitions shipped in the current release).
+
+Key verifications I made before judging:
+
+- **`defineRoute({handler, document, template})` with handler-first ordering** — matches the current docs, which explicitly require handler declared before document/template for type inference. All seven routes comply (e.g. `app/src/routes/index.ts:20-141`).
+- **`document.ts` shape** (`props: {url, title}`, `route-template-outlet`, `@gracile/gracile/server-html`) — reads like the docs' own example (`app/src/document.ts:1-38`).
+- **Sibling `.client.ts` scripts** are the documented "client bundle entrypoint" convention; the build output confirms they're auto-attached as page assets (`app/dist/server/entrypoint.js:63,65`).
+- **`responseInit.status = 404`** is the documented way to set page status (`@gracile/engine` `Handler` type: "Let you mutate the downstream page response").
+- **`404.ts` route** is the official not-found convention — the build registers `/404/` with `"pattern": null`, i.e. the runtime's fallback.
+- **Full-page navigation in client scripts** is acceptable: current docs state "Gracile doesn't provide any CSR mechanism out of the box", and the search form has a `method="get"` no-JS fallback (`app/src/routes/index.ts:166`).
+- **`server.js` express adapter** (`getClientBuildPath` + `nodeAdapter(handler)`) matches the minimal-server-express pattern.
+
+Where it falls short: every template/document casts `context.props.GET as any` (12 occurrences), defeating the typed-props inference the current `defineRoute` docs showcase; handlers return `any`-laden objects so the casts are self-inflicted. The undocumented `gracile-static` hostname sentinel is copy-pasted into five handlers. `app/dist/` is committed-ish territory — the root `.gitignore` doesn't exclude it. A few minor correctness edges (unguarded `defaultVariety.pokemon.url`, `catch` blocks that turn upstream API failures into "No Pokémon found" with HTTP 200).
+
+```json
+{
+  "dimension": "mergeability",
+  "criteria": {
+    "idiomatic": {
+      "score": 4,
+      "evidence": [
+        "app/src/routes/index.ts:20 — defineRoute with handler-before-document/template ordering, exactly as current docs require for type inference",
+        "app/src/document.ts:6 — document (props: {url, title}) with route-template-outlet, mirrors the annotated docs example",
+        "app/src/routes/pokemon/[name].client.ts:1 — sibling .client.ts page entrypoint, the documented client-bundle convention (build confirms auto-attachment)",
+        "app/src/routes/404.ts:1 — official 404 fallback route convention (registered with pattern null in dist/server/entrypoint.js:5)",
+        "app/src/routes/index.ts:164 — context.props.GET as any cast defeats Gracile's documented typed props; repeated in all 7 routes",
+        "app/src/routes/index.ts:35 — 'gracile-static' hostname sentinel: undocumented internal Gracile convention copied into 5 handlers"
+      ],
+      "rationale": "Structure, routing, document/template split, client scripts and the express adapter all read like the current docs' examples; the as-any props casts and the undocumented build-time sentinel are the only places it works around the framework instead of with it."
+    },
+    "correctness_risks": {
+      "score": 4,
+      "evidence": [
+        "app/src/lib/api.ts:96-100 — rejected promises removed from cache, so a transient failure isn't sticky",
+        "app/src/lib/api.ts:17-33 — concurrency pool correctly caps fan-out (speciesCards on a popular move fetches hundreds of records)",
+        "app/src/routes/pokemon/[name].ts:117 — await api(defaultVariety.pokemon.url) unguarded; a species without varieties throws TypeError -> 500 instead of 404",
+        "app/src/routes/index.ts:78,93 — catch { species = [] } converts upstream API failures into 'No Pokémon found' with HTTP 200, masking outages",
+        "app/src/routes/pokemon/[name].ts:269 — width style computed with Math.min clamp; lit bindings auto-escape all API-derived text, no raw HTML injection anywhere"
+      ],
+      "rationale": "No serious bug found: caching, fan-out limiting, 404 handling (via documented responseInit.status) and escaping are all handled; remaining risks are minor edge cases (unguarded variety access, swallowed API errors) rather than races or mismatches."
+    },
+    "global_abstractions": {
+      "score": 4,
+      "evidence": [
+        "app/src/lib/api.ts — single fetch/cache module with clear boundary; no other module touches fetch",
+        "app/src/lib/species-cards.ts:22 — one shared card-data shaper reused by three route families instead of three near-duplicates",
+        "app/src/lib/components.ts:36 — card/section templates shared across pages, small and coherent",
+        "app/src/lib/format.ts:58-63 — EXCLUDED_TYPES/isAlternateForm domain rules mixed into a display-formatting module",
+        "app/src/routes/index.ts:35 — the 'gracile-static' sentinel is hidden cross-file config duplicated in 5 places rather than centralized"
+      ],
+      "rationale": "Abstractions are few, small and each earns its keep with clean boundaries; the deductions are the duplicated build-time sentinel and domain constants living in the formatting utils."
+    },
+    "readability": {
+      "score": 4,
+      "evidence": [
+        "app/src/lib/api.ts:1-8 — module doc comment explains the caching policy and why",
+        "app/src/routes/pokemon/[name].client.ts:2-5 — comment explains the aria-sort/sorting contract including 'missing sorts last'",
+        "app/src/routes/pokemon/[name].ts:100-290 — ~190-line route mixing data loading, table model, markup and the data-v sorting protocol; docs advise routes as thin entry points",
+        "app/src/lib/format.ts — helper names (humanize, dexNumber, latestFlavorText) map 1:1 to spec definitions, easy to audit"
+      ],
+      "rationale": "Naming, comments and consistency are good; the main rough spot is the oversized Pokémon route where the implicit data-v/data-n contract between template and client script lives in two files."
+    },
+    "review_cost": {
+      "score": 4,
+      "evidence": [
+        "app/src/routes/index.ts:35 — ask: centralize/justify the gracile-static sentinel or cite the framework source",
+        "app/src/routes/index.ts:164 — ask: drop the as-any casts and type handler returns so Gracile's inference works",
+        ".gitignore:1-3 — ask: add app/dist/ (build output currently not ignored and present in the tree)",
+        "app/src/routes/index.ts:78 — ask: distinguish 404 (bad filter value) from upstream API failure"
+      ],
+      "rationale": "Approve-with-nits territory: the changes I'd request (typing, one shared helper, a .gitignore line, error handling polish) don't require rework of architecture or behavior."
+    }
+  },
+  "overall": 4,
+  "findings": [
+    {
+      "severity": "medium",
+      "location": "app/src/routes/index.ts:35",
+      "issue": "The 'gracile-static' hostname sentinel is an undocumented framework-internal convention, copy-pasted into five route handlers with only a one-line comment; it is hidden cross-file config that breaks silently if Gracile changes internals.",
+      "suggestion": "Centralize it in app/src/lib (e.g. isBuildTimeStub(url)) with a comment citing the exact Gracile version/behavior, or verify whether handlers run at build in server output mode at all and delete the guards if not."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/routes/index.ts:164",
+      "issue": "Every document/template casts context.props.GET as any, discarding the typed-props inference that current Gracile (0.11) documents as the core defineRoute benefit; handler returns are likewise untyped (species: any, pokemon: any).",
+      "suggestion": "Define minimal interfaces for the API payloads and handler return shapes, declare handler before document/template (already done), and let context.props.GET flow through without casts."
+    },
+    {
+      "severity": "medium",
+      "location": ".gitignore:1",
+      "issue": "app/dist/ (built server/client bundles) is not gitignored, so build artifacts risk landing in the repo on every commit.",
+      "suggestion": "Add app/dist/ (and app/node_modules/) to .gitignore."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/routes/index.ts:78",
+      "issue": "Type and generation filter failures are swallowed into an empty result list with HTTP 200, so an API outage is indistinguishable from 'No Pokémon found' for filters.",
+      "suggestion": "Only treat 404 as 'no results'; propagate other ApiError statuses as a 502 or an error page."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/routes/pokemon/[name].ts:114",
+      "issue": "defaultVariety.pokemon.url is accessed without a guard; a species with no varieties would throw a TypeError and produce a 500 instead of the not-found page.",
+      "suggestion": "Guard defaultVariety and return the documented notFound props with responseInit.status = 404."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/routes/pokemon/[name].ts:100",
+      "issue": "The Pokémon route is ~190 lines mixing data loading, move-table model construction, markup and the data-v/data-n sorting contract consumed by [name].client.ts; Gracile's docs recommend keeping routes thin and moving logic to components/lib.",
+      "suggestion": "Extract the moves-table model (method ordering, row shaping) into src/lib and keep the implicit sorting protocol in one shared, commented place."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/lib/format.ts:58",
+      "issue": "Domain rules (EXCLUDED_TYPES, isAlternateForm) live in a display-formatting module, blurring what the module is for.",
+      "suggestion": "Move domain constants/predicates to a small src/lib/pokeapi-domain.ts (or api.ts) alongside idFromUrl."
+    },
+    {
+      "severity": "low",
+      "location": "app/server.js:1",
+      "issue": "No express error middleware; an upstream PokeAPI outage surfaces as unhandled 500s with stack traces from the framework adapter.",
+      "suggestion": "Add a final express error handler rendering a friendly error page with a sane status."
+    }
+  ],
+  "summary": "A genuinely idiomatic Gracile 0.11 app: route/document/template split, typed-props handler ordering, sibling .client.ts scripts, the 404.ts convention and the express node adapter all match the current docs, and shared lib modules are small with clean boundaries. Remaining issues are polish: as-any props casts that throw away Gracile's documented type inference, an undocumented 'gracile-static' build sentinel pasted into five handlers, ungitignored build output, and a couple of minor error-swallowing paths. I'd approve after one light round of nits."
+}
+```

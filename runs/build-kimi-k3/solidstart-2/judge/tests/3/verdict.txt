@@ -1,0 +1,153 @@
+I've read the whole app. Now I'll verify my read of the test situation before scoring: the facts say 0 test files, and it's confirmed — `app/package.json` has no `test` script, `devDependencies` is empty, and there's no test file anywhere under `app/` (only `src/{routes,components,lib}`, `app.css`, entries, and config). The app contains ~676 lines of substantive logic — a full data-access layer with filtering, pagination, form-dedup, sorting, and URL state — none of it guarded by anything the app itself owns.
+
+## Review
+
+**What's in front of me.** `app/src/lib/data.js` holds all the risky logic: the memory-cached API client (`apiFetch`, data.js:15–24), alternate-form exclusion and species collapsing (`cardsFromPokemonRefs`, data.js:93–115), home filtering + pagination + count (data.js:139–200), moves grouping/ordering per version group (data.js:238–323), and damage-relation/type pages. `app/src/lib/util.js` holds the name/flavor/ID helpers. `app/src/routes/index.jsx:25–51` manages URL state (debounced search, filter→param sync, page hrefs). `app/src/components/MoveTables.jsx:13–49` implements column sorting with missing-values-last semantics. None of it has a single test.
+
+**The critical observation:** once the acceptance suite is retired or someone refactors `data.js`, essentially *any* behavior is unprotected. The most fragile spots:
+
+- **Filtering/pagination** (`app/src/lib/data.js:160–190`): the three-way filter conjunction, the `page > totalPages` clamp, and the `(page-1)*48` slice are classic off-by-one territory. A regression that breaks the count text, drops `q` while paging, or forgets to reset `page` on filter change (handled in `app/src/routes/index.jsx:33–38, 45–51`) would ship silently.
+- **Move tables** (`app/src/lib/data.js:238–323` and `app/src/components/MoveTables.jsx:13–22`): method ordering (level-up/machine/egg/tutor then alphabetical), level-then-name default sort, and the "missing values sort last in both directions" comparator are intricate and exactly the kind of thing a refactor breaks invisibly. The grouping at data.js:240–248 can also emit duplicate rows if a move lists the same version group twice — nothing would catch that.
+- **Error paths are conflated and fragile.** `apiFetch` (data.js:19–23) caches *rejections and non-OK responses as `null` forever*, so one transient API hiccup poisons the process; every caller treats `null` as "not found" (`app/src/routes/pokemon/[name].jsx:111–115` etc.), so an API outage renders 404s. And if the evolution-chain fetch fails, `evolution` is `null` (data.js:232) while `<EvoNode node={d().evolution} />` (`app/src/routes/pokemon/[name].jsx:107`) dereferences `props.node.name` unconditionally — a hard crash no test would prevent.
+- **URL-state race** in the search box: `value={d().q}` (`app/src/routes/index.jsx:30`) reflects the server-confirmed query, so keystrokes typed while the refetch is in flight can be clobbered when the URL catches up. Behavioural tests of "type fast, expect results for the final input" would expose it.
+- **Pure helpers** (`app/src/lib/util.js:5–38`): `humanize`, `latestEnglishFlavor` (last-English-entry semantics), `dexNumber` padding, `idFromUrl` regex — trivially unit-testable, currently untested.
+
+The one mitigation is that `data.js` is a clean, query-based data layer with pure helpers; a test suite could be added cheaply against a stubbed `fetch` or the fixture API. That it wasn't is the finding.
+
+```json
+{
+  "dimension": "tests",
+  "criteria": {
+    "coverage_of_risk": {
+      "score": 1,
+      "evidence": [
+        "app/src/lib/data.js:139-200 — home filtering, 48-per-page pagination and count logic: zero tests",
+        "app/src/lib/data.js:238-323 — move grouping, method ordering and level sorting: zero tests",
+        "app/src/components/MoveTables.jsx:13-22 — missing-values-last comparator: zero tests",
+        "app/src/lib/util.js:5-38 — humanize/latestEnglishFlavor/dexNumber/idFromUrl: zero tests",
+        "app/src/routes/index.jsx:25-51 — URL query state and page href construction: zero tests"
+      ],
+      "rationale": "No tests exist in app/ at all, and the app's riskiest logic (filtering, pagination, sorting, URL state, form-dedup) is entirely uncovered except by the throwaway acceptance suite."
+    },
+    "behaviour_not_implementation": {
+      "score": 1,
+      "evidence": [
+        "app/package.json:5-10 — no test script, no test runner, empty devDependencies"
+      ],
+      "rationale": "There are no tests to be behavioural or implementation-focused; nothing would be caught."
+    },
+    "regression_power": {
+      "score": 1,
+      "evidence": [
+        "app/src/lib/data.js:93-115 — cardsFromPokemonRefs alt-form exclusion/collapse: a regression reintroducing forms would pass everything in app/",
+        "app/src/lib/data.js:232 — evolution null on chain-fetch failure feeds app/src/routes/pokemon/[name].jsx:107 which dereferences it unguarded"
+      ],
+      "rationale": "Breaking literally any behaviour — filter conjunctions, page slicing, method ordering, form exclusion — fails no test the app owns."
+    },
+    "signal_to_noise": {
+      "score": 3,
+      "evidence": [
+        "app/package.json:5-10 — no test infrastructure to produce noise or signal"
+      ],
+      "rationale": "No tests, so no low-value padding either; scored 3 per the rubric for absent suites."
+    }
+  },
+  "overall": 1,
+  "findings": [
+    {
+      "severity": "high",
+      "location": "app/package.json:5",
+      "issue": "The app ships zero tests despite ~700 lines of intricate data-transformation logic (filtering, pagination, sorting, dedup, URL state) that is only guarded by the acceptance suite.",
+      "suggestion": "Add a minimal Vitest suite for app/src/lib/util.js and app/src/lib/data.js against a stubbed fetch (the fixture API shape), covering filtering, pagination edges, method ordering, and missing-value sorting."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/lib/data.js:19-23",
+      "issue": "apiFetch caches the promise for failed/ non-OK requests, so a transient error or 404 is stored as null for the lifetime of the process and every caller then renders a 404 page.",
+      "suggestion": "Only cache successful responses; delete the cache entry (or cache an error marker with TTL) when fetch rejects or res.ok is false."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/routes/pokemon/[name].jsx:107",
+      "issue": "EvoNode dereferences props.node.name unconditionally, but getPokemonPage (data.js:232) returns evolution: null when the evolution-chain fetch fails — an API hiccup crashes the whole Pokémon page.",
+      "suggestion": "Guard the Evolution section with <Show when={d().evolution}> (and/or fall back to a single-node chain) and cover it with an error-path test."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/routes/index.jsx:30",
+      "issue": "The search input's value is bound to the server-confirmed d().q, so keystrokes typed while the debounced navigation/refetch is in flight can be clobbered when the URL catches up — a race no current test would catch.",
+      "suggestion": "Keep the raw input in a local signal and sync from the URL only on external changes, and add a behavioural test that types quickly and asserts results for the final input."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/lib/data.js:240-248",
+      "issue": "Move grouping pushes one row per version_group_details entry, so a move listed twice for the same version group yields duplicate table rows; nothing would catch this or a regression in method ordering/level sorting.",
+      "suggestion": "Dedupe rows per (move, level) and unit-test the grouping and ordering of byMethod/methodEntries."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/routes/index.jsx:41-44",
+      "issue": "The debounce timer is never cleared on unmount, so a pending updateParams can navigate after the user has left the home page.",
+      "suggestion": "Clear searchTimer in onCleanup and cover filter interaction ordering with a test."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/lib/data.js:185-187",
+      "issue": "Page silently clamps to totalPages when page is out of range, diverging URL (?page=999) from rendered state — a reasonable choice, but untested behaviour someone could change without noticing.",
+      "suggestion": "Pin the clamp/redirect behaviour with a test for out-of-range page values."
+    }
+  ],
+  "summary": "The app contains no tests of its own: no runner, no test script, zero test files, while all its substantial logic — filtering, 48-per-page pagination, alternate-form exclusion, move-table grouping and sorting, and URL state — lives in one untested data layer. The acceptance suite is currently the only guard, so any refactor of app/src/lib/data.js or the URL-sync in routes/index.jsx can silently regress behaviour, including a real latent crash in the Evolution section and a failure-caching bug in the API client. The data layer is cleanly factored for testability (pure helpers, query functions), which makes the absence of even a small unit suite the central omission of this change.",
+  "wroteTests": false,
+  "testCount": 0,
+  "valuableTests": [],
+  "lowValueTests": [],
+  "untested": [
+    {
+      "area": "Home filtering, pagination and count (app/src/lib/data.js:139-200)",
+      "risk": "high",
+      "likelyBug": "Off-by-one in the (page-1)*48 slice, a broken filter conjunction (type × generation × search), a wrong count text, or the page-not-reset-on-filter-change rule in app/src/routes/index.jsx:33-38 would all ship undetected."
+    },
+    {
+      "area": "Moves grouping and ordering per version group (app/src/lib/data.js:238-323)",
+      "risk": "high",
+      "likelyBug": "Method order drifting from Level Up/Machine/Egg/Tutor, level-then-name default sort breaking, duplicate rows when a move repeats for a version group, or the default game (highest order) being picked wrong."
+    },
+    {
+      "area": "Move-table column sorting and aria-sort (app/src/components/MoveTables.jsx:13-49)",
+      "risk": "medium",
+      "likelyBug": "The missing-values-sort-last-in-both-directions rule and ascending-then-descending toggle are easy to break in a refactor of compareValues; nobody would notice until users report it."
+    },
+    {
+      "area": "Alternate-form exclusion and species collapsing (app/src/lib/data.js:93-115, 31-37)",
+      "risk": "medium",
+      "likelyBug": "Mega/alternate forms leaking back into card lists or Learned-by lists, or duplicate cards, if the ID cutoff or dedup logic regresses."
+    },
+    {
+      "area": "URL query state on the home page (app/src/routes/index.jsx:25-51)",
+      "risk": "medium",
+      "likelyBug": "Pagination hrefs dropping q/type/generation, the debounced search clobbering in-flight keystrokes via value={d().q}, or stale navigations after unmount from the uncleared timer."
+    },
+    {
+      "area": "Not-found vs API-failure paths (app/src/lib/data.js:19-23; all routes' Show when={data() === null})",
+      "risk": "medium",
+      "likelyBug": "A transient API failure being cached as null forever and rendered as a 404 page with HttpStatusCode 404 — the error path is indistinguishable from 'missing resource' and untested."
+    },
+    {
+      "area": "Evolution chain rendering (app/src/routes/pokemon/[name].jsx:19-30, 107)",
+      "risk": "medium",
+      "likelyBug": "A null chain (failed fetch) crashes the page via props.node.name; branching chains (Eevee) losing nested list structure would also go unnoticed."
+    },
+    {
+      "area": "Pure helpers: humanize, latestEnglishFlavor, dexNumber, idFromUrl (app/src/lib/util.js:5-38)",
+      "risk": "low",
+      "likelyBug": "Wrong language entry selected, whitespace collapse dropped, dex-number padding off, or the ID regex breaking on URL variants — cheap one-line tests would pin all of these."
+    },
+    {
+      "area": "Ability hidden flag mapping (app/src/lib/data.js:357-366)",
+      "risk": "low",
+      "likelyBug": "The 'Hidden ability' note attaching to the wrong cards (keyed by pokemon ID merged from ability.pokemon) after a refactor of cardsFromPokemonRefs."
+    }
+  ]
+}
+```

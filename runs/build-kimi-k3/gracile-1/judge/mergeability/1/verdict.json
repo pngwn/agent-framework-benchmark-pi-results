@@ -1,0 +1,110 @@
+{
+  "dimension": "mergeability",
+  "criteria": {
+    "idiomatic": {
+      "score": 4,
+      "evidence": [
+        "app/server.js:1-15 — matches the Gracile 0.11 output-modes doc's Express example almost verbatim (getClientBuildPath + nodeAdapter)",
+        "app/src/document.ts:1-28 — server-html html + <route-template-outlet>, exactly the documented base-document pattern",
+        "app/src/routes/moves/[name].ts:9-24 — defineRoute handler→props→template flow and responseInit.status = 404, both as documented",
+        "app/src/routes/404.ts:1-11 — custom 404 route, the engine's documented unmatched-URL fallback (request.js rewrites to /404/)",
+        "app/src/routes/index.ts:36 — `url.hostname === 'gracile-static'` build-time guard; verified real in engine 0.11.0 (renderRoutes calls handlers with new URL(pattern, 'http://gracile-static')), correctly prevents build-time API fetch",
+        "app/src/routes/types/[name].ts:44 — `context.props.GET as any` defeats defineRoute's typed-props feature the docs showcase",
+        "app/vite.config.ts:1-9 + app/package.json:6-11 — output: 'server' with pinned 0.11.0 (current stable); but no tsconfig despite Gracile shipping tsconfig presets"
+      ],
+      "rationale": "The architecture is what the framework's own examples look like, including a correct (if undocumented-sentinel-based) guard against Gracile's build-time handler stub call. Knocked one point for casting away the framework's typed props and skipping type checking entirely."
+    },
+    "correctness_risks": {
+      "score": 3,
+      "evidence": [
+        "app/src/lib/api.ts:30-52 — acquire()/release() hand-off race: release() decrements and resolves a waiter, but a fresh acquire() can take the slot before the waiter's microtask increments, overshooting MAX_CONCURRENT",
+        "app/src/routes/index.ts:64-80 — type/generation filter `catch { species = []; }` renders 'No Pokémon found' with HTTP 200 when the API errors, masking failures",
+        "app/src/routes/pokemon/[name].ts:114-118 — `defaultVariety.pokemon.url` and `species.evolution_chain.url` used without null guards; malformed species data yields a 500 instead of the not-found page",
+        "app/src/lib/api.ts:69-78 — unbounded in-memory cache Map (acceptable per spec for the fixed snapshot, but no cap or eviction policy is documented)"
+      ],
+      "rationale": "No injection, leak, or SSR/CSR hazards (Lit auto-escapes; no hydration), and 404 handling is right — but the concurrency-pool race, error-swallowing filters, and unguarded data access are real, minor fragilities a reviewer would flag."
+    },
+    "global_abstractions": {
+      "score": 4,
+      "evidence": [
+        "app/src/lib/api.ts — single server-only data module with one cache and one pool; clear boundary, never imported by client scripts",
+        "app/src/lib/format.ts, app/src/lib/components.ts — small pure helpers, genuinely shared",
+        "app/src/lib/species-cards.ts:26-53 — one helper correctly deduplicates Pokémon→species and drops alternate forms for three different routes",
+        "app/src/routes/index.ts:36, app/src/routes/pokemon/[name].ts:104, app/src/routes/moves/[name].ts:11, app/src/routes/abilities/[name].ts:11, app/src/routes/types/[name].ts:11 — the gracile-static guard and 404 preamble copy-pasted across five handlers"
+      ],
+      "rationale": "Abstractions are few and well-bounded; the only structural complaint is the five-fold duplication of the build-time guard/404 preamble that should be one `isBuildTimeStub`/`fetchOr404` helper in lib."
+    },
+    "readability": {
+      "score": 4,
+      "evidence": [
+        "app/src/lib/api.ts:1-8, app/src/lib/species-cards.ts:14-24 — comments explain intent (caching policy, entry-shape variance)",
+        "app/src/routes/pokemon/[name].ts:14-97 — moves-table helpers named for what they render; but the file is ~340 lines mixing data loading, sorting rules and full page markup",
+        "app/src/routes/pokemon/[name].ts:66-70, 91 — `data-v`/`data-n`/`data-missing` sort-key attributes are cryptic and only documented by their consumer in [name].client.ts",
+        "app/src/routes/types/[name].ts:9-17 — RELATIONS table maps spec terms to API keys; easy to extend"
+      ],
+      "rationale": "Consistent naming and organization that mirrors the framework; a new teammate finds their way quickly. Rough spots are the oversized Pokémon route file and the attribute-based sort protocol shared between server and client."
+    },
+    "review_cost": {
+      "score": 4,
+      "evidence": [
+        "app/src/routes/abilities/[name].ts:15-33 — clean, small route a reviewer can approve at a glance",
+        "app/src/routes/pokemon/[name].client.ts:1-47 — vanilla DOM sorting is self-contained and correct (missing-values-last verified)",
+        "app/package.json:12 — zero devDependencies: no TypeScript/tsc, so `as any` casts and the missing tsconfig can't even be caught by CI",
+        "app/dist/ present in app/ with no app/.gitignore and root .gitignore lacking dist — build output risks landing in the PR"
+      ],
+      "rationale": "Approve with a round of small changes: extract the duplicated guard, fix the pool hand-off, add a tsconfig/typecheck, and gitignore dist. Nothing requires rework."
+    }
+  },
+  "overall": 4,
+  "findings": [
+    {
+      "severity": "medium",
+      "location": "app/src/lib/api.ts:36-52",
+      "issue": "Concurrency-pool slot hand-off is not atomic: release() frees the slot before the waiter increments, so a concurrent acquire() can take it too and activeCount overshoots MAX_CONCURRENT.",
+      "suggestion": "Have release() transfer the slot directly to the waiter (increment before resolving, or resolve the waiter with the already-held slot) instead of decrement/re-increment."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/routes/index.ts:64-80",
+      "issue": "Type and generation filter failures are swallowed (`catch { species = []; }`), rendering 'No Pokémon found' with HTTP 200 instead of surfacing the API error.",
+      "suggestion": "Distinguish 404 (unknown filter value) from other failures; on 5xx/network errors let the error propagate to Gracile's error page or retry."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/routes/index.ts:36 (and pokemon/[name].ts:104, moves/[name].ts:11, abilities/[name].ts:11, types/[name].ts:11)",
+      "issue": "The `url.hostname === 'gracile-static'` build-time guard and the try/api/404 handler preamble are duplicated across five routes; the sentinel itself is an undocumented engine internal.",
+      "suggestion": "Extract shared helpers (e.g. `isBuildTimeStub(url)` and `fetchResourceOr404(name, path, responseInit)`) into src/lib, with a comment citing the engine's renderRoutes behavior."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/routes/types/[name].ts:44",
+      "issue": "`context.props.GET as any` (repeated in every route) discards the typed props defineRoute is designed to provide, and the whole PokeAPI surface is `any`.",
+      "suggestion": "Drop the casts and let handler return types flow into document/template contexts; add minimal interfaces for the API resources actually consumed."
+    },
+    {
+      "severity": "low",
+      "location": "app/package.json:12",
+      "issue": "No TypeScript compiler, tsconfig, or @types/node despite a .ts codebase — nothing type-checks, and Gracile ships tsconfig presets (base/strict/strictest) for exactly this.",
+      "suggestion": "Add a tsconfig extending '@gracile/gracile/tsconfigs/strict' plus typescript and @types/node devDependencies, and a `check` script."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/routes/pokemon/[name].ts:114-118",
+      "issue": "`defaultVariety.pokemon.url` and `species.evolution_chain.url` are dereferenced without guards; a species with missing varieties or chain would throw and 500 instead of showing Not found.",
+      "suggestion": "Treat missing varieties/evolution_chain as not-found (or render those sections empty) instead of letting the handler throw."
+    },
+    {
+      "severity": "low",
+      "location": "app/dist/ (no app/.gitignore; root .gitignore lacks dist)",
+      "issue": "Build output sits in the working tree with nothing preventing it from being committed.",
+      "suggestion": "Add app/.gitignore with `dist/` and `node_modules/`."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/lib/api.ts:69-78",
+      "issue": "Unbounded in-memory cache keyed by URL with no eviction; fine for this fixed snapshot but undocumented as a policy.",
+      "suggestion": "Keep it, but state the expected working-set bound in the module comment (or add a simple LRU cap) so future data sources don't balloon memory."
+    }
+  ],
+  "summary": "This is a faithful, current-stable Gracile 0.11 server-mode app: routes, document, client siblings, Express adapter and 404 handling all match the framework's documented patterns, and it even correctly guards the engine's undocumented build-time handler stub call. The shared libs are small and well-bounded, and the only structural complaint is a five-fold duplicated guard/404 preamble. Minor real bugs (pool hand-off race, error-swallowing filters) and the total absence of type checking keep it at approve-with-one-round rather than approve-as-is."
+}

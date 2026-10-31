@@ -1,0 +1,89 @@
+## Review
+
+I read the spec, all of `app/src/` (pages, components, `lib/`, `public/js/`, `global.css`), and verified against current Astro (the app pins `astro@^7.4.4` — the current stable line as of 2026-10 — and `@astrojs/node@^11`, `app/package.json:11-12`, which is correct and current).
+
+**Structure at a glance:** `output: 'server'` with the Node standalone adapter (`app/astro.config.mjs`), six routes, five components, and three small lib modules (`api.js` fetch+cache, `data.js` derived data, `format.js` pure formatting). Pages do their own data shaping; client enhancement lives in two IIFE scripts under `app/public/js/`.
+
+**Scenario walk-throughs (evidence for the scores):**
+
+1. **Remove Abilities** — delete `app/src/pages/abilities/[name].astro` and cut the clearly-bounded Abilities section at `app/src/pages/pokemon/[name].astro:200-209`. The nav (`app/src/components/Layout.astro:31-33`) has no Abilities link, and `NotFound`/404 are generic. Residue: `hidden` prop in `app/src/components/PokemonCard.astro:14,39` and `.card-hidden` in `app/src/styles/global.css:253` become dead — that's what keeps this from a 5.
+2. **Sprite bug (Deoxys et al.)** — the sprite decision is centralized: `spriteFor()` at `app/src/lib/api.js:49`, used only by `app/src/components/PokemonCard.astro:22`, and all four card lists render through that component. So the simple fix is one place. But the card takes a species `id`, not a sprite URL; if the fix needs the default Pokémon's own `front_default`, every card producer must thread new data through: `app/src/lib/data.js:48-64` (`pokemonRefsToSpecies`), `app/src/pages/abilities/[name].astro:19-29` (its own inline copy of that mapping), and `app/src/pages/index.astro` (species list only). One fix covers every list for the spec-permitted case; the seam exists but is shallow.
+3. **Sort cards by name** — touch `app/src/lib/data.js:63` (`out.sort` in `pokemonRefsToSpecies`, covers Moves "Learned by" and Types "Pokémon"), `app/src/pages/abilities/[name].astro:29` (second, independent sort), and `app/src/pages/index.astro:43-56` (the filtered list). Three files, two of which contain duplicated "unique species by dex" logic — a comparator that would also be written twice unless you factor it.
+4. **Items section** — reusable: `Layout`, `NotFound`, `TypeBadge`, `PokemonCard`, and the whole `lib/` (fetch/404 semantics, `humanize`/`englishName`/`latestEnglishFlavor`/`orDash`, `pokemonRefsToSpecies`). Not reusable: the ~35-line page scaffold — `try { fetchJson(…); …shape data } catch (err) { if (err?.status === 404) … }` — is duplicated verbatim across `app/src/pages/moves/[name].astro:20-51`, `abilities/[name].astro:13-34`, `types/[name].astro:26-49`, `pokemon/[name].astro:33-155`, so `/items/:name` means copying it again.
+5. **API base URL / caching** — one file: `app/src/lib/api.js:4,13` (base URL and `/api/v2` joining), `:8-38` (the promise cache and its retry-on-failure policy), `:49` (media base). Nothing else in `src/` hardcodes an origin (grep for `localhost|9000` confirms). Trivial.
+
+**Cross-cutting observations:**
+
+- The abilities page reimplements the Pokémon→species mapping that `data.js:48-64` already owns (it needs `is_hidden`, but the shared core — id extraction, `MAX_MAIN_ID` filter, fetch, species dedupe — is copy-pasted at `app/src/pages/abilities/[name].astro:19-29`). This is the sharpest duplication in the app; a change to form-exclusion rules lands in two places.
+- Filter-state serialization exists twice: server-side `pageUrl` at `app/src/pages/index.astro:52-59` and client-side `apply` at `app/public/js/home.js:9-14` both encode "omit empty/default params", and `home.js` depends on five hardcoded element IDs that `index.astro` must keep producing. Adding a filter means editing both, plus the swap target `#results`.
+- The `<p class="result-count">{n} Pokémon</p><ul class="card-grid">` card-list markup is repeated at `app/src/pages/moves/[name].astro:84-90`, `abilities/[name].astro:58-64`, `types/[name].astro:85-92`, `index.astro:105-113` — a `CardList` component is the obvious missing abstraction.
+- Typing is weak at the seams: every page's shaped `data` object is `any` (e.g. `app/src/pages/pokemon/[name].astro:31,121-140`), so refactors get no compiler help — cheap to fix with interfaces in `lib/`.
+- Styling is one 553-line `app/src/styles/global.css` shared by all pages. Consistent, but removing a feature leaves dead rules (`.card-hidden`, `.move-list`, `.relations`) and Astro's per-component scoped styles would localize them.
+
+**What's good:** `format.js` is exactly the right pure-function layer; `api.js` cleanly isolates the one thing most likely to change (origin + caching); components take narrow props with no prop drilling; the server/client split is crisp — the client scripts only enhance already-working pages, so removing `home.js` breaks nothing functionally. On current Astro 7 this is a conventional, well-organized SSR app; nothing deprecated or experimental was used.
+
+```json
+{
+  "dimension": "editability",
+  "criteria": {
+    "removability": {
+      "score": 4,
+      "evidence": [
+        "app/src/pages/abilities/[name].astro — entire feature is one file, delete it",
+        "app/src/pages/pokemon/[name].astro:200-209 — Abilities section is the only inbound link, clearly bounded",
+        "app/src/components/Layout.astro:31-33 — nav has no Abilities link, nothing else to edit",
+        "app/src/styles/global.css:253 — .card-hidden and PokemonCard.astro's hidden prop become dead after removal"
+      ],
+      "rationale": "Deleting the Abilities route is a directory delete plus one well-delimited section edit, with no nav changes needed; only minor dead CSS/prop residue keeps it from a 5."
+    },
+    "changeability": {
+      "score": 3,
+      "evidence": [
+        "app/src/lib/api.js:49 — spriteFor is the single sprite source; PokemonCard.astro:22 is its only consumer, so the Deoxys fix has one home",
+        "app/src/pages/abilities/[name].astro:19-29 — reimplements the pokemon→species mapping already owned by app/src/lib/data.js:48-64; form-exclusion/dedupe fixes land twice",
+        "app/src/pages/index.astro:52-59 and app/public/js/home.js:9-14 — filter-param serialization duplicated server and client"
+      ],
+      "rationale": "The card rendering fix is genuinely one place, but two pieces of domain logic are duplicated across files (species mapping, filter params), so several realistic fixes land in 2-3 spots."
+    },
+    "coupling": {
+      "score": 3,
+      "evidence": [
+        "app/src/components/PokemonCard.astro:9-14, TypeBadge.astro:3-7, EvolutionNode.astro:4-9 — components take narrow props, no internals leaked",
+        "app/public/js/home.js:4-6,9-14 — implicit contract on five element IDs and param rules owned by index.astro",
+        "app/src/lib/api.js:4,49 — data-source knowledge isolated to one module",
+        "app/src/styles/global.css — single 553-line sheet shared by every page"
+      ],
+      "rationale": "Component seams are clean and the API origin is properly isolated, but the home page's server/client pair share an undocumented ID-and-params contract, and one global stylesheet couples all pages' styling."
+    },
+    "abstraction_design": {
+      "score": 3,
+      "evidence": [
+        "app/src/lib/format.js:1-33 — right-sized pure helpers, easily reused by any new section",
+        "app/src/pages/moves/[name].astro:22-34 vs abilities/[name].astro:15-25 vs types/[name].astro:29-38 — identical fetch/shape/404 scaffold copy-pasted per page",
+        "app/src/pages/moves/[name].astro:84-90, abilities/[name].astro:58-64, types/[name].astro:85-92, index.astro:105-113 — count+card-grid list markup duplicated four times, no CardList component"
+      ],
+      "rationale": "The lib layer stretches well, but the resource-page scaffold and the card-list markup are copied rather than abstracted, so adding an Items section means duplicating ~35 lines of moves-page boilerplate."
+    }
+  },
+  "overall": 3,
+  "findings": [
+    { "severity": "medium", "location": "app/src/pages/abilities/[name].astro:19-29", "issue": "Reimplements the pokemon→unique-species mapping (id extraction, MAX_MAIN_ID filter, fetch, dedupe) that lib/data.js:48-64 already owns as pokemonRefsToSpecies", "suggestion": "Extend pokemonRefsToSpecies to carry through per-entry metadata (e.g. is_hidden) and make the abilities page consume it" },
+    { "severity": "medium", "location": "app/public/js/home.js:9-14", "issue": "Filter query-param serialization and the 'omit empty/default' rule are duplicated from index.astro:52-59, and the script depends on five hardcoded element IDs owned by index.astro", "suggestion": "Single source of truth: either derive params from the form on both sides via one shared module, or move the client script into index.astro as a colocated Astro script" },
+    { "severity": "medium", "location": "app/src/pages/moves/[name].astro:22-34", "issue": "The fetch/shape/try-catch-404 page scaffold is copy-pasted in all four dynamic routes, so a new resource type (Items) duplicates it again", "suggestion": "Extract a loadResource(name, path, shaper) helper in lib/ that throws/returns a not-found sentinel, keeping pages declarative" },
+    { "severity": "medium", "location": "app/src/pages/types/[name].astro:85-92", "issue": "'<count> Pokémon' + card-grid list markup repeated identically in four routes with no shared CardList component", "suggestion": "Add a CardList.astro (items + heading slot) and route all card lists through it, alongside PokemonCard" },
+    { "severity": "low", "location": "app/src/pages/pokemon/[name].astro:31", "issue": "Every page's shaped data object is typed `any` (data, rows, relations), so refactors across page boundaries get no compiler support", "suggestion": "Define interfaces for the shaped data (and API records) in lib/ and type Astro.props/data from them" },
+    { "severity": "low", "location": "app/src/lib/api.js:6", "issue": "Exported `apiBase` is dead code — nothing imports it", "suggestion": "Delete it, or use it in the rare place a full origin is needed" },
+    { "severity": "low", "location": "app/src/styles/global.css:253", "issue": "Single 553-line global stylesheet means feature removal strands dead rules (.card-hidden, .move-list, .relations) and every page edit touches a shared file", "suggestion": "Move per-feature rules into Astro scoped <style> blocks in the owning components/pages, keeping tokens + layout global" },
+    { "severity": "low", "location": "app/src/pages/pokemon/[name].astro:200-209", "issue": "Feature removal leaves dead code: the `hidden` prop on PokemonCard.astro:14 and its CSS exist only for the Abilities feature", "suggestion": "When removing a feature, grep for its props/classes and remove them in the same change" }
+  ],
+  "summary": "A conventionally structured, current-Astro SSR app with a genuinely good lib layer (pure formatters, isolated API/cache module) and narrow-prop components; the card-sprite and data-source seams mean the highest-risk changes land in one file. Its weaknesses are duplicated domain logic (pokemon→species mapping, filter params, page scaffolding, card-list markup) and pervasive `any` typing, which push multi-file fixes and copy-paste onto the next maintainer. Solid, unremarkable, easy to navigate — 3."
+  ,
+  "scenarios": [
+    { "change": "Remove the Abilities pages and every link to them", "files": ["app/src/pages/abilities/[name].astro", "app/src/pages/pokemon/[name].astro", "app/src/components/PokemonCard.astro", "app/src/styles/global.css"], "difficulty": 4, "notes": "One route file to delete plus one bounded section in the Pokémon page; nav needs no edit. Only wrinkle is remembering the hidden-ability card prop and its CSS become dead." },
+    { "change": "Fix wrong sprite for species whose default Pokémon differs (e.g. Deoxys)", "files": ["app/src/components/PokemonCard.astro", "app/src/lib/api.js"], "difficulty": 4, "notes": "spriteFor (api.js:49) is the single sprite source and every list renders through PokemonCard, so one fix covers all four lists. Only if the fix needs per-Pokémon sprite URLs do the data producers (data.js:48-64, abilities page, index) have to thread new data through." },
+    { "change": "Add sorting by name to every list of Pokémon cards", "files": ["app/src/lib/data.js", "app/src/pages/abilities/[name].astro", "app/src/pages/index.astro"], "difficulty": 3, "notes": "data.js covers moves+types lists, but the abilities page sorts independently and the home page filters/sorts its own list; the comparator would be written twice unless factored. Client home.js needs no change since it swaps server markup." },
+    { "change": "Add an Items section (/items, /items/:name) shaped like Moves", "files": ["app/src/pages/items/index.astro", "app/src/pages/items/[name].astro", "app/src/components/Layout.astro"], "difficulty": 3, "notes": "Layout, NotFound, TypeBadge, PokemonCard and all of lib/ (fetch/404 semantics, formatters, pokemonRefsToSpecies) are directly reusable. But the ~35-line fetch/shape/404 page scaffold and the count+card-grid markup must be copied from the moves page rather than shared." },
+    { "change": "Change the API base URL and caching rules", "files": ["app/src/lib/api.js"], "difficulty": 5, "notes": "Base URL, /api/v2 joining, media/sprite origin and the in-memory promise cache (including its retry-on-failure policy) all live in one module; grep confirms no other origin is hardcoded anywhere in src/." }
+  ]
+}
+```

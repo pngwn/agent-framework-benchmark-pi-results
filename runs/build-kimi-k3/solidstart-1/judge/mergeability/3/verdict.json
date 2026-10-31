@@ -1,0 +1,112 @@
+{
+  "dimension": "mergeability",
+  "criteria": {
+    "idiomatic": {
+      "score": 4,
+      "evidence": [
+        "app/vite.config.ts:5-6 — solidStart() + nitro(), exactly the documented SolidStart v2 vite.config.ts",
+        "app/src/lib/queries.ts:6-9 — 'use server' placed inside the query function per the use-server reference (not file-level)",
+        "app/src/routes/pokemon/[name].tsx:12-14,17 — route.preload + createAsync, the documented data-loading pair",
+        "app/src/routes/index.tsx:57,90 — useSearchParams with undefined to delete a key, matching documented SetSearchParams semantics",
+        "app/src/routes/[...404].tsx:3 — catch-all file route re-exporting NotFound, idiomatic 404 routing",
+        "app/src/app.tsx:21 — Suspense at the root with no ErrorBoundary, though router docs pair the two around createAsync data"
+      ],
+      "rationale": "Reads like the current SolidStart v2 docs: correct plugin config, query/use-server placement, preload+createAsync, URL-driven filter state. Only misses are the recommended-but-absent ErrorBoundary and HttpStatusCode."
+    },
+    "correctness_risks": {
+      "score": 3,
+      "evidence": [
+        "app/src/lib/api.ts:19-25 — non-404 failures throw and no ErrorBoundary exists anywhere (grep: 0 hits), so an API 5xx/outage rejects createAsync into an unhandled render error with no user-facing state",
+        "app/src/lib/api.ts:10,162 — module-level unbounded promise cache plus Promise.all over every move of a Pokémon (~190 parallel fetches on a cold cache) for a page that shows one game at a time",
+        "app/src/routes/pokemon/[name].tsx:14-17 — nested <Show> fallback distinguishes null from undefined correctly, but a thrown (not null) result bypasses it entirely",
+        "app/src/routes/index.tsx:44,60-63 — debounce timer cleaned via onCleanup; select sets both value on <select> and selected on <option> (redundant, minor hydration risk)",
+        "app/src/lib/api.ts:24 — failed/404 promises are evicted from cache rather than cached forever, avoiding stale-not-found"
+      ],
+      "rationale": "No races found — debounce is cleaned up, 404 names resolve to NotFound, sorting keeps nulls last in both directions — but the missing error boundary and the per-move fetch fan-out are real fragility the tests don't cover."
+    },
+    "global_abstractions": {
+      "score": 4,
+      "evidence": [
+        "app/src/lib/queries.ts:1-42 — thin, uniform server-function boundary; every page's data crosses here and nowhere else",
+        "app/src/lib/api.ts:1-3 — comment marks it server-only, and it is imported only by queries.ts, keeping the client/server leak-free",
+        "app/src/lib/util.ts:1-48 — small, dependency-free helpers shared by both sides, no hidden global state",
+        "app/src/lib/api.ts:121-134,186,244,251,271-274 — the {name, en} type-reference construction is repeated five times instead of one helper",
+        "app/src/components/PokemonCard.tsx:10-33 — the one shared card component is well-scoped, props-driven, no god component"
+      ],
+      "rationale": "The queries.ts/api.ts split is a clean, earned abstraction with an explicit server boundary; the only untangling a reviewer will do later is deduplicating the five copies of the name/English-name mapping."
+    },
+    "readability": {
+      "score": 4,
+      "evidence": [
+        "app/src/routes/*/... — one file per route matching the URL, names (loadPokemonPageData, MovesSection, EvoNode) say what they mean",
+        "app/src/lib/api.ts:84-90 — comment explains the >=10000 alternate-form rule, the one non-obvious domain invariant",
+        "app/src/routes/pokemon/[name].tsx:226-282 — MoveTable is a focused, self-contained sorting table component",
+        "app/src/routes/pokemon/[name].tsx:14-17 — the double-nested <Show> fallback for loading-vs-not-found is clever but takes a beat to decode",
+        "app/src/routes/index.tsx:44-56, grep ': any' — 40+ untyped data sites mean no jump-to-definition on payload shapes"
+      ],
+      "rationale": "A new teammate finds any page in minutes — structure and naming are consistent — but the untyped payloads and the nested-Show not-found trick are rough spots they'll have to reverse-engineer."
+    },
+    "review_cost": {
+      "score": 3,
+      "evidence": [
+        "app/src/app.tsx:21 — one ErrorBoundary wrapping the Suspense is a required change before merge",
+        "app/src/components/NotFound.tsx:1-15 — adding <HttpStatusCode code={404}/> is a two-line ask the spec explicitly encourages",
+        "app/src/lib/api.ts (whole file) — payload interfaces or inferred return types to replace the pervasive any",
+        "app/src/lib/api.ts:121-134,186,244,251 — dedupe the repeated type/name mapping into one helper"
+      ],
+      "rationale": "The architecture and framework usage I'd approve as-is, but the error handling, 404 status, and typing would each be a blocking comment — that's a round of changes, not nits."
+    }
+  },
+  "overall": 3,
+  "findings": [
+    {
+      "severity": "high",
+      "location": "app/src/app.tsx:21",
+      "issue": "Suspense has no ErrorBoundary; any non-404 API failure (5xx, network error, malformed JSON thrown in app/src/lib/api.ts:19-25) rejects createAsync with no handler, breaking the render with no user-facing error state.",
+      "suggestion": "Wrap the route outlet in <ErrorBoundary fallback={...}> alongside Suspense, as the Solid Router docs prescribe, and render a friendly failure page."
+    },
+    {
+      "severity": "high",
+      "location": "app/src/lib/api.ts:164-183",
+      "issue": "Every payload crossing the server/client boundary is typed any (40+ occurrences), so 'strict': true in app/tsconfig.json:12 checks almost nothing; renaming a field in api.ts silently breaks components at runtime.",
+      "suggestion": "Define interfaces for each loader's return value (HomeData, PokemonPageData, MoveRow, SpeciesCard) in a shared types module and annotate the query wrappers so route components get inference."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/components/NotFound.tsx:1",
+      "issue": "Not-found pages render 200; the spec encourages HTTP 404 and SolidStart provides a one-line mechanism for it.",
+      "suggestion": "Add <HttpStatusCode code={404} /> from @solidjs/start to the NotFound component so unmatched URLs and unknown resources respond correctly."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/lib/api.ts:162-163",
+      "issue": "loadPokemonPageData fans out one fetch per learned move (up to ~190 concurrent requests on a cold cache) even though only the selected game's rows are shown; the results are cached but the first visit to each Pokémon is slow.",
+      "suggestion": "Either filter moves to the needed version group before fetching, or at least document the deliberate trade-off and cap concurrency; consider fetching move details lazily per selected game."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/routes/pokemon/[name].tsx:14-18",
+      "issue": "The <Show when={data()} fallback={<Show when={data() === null}>…}> construct distinguishes loading from not-found via a second nested Show; it works but reads as a trick and is duplicated in four route files.",
+      "suggestion": "Extract a small <DataOrNotFound data={data()}> component (or a keyed Show) so the loading/null/error states are named and the pattern lives in one place."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/lib/api.ts:10",
+      "issue": "The module-level promise cache is unbounded and has no TTL or invalidation; bounded in practice only because the API snapshot is finite.",
+      "suggestion": "Add a brief comment stating the cache is intentionally process-lifetime and bounded by API size, or implement a simple LRU/TTL if the upstream API grows."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/lib/api.ts:121-134",
+      "issue": "The {name, en} type-reference mapping (with the enName ?? humanize fallback) is constructed five separate times across loadHomeData, loadPokemonPageData, loadMovePageData, loadTypePageData and loadTypeListData.",
+      "suggestion": "Add a typeRef(name, typeEn) helper next to getTypeNameMap and use it everywhere."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/routes/index.tsx:60-63",
+      "issue": "Each <select> sets value on the select and selected on every option; redundant and a known source of hydration quirks.",
+      "suggestion": "Pick one mechanism — the per-option selected prop is the SSR-safe choice — and drop the select-level value."
+    }
+  ],
+  "summary": "This is a faithful, current-spec SolidStart v2 app: the vite/nitro config, query + \"use server\" placement, preload/createAsync data loading and URL-driven filter state all read like the framework's own docs. The structure is clean — a thin queries.ts server boundary over an api.ts that never leaks to the client — and the card/table components are well scoped. I'd hold the merge for a round of changes: an ErrorBoundary around the Suspense, real types on the payloads instead of pervasive any, an HTTP 404 status on the not-found pages, and slimming the per-move fetch fan-out."
+}

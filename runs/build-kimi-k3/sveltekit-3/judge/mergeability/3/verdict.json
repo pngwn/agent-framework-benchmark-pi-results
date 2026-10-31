@@ -1,0 +1,99 @@
+{
+  "dimension": "mergeability",
+  "criteria": {
+    "idiomatic": {
+      "score": 5,
+      "evidence": [
+        "app/vite.config.js:7 — sveltekit({ adapter: adapter() }) in vite.config, matching SvelteKit 3's documented config location (no svelte.config.js)",
+        "app/package.json:5-8 — '#lib' declared via package.json 'imports' subpath imports, exactly the SvelteKit 3 migration-guide pattern",
+        "app/src/env.js:1-10 — defineEnvVars with static:false and schema default, consumed via $app/env/private in app/src/lib/server/api.js:2",
+        "app/src/routes/+page.svelte:12,45 — goto(..., { shallow: true, replace: true }) plus page.shallow?.url ?? page.url, the documented SvelteKit 3 shallow-routing approach for URL-driven filter state",
+        "app/src/routes/pokemon/[name]/+page.svelte:119-125 — recursive {#snippet}/{@render} for the evolution tree, idiomatic Svelte 5",
+        "app/src/routes/pokemon/[name]/+page.server.js:20,26 — +page.server.js loaders with error(404) for missing resources"
+      ],
+      "rationale": "Uses the current stable SvelteKit 3 exactly as its docs do — new config location, #lib imports, explicit env vars, shallow routing via goto with page.shallow, Svelte 5 runes and snippets. No deprecated $app/stores, $env/*, pushState or svelte.config.js anywhere."
+    },
+    "correctness_risks": {
+      "score": 4,
+      "evidence": [
+        "app/src/routes/+page.svelte:48-52 — debounce timer never cleared on component teardown; a shallow goto can fire up to 150ms after the user has navigated to a different page, replacing that page's URL",
+        "app/src/routes/+error.svelte:3 — 'Not found' h1 rendered for all error statuses, so a 500 (e.g. API outage) shows a misleading 404-style page",
+        "app/src/lib/server/api.js:15 — fetch with no timeout; a hung API stalls loads indefinitely (though cached-promise design elsewhere is sound)",
+        "app/src/routes/+page.svelte:16-19 — page param parsed defensively (NaN/0 clamp to 1) and page clamped to totalPages at line 23-24",
+        "app/src/lib/server/api.js:20-22 — failed fetches evicted from the cache so a later request can retry; 404s cached as null"
+      ],
+      "rationale": "No serious bugs; load paths handle 404s, bad query params and duplicate/alternate-form entries correctly. The debounce timer leak and the status-blind error page are the only genuine issues, both cheap to fix."
+    },
+    "global_abstractions": {
+      "score": 4,
+      "evidence": [
+        "app/src/lib/server/api.js:8 — single module-level promise cache plus five lazily-memoised dataset promises (lines 40, 57, 65, 102) that every route depends on",
+        "app/src/lib/utils.js:1-50 — small, pure helpers safely shared by server and client code",
+        "app/src/lib/components/PokemonCardList.svelte:1-26 — card list reused by four pages with a clear, narrow props contract",
+        "app/src/lib/server/api.js:155-170 — speciesCardsFromRefs centralises the alternate-form/species-mapping rule so it isn't duplicated across move/ability/type loaders"
+      ],
+      "rationale": "Boundaries are crisp (server code confined to lib/server and +page.server.js files, SvelteKit-enforced) and abstractions earn their keep, but api.js concentrates the HTTP client, an unbounded cache and several app-specific aggregations in one module with module-global memoisation state — cohesive today, worth splitting as it grows."
+    },
+    "readability": {
+      "score": 5,
+      "evidence": [
+        "app/src/lib/server/api.js:16-22 — comment explains why failures are evicted from the cache",
+        "app/src/lib/components/MovesTable.svelte:32-34 — comment explains the sort-stability and missing-values-last contract",
+        "app/src/routes/+page.svelte:9-11 — comment explains why page.shallow must be read before page.url",
+        "app/src/lib/utils.js — five small named helpers with doc comments and no dead code",
+        "app/src/lib/server/api.js:87-91 — comment documents why default-Pokémon ids map straight onto species"
+      ],
+      "rationale": "Naming is consistent (api/human/label conventions repeated across files), functions are short, and the comments explain non-obvious *why* (cache eviction, sort stability, shallow vs full URL) rather than restating code. A new teammate can find anything in minutes."
+    },
+    "review_cost": {
+      "score": 4,
+      "evidence": [
+        "app/src/routes/+page.svelte:48-52 — one-line fix: clear the debounce timer on teardown",
+        "app/src/routes/+error.svelte:3 — one-line fix: branch on page.status for 500 vs 404",
+        "app/package.json:6 — dead \"#lib\": \"./src/lib\" mapping pointing at a directory rather than a module",
+        "app/src/routes/+page.svelte:74 — form submit reads the input via querySelector('input') instead of FormData/named element access"
+      ],
+      "rationale": "I'd approve after one small round: the timer teardown fix is a must, and the rest are nits (error-page status, dead import mapping, brittle input lookup). No structural or architectural changes requested."
+    }
+  },
+  "overall": 4,
+  "findings": [
+    {
+      "severity": "medium",
+      "location": "app/src/routes/+page.svelte:48",
+      "issue": "The search debounce timer is never cancelled when the component unmounts; if the user types and then navigates away within 150 ms, the pending callback fires a shallow goto('/?q=…') while on a different page, silently replacing that page's URL.",
+      "suggestion": "Clear the timer on teardown, e.g. $effect(() => { return () => clearTimeout(searchTimer); }) or an onDestroy hook."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/routes/+error.svelte:3",
+      "issue": "The error page renders 'Not found' for every error status, so a 500 (API failure) is presented to users as a missing page.",
+      "suggestion": "Import page from $app/state and vary the heading/message on page.status (e.g. 'Something went wrong' for 5xx)."
+    },
+    {
+      "severity": "low",
+      "location": "app/package.json:6",
+      "issue": "\"#lib\": \"./src/lib\" maps the bare #lib specifier to a directory (no index module exists), so any future `import ... from '#lib'` would fail resolution; only the #lib/* mapping is real.",
+      "suggestion": "Drop the bare \"#lib\" mapping, or point it at a real module such as ./src/lib/index.js."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/routes/+page.svelte:74",
+      "issue": "The form's submit handler finds the search input via querySelector('input'), which breaks if the field order or structure changes.",
+      "suggestion": "Use event.currentTarget elements by name (new FormData(event.currentTarget).get('q')) or give the handler the input directly."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/lib/components/MovesTable.svelte:75",
+      "issue": "Rows are keyed by object reference ({#each sorted as row (row)}); it works because sort() reorders existing references, but it's an unusual key choice that a maintainer may 'fix' incorrectly.",
+      "suggestion": "Key by a stable identity (e.g. `${row.moveName}-${row.level}`) or use the default index key, with a comment noting sort() reuses row objects."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/lib/server/api.js:15",
+      "issue": "API fetches have no timeout, so a hung upstream stalls page loads indefinitely with no user-visible error.",
+      "suggestion": "Add AbortSignal.timeout(...) (or a configurable timeout) so transient API hangs surface as errors that the cache-eviction path already handles."
+    }
+  ],
+  "summary": "A small, exemplary SvelteKit 3 codebase: current idioms throughout (vite.config adapter, #lib subpath imports, defineEnvVars/$app/env/private, shallow routing via goto with page.shallow) and clean, well-commented structure with a crisp server/client boundary. The only real defect is a debounce timer that survives component teardown and can fire a shallow navigation after the user has left the page; everything else is nits. Mergeable after that one-line fix."
+}

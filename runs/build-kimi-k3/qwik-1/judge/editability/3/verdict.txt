@@ -1,0 +1,157 @@
+I've reviewed the whole app (`app/src` routes, components, lib, server entry, packaging) against the spec and current Qwik stable (1.20.x, current as of 2026-10; 2.0 is still RC — the app pins `^1.20.3`, which is correct).
+
+## Scenario walkthrough
+
+1. **Remove Abilities**: delete `app/src/routes/abilities/` and the Abilities section on the Pokémon page (`app/src/routes/pokemon/[name]/index.tsx:270-279` + the loader mapping at `:174-179`), plus the now-dead `.hidden-note` rule in `app/src/global.css:449`. Grep confirms no other inbound links (the nav in `layout.tsx` doesn't link abilities). Difficulty **5**.
+2. **Sprite fix**: the sprite URL is centralized in `spriteUrl` (`app/src/lib/api.ts:62`) but card *construction* is duplicated — `cardsForPokemonRefs` uses the ref's Pokémon id (`app/src/lib/data.ts:104`) while the home loader uses the species id (`app/src/routes/index.tsx:67`), with a third derivation on the Pokémon page artwork fallback (`.../pokemon/[name]/index.tsx:158`). One fix in `data.ts` covers the move/ability/type lists, but the home list and artwork need separate edits, and the maintainer must first discover that three sites exist and that they don't agree on which ID they use. Difficulty **3**.
+3. **Sort cards by name**: one edit in `cardsForPokemonRefs` (`app/src/lib/data.ts:108` already centralizes the by-dex sort) covers 3 of 4 lists; the home loader's `all` mapping (`app/src/routes/index.tsx:46-56`) needs its own sort. `CardGrid` itself is untouched. Difficulty **4**.
+4. **Items section**: `CardGrid`, `cardsForPokemonRefs`, `apiFetch`, `format.ts` helpers and `NotFound` all reuse directly; `getTypes` (`app/src/lib/data.ts:24-38`) is a 15-line template for `getItems`. But the Moves detail page is a single route file with no shared "resource page" abstraction, so `/items/:name` is copy-adapt of `app/src/routes/moves/[name]/index.tsx`, and nothing of the move-table grouping logic is extractable (it's inlined in the Pokémon loader). Difficulty **4**.
+5. **API base/caching change**: everything lives in `app/src/lib/api.ts` — base URL `:6`, promise cache `:8`, concurrency pool `:11-30`, `apiFetch` `:32`, media prefix derived from the same constant `:62`. One file. Difficulty **5**.
+
+## Scores
+
+- **removability 5** — routes map 1:1 to features; abilities touches only its own directory, one consumer section, and one CSS rule.
+- **changeability 3** — data fixes mostly land in `lib/`, but card construction is duplicated (`app/src/lib/data.ts:80-110` vs `app/src/routes/index.tsx:63-72`), the type-name map is rebuilt in three loaders (`routes/moves/[name]/index.tsx:22`, `routes/types/[name]/index.tsx:20`, `routes/pokemon/[name]/index.tsx:48`), and URL building is only half-centralized (`lib/urls.ts` has `homeUrl` only; `/pokemon/…` links are inlined at `components/card-grid.tsx:14`, `components/moves-table.tsx:98`, `routes/pokemon/[name]/index.tsx:299`).
+- **coupling 4** — clean layering (lib → route loaders → presentational components), all fetching in `routeLoader$`s with client state limited to sort signals and filter nav; docked for the duplicated `CardData` type (`lib/data.ts:66`) vs `CardItem` (`components/card-grid.tsx:3`) and API-shape knowledge living in the home route loader (`routes/index.tsx:37-47`) rather than `lib/data.ts`.
+- **abstraction_design 3** — `CardGrid`/`MovesTable`/`NotFound` are small, prop-driven, and own their concerns (sort state lives inside `MovesTable`), but optional-flag creep (`showLevel`, `types?`, `hidden?`) is at the limit, the Pokémon loader is a 140-line monolith (`routes/pokemon/[name]/index.tsx:32-170`) that can't be reused, and page skeletons are copy-paste ×4.
+- **overall 4** — well-factored for its size; I'd approve with comments.
+
+```json
+{
+  "dimension": "editability",
+  "criteria": {
+    "removability": {
+      "score": 5,
+      "evidence": [
+        "app/src/routes/abilities/[name]/index.tsx — the entire feature is one self-contained route directory",
+        "app/src/routes/pokemon/[name]/index.tsx:270 — the only other abilities links are this one section; delete it plus the loader mapping at :174",
+        "app/src/routes/layout.tsx:13-16 — nav has no abilities link, so no nav edit needed",
+        "app/src/global.css:449 — .hidden-note is the only feature-specific CSS to sweep"
+      ],
+      "rationale": "Routes map one-to-one to features and inbound links are few and grep-able; removing a feature means deleting a directory plus one clearly-delimited section elsewhere."
+    },
+    "changeability": {
+      "score": 3,
+      "evidence": [
+        "app/src/lib/data.ts:104 vs app/src/routes/index.tsx:67 — sprite derivation duplicated (ref's pokemon id vs species id); a card-level fix lands in 2-3 places incl. routes/pokemon/[name]/index.tsx:158",
+        "app/src/routes/moves/[name]/index.tsx:22, app/src/routes/types/[name]/index.tsx:20, app/src/routes/pokemon/[name]/index.tsx:48 — the same typeEn map is rebuilt in three loaders",
+        "app/src/lib/urls.ts:18 — only homeUrl is centralized; /pokemon, /types, /moves links are inlined at components/card-grid.tsx:14, components/moves-table.tsx:98-101, routes/pokemon/[name]/index.tsx:299",
+        "app/src/lib/api.ts:6-62 — by contrast, API base URL, cache, and media prefix are one file, which is exactly the seam you want"
+      ],
+      "rationale": "Data-layer fixes usually land in lib/, but Pokémon-card construction, type-name mapping, and URL building are each duplicated across 2-3 files, so a maintainer must find all sites before fixing."
+    },
+    "coupling": {
+      "score": 4,
+      "evidence": [
+        "app/src/routes/* — every loader goes through lib/api.ts + lib/data.ts; no component fetches data",
+        "app/src/components/card-grid.tsx:8 — CardGrid takes a plain CardItem[] prop; no reach into route internals",
+        "app/src/components/moves-table.tsx:31-40 — sorting state is self-contained in the component via useSignal",
+        "app/src/lib/data.ts:66 vs app/src/components/card-grid.tsx:3 — CardData duplicates CardItem instead of importing it",
+        "app/src/routes/index.tsx:37-47 — PokeAPI shape knowledge (type records listing pokemon, generation species lists) inlined in the route loader rather than lib/data.ts"
+      ],
+      "rationale": "Layering and server/client separation are genuinely clean; the tangles are small: a duplicated card type and domain-shape logic living in the home route instead of the data layer."
+    },
+    "abstraction_design": {
+      "score": 3,
+      "evidence": [
+        "app/src/components/card-grid.tsx:6-11 — CardItem carries optional types/hidden flags matching the real variation (home shows types, ability shows hidden)",
+        "app/src/components/moves-table.tsx:21-23 — showLevel boolean flag rather than a column-descriptor, but only one real variation exists",
+        "app/src/routes/pokemon/[name]/index.tsx:32-170 — species+evolution+version groups+move-table grouping all inline in one 140-line loader; none of it reusable for a similar feature",
+        "app/src/routes/{moves,abilities,types}/[name]/index.tsx — page skeleton (loader + h1 + NotFound + head resolveValue) is copy-paste ×4 with no shared resource-page seam",
+        "app/src/lib/data.ts:24-38 — getTypes is a clean, short template a sibling getItems() could clone"
+      ],
+      "rationale": "The shared components stretch well and the lib helpers are the right shape, but the Pokemon page loader is monolithic and detail pages are copied rather than derived, so 'similar-but-different' means copy-adapt."
+    }
+  },
+  "overall": 4,
+  "findings": [
+    {
+      "severity": "medium",
+      "location": "app/dist/ and app/server/",
+      "issue": "Generated build bundles (entry.node-server.js, q-*.js chunks, assets) sit inside app/ and are not covered by .gitignore (only /data/, /.data-cache/, node_modules/ are), so they will be committed and pollute every diff; npm start also runs the stale server/entry.node-server.js if src changes aren't rebuilt.",
+      "suggestion": "Add app/dist, app/server and app/tmp to .gitignore and rely on `npm run build`, which the harness already runs."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/lib/data.ts:80-110",
+      "issue": "Pokémon-card construction (id, speciesName, human, sprite) exists twice: cardsForPokemonRefs here and the inline mapping in app/src/routes/index.tsx:63-72, and the two disagree on which ID feeds spriteUrl (ref pokemon id at data.ts:104 vs species id at index.tsx:67), which is exactly the class of bug the sprite scenario describes.",
+      "suggestion": "Extract a single cardForSpecies()/cardsForSpecies() helper in lib/data.ts (with optional types/hidden) and have the home loader use it."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/routes/pokemon/[name]/index.tsx:32-170",
+      "issue": "The route loader monolithically handles species, default variety, evolution tree, version-group resolution, per-method move grouping and move-record fetching; none of it is reusable or independently testable.",
+      "suggestion": "Move the version-group/moves-table grouping into lib/data.ts (e.g. getMoveTables(pokemon, gameName)) and the evolution mapping alongside it, leaving the loader as thin composition."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/lib/api.ts:32",
+      "issue": "The API surface is typed as Promise<any> throughout (apiFetch, TypeInfo.record, CardData fields), so a change to API shapes compiles silently and breaks at runtime instead of at type-check time.",
+      "suggestion": "Define interfaces for the handful of records actually consumed (NamedAPIResource, Pokemon, Species, Type, Move) and type apiFetch<T>."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/routes/moves/[name]/index.tsx:22",
+      "issue": "The typeEn lookup map is rebuilt in three loaders (also routes/types/[name]/index.tsx:20 and routes/pokemon/[name]/index.tsx:48).",
+      "suggestion": "Add a typeEnglishName()/getTypeNameMap() helper to lib/data.ts next to getTypes()."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/lib/urls.ts:18",
+      "issue": "URL construction is only half-centralized: homeUrl exists, but /pokemon/<name>, /types/<name> and /moves/<name> are inlined in components/card-grid.tsx:14, components/moves-table.tsx:98-101, routes/types/[name]/index.tsx:75, routes/pokemon/[name]/index.tsx:222,299.",
+      "suggestion": "Add pokemonUrl/typeUrl/moveUrl to urls.ts so a URL-scheme change is one edit."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/lib/data.ts:66",
+      "issue": "CardData duplicates the shape of CardItem (components/card-grid.tsx:3) with a required hidden field instead of importing it; the two can drift.",
+      "suggestion": "Import CardItem from components/card-grid.tsx (or move the type into lib) and reuse it."
+    },
+    {
+      "severity": "low",
+      "location": "app/package.json:19",
+      "issue": "undici is declared a devDependency, but the production server bundle imports it at runtime (app/server/entry.node-server.js:1 does import{...}from\"undici\"); it currently resolves only transitively via qwik-city's undici \"*\" dependency.",
+      "suggestion": "Move undici to dependencies (or remove it and let qwik-city's own dependency provide it explicitly)."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/lib/data.ts",
+      "issue": "No unit tests anywhere in app/ (testLoc 0); pure helpers like cardsForPokemonRefs, humanize/englishName and the move-table grouping are the regression-prone parts and are trivially testable.",
+      "suggestion": "Add a few vitest cases for lib/format.ts, lib/data.ts filtering/mapping and the moves grouping once it is extracted."
+    }
+  ],
+  "summary": "This is a cleanly organized Qwik City app: one data seam (lib/api.ts with base URL, cache and media prefix), shared CardGrid/MovesTable/NotFound components, and routes that map 1:1 to features, so removal and data-source changes are easy. The main drags on editability are duplicated Pokémon-card construction between lib/data.ts and the home loader (which also disagree on which ID feeds the sprite URL), a 140-line monolithic Pokémon route loader, and copy-pasted page scaffolding. I'd approve after adding .gitignore entries for build output and unifying card construction.",
+  "scenarios": [
+    {
+      "change": "Remove the Abilities pages and every link to them",
+      "files": ["app/src/routes/abilities/", "app/src/routes/pokemon/[name]/index.tsx", "app/src/global.css"],
+      "difficulty": 5,
+      "notes": "Delete the route directory, remove the one Abilities section (routes/pokemon/[name]/index.tsx:270-279 and its loader mapping at :174-179) and the .hidden-note rule; nav needs no edit."
+    },
+    {
+      "change": "Fix wrong sprite for species whose default Pokémon differs (e.g. Deoxys)",
+      "files": ["app/src/lib/data.ts", "app/src/routes/index.tsx", "app/src/routes/pokemon/[name]/index.tsx", "app/src/lib/api.ts"],
+      "difficulty": 3,
+      "notes": "spriteUrl is centralized in api.ts:62, but card construction is duplicated: cardsForPokemonRefs uses the ref's pokemon id (data.ts:104) while the home loader uses the species id (routes/index.tsx:67), plus the artwork fallback at pokemon/[name]/index.tsx:158 — the fixer must find all three and decide which ID is authoritative."
+    },
+    {
+      "change": "Add sorting by name to every list of Pokémon cards",
+      "files": ["app/src/lib/data.ts", "app/src/routes/index.tsx"],
+      "difficulty": 4,
+      "notes": "One sort in cardsForPokemonRefs (data.ts:108 already sorts by dex there) covers move/ability/type lists; the home loader builds its list separately so it needs its own edit; CardGrid itself is untouched."
+    },
+    {
+      "change": "Add an Items section (/items, /items/:name) shaped like Moves",
+      "files": ["app/src/routes/items/index.tsx", "app/src/routes/items/[name]/index.tsx", "app/src/lib/data.ts", "app/src/routes/layout.tsx"],
+      "difficulty": 4,
+      "notes": "CardGrid, cardsForPokemonRefs, apiFetch, format.ts and NotFound reuse directly and getTypes is a ready template for getItems, but the Moves detail page is a single monolithic route file, so the item page is copy-adapt of routes/moves/[name]/index.tsx rather than reuse of an abstraction."
+    },
+    {
+      "change": "Change the API base URL and caching rules",
+      "files": ["app/src/lib/api.ts"],
+      "difficulty": 5,
+      "notes": "API_BASE (api.ts:6), the in-memory promise cache (:8), the concurrency pool (:11-30) and the media prefix (:62) all live in one 63-line module that every loader funnels through."
+    }
+  ]
+}
+```

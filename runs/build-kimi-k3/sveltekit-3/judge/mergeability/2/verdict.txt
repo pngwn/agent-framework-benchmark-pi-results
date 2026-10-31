@@ -1,0 +1,132 @@
+# Review: Pokédex app (SvelteKit)
+
+## What this app is doing right (and it's a lot)
+
+This codebase is written against **SvelteKit 3 / Svelte 5.57 / Vite 8** — the current stable stack as of today — and it uses the *new* idioms correctly, not the ones from my training data:
+
+- **Config in the Vite plugin, no `svelte.config.js`** — correct for SvelteKit 3 (`app/vite.config.js:6-9` uses `sveltekit({ adapter: adapter() })`, matching the v3 migration guide; `svelte.config.js` is no longer supported).
+- **`#lib` subpath imports** (`app/package.json:6-8`, used throughout) — this is the *replacement* for `$lib` announced in the SvelteKit 3 release notes, via standard package `imports` field. Not a home-grown alias.
+- **Explicit env vars** (`app/src/env.js` uses `defineEnvVars` from `@sveltejs/kit/env`; consumed via `$app/env/private` at `app/src/lib/server/api.js:2`) — the current recommended replacement for the deprecated `$env/*` modules, with `static: false` correctly chosen so the base URL is read at runtime, which matters because the harness builds once and runs against a changed API.
+- **Shallow routing** (`app/src/routes/+page.svelte:45`) — `goto(url, { shallow: true, replace: true })` with `page.shallow?.url` (`:11`) is exactly the pattern the current docs prescribe for URL-driven local state without re-running `load`; the app even knows the documented subtlety that `page.url` is not updated by shallow navigations (comment at `:9-10`).
+- **Svelte 5 runes everywhere**: `$props`, `$derived`/`$derived.by`, snippets with `{@render}`, `onclick`, keyed each-blocks, `style:` directive — no legacy syntax at all. Recursive snippet for the evolution tree (`app/src/routes/pokemon/[name]/+page.svelte:118-128`) is idiomatic and neat.
+- **Data loading is server `load` + `error(404)`**, with a clean server-only data layer in `#lib/server/api.js` — the directory whose imports SvelteKit blocks from client code, so the server/client boundary is enforced, not just conventional.
+
+## Issues
+
+The one genuine bug class I found is the **unowned debounce timer** (`app/src/routes/+page.svelte:48-52`): typing in search and then clicking a card within the 150 ms window fires `goto('/?q=…', { shallow: true, replace: true })` *after* the app has navigated to the Pokémon page — a shallow URL rewrite behind a different page, with no cleanup on destroy. In Svelte 5 this should be a `$effect` teardown or timer scoped to the component. Everything else is polish: the `+error.svelte` claims "Not found" even for a 500 (API down), the whole 500-line stylesheet is global while its markup lives in components, and pagination uses plain anchors so the ~1025-item species payload is re-serialized on every page click.
+
+No tests in `app/` (0 test files), but the acceptance suite is external per the task setup.
+
+```json
+{
+  "dimension": "mergeability",
+  "criteria": {
+    "idiomatic": {
+      "score": 5,
+      "evidence": [
+        "app/vite.config.js:6-9 — adapter passed to the sveltekit() Vite plugin, the SvelteKit 3 config style; no deprecated svelte.config.js",
+        "app/package.json:6-8 — '#lib' standard subpath imports, the SvelteKit 3 replacement for $lib",
+        "app/src/env.js:1-9 — defineEnvVars with static:false (runtime-read, not build-inlined) via the current explicit env vars API",
+        "app/src/routes/+page.svelte:11,45 — page.shallow?.url + goto(..., { shallow: true, replace: true }) per current shallow-routing docs",
+        "app/src/routes/pokemon/[name]/+page.svelte:118-128 — recursive {#snippet}/{@render} evolution tree, runes-only Svelte 5 syntax throughout",
+        "app/src/lib/server/api.js:1-2 — server-only data module under lib/server (import-restricted boundary), $app/env/private consumed server-side"
+      ],
+      "rationale": "Uses the current stable framework exactly as its docs and release notes prescribe: SvelteKit 3 plugin config, #lib subpath imports, defineEnvVars, $app/state, shallow routing, runes and snippets. Only stylistic deviation is all CSS in one global file instead of scoped component styles, which the spec explicitly permits."
+    },
+    "correctness_risks": {
+      "score": 3,
+      "evidence": [
+        "app/src/routes/+page.svelte:48-52 — debounce timer never cleared on unmount; firing after navigating to a Pokémon page shallow-rewrites the URL behind it",
+        "app/src/routes/+error.svelte:2-5 — same 'Not found' page/title for 500s (e.g. API down), misleading; page.status is not consulted",
+        "app/src/lib/server/api.js:8-23 — in-memory cache never expires (allowed by spec) and fetches have no timeout, so a hung API request hangs the page indefinitely",
+        "app/src/routes/+page.svelte:26-27 — URL page=99 displays the last page but the URL still says 99 (shownPage clamp without navigation)",
+        "app/src/routes/pokemon/[name]/+page.svelte:9-12 — onMount hash-scroll duplicates SvelteKit's built-in hash handling and only runs on first mount",
+        "app/src/lib/server/api.js:20-22 — cache correctly evicts rejected promises so failures retry; 404→null handling is correct in every load (e.g. app/src/routes/moves/[name]/+page.server.js:7)"
+      ],
+      "rationale": "One real race (the debounce timer firing post-navigation) plus a handful of minor fragilities; error paths, 404s, alternate-form filtering and missing-value handling are otherwise careful and correct."
+    },
+    "global_abstractions": {
+      "score": 4,
+      "evidence": [
+        "app/src/lib/server/api.js — single cohesive server data layer; memoized promise singletons (getTypeRecords, getSpeciesMeta) with clear ownership and failure eviction",
+        "app/src/lib/utils.js:1-42 — small, pure, well-named helpers; no god-module",
+        "app/src/lib/components — three small components (PokemonCardList, MovesTable, TypeBadge) with no overlap",
+        "app/src/app.css:253,315 — styles for card/type-badge markup that lives in PokemonCardList.svelte are defined in a single global 500-line stylesheet, coupling files across the tree"
+      ],
+      "rationale": "Abstractions are few and earn their keep: a server-only data module with enforced boundaries and a tiny utils file. The one global concern is the monolithic global stylesheet whose selectors are tied to component markup elsewhere."
+    },
+    "readability": {
+      "score": 5,
+      "evidence": [
+        "app/src/lib/server/api.js:19-21 — comments explain why (cache eviction for retry), not what",
+        "app/src/routes/+page.svelte:9-10 — documents the page.url-vs-page.shallow subtlety inline",
+        "app/src/routes/pokemon/[name]/+page.server.js:17-18 — METHOD_ORDER fixed-position sort with rationale; load functions are linear and easy to follow",
+        "app/src/lib/utils.js:5-9 — every helper has a one-line doc comment with an example"
+      ],
+      "rationale": "Small files, consistent naming (human/label/name conventions applied uniformly), and comments that capture the non-obvious decisions. A new teammate could find their way in minutes."
+    },
+    "review_cost": {
+      "score": 4,
+      "evidence": [
+        "app/src/routes/+page.svelte:48-52 — would ask for timer cleanup in an $effect teardown",
+        "app/src/routes/+error.svelte:2-5 — would ask to branch on page.status",
+        "app/src/app.css:1-538 — would ask to split per-route/component styles (nit)",
+        "app/src/routes/+page.svelte:74 — form submit reads the input via querySelector instead of a bound value (nit)"
+      ],
+      "rationale": "One round of small, mechanical changes — a timer cleanup, a status-aware error page, and CSS organization nits — nothing structural."
+    }
+  },
+  "overall": 4,
+  "findings": [
+    {
+      "severity": "medium",
+      "location": "app/src/routes/+page.svelte:48-52",
+      "issue": "The 150 ms search debounce timer is never cleared when the component unmounts; typing a query then clicking a card within the window fires a shallow goto that rewrites the URL while the user is already on /pokemon/:name",
+      "suggestion": "Own the timer in an $effect (or onMount) teardown: $effect(() => () => clearTimeout(searchTimer)), or guard updateFilters against the route having changed"
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/routes/+page.server.js:3-9",
+      "issue": "The ~1025-item species metadata array is re-serialized to the client on every pagination click, since pagination uses plain <a> full navigations (app/src/routes/+page.svelte:115) while only filters use shallow routing",
+      "suggestion": "Make pagination shallow too, or move species metadata into +layout.server.js so pagination no longer re-runs the load"
+    },
+    {
+      "severity": "low",
+      "location": "app/src/routes/+error.svelte:2-5",
+      "issue": "Every error, including 500s from a failed API fetch, renders 'Not found' in the title and h1",
+      "suggestion": "Branch on page.status (from $app/state) to show a generic error message for non-404s"
+    },
+    {
+      "severity": "low",
+      "location": "app/src/app.css:1-538",
+      "issue": "All styling lives in one global stylesheet whose selectors (.card a, .type-badge, .filters) are coupled to markup defined in components and routes elsewhere, losing Svelte's scoped-style locality",
+      "suggestion": "Move component styles into the .svelte files' scoped <style> blocks; keep only tokens and element defaults global"
+    },
+    {
+      "severity": "low",
+      "location": "app/src/routes/pokemon/[name]/+page.svelte:9-12",
+      "issue": "onMount hash-scroll to #moves duplicates SvelteKit's built-in hash navigation handling and only fires on initial mount, not later client-side navigations",
+      "suggestion": "Delete the onMount block; SvelteKit scrolls to hash targets after navigation, and #moves already has scroll-margin-top set (app/src/app.css:533)"
+    },
+    {
+      "severity": "low",
+      "location": "app/src/lib/server/api.js:8-16",
+      "issue": "API fetches have no timeout; if the upstream hangs, every request for that resource hangs indefinitely (cache holds the pending promise, not just rejections)",
+      "suggestion": "Wrap fetch with AbortSignal.timeout(...) and delete timed-out entries from the cache like rejected ones"
+    },
+    {
+      "severity": "low",
+      "location": "app/src/routes/+page.svelte:72-76",
+      "issue": "Form submit reads the search value via event.currentTarget.querySelector('input') instead of reactive state",
+      "suggestion": "Keep the input in a $state variable bound with bind:value and use it directly in the submit handler"
+    },
+    {
+      "severity": "low",
+      "location": "app/.gitignore",
+      "issue": "No .gitignore in app/ and the root .gitignore does not cover app/.svelte-kit or app/build, so build artifacts are at risk of being committed",
+      "suggestion": "Add app/.gitignore with .svelte-kit/, build/ and node_modules/ as the sv create scaffold does"
+    }
+  ],
+  "summary": "A genuinely modern SvelteKit 3 codebase that reads like the current docs: plugin-based config, #lib subpath imports, defineEnvVars, shallow routing for URL-driven filters, and clean runes-only Svelte 5. The structure is sound — enforced server boundary, small pure helpers, cohesive components — with one real race in the un-owned debounce timer and a few polish items (error page copy, global stylesheet, payload re-serialization on pagination). Merge after one round of small, mechanical fixes."
+}
+```

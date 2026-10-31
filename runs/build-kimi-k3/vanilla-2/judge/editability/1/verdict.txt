@@ -1,0 +1,158 @@
+I've read all the app source. Structure summary before scoring:
+
+- `app/src/shared/` — pure modules used by both server and browser bundle: `format.js` (humanize/escape/etc.), `components.js` (`typeBadge`, `speciesCard`, `section`), `home-view.js` (filter + results markup shared by SSR and client), `router.js` (path→route).
+- `app/src/server/` — `api.js` (fetch + in-memory cache + species/pokemon mapping), `pages.js` (all six page renderers in one 459-line file), `layout.js`.
+- `app/src/client/main.js` — hydration/interactivity only; reuses `home-view.js` so client re-render produces identical markup to SSR.
+- `app/server/server.mjs` — node:http server, SSR + static, reads Vite's `dist/.vite/manifest.json` (correct manifest location for modern Vite).
+
+Now the scenarios, verified against the code:
+
+1. **Remove Abilities**: touch `shared/router.js:6` (regex alternation), `pages.js:326-360` (`abilityPage`), `pages.js:447-448` (switch case), `pages.js:255-259` + `:281` (Abilities section on the Pokémon page), and `styles.css:214` (`.hidden-note` goes dead). No nav link exists, so that part is free. Scattered but greppable.
+2. **Sprite fix (Deoxys)**: all non-home card lists get their sprite from one function, `speciesForPokemonRef` (`api.js:138-147`), so one fix covers move/ability/type lists. The home list derives sprites separately in `buildSummaries` (`api.js:112`) — and behaves differently (prefers API `front_default`, falls back; the other lists never check for null). Two derivations, one file.
+3. **Sort by name**: two sort sites, `api.js:115` (home summaries) and `api.js:157` (all other card lists). Client follows automatically because it filters the same embedded array. Cheap — unless it must be a user-facing control, which then drags in `home-view.js`, `pages.js` and `main.js`.
+4. **Items section**: add `items` to the `shared/router.js:6` regex, a `renderPage` case, and write `itemPage`/`itemsPage` next to `movePage`. Reusable as-is: `record`/`getList`/`mapLimit` (api.js), `humanize`/`englishName` (format.js), `section`/`speciesCard` (components.js). Mostly additive; the page function itself would be a near-copy of `movePage`.
+5. **API base + caching**: `API_BASE` is defined exactly once (`api.js:5`) and `spriteUrl` derives from it (`api.js:64`), but caching lives in four hand-rolled memoizations: `cache` (:15), `listCache` (:44ish), `summariesPromise` (:70), `speciesMapPromise` (:121). One file, four spots to change a caching policy.
+
+```json
+{
+  "dimension": "editability",
+  "criteria": {
+    "removability": {
+      "score": 3,
+      "evidence": [
+        "app/src/server/pages.js:326-360 — abilityPage is a self-contained block, easy to delete",
+        "app/src/server/pages.js:447-448 — but a matching switch case must also be removed",
+        "app/src/shared/router.js:6 — and the route regex alternation lists 'abilities' inline with the other resources",
+        "app/src/server/pages.js:255-259 — inbound links from the Pokémon page's Abilities section are in the same file, not near the page",
+        "app/src/client/styles.css:214 — .hidden-note CSS would go dead with no tooling to flag it"
+      ],
+      "rationale": "Deleting Abilities is a handful of greppable edits spread over router, pages and CSS rather than delete-a-directory. The bulk of it is concentrated in pages.js, which keeps this at 3 rather than lower."
+    },
+    "changeability": {
+      "score": 4,
+      "evidence": [
+        "app/src/server/api.js:138-147 — speciesForPokemonRef is the single sprite/link derivation for every non-home card list (move, ability, type pages all funnel through it)",
+        "app/src/server/api.js:112 — but home derives sprites separately (front_default ?? spriteUrl), so a sprite fix lands twice with different fallback behavior",
+        "app/src/shared/components.js:16 — speciesCard is the only card markup, so visual card changes are one place",
+        "app/src/server/pages.js:294 — effect-text extraction duplicated verbatim at pages.js:331 (movePage vs abilityPage)",
+        "app/src/server/api.js:115 — home ordering and api.js:157 other-list ordering are two separate one-line sorts"
+      ],
+      "rationale": "Most fixes land in one obvious place thanks to the shared card renderer and the species-mapping layer. The few duplications (sprite derivation, effect text, list ordering) are all inside one file and greppable, which keeps it from a 5."
+    },
+    "coupling": {
+      "score": 4,
+      "evidence": [
+        "app/src/shared/format.js:1-52 — pure helpers with zero DOM or fetch imports, used by both server and client",
+        "app/src/shared/home-view.js:1-6 — SSR and the browser share one filter/markup module instead of duplicating logic",
+        "app/src/server/api.js:1-64 — all HTTP knowledge (base URL, cache, 404 handling) is isolated behind getJson/record/getList",
+        "app/src/client/main.js:14-21 — string-level contract: element IDs mirror app/src/server/pages.js:56-74 and :217; renaming one silently breaks the other",
+        "app/src/server/pages.js:74 — the full 1025-species array is embedded as JSON the client re-parses (main.js:14), an implicit schema contract between the two halves"
+      ],
+      "rationale": "Clean layering with real seams: pure shared modules, an isolated data layer, and a client that only layers behavior. The ID-string and embedded-JSON contracts are the usual vanilla-JS tangles and are explicit, so this stays at 4."
+    },
+    "abstraction_design": {
+      "score": 4,
+      "evidence": [
+        "app/src/shared/components.js:16-31 — speciesCard absorbs the real card variation (showTypes, extra) with small options instead of copies",
+        "app/src/shared/home-view.js:28-58 — filter state parsing, query-string building and results markup designed to be shared by two runtimes",
+        "app/src/client/main.js:56-95 — generic sortable-table behavior keyed off data-sort-key, reusable by any future table",
+        "app/src/server/api.js:138-160 — speciesCardsForPokemonRefs absorbs ref-shape variation and per-list extras (extraFor) so all card lists share one pipeline",
+        "app/src/server/api.js:150-153 — the ref.url ?? ref.pokemon?.url ?? ref triple-shape input and extraFor callback are an underspecified seam, mild flag-creep"
+      ],
+      "rationale": "The abstractions track the app's actual variation well: one card component, one home view shared across runtimes, one species-mapping pipeline, one generic table sorter. Adding an Items section reuses the data layer and components wholesale; only the bespoke page function would be copied from movePage, which keeps it at 4 rather than 5."
+    }
+  },
+  "overall": 4,
+  "findings": [
+    {
+      "severity": "medium",
+      "location": "app/src/server/pages.js:1-459",
+      "issue": "All six page renderers live in one 459-line file separated only by comment banners; every page edit and every feature removal collides in the same module, and movesSection alone is ~110 lines mixing fetching, grouping, sorting and markup.",
+      "suggestion": "Split into src/server/pages/{home,pokemon,move,ability,type,not-found}.js with renderPage importing them; movesSection's data assembly could move into api.js next to the other data pipelines."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/server/api.js:112",
+      "issue": "Sprite derivation is duplicated: home prefers pokemon.sprites.front_default with a spriteUrl fallback, while every other card list (api.js:143-147) always constructs spriteUrl and never handles a null front_default — a sprite bug fix must land twice and the two paths already behave differently.",
+      "suggestion": "Extract one resolveSpeciesSprite(pokemon, speciesId) helper used by both buildSummaries and speciesForPokemonRef."
+    },
+    {
+      "severity": "medium",
+      "location": "app/dist/",
+      "issue": "Build output is committed: .gitignore only covers node_modules, and app/dist/ (with hashed Vite assets) sits in the tree, so PRs will carry stale generated code that reviewers can mistake for source.",
+      "suggestion": "Add app/dist/ (or dist/) to .gitignore and delete it from the tree."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/server/pages.js:294",
+      "issue": "The short_effect-then-flavor-then-em-dash effect extraction is duplicated verbatim in abilityPage (pages.js:331).",
+      "suggestion": "Add an englishShortEffect(record) helper to shared/format.js next to latestEnglishFlavor and call it from both pages."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/client/main.js:18-21",
+      "issue": "The client depends on hardcoded element IDs (species-data, filter-search, filter-type, filter-generation, results, game-select) that are defined as string literals in server templates (pages.js:56-74, :217); a rename compiles fine and fails silently at runtime.",
+      "suggestion": "Keep the IDs in one shared constant module (e.g. shared/ids.js) imported by both the templates and main.js, or add a data-* hook convention documented in one place."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/server/api.js:15",
+      "issue": "Four hand-rolled memoization patterns (cache:15, listCache, summariesPromise:70, speciesMapPromise:121) each with their own error-eviction logic; a caching-policy change (TTL, invalidation, size bound) means editing all four.",
+      "suggestion": "Extract one memoize(key, loader) helper and route getJson, getList and the two summary promises through it."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/server/pages.js:74",
+      "issue": "The entire 1025-species summary array is serialized into the HTML and re-parsed by the client (main.js:14), coupling server and client on an implicit shape contract with no shared type or schema definition.",
+      "suggestion": "At minimum, define the summary shape once (JSDoc typedef in shared/home-view.js) and note the contract next to both the serializer and the parser; consider sending only what the client can't recompute."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/server/api.js:150-153",
+      "issue": "speciesCardsForPokemonRefs accepts three ref shapes (ref.url ?? ref.pokemon?.url ?? ref) plus an extraFor callback, a flexible but underspecified seam that makes the function's contract hard to read and easy to misuse.",
+      "suggestion": "Normalize refs at the call sites (pages.js already knows each shape) and take a flat array of {url, isHidden}-style records instead."
+    }
+  ],
+  "summary": "This is a well-factored vanilla app: pure shared modules, a single card component, one home view reused by SSR and the client, and an isolated data layer, so most fixes and extensions touch one or two files. The main editability liabilities are the monolithic 459-line pages.js, a handful of duplicated derivations (sprite, effect text, list ordering, caching) that a fix must chase down, and committed build output. It reads like code a small team could own for years with modest refactoring.",
+  "scenarios": [
+    {
+      "change": "Remove the Abilities pages and every link to them",
+      "files": [
+        "app/src/shared/router.js",
+        "app/src/server/pages.js",
+        "app/src/client/styles.css"
+      ],
+      "difficulty": 3,
+      "notes": "No nav link exists, but the route regex, the renderPage switch case, the abilityPage function, the Pokémon page's Abilities section and the .hidden-note CSS each need a separate edit; all greppable, none isolated to one deletable unit."
+    },
+    {
+      "change": "Fix the wrong sprite for species whose default Pokémon has a different name (Deoxys)",
+      "files": ["app/src/server/api.js"],
+      "difficulty": 4,
+      "notes": "One fix in speciesForPokemonRef covers every card list on move, ability and type pages, since they all funnel through speciesCardsForPokemonRefs. Only home has its own derivation (buildSummaries), so the same file needs a second, smaller edit — and the two paths should be unified first."
+    },
+    {
+      "change": "Add sorting by name to every list of Pokémon cards",
+      "files": ["app/src/server/api.js"],
+      "difficulty": 4,
+      "notes": "Two one-line sorts (summaries.sort at api.js:115 and the seen.values() sort at api.js:157); the client-side home filtering follows automatically because it reuses the embedded summaries array. If it must be a user-facing toggle instead of a default change, it grows to home-view.js, pages.js and main.js and drops to difficulty 3."
+    },
+    {
+      "change": "Add an Items section (/items, /items/:name) shaped like Moves",
+      "files": [
+        "app/src/shared/router.js",
+        "app/src/server/pages.js",
+        "app/src/client/styles.css"
+      ],
+      "difficulty": 4,
+      "notes": "Mostly additive: one regex token, one switch case, and a new page function modeled on movePage. record/getList/mapLimit, humanize/englishName, section and speciesCard are all reusable as-is; the page function itself is the one thing you'd copy-paste, since page renderers are bespoke rather than driven by a generic page factory."
+    },
+    {
+      "change": "Change the API base URL and caching rules",
+      "files": ["app/src/server/api.js"],
+      "difficulty": 3,
+      "notes": "API_BASE is defined exactly once (api.js:5) and spriteUrl derives from it, so the base URL is a one-liner. Caching rules are the weak spot: four hand-rolled memoizations (cache, listCache, summariesPromise, speciesMapPromise) each carry their own eviction logic, so a TTL or invalidation policy means four edits in one file."
+    }
+  ]
+}
+```

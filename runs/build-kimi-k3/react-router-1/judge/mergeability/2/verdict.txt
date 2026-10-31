@@ -1,0 +1,129 @@
+## Review summary
+
+This is a competent React Router 8 framework-mode app: correct route config, server loaders, SSR enabled, `react-router-serve` in production, a clean `Layout` in `root.tsx`, `data()` for 404 statuses, and React 19 `<title>` (which the framework team now endorses over the `meta` export). But it bypasses two flagship framework features and carries one real robustness bug.
+
+**The good.** `app/app/lib/api.server.ts` has a clean server-only boundary with justified comments (concurrency limiter, form-exclusion logic); components (`Section`, `PokemonCard`, `MoveTable`, `TypeBadge`) are small, focused, and reused; the sortable `MoveTable` handles `aria-sort`, missing-value ordering, and per-method level columns correctly; the home page's debounced-search + URL-state pattern is SSR-safe (state seeded from the URL param, `lastSubmitted` ref to distinguish typing from back/forward).
+
+**The issues.** (1) The promise cache never evicts rejected promises — `app/app/lib/api.server.ts:49` and the module-level singletons at `:82/:95` mean one transient API failure permanently poisons that URL (or the whole species index) until process restart, turning real records into "Not found" pages. (2) The skill/docs pattern for missing records is `throw data("Not Found", { status: 404 })` + route `ErrorBoundary`; this app instead returns a `notFound: true` flag from four loaders and re-checks it in each component, and renders the not-found UI in *three* places (`root.tsx:47`, `components/NotFound.tsx`, `routes/not-found.tsx`). (3) The root `ErrorBoundary` labels *every* error — including API 500s — as "Not found", with no `isRouteErrorResponse` distinction. (4) Type generation is fully wired (`tsconfig.json` rootDirs, `typegen` script) but not one route uses `./+types/*`: five of seven route components take `loaderData: any` (e.g. `pokemon.tsx:182`), discarding the loader's inferred return type, and loaders hand-type `{ params, request }`. (5) The home loader serializes all 1,025 species plus per-generation species arrays into every document — a deliberate instant-filtering tradeoff, but one a reviewer would want acknowledged and trimmed.
+
+I'd ask for the cache-eviction fix, the 404/ErrorBoundary rework, and `Route.ComponentProps` adoption before approving — one round of changes, not a rewrite.
+
+```json
+{
+  "dimension": "mergeability",
+  "criteria": {
+    "idiomatic": {
+      "score": 3,
+      "evidence": [
+        "app/app/routes.ts:1-10 — manual route() config with splat catch-all; correct Framework-mode shape",
+        "app/app/root.tsx:8-41 — Layout/html shell with Meta/Links/Scripts matches docs; React 19 <title> usage is now endorsed",
+        "app/app/routes/pokemon.tsx:37 — returns data({notFound:true},{status:404}) instead of the documented throw data(...) + route ErrorBoundary pattern",
+        "app/app/routes/types.tsx:12 — loaderData: any despite typegen being fully configured in tsconfig.json rootDirs",
+        "app/app/routes/pokemon.tsx:182 — component props hand-typed instead of Route.ComponentProps from ./+types"
+      ],
+      "rationale": "Recognisably idiomatic Framework Mode (route config, loaders, SSR, serve, data()), but it skips the framework's 404-throw/ErrorBoundary convention and completely ignores the generated route types it set up, using `any` for loader data in five of seven routes."
+    },
+    "correctness_risks": {
+      "score": 3,
+      "evidence": [
+        "app/app/lib/api.server.ts:49 — cache.set(url, promise) never evicts rejected promises; a transient API failure permanently poisons that URL",
+        "app/app/lib/api.server.ts:82-97 — speciesIndexPromise singleton caches a rejection forever, killing every page after one bad request",
+        "app/app/root.tsx:47-53 — root ErrorBoundary renders 'Not found' for every error, including 500s from the API",
+        "app/app/routes/home.tsx:60-64 — debounce timer cleared on unmount; no listener or rejection leaks found",
+        "app/app/components/MoveTable.tsx:38-56 — SSR-safe initial state; deterministic sort, no hydration mismatch"
+      ],
+      "rationale": "No leaks or races, but the no-eviction promise cache is a real robustness bug (transient failures become permanent 404s until restart), and the ErrorBoundary mislabels server errors as 404s."
+    },
+    "global_abstractions": {
+      "score": 3,
+      "evidence": [
+        "app/app/lib/api.server.ts:1-190 — god data module, but with a clear server-only boundary and coherent per-resource helpers",
+        "app/app/lib/format.ts:1-33 — small pure shared helpers, correctly split from server code",
+        "app/app/routes/move.tsx:11 — the notFound flag pattern is duplicated across four loaders and re-checked in each component",
+        "app/app/root.tsx:47, app/app/components/NotFound.tsx:1, app/app/routes/not-found.tsx:3 — three separate renderings of the not-found UI",
+        "app/app/routes/ability.tsx:35,43 — hidden flag serialized to an id-keyed object then rebuilt into a Map in the component"
+      ],
+      "rationale": "Boundaries are mostly clean (server/client split is disciplined), but the not-found handling is spread over three files plus per-loader flags, and the ability route has an awkward data-marshalling detour."
+    },
+    "readability": {
+      "score": 4,
+      "evidence": [
+        "app/app/lib/api.server.ts:15-29 — concurrency limiter with a clear why-comment",
+        "app/app/routes/home.tsx:36-39 — comment explains the local-state/URL sync strategy for back/forward",
+        "app/app/components/Section.tsx:5-12 — small, single-purpose components throughout",
+        "app/app/routes/pokemon.tsx:224-234 — magic numbers 255/1530 for stat bar maxima",
+        "app/app/routes/type.tsx:8 — second import statement from 'react-router' in the same file"
+      ],
+      "rationale": "Consistent file organisation, good explanatory comments, small components; docked for `loaderData: any` hiding data shapes from readers and a few magic numbers."
+    },
+    "review_cost": {
+      "score": 3,
+      "evidence": [
+        "app/app/lib/api.server.ts:49 — cache eviction on rejection must be added before merge",
+        "app/app/root.tsx:47-53 — ErrorBoundary needs isRouteErrorResponse handling",
+        "app/app/routes/pokemon.tsx:182 — adopt Route.ComponentProps / drop `any` across five routes",
+        "app/app/routes/move.tsx:11 — rework 404 flow to thrown data + ErrorBoundary"
+      ],
+      "rationale": "Approvable architecture, but I'd require the cache-eviction fix, the error-boundary rework, and adoption of generated route types — one concrete round of changes."
+    }
+  },
+  "overall": 3,
+  "findings": [
+    {
+      "severity": "high",
+      "location": "app/app/lib/api.server.ts:49",
+      "issue": "getJSON caches rejected promises forever (same for the speciesIndex/types/generations/typeMap singletons at lines 82-97, 104-122, 124-136), so a single transient API failure permanently serves that record's error — getRecordOrNull only masks 404, so a 500 becomes a permanent 'Not found' page until process restart.",
+      "suggestion": "On rejection, delete the entry from the cache (and reset the singleton) so the next request retries; keep the .catch(()=>{}) only to suppress unhandled rejections."
+    },
+    {
+      "severity": "medium",
+      "location": "app/app/root.tsx:47-53",
+      "issue": "The only ErrorBoundary renders 'Not found' for every error, including API 500s and unexpected exceptions, and hardcodes a Not found title.",
+      "suggestion": "Use isRouteErrorResponse(err) (or Route.ErrorBoundaryProps) to distinguish 404 from other errors, and render a generic error message for non-404s."
+    },
+    {
+      "severity": "medium",
+      "location": "app/app/routes/move.tsx:11",
+      "issue": "Home-grown 404 pattern: four loaders (move.tsx:11, pokemon.tsx:37, ability.tsx:10, type.tsx:21) return a notFound flag that each component must re-check, instead of the framework's throw data(\"Not Found\", { status: 404 }) + route ErrorBoundary; the not-found UI is rendered from three different places.",
+      "suggestion": "Throw a 404 data() Response and add a shared per-route ErrorBoundary, deleting components/NotFound.tsx's per-component checks and the duplicated markup in root.tsx."
+    },
+    {
+      "severity": "medium",
+      "location": "app/app/routes/pokemon.tsx:182",
+      "issue": "Route type generation is fully configured (tsconfig rootDirs, typecheck script) but unused: five of seven route components take loaderData: any (pokemon.tsx:182, move.tsx:39, ability.tsx:40, type.tsx:50, types.tsx:12) and loaders hand-type { params, request }.",
+      "suggestion": "Import Route from './+types/<route>' and use Route.LoaderArgs / Route.ComponentProps so loader return types flow to the components."
+    },
+    {
+      "severity": "low",
+      "location": "app/app/routes/home.tsx:8-23",
+      "issue": "The home loader serializes all 1,025 species with their types plus each generation's full species-id list into every document and payload, just to support client-side filtering.",
+      "suggestion": "Do the filtering in the loader from the URL search params (the framework's recommended shareable-URL pattern), returning only the current page's 48 cards plus counts."
+    },
+    {
+      "severity": "low",
+      "location": "app/app/routes/ability.tsx:35",
+      "issue": "Hidden-ability flags are serialized as an id-keyed object of strings and then reconstructed into a Map in the component (line 43), an awkward boundary detour.",
+      "suggestion": "Include `hidden: boolean` on each species entry in the loader and read it directly in the card list."
+    },
+    {
+      "severity": "low",
+      "location": "app/app/routes/type.tsx:8",
+      "issue": "A second import statement from 'react-router' appears below the first one, splitting imports of the same module.",
+      "suggestion": "Merge into the single existing `import { data } from \"react-router\"` at line 1."
+    },
+    {
+      "severity": "low",
+      "location": "app/app/components/MoveTable.tsx:79",
+      "issue": "Rows keyed by `${row.move}-${i}`, using the array index, which can confuse reconciliation when the sort changes row order.",
+      "suggestion": "Key by a stable composite of move name and level, or precompute a unique id per row in the loader."
+    },
+    {
+      "severity": "low",
+      "location": "app/app/routes/pokemon.tsx:224",
+      "issue": "Stat bar maxima are hardcoded magic numbers (255 and 1530 at lines 224/234).",
+      "suggestion": "Name them (MAX_STAT = 255, MAX_TOTAL = 6 * 255) next to STAT_LABELS."
+    }
+  ],
+  "summary": "A well-structured, mostly idiomatic React Router 8 framework-mode app with a clean server/client boundary, disciplined small components, and SSR-safe client state. Its main sins are bypassing the framework's typed route modules (five `any`-typed components despite typegen being configured) and its documented throw-404/ErrorBoundary convention, plus one genuine robustness bug: the promise cache never evicts rejections, so a transient API failure permanently poisons data until restart. Mergeable after one focused round of fixes."
+}
+```

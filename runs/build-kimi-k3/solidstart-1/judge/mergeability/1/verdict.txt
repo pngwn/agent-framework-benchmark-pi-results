@@ -1,0 +1,129 @@
+I've reviewed the app thoroughly against the current SolidStart v2 / Solid Router docs (query + `"use server"` + `createAsync` + `route.preload`, `useSearchParams` undefined-deletion semantics, `createHandler` options, `solidStart()` + `nitro()` vite config — all of which this code matches verbatim).
+
+```json
+{
+  "dimension": "mergeability",
+  "criteria": {
+    "idiomatic": {
+      "score": 5,
+      "evidence": [
+        "app/src/lib/queries.ts:12 — \"use server\" placed inside each query body, exactly as the v2 docs require (file-level directive would break the query wrapper)",
+        "app/src/routes/index.tsx:9-15 — route.preload calling the query plus createAsync in the component, the documented data-loading pattern",
+        "app/src/routes/index.tsx:39,91,112 — setSearchParams with undefined to drop q/page keys, documented key-deletion behavior; filters reset page to 1",
+        "app/vite.config.ts:4-6 — solidStart() + nitro() matches the current v2 vite.config docs exactly",
+        "app/src/entry-server.tsx:22 — createHandler(…, { mode: \"async\" }) is a documented HandlerOptions mode",
+        "app/src/routes/[...404].tsx:1-3 and app/src/app.tsx:9-31 — FileRoutes + MetaProvider/Title + Suspense in the Router root; A used for all internal links"
+      ],
+      "rationale": "Data loading, routing, rendering and state all use the recommended primitives from the current docs; no framework fighting found."
+    },
+    "correctness_risks": {
+      "score": 4,
+      "evidence": [
+        "app/src/lib/api.ts:19-27 — only 404 is mapped to NotFoundError; a 500/hung upstream API rejects with no app-level handling and no ErrorBoundary anywhere (app/src/app.tsx:20 wraps children only in Suspense)",
+        "app/src/lib/api.ts:23 — fetch without timeout/AbortSignal: a stalled API leaves SSR suspended indefinitely",
+        "app/src/lib/api.ts:11,30-31 — module-level promise cache is unbounded but keyed by a finite endpoint space and drops failed entries; acceptable",
+        "app/src/routes/index.tsx:32-39 — debounce timer is cleaned up via onCleanup; no listener/timer leak",
+        "app/src/routes/index.tsx:39 — q is stored untrimmed (`v.trim() ? v : undefined`), so a whitespace-only input clears itself via the createEffect sync at index.tsx:44; matching trims, so cosmetic",
+        "app/src/lib/api.ts:54-68 — 404s and alternate forms (id >= 10000) handled; excluded types return null → NotFound (api.ts:264-266)"
+      ],
+      "rationale": "No serious bug: cache is bounded, errors are distinguished, SSR/CSR stay consistent, timers are cleaned. The gaps are one moderate robustness issue (non-404 API failures with no error boundary) and two minor ones."
+    },
+    "global_abstractions": {
+      "score": 4,
+      "evidence": [
+        "app/src/lib/api.ts:2,11 — server-only fetch layer with a single documented cache; good boundary in principle, but enforcement is only a comment",
+        "app/src/lib/queries.ts:1-3 — static import of lib/api.ts from the module that also runs on the client; \"use server\" only replaces function bodies, so the server module (and its global cache Map) stays in the client bundle graph",
+        "app/src/lib/api.ts:37,46,101-107,215 — the `enName(t.names) ?? humanize(t.name)` display-name mapping is re-derived in at least four places instead of one helper",
+        "app/src/routes/pokemon/[name].tsx:15, moves/[name].tsx:16, abilities/[name].tsx:15, types/[name].tsx:15 — the same `Show when={data()} fallback={Show when={data()===null}` 404 wrapper duplicated across four routes",
+        "app/src/lib/util.ts — small, pure, well-scoped helpers; no god-module"
+      ],
+      "rationale": "Layering is clean (util / api / queries / components / routes) with no god abstractions; the costs are a convention-only server/client boundary and two duplicated idioms that will need untangling."
+    },
+    "readability": {
+      "score": 4,
+      "evidence": [
+        "app/src/lib/util.ts:5-11 — humanize/idFromUrl/dexNumber are named exactly after spec terms; easy to audit",
+        "app/src/routes/pokemon/[name].tsx:26,143 — props typed as `{ data: any }`; every API shape is `any` (api.ts:62, 89-107), so `strict: true` (app/tsconfig.json:12) buys almost nothing",
+        "app/src/routes/index.tsx:52-66 — filtering/pagination memos are short and read like the spec's rules",
+        "app/src/app.css:1-60 — plain CSS organised with commented sections and token variables; consistent with tokens.css",
+        "app/src/lib/api.ts:89-107 — loadHomeData is long but linear and commented by intent"
+      ],
+      "rationale": "A new teammate finds their way in minutes — naming, file layout and CSS are consistent. The pervasive `any` is the one rough spot that hurts long-term navigation and refactoring."
+    },
+    "review_cost": {
+      "score": 4,
+      "evidence": [
+        "app/src/app.tsx:20 — add an ErrorBoundary/fallback for non-404 query failures (the one substantive ask)",
+        "app/src/lib/api.ts:62-107 — type the loader return shapes instead of `any` (mechanical but broad)",
+        "app/.output/ — build output sits in app/ with no app-level .gitignore (root .gitignore only covers node_modules)",
+        "app/src/routes/*/[name].tsx — extract the duplicated data-or-NotFound wrapper into one component"
+      ],
+      "rationale": "Approve with a short, concrete list: one real robustness change, an API typing pass, a gitignore, and two dedup nits. Nothing architectural needs rework."
+    }
+  },
+  "overall": 4,
+  "findings": [
+    {
+      "severity": "medium",
+      "location": "app/src/app.tsx:20",
+      "issue": "Only 404s are handled (app/src/lib/api.ts:19-27 maps them to null); any other API failure (500, network) rejects the createAsync read with no ErrorBoundary in the tree, so SSR serves the framework error page and client-side navigation can leave a broken UI.",
+      "suggestion": "Wrap the Router root children in an <ErrorBoundary> with a friendly fallback, and/or catch and rethrow a typed ApiError in fetchApi so routes can render an app-styled error state."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/lib/api.ts:62",
+      "issue": "The entire data layer is untyped (`any` for every API resource and loader return, `props: { data: any }` in route components), making strict mode (app/tsconfig.json) ineffective and future refactors unsafe.",
+      "suggestion": "Define interfaces for the API resources the app consumes and the loader return shapes; the shapes are already stable and well-understood in this module."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/lib/queries.ts:1",
+      "issue": "The server-only module lib/api.ts (including its global cache Map and process.env access) is statically imported by a module that also runs on the client; \"use server\" only replaces the query bodies, so the boundary is enforced by a comment, not the build.",
+      "suggestion": "Isolate the server fetch layer so it cannot reach the client graph (file-level \"use server\" module or a server-only marker), keeping queries.ts as the thin wrapper."
+    },
+    {
+      "severity": "low",
+      "location": "app/.output/",
+      "issue": "The production build output is inside app/ and there is no app-level .gitignore; the root .gitignore only covers node_modules, so .output would be committed.",
+      "suggestion": "Add app/.gitignore with `.output/` (and node_modules)."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/routes/pokemon/[name].tsx:15",
+      "issue": "The `Show when={data()} fallback={<Show when={data() === null}><NotFound/>…}` construct is copy-pasted identically in four route files (pokemon, moves, abilities, types).",
+      "suggestion": "Extract one `<PageData query={…}>{(d) => …}</PageData>` component that renders NotFound on null and hides content while loading."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/lib/api.ts:37",
+      "issue": "The type display-name mapping `enName(t.names) ?? humanize(t.name)` is re-derived in at least four places (api.ts:37-48, 101-103, 150-160, 265-276).",
+      "suggestion": "Add a single `typeDisplayName(record)` helper (or always go through getTypeNameMap) and reuse it."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/lib/api.ts:23",
+      "issue": "fetchApi has no timeout or AbortSignal; a hung upstream request leaves SSR suspended and the page blank.",
+      "suggestion": "Use AbortSignal.timeout(...) on the fetch (and rely on the existing cache-delete-on-failure to allow retries)."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/routes/index.tsx:39",
+      "issue": "Whitespace-only input resets the field to empty via the createEffect sync (q is stored untrimmed), which looks like the field eating characters while typing spaces.",
+      "suggestion": "Store `v` as-is and trim only when matching, or drop the reset-on-URL-change effect for the search input specifically."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/lib/api.ts:180-196",
+      "issue": "loadPokemonPageData fans out to every move and version-group record of a Pokémon in parallel (up to ~180 requests for an uncached Pokémon) just to render the default game's tables.",
+      "suggestion": "Acceptable given the in-memory cache and local API, but consider fetching move records lazily per selected version group if the API grows."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/lib/util.ts:5",
+      "issue": "The app ships no tests of its own (0 test files); helpers like humanize/latestEnFlavor and the MoveTable sort (nulls-last, aria-sort) are pure and trivially unit-testable.",
+      "suggestion": "Add a small unit suite for lib/util and the sort comparator so the spec's edge cases stay locked in beyond the acceptance tests."
+    }
+  ],
+  "summary": "A genuinely idiomatic, current-release SolidStart v2 app: query + \"use server\" + createAsync + preload, documented useSearchParams semantics, and the exact documented vite/nitro config, with clean layering and consistent CSS. The main merge-blocking-adjacent asks are an ErrorBoundary for non-404 API failures, typing the data layer instead of pervasive `any`, and a server-only boundary that doesn't rely on a comment. I'd merge after one focused round; overall 4."
+}
+```

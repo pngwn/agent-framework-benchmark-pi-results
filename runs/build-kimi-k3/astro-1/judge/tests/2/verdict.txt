@@ -1,0 +1,81 @@
+I've reviewed the app thoroughly. The facts confirm it: `app/` contains no test files, no test runner in `devDependencies`, and no `test` script. The measured `tests: { files: 0, cases: 0 }` matches what I see — the only spec/test files anywhere are the acceptance tests in `tests/`, which the agent did not write. Everything in the review below therefore focuses on what the acceptance suite doesn't guard and which bugs that leaves open.
+
+Key risky, entirely unguarded logic I verified:
+
+- **Client-side filter/partial-refresh script** — `app/src/pages/index.astro:112-178`: debounce, `pushState` URL construction (must drop `page` when a filter changes, per spec), a `seq` race guard against out-of-order fetches, `DOMParser` swap of `#results`, and a `popstate` → `location.reload()`. All browser-only, invisible to any data-layer test, and full of ways to silently break.
+- **Client-side table sorting** — `app/src/pages/pokemon/[name].astro:300-339`: `aria-sort` flipping, missing-values-last in both directions, column-index-to-cell alignment for the `Level` column, numeric vs. text comparators.
+- **Home filtering/pagination math** — `app/src/pages/index.astro:22-33, 52-68, 81-84`: page parsing/clamping, per-filter fetch-and-intersect, 48/page slicing.
+- **Data layer** — `app/src/lib/pokeapi.js:30-52` (promise cache + failure eviction + concurrency limiter), `:63-67` (`humanize`), `:80-87` (`latestEnglishFlavor` relies on API entry order), `:136-153` (`cardsFromPokemonRefs` alternate-form exclusion and species dedupe).
+- **Moves tables construction** — `app/src/pages/pokemon/[name].astro:66-120`: version-group ordering, default selection, dedupe key, method-order comparator.
+- **Duplicated logic**: `app/src/pages/abilities/[name].astro:27-46` reimplements `cardsFromPokemonRefs` inline (for the `hidden` flag) — a fix to one copy won't propagate to the other, and nothing would catch the divergence.
+- **Error paths**: every page uses `if (err.status !== 404) throw err` (e.g. `app/src/pages/moves/[name].astro:18-23`); an API outage yields an unstyled 500 with no fallback page.
+
+```json
+{
+  "dimension": "tests",
+  "criteria": {
+    "coverage_of_risk": {
+      "score": 1,
+      "evidence": [
+        "app/package.json:9-14 — no test runner, no devDependencies, no test script",
+        "app/src/lib/pokeapi.js:30-152 — whole data layer (cache, humanize, latestEnglishFlavor, cardsFromPokemonRefs) has zero tests",
+        "app/src/pages/index.astro:112-178 — client-side debounce/pushState/partial-refresh script completely untested",
+        "app/src/pages/pokemon/[name].astro:300-339 — sortable-table script completely untested"
+      ],
+      "rationale": "No tests exist at all. The app's riskiest logic — URL-driven filtering/pagination, the partial-refresh client script, table sorting, and the cached data layer — is guarded only by the acceptance suite, which the agent didn't write and won't cover refactor-level regressions."
+    },
+    "behaviour_not_implementation": {
+      "score": 1,
+      "evidence": [
+        "app/src/pages/index.astro:1-178 — no assertions of any kind (rendered output, roles, or otherwise)",
+        "app/src/lib/pokeapi.js:1-153 — pure functions (humanize, dexNumber, latestEnglishFlavor, idFromRef) are trivially unit-testable yet untested"
+      ],
+      "rationale": "Per the rubric, no tests scores 1. Notably, pokeapi.js is pure and dependency-free, so behaviour-level unit tests would have been cheap to add."
+    },
+    "regression_power": {
+      "score": 1,
+      "evidence": [
+        "app/src/pages/index.astro:81-84 — pagination slice/clamp math unguarded; an off-by-one would only be caught by the acceptance suite's specific page assertions",
+        "app/src/pages/pokemon/[name].astro:105-119 — method-order and row-sorting comparators unguarded",
+        "app/src/pages/abilities/[name].astro:27-46 — duplicate of cardsFromPokemonRefs; the two copies can silently diverge with no failing test"
+      ],
+      "rationale": "Nothing the agent wrote can fail, so any regression — from a typo in the sort comparator to breaking the partial-refresh race guard — passes silently outside the exact scenarios the acceptance tests happen to hit."
+    },
+    "signal_to_noise": {
+      "score": 3,
+      "evidence": [
+        "app/src — no test files, so no noise either"
+      ],
+      "rationale": "No tests, hence no low-value tests; neutral on noise, but the maintenance-cost argument cuts the other way: the riskiest code carries zero test cost budget at all."
+    }
+  },
+  "overall": 1,
+  "findings": [
+    { "severity": "high", "location": "app/package.json:9-14", "issue": "No test infrastructure: no runner in devDependencies, no test script, zero test files in the app", "suggestion": "Add vitest (or node:test) for the pure data layer and Playwright component/route tests for the two client scripts; at minimum unit-test app/src/lib/pokeapi.js, which needs no mocking beyond fetch stubs" },
+    { "severity": "high", "location": "app/src/pages/index.astro:112-178", "issue": "Client filter script (debounce, URL building that must drop 'page' on filter change, seq race guard, DOMParser swap, popstate) is untested", "suggestion": "Browser tests asserting: typing 'char' shows Charmander etc., changing type resets to page 1, URL reflects q/type/generation with defaults omitted, back button restores the previous view" },
+    { "severity": "high", "location": "app/src/pages/pokemon/[name].astro:300-339", "issue": "Sortable-moves-table script untested: aria-sort flipping, missing-values-last in both directions, column/cell index alignment", "suggestion": "Test clicking Power twice on a table with '—' values: ascending then descending, missing always last, aria-sort on exactly one header" },
+    { "severity": "high", "location": "app/src/pages/index.astro:52-84", "issue": "Filter/pagination math unguarded: page parsing and clamping, type/generation intersection, 48/page slicing", "suggestion": "Unit-test the filter pipeline extracted from this page: q case-insensitivity ('MR MIME' finds Mr. Mime), ?page=0/NaN/99999 behaviour, empty-result state" },
+    { "severity": "medium", "location": "app/src/pages/abilities/[name].astro:27-46", "issue": "cardsFromPokemonRefs logic duplicated inline (for the hidden flag); a fix to either copy won't reach the other", "suggestion": "Extend cardsFromPokemonRefs to carry a per-entry flag (e.g. a transform callback) and unit-test one shared implementation" },
+    { "severity": "medium", "location": "app/src/pages/pokemon/[name].astro:105-108", "issue": "Move tables sort by the English display label, not the API name the spec specifies; differs for names like '10,000,000 Volt Thunderbolt', and nothing tests the distinction", "suggestion": "Add a test with a move whose English name and humanized API name sort differently, or sort by API name and test the rendered order" },
+    { "severity": "medium", "location": "app/src/pages/index.astro:54-66", "issue": "An unknown type/generation query value yields 0 results ('No Pokémon found') because the 404 leaves the id set empty — arguably it should ignore the filter; untested edge", "suggestion": "Decide and test the behaviour for ?type=not-a-type: either ignore the filter or render not-found" },
+    { "severity": "medium", "location": "app/src/lib/pokeapi.js:30-52,80-87", "issue": "Promise cache has no TTL (stale data across a live-data change) and latestEnglishFlavor assumes entries are pre-ordered; both untested", "suggestion": "Unit-test latestEnglishFlavor against shuffled/unsorted entries; document or test the cache's lifetime semantics" },
+    { "severity": "low", "location": "app/src/pages/moves/[name].astro:18-23", "issue": "Non-404 API errors are rethrown with no fallback rendering; an API outage gives an unhandled 500", "suggestion": "Add an error boundary/fallback page and a test that simulates a 500 from the API" },
+    { "severity": "low", "location": "app/src/pages/pokemon/[name].astro:36-45", "issue": "Evolution chain rendered via hand-built HTML string with a local escapeHtml helper — escaping regressions (or an incomplete escape) would ship unnoticed", "suggestion": "Build the nested list with Astro markup (set:html on small pieces or a recursive component) and test a species with special characters in its name" }
+  ],
+  "summary": "The agent wrote no tests of its own — no runner, no script, no files — leaving the acceptance suite as the only guard. That suite covers happy-path rendering, so the app's genuinely fragile parts (client-side filtering/partial refresh, table sorting, pagination math, the cached data layer, and duplicated card-building logic) are unprotected. The first refactor of pokeapi.js or the inline scripts is likely to break the spec silently.",
+  "wroteTests": false,
+  "testCount": 0,
+  "valuableTests": [],
+  "lowValueTests": [],
+  "untested": [
+    { "area": "Client-side search/filter script: debounce, pushState URL construction, race guard, DOMParser swap of #results, popstate (app/src/pages/index.astro:112-178)", "risk": "high", "likelyBug": "Filter change stops resetting page to 1, URL gains redundant default params, or out-of-order fetches render stale results — all invisible to data-layer tests" },
+    { "area": "Sortable moves tables: aria-sort toggling, missing-values-last in both directions, column-index/cell alignment, numeric vs text comparison (app/src/pages/pokemon/[name].astro:300-339)", "risk": "high", "likelyBug": "Descending sort puts '—' first, aria-sort applied to the wrong header, or the Level column sorts as text ('10' before '2')" },
+    { "area": "Home-page filter pipeline and pagination: q case-insensitive substring, type/generation intersection, page parse/clamp, 48-per-page slicing, pageHref (app/src/pages/index.astro:22-101)", "risk": "high", "likelyBug": "Off-by-one in page slicing, ?page=0/NaN treated as a large page, or pagination links losing the active filters" },
+    { "area": "Data layer: apiFetch promise cache + failure eviction + concurrency limiter, humanize, latestEnglishFlavor, idFromRef, cardsFromPokemonRefs dedupe/ordering (app/src/lib/pokeapi.js)", "risk": "high", "likelyBug": "A refactor breaks humanize capitalization or dex-number padding, alternate-form exclusion drops or admits forms, or failed requests get cached (or never retried) — none of which any current test would catch" },
+    { "area": "Moves-table construction: version-group ordering and default (highest order), method-order comparator, dedupe key, level-up sort (app/src/pages/pokemon/[name].astro:66-120)", "risk": "medium", "likelyBug": "Default game selection flips to the lowest order, methods stop sorting Level Up/Machine/Egg/Tutor first, or duplicate rows reappear" },
+    { "area": "Ability→card mapping with hidden flag, duplicated inline from cardsFromPokemonRefs (app/src/pages/abilities/[name].astro:27-46)", "risk": "medium", "likelyBug": "The two implementations diverge: fixing dedupe/ordering in pokeapi.js doesn't reach the abilities page, or 'Hidden ability' attaches to the wrong Pokémon after a species has multiple forms" },
+    { "area": "404 and API-failure paths: status!==404 rethrow, unknown type/generation filter collapsing to zero results (app/src/pages/moves/[name].astro:18-23, app/src/pages/index.astro:54-66)", "risk": "medium", "likelyBug": "API outage shows an unstyled 500 instead of a fallback; ?type=bogus renders 'No Pokémon found' rather than the unfiltered list, and no test pins either behaviour" },
+    { "area": "Evolution-chain recursion with manual escapeHtml + set:html (app/src/pages/pokemon/[name].astro:36-45, 147)", "risk": "low", "likelyBug": "Escaping or nesting regression on deep/branching chains (Eevee) — malformed list or an unescaped name — ships silently" }
+  ]
+}
+```

@@ -1,0 +1,122 @@
+```json
+{
+  "dimension": "mergeability",
+  "criteria": {
+    "idiomatic": {
+      "score": 4,
+      "evidence": [
+        "app/nuxt.config.ts:1 — Nuxt 4 layout with compatibilityDate, app.head htmlAttrs lang, runtimeConfig.public",
+        "app/app/pages/index.vue:18 — await useAsyncData with a stable key, mirroring the docs' canonical usage",
+        "app/app/pages/pokemon/[name].vue:116-118 — useAsyncData with `watch: [() => route.params.name, () => route.query.game]`, the documented pattern for param-driven pages",
+        "app/app/pages/pokemon/[name].vue:120-123 — useRequestEvent + setResponseStatus(event, 404), which is verbatim the pattern in the current Nuxt 4 setResponseStatus docs",
+        "app/app/composables/useApiBase.ts:1-8 — auto-imported composable using useState/useRuntimeConfig",
+        "app/app/lib/pokeapi.ts:67-78 — home-grown fetch/cache layer with raw `fetch` instead of $fetch/useFetch, the one deviation from the docs' recommended primitives (defensible given the spec's cross-request in-memory caching allowance, but it forgoes Nuxt's error/abort handling)"
+      ],
+      "rationale": "Recognisably reads like the current Nuxt 4 docs: app/ srcDir, NuxtLayout/NuxtPage, useAsyncData+watch, useHead, useState, and the documented setResponseStatus 404 recipe. Only the custom data-fetch layer bypasses $fetch/useFetch, and that choice is motivated by the spec rather than ignorance of the framework."
+    },
+    "correctness_risks": {
+      "score": 3,
+      "evidence": [
+        "app/app/lib/pokeapi.ts:48,71-77 — the cache stores the Promise itself; if a request fails with a non-404 error the rejected promise stays cached for the lifetime of the server process (and the browser SPA session), permanently breaking that resource until restart",
+        "app/app/pages/pokemon/[name].vue:116-124 — `const { data } = await useAsyncData(...)` ignores the returned `error`; a 500 from the API renders the 'Not found' page and sets HTTP 404 (same pattern in abilities/moves/types pages)",
+        "app/app/pages/pokemon/[name].vue:116 — key `pokemon-${route.params.name}` is evaluated once at setup; on client-side param change (component reused, watch refetches) the new Pokémon's data is written under the old key, polluting Nuxt's payload cache",
+        "app/app/pages/index.vue:42-44 — page number is clamped to pageCount, so ?page=999 renders the last page instead of an empty list (good)",
+        "app/app/components/MoveTable.vue:66-79 — missing values sort last in both directions, matching the spec (good)",
+        "app/app/pages/index.vue:63-70 — debounce timer is a module-scope-per-instance `let` cleared on each keystroke; no stale-push race with the route-sync watcher (guarded at index.vue:20-27)"
+      ],
+      "rationale": "404 handling, pagination clamping, dedup and sorting edge cases are all handled carefully, but the promise-cache poisoning on transient API failure is a real fragility, and API errors are misreported as 404s because `error` from useAsyncData is never inspected."
+    },
+    "global_abstractions": {
+      "score": 4,
+      "evidence": [
+        "app/app/lib/pokeapi.ts:1-238 — one coherent data module every page depends on; boundaries are clear (named helpers, documented comment header) and it earns its keep by centralising humanize/name/flavor logic",
+        "app/app/lib/pokeapi.ts:48,93-94,143 — three module-level Map caches are hidden global state, but they are keyed by API base, bounded by the API's fixed dataset, and explicitly permitted by the spec",
+        "app/app/lib/pokeapi.ts:164 — buildIndex re-fetches the same /type/<name>/ records getTypes already fetched (deduped only by the promise cache) — a small leaky layering between the two index builders",
+        "app/app/lib/pokeapi.ts:82 — dead export `spriteUrl`, never used; PokemonCard.vue:16 builds the sprite URL inline instead",
+        "app/app/pages/abilities/[name].vue:13-19 — near-duplicate of speciesCardsForRefs (pokeapi.ts:217) with a hidden flag; should be one parameterised helper"
+      ],
+      "rationale": "The abstractions are few and have clean boundaries; the costs are the hidden mutable module caches (acceptable given the spec), one dead helper, and one duplicated card-mapping loop."
+    },
+    "readability": {
+      "score": 3,
+      "evidence": [
+        "app/app/lib/pokeapi.ts:1-2,14-15 — comments explain the caching model and the humanize contract, exactly the 'why' comments you want",
+        "app/app/pages/pokemon/[name].vue:19-113 — a single ~95-line load() doing species fetch, game discovery, move joins, stats, abilities and evolutions in one `any`-typed block",
+        "app/app/lib/pokeapi.ts:67 — `Promise<any>` return type, and ~40 `any`/`(x: any)` casts across pages defeat the typed interfaces defined at pokeapi.ts:28-56",
+        "app/app/package.json:10-14 — no devDependencies at all: no vue-tsc or linter, so the pervasive `any` is never checked",
+        "app/app/assets/css/main.css:1-515 — one global stylesheet holding every component's styles (card, panel, badge, table) rather than colocated/scoped styles; consistent but hard to navigate"
+      ],
+      "rationale": "Naming and file organisation are clear and a new teammate would find their way, but the `any`-density, the monolithic load() on the Pokémon page, and the single 515-line global CSS file are real rough spots for a team codebase."
+    },
+    "review_cost": {
+      "score": 3,
+      "evidence": [
+        "app/app/lib/pokeapi.ts:48-77 — cache-rejection handling is a required change before merge (delete the cache entry when the promise rejects)",
+        "app/app/pages/*/[name].vue:120-123 — four pages need error vs 404 distinguished (`error` from useAsyncData inspected, not just falsy data)",
+        "app/app/lib/pokeapi.ts:82 — delete unused spriteUrl (or use it in PokemonCard.vue:16)",
+        "app/nuxt.config.ts:3 — compatibilityDate '2025-07-15' is well behind the installed Nuxt 4.6.x; should be bumped",
+        "app/app/pages/pokemon/[name].vue:19-113 — split load() into smaller loaders and replace `any` with the interfaces already defined in pokeapi.ts"
+      ],
+      "rationale": "I'd ask for one round of changes — rejection-safe caching, error/404 distinction, dead-code removal and `any` clean-up — but the architecture is sound and none of it is structural rework."
+    }
+  },
+  "overall": 3,
+  "findings": [
+    {
+      "severity": "medium",
+      "location": "app/app/lib/pokeapi.ts:71-77",
+      "issue": "Rejected promises are cached forever: a single transient API failure poisons the in-memory cache for that URL for the life of the server process (or browser session), with no recovery path.",
+      "suggestion": "Wrap with .catch that removes the entry (`hit.catch(() => cache.delete(url))`) or store resolved values instead of promises, so a retry is possible."
+    },
+    {
+      "severity": "medium",
+      "location": "app/app/pages/pokemon/[name].vue:116-124",
+      "issue": "The `error` result of useAsyncData is discarded; any non-404 API failure renders the 'Not found' page and returns HTTP 404, masking server errors (same pattern in abilities, moves and types pages).",
+      "suggestion": "Destructure `error`, render/throw it distinctly (e.g. `createError({ status: 500 })` or an error state) and only treat a `null` load result as 404."
+    },
+    {
+      "severity": "low",
+      "location": "app/app/pages/pokemon/[name].vue:116",
+      "issue": "useAsyncData key interpolates route.params.name, but the key is fixed at setup; on client-side param change the watched refetch writes the new Pokémon's data under the old key, polluting the payload cache.",
+      "suggestion": "Use a stable page-level key (e.g. 'pokemon-page'); the `watch` option already handles refetching."
+    },
+    {
+      "severity": "low",
+      "location": "app/app/lib/pokeapi.ts:82",
+      "issue": "Dead export: spriteUrl is never used; PokemonCard.vue:16 re-derives the sprite URL inline, so the helper and the template can drift.",
+      "suggestion": "Delete spriteUrl or use it from PokemonCard."
+    },
+    {
+      "severity": "low",
+      "location": "app/app/lib/pokeapi.ts:164",
+      "issue": "buildIndex re-issues the exact fetches getTypes already performed; correctness is saved only by the promise cache, making the layering fragile if the cache changes.",
+      "suggestion": "Have getTypes expose its records or reuse one shared fetch of the 18 type records in buildIndex."
+    },
+    {
+      "severity": "low",
+      "location": "app/app/pages/abilities/[name].vue:13-19",
+      "issue": "Near-duplicate of speciesCardsForRefs (pokeapi.ts:217), differing only by carrying a hidden-ability flag.",
+      "suggestion": "Extend speciesCardsForRefs with an optional transform/flag parameter and reuse it here."
+    },
+    {
+      "severity": "low",
+      "location": "app/app/lib/pokeapi.ts:67",
+      "issue": "`Promise<any>` plus ~40 `any` casts across the data layer and page loaders defeat the typed interfaces defined in the same file, and package.json has no vue-tsc to catch it.",
+      "suggestion": "Type the api() helper generically and add vue-tsc (and a lint) to devDependencies with a typecheck script."
+    },
+    {
+      "severity": "low",
+      "location": "app/nuxt.config.ts:3",
+      "issue": "compatibilityDate '2025-07-15' is several releases behind the installed Nuxt 4.6.x, silently opting out of newer framework behaviour fixes.",
+      "suggestion": "Bump compatibilityDate to match the current Nuxt release the app is built with."
+    },
+    {
+      "severity": "low",
+      "location": "app/app/composables/useApiBase.ts:3-6",
+      "issue": "The base-URL resolution mixes a build-time-baked runtimeConfig value with a server-only process.env override and a serialised useState — three mechanisms for one config value.",
+      "suggestion": "Rely on Nuxt's runtime config env convention (NUXT_PUBLIC_API_BASE_URL) or resolve the override once in a Nitro plugin/server util instead of on every composable call."
+    }
+  ],
+  "summary": "A competent, recognisably idiomatic Nuxt 4 app that follows the framework's current patterns (app/ srcDir, useAsyncData+watch, documented setResponseStatus 404 recipe) with a well-bounded shared data layer. The blocking items are operational fragility, not structure: failed API promises are cached forever and API errors masquerade as 404s because useAsyncData's error is ignored. After one round of those fixes plus `any`/dead-code clean-up, I'd merge it."
+}
+```

@@ -1,0 +1,119 @@
+{
+  "dimension": "mergeability",
+  "criteria": {
+    "idiomatic": {
+      "score": 4,
+      "evidence": [
+        "app/server/server.mjs:18-22 — reads .vite/manifest.json and emits hashed js/css links, exactly Vite 8's documented Backend Integration recipe",
+        "app/package.json:13 — vite ^8.3.5 matches the current stable release",
+        "app/src/client/main.js:37-50 — native form controls, debounced input, URLSearchParams-driven state; no hand-rolled reactivity",
+        "app/server/server.mjs:26-27 — dev mode hand-serves raw /src files instead of using Vite's dev server, which cannot transform the CSS import",
+        "app/src/client/main.js:2 — `import './styles.css'` breaks the raw-served dev mode (module loader rejects text/css), so `npm run dev` ships dead interactivity"
+      ],
+      "rationale": "Follows current Vite docs closely (manifest-based backend integration, ESM everywhere, request-time fetching); the only real deviation is a hand-rolled dev path that doesn't work."
+    },
+    "correctness_risks": {
+      "score": 4,
+      "evidence": [
+        "app/src/server/api.js:15-32 — single-flight promise cache with delete-on-failure, so no duplicate fan-out or stuck poison entries",
+        "app/src/server/api.js:92-98 — mapLimit bounds parallelism (32/16/8) during the 1025-record summaries build",
+        "app/src/shared/format.js:51-55 — escapeJsonForHtml defuses </script> before inlining species data",
+        "app/src/shared/home-view.js:49 — page clamps to totalPages for content but the raw out-of-range page value stays in the URL (state.page unclamped)",
+        "app/server/server.mjs:71-74 — HEAD requests fall through to res.end(body), sending a body contrary to HTTP semantics",
+        "app/src/server/pages.js:225-226 — `variety.pokemon.url` dereferenced without guarding empty varieties; would 500 rather than 404"
+      ],
+      "rationale": "Production path is careful and race-free; remaining issues are the broken dev script, small edge cases the tests never hit, and none are exploitable."
+    },
+    "global_abstractions": {
+      "score": 4,
+      "evidence": [
+        "app/src/shared/home-view.js:1-2 — filtering/markup shared by SSR and client so both emit identical markup (kills SSR/CSR drift)",
+        "app/src/server/api.js:15,36,70,121 — the same promise-memoization idiom hand-rolled four times with slight variations",
+        "app/src/server/pages.js — one 460-line module holding all five page renderers; section comments help but it is the file everything routes through",
+        "app/src/client/main.js:14 — magic DOM ids ('species-data', 'filter-*', 'game-select') form an implicit contract with the SSR template (pages.js:71-74) with no shared constants",
+        "app/src/server/api.js:6-10 — API_BASE buried as module-level env read, fine here but it is the only place to change for deployment"
+      ],
+      "rationale": "The shared/ layer earns its keep and boundaries are clean; the costs are four copies of one memoization pattern and a growing god-module of page renderers."
+    },
+    "readability": {
+      "score": 4,
+      "evidence": [
+        "app/src/server/api.js:3-4 — file-purpose header comments; same convention in every file",
+        "app/src/server/api.js:115-117 — comment explains the alternate-form exclusion rule (the why, not the what)",
+        "app/src/server/pages.js:185-192 — movesSection explains version-group ordering and grouping intent before the code",
+        "app/src/shared/format.js — small, pure, well-named helpers (humanize, dexNumber, latestEnglishFlavor)",
+        "app/src/server/pages.js:225-460 — pokemonPage plus movesSection inline is ~200 lines of nested template strings; readable but the densest spot"
+      ],
+      "rationale": "Consistent style, good comments explaining intent, and a new teammate could navigate by file name alone; only the long template-string pages need a scroll."
+    },
+    "review_cost": {
+      "score": 4,
+      "evidence": [
+        "app/package.json:10 — `dev` script serves raw sources and is broken; must be fixed or removed before merge",
+        "app/.gitignore — repo .gitignore (lines 1-3) does not exclude app/dist/, and build output is present",
+        "app/src/server/pages.js:74 — full 1025-species JSON inlined per response; reviewer would ask for an endpoint or ETag",
+        "app/src/server/api.js:15-47 — trivial extract-a-memoize-helper nit",
+        "app/src/shared/home-view.js:29-37 — URL/state helpers already omit defaults correctly, so no rework there"
+      ],
+      "rationale": "No structural rework needed; one round of nits (dev script, dist ignore, payload size) and I'd approve."
+    }
+  },
+  "overall": 4,
+  "findings": [
+    {
+      "severity": "medium",
+      "location": "app/src/client/main.js:2",
+      "issue": "`npm run dev` (package.json:10 → server/server.mjs:26-27) serves raw /src files, but the entry imports './styles.css'; browsers refuse a text/css module, so the whole client bundle fails and filtering/sorting/game-select are dead in dev mode.",
+      "suggestion": "Run Vite's dev server for development (e.g. `vite` with a middleware/proxy in server.mjs, or a separate dev script), or move the CSS import out of the module graph the raw server serves."
+    },
+    {
+      "severity": "low",
+      "location": "app/.gitignore",
+      "issue": "Build output app/dist/ (including hashed assets and manifest) is present and not ignored by the repo's .gitignore.",
+      "suggestion": "Add `app/dist/` to .gitignore and commit only sources."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/server/pages.js:74",
+      "issue": "Every home-page response inlines the entire 1025-species summary JSON (~150 KB) inside the HTML with `Cache-Control: no-cache`, so the payload is re-sent on each navigation and pagination click.",
+      "suggestion": "Serve the summaries as a JSON endpoint from the app's own server (or support ETag/304) and let the client fetch once; SSR can keep embedding the first page only."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/server/api.js:15",
+      "issue": "The same promise-memoization idiom is hand-rolled four times (cache at :15, listCache at :36, summariesPromise at :70, speciesMapPromise at :121) with slightly different shapes.",
+      "suggestion": "Extract one `memoize(fn)` helper that stores a promise and evicts on rejection."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/shared/home-view.js:49",
+      "issue": "`page` is clamped for rendering but `state.page` (parseHomeState, :33) keeps the raw value, so a URL like ?page=999 shows page 1 while the address bar stays out of range; client-side syncUrl would also re-emit the bad value.",
+      "suggestion": "Clamp page inside parseHomeState (or write it back) so URL and content agree."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/server/pages.js:226",
+      "issue": "`variety.pokemon.url` is dereferenced without checking that varieties is non-empty; a malformed species record would 500 instead of rendering Not found.",
+      "suggestion": "Guard the variety lookup and fall through to the 404 path."
+    },
+    {
+      "severity": "low",
+      "location": "app/server/server.mjs:71-74",
+      "issue": "HEAD requests receive a full response body, contrary to HTTP semantics (harmless here, but a proxy will be in front in production).",
+      "suggestion": "Skip res.end(body) for HEAD (res.end() after writeHead)."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/server/pages.js",
+      "issue": "A single 460-line module holds all five page renderers plus the shared moves-table logic; every future page change funnels through one file.",
+      "suggestion": "Split into per-page modules (home, pokemon, move, ability, type) sharing components.js/section()."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/client/main.js:14",
+      "issue": "The client depends on magic DOM ids generated by the server template ('species-data', 'filter-search', 'game-select') with no shared constants defining the contract.",
+      "suggestion": "Export an ID-constants module from src/shared and use it on both sides, or at least document the contract in one place."
+    }
+  ],
+  "summary": "A well-executed SSR + Vite vanilla app that follows current Vite 8 idioms (manifest-based backend integration, request-time fetching, shared server/client template code) with clean boundaries and consistent escaping. Production behavior is solid and race-free thanks to single-flight caches and bounded fetch parallelism. The blockers are small: a broken hand-rolled dev mode (raw-served CSS import kills the client bundle), committed build output, and a few clamping/edge-case nits — all addressable in one review round."
+}

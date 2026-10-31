@@ -1,0 +1,165 @@
+{
+  "dimension": "forward-thinking",
+  "criteria": {
+    "latest_apis": {
+      "score": 5,
+      "evidence": [
+        "app/package.json:12 — devDependencies pinned to vite ^8.3.5, resolved to 8.3.5 (npm latest as of 2026-10-21)",
+        "app/vite.config.js:1-5 — defineConfig with only build.manifest; no deprecated v8-era options (no rollupOptions, esbuild, minify:'esbuild')",
+        "app/server/server.mjs:3-5 — node:-prefixed imports, import.meta.url + fileURLToPath instead of __dirname",
+        "app/src/server/api.js:21 — global fetch (Node's native undici fetch), no hand-rolled HTTP client",
+        "app/src/client/main.js:29-30,44-50 — History API pushState/replaceState + popstate, URLSearchParams"
+      ],
+      "rationale": "Vite 8.3.5 is the current stable (Vite 8.0, the Rolldown-based release, shipped 2026-03-12 and 8.3.5 is the latest npm tag per vite.dev and npm). The config uses only non-deprecated options; per the Vite 8 migration guide, deprecated `build.rollupOptions`/`esbuild` options are avoided entirely, and Node/browser APIs are the current generation."
+    },
+    "platform": {
+      "score": 4,
+      "evidence": [
+        "app/src/server/api.js:21,34-36 — fetch + in-memory promise cache (dedupes concurrent requests, drops failures so they can retry)",
+        "app/server/server.mjs:62-72 — fs.createReadStream piped to the response for static assets",
+        "app/src/client/styles.css:122,141 — CSS grid auto-fill, logical properties (margin-inline, padding-block)",
+        "app/src/client/styles.css:43-47 — :focus-visible for keyboard users",
+        "app/src/client/main.js:47-50 — history.pushState/replaceState instead of full navigation for filter changes",
+        "app/src/server/api.js:21 — fetch with no AbortSignal.timeout, so a hung upstream hangs SSR forever",
+        "app/src/client/main.js:52-55 — game select does location.assign (full reload) where fetch+swap or navigation API would be smoother"
+      ],
+      "rationale": "Reaches for the platform first: fetch, streams, ES modules, History API, modern CSS with custom properties, logical properties and focus-visible. The misses are resilience (no AbortController/timeout on upstream fetches) and a couple of full-page navigations where a fetch-based swap would age better; no CSS nesting is used, though that's a style choice, not a defect."
+    },
+    "dependencies": {
+      "score": 5,
+      "evidence": [
+        "app/package.json:10-13 — zero runtime dependencies; only vite as a devDependency",
+        "app/src/server/api.js:69-77 — hand-rolled mapLimit replaces an async-pool dependency",
+        "app/src/shared/format.js:30-38 — hand-rolled escaping instead of a template library"
+      ],
+      "rationale": "One dev-only dependency, at the latest stable (Vite 8.3.5). Everything else — concurrency pool, HTML escaping, routing, debounce — is a small, readable hand-rolled module, which is the right call when the platform covers it. A build artifact, app/dist/, is committed to the repo (root .gitignore only lists node_modules and /data/), which is hygiene rather than a dependency problem."
+    },
+    "churn_resistance": {
+      "score": 3,
+      "evidence": [
+        "app/src/server/api.js:1-139 — all API access behind one module (getJson/record/getList/summaries); server pages never call fetch directly",
+        "app/src/shared/home-view.js:1-3, app/src/shared/components.js:1-2 — filter/render logic shared by SSR and client, so both produce identical markup",
+        "app/src/shared/router.js:1-9 — single route table; app/server/server.mjs:83 — one place resolves routes",
+        "app/src/server/pages.js:122-127 — r.power/r.accuracy/r.pp/r.level interpolated unescaped from API JSON (escapeHtml applied elsewhere inconsistently)",
+        "app/src/server/pages.js:74 — full 1025-species dataset embedded as JSON in every home-page response",
+        "app/src/client/main.js:88-102 — sortable tables re-parse numbers out of DOM textContent, coupling behavior to markup",
+        "app/src/server/pages.js:240-246 — zero type annotations or JSDoc at the API boundary (typeLines: 0 for the whole app)"
+      ],
+      "rationale": "The structure is genuinely churn-resistant — one data layer, one route table, shared logic used by both server and client, no framework internals beyond the documented Vite manifest. But nothing is typed at the API boundary and HTML is assembled by hand across pages.js with ~100 interpolations, several of which bypass escapeHtml, so an API shape change or a new field is easy to get wrong; the DOM-text-based sorting and the always-embedded dataset also grow brittle as requirements move."
+    }
+  },
+  "overall": 4,
+  "findings": [
+    {
+      "severity": "medium",
+      "location": "app/server/server.mjs:22-30",
+      "issue": "The dev-mode fallback serves raw source, but app/src/client/main.js:4 does `import './styles.css'`, which a browser will refuse to load as a module (CSS is not a JS module). If a dist/ exists (it's committed), 'dev' silently serves the stale production bundle instead.",
+      "suggestion": "Either point `npm run dev` at Vite's dev server (vite, with the SSR server proxied) or drop the CSS import in the unbundled path. Add `app/dist` to .gitignore so dev never serves a stale build."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/server/api.js:21",
+      "issue": "Upstream fetches have no timeout or AbortController; a slow/hung PokeAPI request hangs an SSR response indefinitely (Node's undici defaults are hundreds of seconds).",
+      "suggestion": "Use `AbortSignal.timeout(...)` on the fetch and translate the abort into a 502/504 response; the existing promise-cache retry logic already handles the failure path."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/server/pages.js:122-127",
+      "issue": "Manual HTML templating across ~100 interpolation points with inconsistent escaping: r.power/r.accuracy/r.pp/r.level (pages.js:122-125) and s.base_stat (pages.js:245-246) go into markup unescaped, relying on them being numbers from the API.",
+      "suggestion": "Route every value through escapeHtml (or a small `h()` tagged-template that auto-escapes), so a future field type change can't introduce an XSS hole or a rendering crash."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/client/main.js:88-102",
+      "issue": "Table sorting reads cell textContent and coerces it with Number(), so sort behavior is coupled to the rendered markup (a display change like adding units or a badge would silently break numeric sorting).",
+      "suggestion": "Emit sort keys as data-* attributes on the row (or sort from the underlying move data), which keeps the client independent of presentation changes."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/server/pages.js:74",
+      "issue": "The entire species dataset is serialized into every home-page response (and re-serialized for every filter/page combination); ~100KB+ of duplicated HTML per page view, and it grows linearly with the dataset.",
+      "suggestion": "Serve the summaries as a single cacheable /api/summary.json fetched by the client, or hydrate only the first page and lazy-load the rest; the shared home-view logic makes this a contained change."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/server/api.js:96-112",
+      "issue": "The first home-page request triggers ~1,035 upstream fetches (1025 pokemon + generations) before any bytes are sent; the first visitor pays seconds of latency, and the server has no warm-up.",
+      "suggestion": "Kick off getSpeciesSummaries() at server start (server.mjs listen callback) so the cache is warm before the first request."
+    },
+    {
+      "severity": "low",
+      "location": "app/package.json:10-13",
+      "issue": "No `engines` field, though the server requires Node ≥18 for global fetch; the repo's .nvmrc (24.22.1) is the only signal.",
+      "suggestion": "Add `\"engines\": { \"node\": \">=18\" }` so an older runtime fails fast."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/shared/format.js:17-27",
+      "issue": "humanize/escapeHtml/format helpers are fine, but there is no JSDoc or TypeScript anywhere (typeLines: 0), so the API response shapes that pages.js destructures are documented nowhere.",
+      "suggestion": "Add JSDoc typedefs for the PokeAPI records at the api.js boundary — cheap insurance for a codebase with no compiler."
+    }
+  ],
+  "summary": "A lean, deliberately unglamorous stack that is fully current: Vite 8.3.5 (the latest stable, post-dating most training data), zero runtime dependencies, native fetch/History/stream APIs, and a clean separation between one data-access module, shared logic used by both server and client, and one route table. The forward-looking weaknesses are in the seams: no types or validation at the API boundary, hand-assembled HTML with inconsistent escaping, DOM-text-coupled client sorting, a broken/stale dev path, and committed build artifacts. It will upgrade cleanly when Vite moves; the churn risk is in its own hand-rolled template layer.",
+  "apis": [
+    {
+      "api": "defineConfig",
+      "location": "app/vite.config.js:1",
+      "status": "current",
+      "replacement": ""
+    },
+    {
+      "api": "build.manifest",
+      "location": "app/vite.config.js:3",
+      "status": "current",
+      "replacement": "Still the documented way to get hashed asset paths; not among v8's deprecations (vite.dev/guide/migration)"
+    },
+    {
+      "api": "node:-prefixed imports + fileURLToPath/import.meta.url",
+      "location": "app/server/server.mjs:3-5,9",
+      "status": "current",
+      "replacement": ""
+    },
+    {
+      "api": "global fetch (undici)",
+      "location": "app/src/server/api.js:21",
+      "status": "current",
+      "replacement": ""
+    },
+    {
+      "api": "History API (pushState/replaceState/popstate)",
+      "location": "app/src/client/main.js:29-30,44-50",
+      "status": "current",
+      "replacement": ""
+    },
+    {
+      "api": "URLSearchParams / URL",
+      "location": "app/src/client/main.js:12,53",
+      "status": "current",
+      "replacement": ""
+    },
+    {
+      "api": ":focus-visible",
+      "location": "app/src/client/styles.css:43",
+      "status": "current",
+      "replacement": ""
+    },
+    {
+      "api": "writeHead(...).end() chaining",
+      "location": "app/server/server.mjs:88,95",
+      "status": "current",
+      "replacement": ""
+    }
+  ],
+  "dependencies": [
+    {
+      "name": "vite",
+      "verdict": "modern",
+      "note": "^8.3.5, resolved to 8.3.5 — the latest stable release (Vite 8 shipped 2026-03-12 with Rolldown; 8.3.5 is the current npm latest, 2026-10-21). Used only as a bundler + manifest generator, which is all this app needs."
+    },
+    {
+      "name": "(runtime deps)",
+      "verdict": "modern",
+      "note": "None. Routing, concurrency pool, escaping and debounce are small hand-rolled modules — the right trade where the platform covers it."
+    }
+  ]
+}

@@ -1,0 +1,162 @@
+# Review — `app/` (Hono + htmx Pokédex), dimension: editability
+
+## Structure at a glance
+
+- `app/src/index.js` — server entry (`serve` from `@hono/node-server`)
+- `app/src/app.js` — all six routes plus per-route data assembly (~300 lines)
+- `app/src/api.js` — single data layer: `API_BASE`, promise-cache, `memo`d indexes (`speciesIndex`, `allTypes`, …)
+- `app/src/format.js` — pure display helpers
+- `app/src/views/` — `layout.js`, `components.js` (`pokemonCard`, `section`, `typeBadge`), `home.js`, `pokemon.js`, `details.js`; all pure `hono/html` template functions over plain data props
+- `app/public/app.js` — the only client code: htmx param cleanup + event-delegated table sorting
+
+Dependencies (`hono@^4.13`, `@hono/node-server@^2.1.5`, `htmx.org@^2`) are the current stable releases; the `hono/html` tagged-template approach and `@hono/node-server/serve-static` usage are current and idiomatic. Nothing here is out of date.
+
+## Scenario walkthroughs
+
+**1. Remove Abilities.** Route block at `app/src/app.js:253-266`, its import at `app/src/app.js:28`, `abilityPage` at `app/src/views/details.js:35-43`, the Abilities section on the Pokémon page (`app/src/views/pokemon.js:55-64`, used at `:128`) and its data mapping at `app/src/app.js:194-196`. Three files, ~6 edits, all easy to find; the nav (`app/src/views/layout.js:29-32`) has no Abilities link. Leftover: `pokemonCard`'s `hidden` flag / "Hidden ability" note (`app/src/views/components.js:14,23`) has exactly one caller and would go dead. Anchors say "a handful of scattered edits" → **3**.
+
+**2. Sprite bug.** Every card on every list is built by one template, `pokemonCard` (`app/src/views/components.js:14-24`), which constructs the sprite URL at `:17` from the species id — home (`app/src/app.js:72`) and moves/abilities/types all funnel through `pokemonCard` or `speciesCardsFor` (`app/src/app.js:208-224`). One fix covers every list *as long as id+name is enough*; if the fix needs the Pokémon record's own sprite URL, the plumbing (`speciesIndex` in `app/src/api.js:101`, `speciesCardsFor` in `app/src/app.js:208`) must carry it. So: one obvious place, with a caveat. **4** for the happy case.
+
+**3. Sort card lists by name.** Card rendering is shared, but ordering happens in two data spots (`app/src/app.js:65-72` home, `app/src/app.js:222-223` `speciesCardsFor`), the count+list markup is copy-pasted three times in `app/src/views/details.js:32,38,77`, and a sort control would have to be added at four render sites (plus client JS if interactive). **2**.
+
+**4. Items section shaped like Moves.** Genuinely additive: a route block + `itemPage` in `app/src/views/details.js`, reusing `apiJson`, `englishName`, `orMissing`, `section`, `layout`, `renderPage`. But `movePage`'s `<dl class="facts">` (`app/src/views/details.js:5-31`) is duplicated inline with the Pokémon summary (`app/src/views/pokemon.js:33-46`), so the "facts list" shape gets copied a third time rather than reused. **4**.
+
+**5. Change API base/caching.** Base URL and cache live in exactly one module (`app/src/api.js:2-25`, `memo` at `:57-61`). The one leak: the view layer re-derives media URLs (`app/src/views/components.js:2,17` hardcodes `${API_BASE}/media/sprites/pokemon/${id}.png`), so a media-path change touches a template. **4**.
+
+## Scores
+
+**removability — 3.** Route + import + view function + a section on a sibling page, with one caller-less flag left behind.
+
+**changeability — 3.** Most fixes land in one obvious place (`pokemonCard`, `format.js`, `api.js`), but cards carry only `{id, name}`, so pokemon-level fixes need plumbing through `api.js` and `app.js`; and the `typeLabels` parameter accepts two shapes — a `Map` from `app/src/app.js:72` but a plain object from `app/src/app.js:297` — while `app/src/views/components.js:21` indexes it with `[]`, so the Map lookups silently fail and fall back to `humanize` (invisible today only because English type names equal their humanized forms). That's a trap for the next editor.
+
+**coupling — 4.** Clean layering: pure template functions over data props, one data module, client code isolated in `public/app.js` with an explicit htmx seam (`isHtmx` at `app/src/app.js:20`, fragments `resultsFragment`/`movesSection` matching `hx-target="#results"` / `"#moves"`). Deductions: media URL layout known by the view (`app/src/views/components.js:17`), `PAGE_SIZE` (a pagination constant) exported from the view module (`app/src/views/home.js:4`) and consumed by the route (`app/src/app.js:66,71`), and the `—` missing-value token duplicated between server (`app/src/format.js:28`) and client sorter (`app/public/app.js:34`).
+
+**abstraction_design — 3.** The abstractions track real variation well: `section()` (`app/src/views/components.js:31-38`), `speciesCardsFor` unifying three different API shapes via `entry.pokemon ?? entry` plus an `extra` callback (`app/src/app.js:208-224`), data-driven move tables (`app/src/views/pokemon.js:88-124`). But the facts-dl and "count + cardList" patterns are copy-pasted rather than factored, and `pokemonCard` is accumulating one-caller flags (`hidden`, `typeLabels`).
+
+```json
+{
+  "dimension": "editability",
+  "criteria": {
+    "removability": {
+      "score": 3,
+      "evidence": [
+        "app/src/app.js:253-266 — abilities route plus its import at app/src/app.js:28",
+        "app/src/views/details.js:35-43 — abilityPage template",
+        "app/src/views/pokemon.js:55-64 — abilitiesHtml and its use at app/src/views/pokemon.js:128, data mapping at app/src/app.js:194-196",
+        "app/src/views/components.js:14 — pokemonCard's `hidden` flag has one caller (app/src/app.js:259), so removing abilities strands it"
+      ],
+      "rationale": "Deleting Abilities means coordinated edits in three files across route, data mapping and two view modules; each edit is easy to find, but it's scattered and leaves one dead flag behind."
+    },
+    "changeability": {
+      "score": 3,
+      "evidence": [
+        "app/src/views/components.js:17 — single sprite-URL construction point; every list funnels through it (app/src/app.js:72, app/src/app.js:208-224)",
+        "app/src/app.js:72 — passes a Map as typeLabels while app/src/app.js:297 passes a plain object",
+        "app/src/views/components.js:21 — indexes typeLabels with [], so the Map call site silently falls back to humanize",
+        "app/src/app.js:96-166 — pokemonMovesData, ~70 lines of moves data munging living inside the route file"
+      ],
+      "rationale": "Most fixes have one obvious home, but the typeLabels Map/object wobble is a latent trap, and fixes needing pokemon-level data must be plumbed through api.js and speciesCardsFor rather than landing in one place."
+    },
+    "coupling": {
+      "score": 4,
+      "evidence": [
+        "app/src/api.js:1-25 — single data module owning API_BASE, cache and memo",
+        "app/src/app.js:20 — isHtmx seam; fragments at app/src/views/home.js:18 and app/src/views/pokemon.js:77 match hx-target=#results/#moves",
+        "app/public/app.js:1-45 — all client behavior isolated, event-delegated so htmx-swapped content keeps working",
+        "app/src/views/components.js:2 — view imports API_BASE and hardcodes the media path pattern at :17",
+        "app/src/views/home.js:4 — PAGE_SIZE lives in a view but is consumed by the route (app/src/app.js:66,71)"
+      ],
+      "rationale": "Loose coupling with clear seams: pure template functions, one data layer, explicit htmx fragments. Only small leaks: media URL layout in a template and a pagination constant exported from a view."
+    },
+    "abstraction_design": {
+      "score": 3,
+      "evidence": [
+        "app/src/app.js:208-224 — speciesCardsFor unifies three list shapes (moves/abilities/types) with an extra callback",
+        "app/src/views/components.js:31-38 — generic section() used consistently across all detail pages",
+        "app/src/views/details.js:32,38,77 — '<count> Pokémon' + cardList markup copy-pasted three times",
+        "app/src/views/details.js:5-31 vs app/src/views/pokemon.js:33-46 — the dl.facts pattern duplicated rather than a shared helper",
+        "app/src/views/components.js:14 — pokemonCard growing one-caller flags (hidden, typeLabels) alongside types"
+      ],
+      "rationale": "The load-bearing abstractions (card, section, speciesCardsFor, the data-driven move tables) stretch across the app's real variation, but the smaller patterns (facts list, count+list section) are copy-pasted and would be copied again for an Items page."
+    }
+  },
+  "overall": 4,
+  "findings": [
+    {
+      "severity": "medium",
+      "location": "app/src/views/components.js:21",
+      "issue": "pokemonCard indexes typeLabels with [] but receives a Map from app/src/app.js:72 and a plain object from app/src/app.js:297; the Map lookups silently fail and fall back to humanize.",
+      "suggestion": "Pick one shape (always a Map, or pre-resolved label strings on each type entry) and pass it consistently from every call site."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/views/components.js:17",
+      "issue": "A view template imports API_BASE and hardcodes the media URL pattern '/media/sprites/pokemon/<id>.png', leaking data-source layout into the presentation layer.",
+      "suggestion": "Resolve sprite URLs in the data layer (api.js) or pass a ready-made spriteUrl prop into pokemonCard."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/views/details.js:32",
+      "issue": "The 'count + cardList' section markup is copy-pasted three times (lines 32, 38, 77), so any change to list rendering (e.g. adding sort controls) touches each copy.",
+      "suggestion": "Extract a pokemonListSection(slug, title, count, cards) helper next to section() and reuse it for move/ability/type pages."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/views/details.js:5",
+      "issue": "The dl.facts pattern is duplicated inline with the Pokémon summary (app/src/views/pokemon.js:33-46); an Items page would copy it a third time.",
+      "suggestion": "Extract a factsList([{term, description}]) helper into components.js."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/views/home.js:4",
+      "issue": "PAGE_SIZE, a pagination/data constant, is exported from a view module and consumed by the route (app/src/app.js:66,71).",
+      "suggestion": "Move PAGE_SIZE into api.js or app.js where the slicing happens."
+    },
+    {
+      "severity": "low",
+      "location": "app/public/app.js:34",
+      "issue": "The client sorter duplicates the server's missing-value token ('—' from app/src/format.js:28); changing one but not the other breaks 'missing sorts last'.",
+      "suggestion": "Emit the token into the DOM (e.g. data-missing attribute on the table) and read it, or comment both sites pointing at each other."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/app.js:96",
+      "issue": "pokemonMovesData is ~70 lines of data transformation inside the route file, making app.js both router and data munging layer.",
+      "suggestion": "Move moves data assembly into a src/data/ module (or extend api.js) so app.js stays route+render wiring."
+    }
+  ],
+  "summary": "This is a cleanly layered little app: one data module, pure hono/html template functions over plain props, shared card/section abstractions, and an explicit htmx fragment seam, so most changes land in one obvious place. The main editability costs are copy-pasted small patterns (facts dl, count+list markup), a typeLabels parameter that accepts two shapes, and a media-URL pattern leaked into a view template. All are easy fixes; none require restructuring.",
+  "scenarios": [
+    {
+      "change": "Remove the Abilities pages and every link to them",
+      "files": ["app/src/app.js", "app/src/views/details.js", "app/src/views/pokemon.js", "app/src/views/components.js"],
+      "difficulty": 3,
+      "notes": "Route block (app.js:253-266), import (app.js:28), abilityPage (details.js:35-43), the Pokémon page's Abilities section (pokemon.js:55-64,128) and its data mapping (app.js:194-196). All findable, but three files, and pokemonCard's `hidden` flag becomes dead code unless you also clean components.js."
+    },
+    {
+      "change": "Fix the sprite shown for species whose default Pokémon has a different name (e.g. Deoxys)",
+      "files": ["app/src/views/components.js"],
+      "difficulty": 4,
+      "notes": "Every list renders through pokemonCard, whose img src is built at components.js:17 from the id, so one fix covers home, moves, abilities and types. Caveat: cards carry only {id, name}; if the fix needs the Pokémon record's own sprite URL, you must extend speciesIndex (api.js) and speciesCardsFor (app.js), dropping this to 2-3."
+    },
+    {
+      "change": "Add sorting by name to every list of Pokémon cards",
+      "files": ["app/src/app.js", "app/src/views/home.js", "app/src/views/details.js", "app/public/app.js", "app/public/styles.css"],
+      "difficulty": 2,
+      "notes": "Card rendering is shared but ordering lives in two data spots (app.js:65-72, 222-223) and the count+list markup is duplicated three times in details.js, so sort UI and wiring must be added per page. A client-side sort in public/app.js (event-delegated like the table sorter) would touch fewer files but leaves server-rendered order unchanged."
+    },
+    {
+      "change": "Add an Items section (/items, /items/:name) shaped like Moves",
+      "files": ["app/src/app.js", "app/src/views/details.js"],
+      "difficulty": 4,
+      "notes": "Mostly additive: one route block following the existing pattern plus an itemPage view, reusing apiJson, englishName, orMissing, section, layout and renderPage. The facts-dl shape gets copied from movePage since no shared helper exists."
+    },
+    {
+      "change": "Change the API base URL and caching rules",
+      "files": ["app/src/api.js", "app/src/views/components.js"],
+      "difficulty": 4,
+      "notes": "API_BASE, the promise cache and the memo wrapper all live in api.js:2-61; caching rules change in one place. The one second place is the card template's hardcoded media path (components.js:17)."
+    }
+  ]
+}
+```

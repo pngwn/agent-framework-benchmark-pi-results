@@ -1,0 +1,127 @@
+{
+  "dimension": "mergeability",
+  "criteria": {
+    "idiomatic": {
+      "score": 4,
+      "evidence": [
+        "app/src/app.js:36 — new Hono() with c.req.param/query/header, c.html and app.notFound/app.onError exactly as current Hono v4 docs (4.13.14 is latest stable; pinned in app/package.json)",
+        "app/src/views.js:1 — hono/html tagged templates for everything incl. the doctype layout; escaping-by-default with no raw() anywhere",
+        "app/src/app.js:49,159 — HX-Request branch returning a partial vs full page is the canonical htmx-with-server-rendering pattern",
+        "app/src/views.js:99-104 — htmx 2.x attributes (hx-get, hx-trigger delay debounce, hx-target, hx-swap outerHTML, hx-push-url) all current",
+        "app/src/views.js:337 — hx-target=\"closest table\" uses htmx's extended selectors correctly",
+        "app/src/server.js:5 — serve({ fetch: app.fetch, port }) matches @hono/node-server docs",
+        "app/src/views.js:100 — active-search pattern omits hx-sync, which the htmx docs explicitly recommend for this exact use case"
+      ],
+      "rationale": "Reads like the framework's own examples: hono/html escaping, HX-Request fragment endpoints, htmx debounce/push-url, correct current stable versions (hono 4.13.14, htmx 2.0.11). Only deviations are the missing hx-sync on search and hand-rolled per-file static middleware."
+    },
+    "correctness_risks": {
+      "score": 3,
+      "evidence": [
+        "app/src/api.js:82 — indexPromise ??= buildIndex() caches a rejected promise forever; one transient API failure on the first request makes every page 500 until process restart (apiFetch entries do self-heal at api.js:18, the index does not)",
+        "app/src/views.js:100 — debounced search without hx-sync: per htmx docs, a second request begins while the first is in flight and the last-completed (not last-issued) response wins the swap, so stale results and a stale pushed URL are possible",
+        "app/src/app.js:255 — onError returns notFoundPage() (h1 'Not found') with status 500; server errors render as the 404 page",
+        "app/src/api.js:13 — no timeout/AbortController on upstream fetch; a hung API call hangs the response",
+        "app/src/app.js:52-58 — page param validated, NaN/0 clamped, page>totalPages clamped; good defensive handling",
+        "app/src/app.js:88-92 — per-move version_group_details deduped and unknown games filtered, robust against repeated entries"
+      ],
+      "rationale": "A few minor risks plus one moderately serious one: the cached-rejection index makes the process unrecoverable after a single boot-time API blip. Everything else (404s, bad query params, escaping) is handled carefully; hono/html escapes all interpolations, so no XSS surface."
+    },
+    "global_abstractions": {
+      "score": 3,
+      "evidence": [
+        "app/src/api.js:1-155 — single module mixes HTTP client, cache, view-formatting helpers (dexNumber, humanize, spriteUrl), a concurrency util, and the global index builder; every other file imports it",
+        "app/src/api.js:80-83 — module-level mutable indexPromise is hidden global state every route must await; its shape (species/byId/typeEn) is an implicit contract threaded through all views",
+        "app/src/app.js:79-147 — buildMovesData (data loading) lives in the routing file rather than the data layer, so the table row shape app.js produces and views.js consumes is split across files",
+        "app/src/views.js:10,160 — PAGE_SIZE (a routing concern used at app.js:56) is defined and re-exported from the views module",
+        "app/src/api.js:42,46 — englishGenus/latestEnglishFlavor exported here but views.js:181-184 re-implements both inline: two sources of truth for the same domain rule"
+      ],
+      "rationale": "The four-file split is right for this size, but api.js is becoming a 'utils' god module and the index's global promise plus moves-assembly-in-the-router will need untangling as the app grows. No premature generic layers; duplication is minor but real."
+    },
+    "readability": {
+      "score": 4,
+      "evidence": [
+        "app/src/api.js:20,63,66,72 — comments explain why (humanize example, whitespace collapse, mapLimit purpose)",
+        "app/src/views.js:15-50 — one shared layout with clear landmarks; consistent section() helper at views.js:74",
+        "app/src/app.js:25-49 — routes grouped by page with banner comments",
+        "app/src/views.js:186,349,379,426 — identical typeEn closure copy-pasted four times",
+        "app/src/views.js:65-72 — typeBadgeLink is a curried factory; slightly clever but readable"
+      ],
+      "rationale": "A new teammate finds their way in minutes: consistent naming, why-comments where they matter, routes and views mirror each other. Rough spots are the 469-line views.js, the four duplicated typeEn closures, and the dead englishGenus export."
+    },
+    "review_cost": {
+      "score": 4,
+      "evidence": [
+        "app/src/api.js:82 — needs a rejection-reset one-liner before merge",
+        "app/src/views.js:100 — needs hx-sync=\"this:replace\" added",
+        "app/src/app.js:42-44 — three static registrations could be one; paths are cwd-relative rather than import.meta-relative",
+        "app/src/app.js:255 — 500 handler copy fix",
+        "app/src/views.js:182-184 — reuse api.js helpers instead of duplicating"
+      ],
+      "rationale": "Approve after a round of small, local fixes — nothing structural blocks merge. The index/cache design is worth a design comment but doesn't require rework at this size."
+    }
+  },
+  "overall": 4,
+  "findings": [
+    {
+      "severity": "medium",
+      "location": "app/src/api.js:82",
+      "issue": "getIndex() permanently caches a rejected buildIndex() promise; a single transient API failure at first request bricks every page with 500s until the process restarts (per-URL cache entries self-heal at api.js:18, but the index never does).",
+      "suggestion": "Reset the memo on failure: buildIndex().catch((e) => { indexPromise = null; throw e; }) or equivalent, so the next request retries."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/views.js:100",
+      "issue": "Active search uses hx-trigger debounce but no hx-sync, so a request issued while another is in flight lets the last-completed response win the swap, showing stale results and pushing a stale URL.",
+      "suggestion": "Add hx-sync=\"this:replace\" to the filter form, as the htmx docs recommend for active search."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/app.js:255",
+      "issue": "app.onError returns the 'Not found' page body with status 500, so server errors render as 404s to users and to assistive tech.",
+      "suggestion": "Render a distinct error page (e.g. h1 'Something went wrong') for 500s."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/views.js:182",
+      "issue": "Latest-English-flavor-text and genus logic re-implemented inline, duplicating latestEnglishFlavor (api.js:46) and leaving exported englishGenus (api.js:42) dead — two sources of truth for the same domain rule.",
+      "suggestion": "Import latestEnglishFlavor/englishGenus in views.js and delete the inline copies."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/app.js:42",
+      "issue": "Three hand-registered serveStatic routes with cwd-relative paths; running the server from another directory silently 404s all assets.",
+      "suggestion": "Use one app.use('/public/*', serveStatic({ root: ... })) resolved via import.meta.url, or at minimum derive paths from the module location."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/views.js:10",
+      "issue": "PAGE_SIZE, used for slicing in the route (app.js:56), is defined and re-exported from the views module.",
+      "suggestion": "Move the constant into app.js (or a config module) and pass it into the view."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/api.js:13",
+      "issue": "apiFetch has no timeout, so a hung upstream request hangs the page response indefinitely.",
+      "suggestion": "Wrap fetch with AbortSignal.timeout(...) (e.g. 10s) so failures surface to onError quickly."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/api.js:6",
+      "issue": "The cache Map has no TTL or eviction and lives for the process lifetime; fine for a fixed dataset but silently conflicts with the spec's 'treat the API as live' stance over long uptimes.",
+      "suggestion": "Note the assumption in a comment, or add a simple TTL so long-lived processes pick up API changes eventually."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/app.js:186",
+      "issue": "Each sort click on a moves table re-runs loadPokemonPageData + buildMovesData (full species, pokemon, all move records, all methods) just to render one table.",
+      "suggestion": "Acceptable at this size, but cache the built movesData per (species, game) or slice buildMovesData so the fragment endpoint only computes the requested method."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/views.js:186",
+      "issue": "The typeEn fallback closure is duplicated verbatim at views.js:186, 349, 379 and 426.",
+      "suggestion": "Hoist it to a single exported helper (e.g. makeTypeEn(index)) next to the other name helpers."
+    }
+  ],
+  "summary": "A clean, current-stack Hono 4 + htmx 2 SSR app that uses the frameworks almost exactly as documented: hono/html templates, HX-Request fragment endpoints, debounced/pushed-URL filtering, and careful 404 and escaping behavior. The main merge blocker is a permanently-cached rejected index promise that makes the whole app unrecoverable after one boot-time API hiccup; the rest are nits (missing hx-sync on search, a 500 that renders as the 404 page, and a handful of duplicated helpers in an over-broad api.js). I'd merge after one small round of fixes."
+}

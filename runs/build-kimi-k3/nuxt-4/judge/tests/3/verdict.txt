@@ -1,0 +1,127 @@
+I've read the spec, all of `app/`'s source, and confirmed the measured facts on the ground: `app/` contains **zero tests** — no test files, no runner/devDependencies (`app/package.json` has only `dev`, `build`, `start` scripts and `nuxt`/`vue`/`vue-router` deps), and `testLoc: 0`. So this review is about what the acceptance suite won't catch.
+
+**What's at risk, given the code's shape**
+
+- The whole data layer lives in one module, `app/app/lib/pokeapi.ts`, full of pure, easily-testable transformation logic that has no tests: `humanize` (:13), `idFromUrl` (:24), `latestEnFlavor` (:38), `buildIndex` (:155 — type-slot ordering/dedup, generation mapping, alternate-form exclusion via `speciesById`), `speciesCardsForRefs` (:217 — dedup + dex sort + form exclusion). These are exactly the functions someone "refactoring the data layer" would touch.
+- The riskiest UI logic: filtering/pagination/URL-state in `app/app/pages/index.vue` (`filtered` :31, `currentPage` clamp :41, `buildQuery` default-omission :44, and the 200 ms debounce watcher at :59-65), and the sortable-table comparator with "missing values last in both directions" semantics in `app/app/components/MoveTable.vue:61-77`. Neither has a single regression guard; a comparator sign flip or a broken clamp would pass green CI forever.
+- The Pokémon page aggregator `app/app/pages/pokemon/[name].vue:19-121` encodes many spec rules in code (default version group = highest `order`, `?game` validation, `METHOD_ORDER` then alphabetical, stat `Total`, height/weight ÷ 10) — all untested.
+- Notably, `api()` (`pokeapi.ts:67-83`) caches the *promise*, not the result: `cache.set(url, hit)` happens before the fetch resolves, so a transient API failure is cached permanently and every later request for that resource fails until restart. Same pattern in `getIndex` (:147) and `getTypes`. No error-path test would ever have caught this, and there is none.
+- 404 handling (`api` returning `null` on 404 :73, per-page `setResponseStatus` in `[...slug].vue` and the three detail pages) is also untested.
+- Minor: the ability page reimplements the species-card mapping (`abilities/[name].vue:14-30`) instead of reusing `speciesCardsForRefs`, so divergent bugs between the two paths are invisible without tests.
+
+The acceptance tests in `tests/` were given to the agent; it gets no credit for them, and nothing else exists.
+
+```json
+{
+  "dimension": "tests",
+  "criteria": {
+    "coverage_of_risk": {
+      "score": 1,
+      "evidence": [
+        "app/app/lib/pokeapi.ts:13 — humanize/idFromUrl/latestEnFlavor, pure transforms, no tests",
+        "app/app/lib/pokeapi.ts:155 — buildIndex: type-slot ordering, generation mapping, form exclusion, untested",
+        "app/app/pages/index.vue:31 — filtered/pagination/URL-state logic (clamp at :41, buildQuery at :44), untested",
+        "app/app/components/MoveTable.vue:61 — sort comparator with missing-values-last semantics, untested",
+        "app/package.json — no test script, no runner, no devDependencies"
+      ],
+      "rationale": "No tests exist at all; every high-risk area (data transformation, filtering, pagination, URL state, sorting, error paths) is unguarded."
+    },
+    "behaviour_not_implementation": {
+      "score": 1,
+      "evidence": [
+        "app/app — zero test files (facts: tests.files 0, testLoc 0)"
+      ],
+      "rationale": "There are no tests, so nothing asserts behaviour either way."
+    },
+    "regression_power": {
+      "score": 1,
+      "evidence": [
+        "app/app/components/MoveTable.vue:61-77 — flipping the comparator or the missing-value branch would fail nothing",
+        "app/app/pages/index.vue:41 — breaking the page-clamp or the debounce watcher would fail nothing",
+        "app/app/lib/pokeapi.ts:67-83 — a rejected fetch is cached permanently; no test would catch this class of regression"
+      ],
+      "rationale": "With no tests, any refactor of the data layer or filtering logic can silently change behaviour; the only guard is the external acceptance suite."
+    },
+    "signal_to_noise": {
+      "score": 3,
+      "evidence": [
+        "app/app — no tests, hence no noise; app/package.json — but also no runner configured"
+      ],
+      "rationale": "Per the anchor, no tests means no noise to maintain — 3."
+    }
+  },
+  "overall": 1,
+  "findings": [
+    {
+      "severity": "high",
+      "location": "app/package.json",
+      "issue": "The app ships with zero tests: no test files, no test script, no runner among dependencies.",
+      "suggestion": "Add @nuxt/test-utils or vitest and cover at minimum the pure helpers in lib/pokeapi.ts before touching the data layer."
+    },
+    {
+      "severity": "high",
+      "location": "app/app/lib/pokeapi.ts:155",
+      "issue": "buildIndex and speciesCardsForRefs (:217) perform the riskiest transformations (type-slot dedup/order, generation membership, alternate-form exclusion, dex sort) with no regression guard.",
+      "suggestion": "Unit-test against small fixture payloads: multi-slot types, forms with ID > 10000, duplicate refs, species missing from the index."
+    },
+    {
+      "severity": "high",
+      "location": "app/app/pages/index.vue:31",
+      "issue": "Filtering, 48-per-page slicing, page clamping (:41), URL default omission in buildQuery (:44) and the 200 ms debounce watcher (:59) are untested; URL-state regressions (e.g. page not reset on filter change, empty params not omitted) would slip through.",
+      "suggestion": "Test the filter/pagination computations as pure functions or extract them to a composable with tests covering query round-tripping."
+    },
+    {
+      "severity": "high",
+      "location": "app/app/components/MoveTable.vue:61",
+      "issue": "Sort comparator handles missing-values-last in both directions and numeric-vs-string comparison — easy to break silently, no tests.",
+      "suggestion": "Mount-test or extract the comparator and test: nulls last asc and desc, numeric columns, English-name string columns, aria-sort toggling."
+    },
+    {
+      "severity": "medium",
+      "location": "app/app/lib/pokeapi.ts:73",
+      "issue": "The cache stores the in-flight promise, so a rejected fetch (network hiccup, 5xx) is cached forever in getIndex (:147) and getTypes too; no error-path test would catch this.",
+      "suggestion": "On rejection, evict the cache entry (or cache the resolved value); add a test for retry-after-failure and 404-returns-null behaviour."
+    },
+    {
+      "severity": "medium",
+      "location": "app/app/pages/pokemon/[name].vue:19",
+      "issue": "load() encodes many spec rules (default game = highest order, ?game validation, METHOD_ORDER then alphabetical, stat Total, ÷10 conversions) with no tests.",
+      "suggestion": "Fixture-based test of load()'s output for a Pokémon with branching evolutions, hidden ability and multi-version-group moves."
+    },
+    {
+      "severity": "medium",
+      "location": "app/app/pages/[...slug].vue:7",
+      "issue": "Not-found paths (api null on 404, server setResponseStatus, catch-all route) are untested.",
+      "suggestion": "Add tests asserting 404 status and the NotFound rendering for an unknown species, move, ability and arbitrary slug."
+    },
+    {
+      "severity": "medium",
+      "location": "app/app/pages/abilities/[name].vue:14",
+      "issue": "Species-card mapping is reimplemented inline instead of reusing speciesCardsForRefs (pokeapi.ts:217), so the two paths can diverge without any test noticing.",
+      "suggestion": "Reuse speciesCardsForRefs (adding the hidden flag) or extract shared mapping covered by one test suite."
+    },
+    {
+      "severity": "low",
+      "location": "app/app/composables/useApiBase.ts:2",
+      "issue": "Env-override and trailing-slash handling of the API base is untested; a regression breaks every fetch.",
+      "suggestion": "One-line unit tests for trailing-slash stripping and API_BASE_URL precedence."
+    }
+  ],
+  "summary": "The app contains no tests of its own — no runner, no scripts, nothing — while nearly all of its logic is exactly the kind (data-layer transforms, filtering/pagination/URL state, table sorting, 404 and failure paths) that needs them. The most valuable first step is unit coverage of lib/pokeapi.ts and the index-page filter logic, which are pure and cheap to test. A latent promise-caching bug (rejected fetches cached forever) shows concretely what the absence of error-path tests lets through.",
+  "wroteTests": false,
+  "testCount": 0,
+  "valuableTests": [],
+  "lowValueTests": [],
+  "untested": [
+    { "area": "Pure data transforms: humanize, idFromUrl, latestEnFlavor, collapse (app/app/lib/pokeapi.ts:13-46)", "risk": "high", "likelyBug": "Whitespace-collapse or em-dash formatting regressions, wrong URL→ID parsing breaking every card list" },
+    { "area": "Index building: type slots, generation membership, alternate-form exclusion, dex ordering (app/app/lib/pokeapi.ts:155-215, :217)", "risk": "high", "likelyBug": "Type filter matching nothing, forms (ID>10000) leaking into lists, generation filter off-by-one, unsorted card lists" },
+    { "area": "List filtering, 48/page pagination, page clamping and URL query round-tripping (app/app/pages/index.vue:31-65)", "risk": "high", "likelyBug": "Page not reset when filters change, out-of-range ?page rendering an empty grid, default params not omitted, debounce race overwriting filters" },
+    { "area": "Move-table sorting: missing-values-last in both directions, aria-sort (app/app/components/MoveTable.vue:61-77, template th)", "risk": "high", "likelyBug": "Nulls sorting first on descending, numeric columns compared as strings (e.g. 100 < 20), aria-sort never flipping" },
+    { "area": "Pokémon page aggregation: default game selection, ?game validation, method ordering, stat Total, height/weight ÷10 (app/app/pages/pokemon/[name].vue:19-121)", "risk": "high", "likelyBug": "Wrong default version group, invalid ?game silently emptying the Moves section, Egg before Machine, Total row wrong" },
+    { "area": "Evolution chain recursion (app/app/components/EvoNode.vue)", "risk": "medium", "likelyBug": "Broken nesting or missing branches for chains like Eevee (three-way split)" },
+    { "area": "Error/404 handling: api null-on-404, setResponseStatus on server, catch-all route (app/app/lib/pokeapi.ts:67-88, app/app/pages/[...slug].vue)", "risk": "high", "likelyBug": "Unknown names returning 200 with an empty page, or non-404 API errors crashing SSR instead of rendering an error state; the permanently-cached rejected promise bug already present at pokeapi.ts:70-83" },
+    { "area": "Ability page card mapping duplicated from speciesCardsForRefs (app/app/pages/abilities/[name].vue:13-30)", "risk": "medium", "likelyBug": "The two implementations diverging (dedup or sort dropped from one) after a refactor" },
+    { "area": "API base resolution from API_BASE_URL and trailing-slash handling (app/app/composables/useApiBase.ts:2-7)", "risk": "low", "likelyBug": "Double slash or stale config breaking every fetch URL" }
+  ]
+}
+```

@@ -1,0 +1,134 @@
+## Review summary
+
+This is a clean, current-version Astro 7 app (astro ^7.4.4 / @astrojs/node ^11.1.9 are the latest stable releases as of 2026-10-30, verified against the changelog). It uses `output: 'server'` + standalone Node adapter exactly as the docs prescribe, does all data loading in frontmatter with top-level await, handles 404s via `Astro.response.status = 404` + a `404.astro`, and keeps a small, well-bounded `lib/` layer (`api.js` fetch+cache+bounded-concurrency, `data.js` API shaping, `format.js` pure helpers). Race handling in the client script (`seq` guard, `app/public/js/home.js:33-35`), min-level move dedupe, and default-variety/species-name resolution (`app/src/lib/data.js:56-70`) show real care about the tricky parts of the API's shape. The deductions are consistent and modest: the 404 try/catch block is copy-pasted across four dynamic routes, frontmatter leans on `any` throughout, and the two client scripts live as un-bundled `public/` files loaded via `is:inline` rather than Astro's processed/bundled `<script>`.
+
+```json
+{
+  "dimension": "mergeability",
+  "criteria": {
+    "idiomatic": {
+      "score": 4,
+      "evidence": [
+        "app/astro.config.mjs:4-6 — output: 'server' + node adapter standalone, matching current on-demand rendering docs",
+        "app/start.mjs:2-3 — imports dist/server/entry.mjs with PORT env, the documented standalone startup",
+        "app/src/pages/pokemon/[name].astro:126 — Astro.response.status = 404 for data misses, current API",
+        "app/src/pages/404.astro:1 — custom 404 page for unmatched routes",
+        "app/src/components/EvolutionNode.astro:24 — Astro.self recursion, the documented recursive-component idiom",
+        "app/src/pages/index.astro:136 — client logic in public/ loaded with is:inline instead of a colocated bundled <script>",
+        "app/src/styles/global.css:1 — single 550-line global stylesheet rather than Astro scoped component styles"
+      ],
+      "rationale": "Framework usage is current and doc-faithful (SSR config, data loading in frontmatter, params/status APIs, 404 route). Minor deviations: un-bundled public/ scripts with is:inline instead of Astro's processed <script> tag, and global-only CSS where Astro favors scoped styles."
+    },
+    "correctness_risks": {
+      "score": 4,
+      "evidence": [
+        "app/public/js/home.js:28-36 — seq guard prevents stale fetch results overwriting newer ones; debounced input",
+        "app/src/lib/api.js:26-27 — failed fetches are evicted from the cache so transient errors are retryable",
+        "app/src/lib/api.js:37-46 — mapAll bounds concurrency at 32, avoiding fetch fan-out storms",
+        "app/public/js/home.js:37-39 — silent catch leaves pushed URL and rendered results inconsistent on network failure",
+        "app/src/lib/api.js:8 — cache Map has no eviction; effectively bounded only because the API is a fixed snapshot",
+        "app/src/lib/api.js:18 — fetch has no timeout/AbortController; a hung API stalls the render",
+        "app/src/pages/pokemon/[name].astro:35-36 — empty species.varieties would throw a TypeError (500, not 404)",
+        "app/public/js/home.js:31 — pushState per debounced keystroke bloats history; replaceState would suit typing"
+      ],
+      "rationale": "Race conditions, fan-out and 404 propagation are handled deliberately and well; remaining risks (no fetch timeout, URL/content desync on a failed background fetch, un-evicted cache) are minor given the spec sanctions in-memory caching."
+    },
+    "global_abstractions": {
+      "score": 4,
+      "evidence": [
+        "app/src/lib/api.js:1-48 — one small transport module (fetch, cache, concurrency) with a clear boundary",
+        "app/src/lib/format.js:1-37 — pure display helpers, no hidden state",
+        "app/src/lib/data.js:15-22 — getTypeNameMap reuses the promise cache to avoid duplicate type fetches",
+        "app/src/pages/pokemon/[name].astro:124-129 — the 404 try/catch→NotFound block duplicated verbatim in moves/[name].astro:39-44, abilities/[name].astro:36-41, types/[name].astro:43-48",
+        "app/src/pages/abilities/[name].astro:22-37 — near-duplicate of pokemonRefsToSpecies (lib/data.js:56) differing only in the is_hidden flag"
+      ],
+      "rationale": "Abstractions are few, small and earn their keep. The duplicated 404 catch block across four routes and the ability page's variant of pokemonRefsToSpecies will need consolidating eventually, but nothing is structurally problematic."
+    },
+    "readability": {
+      "score": 4,
+      "evidence": [
+        "app/src/lib/format.js:3-7 — humanize/dexNumber/etc., well-named one-liners with obvious roles",
+        "app/src/lib/api.js:1-2,35 — comments explain intent (runtime caching, bounded concurrency), not mechanics",
+        "app/src/components/PokemonCard.astro:6-15 — typed Props interface documenting each field",
+        "app/src/pages/pokemon/[name].astro:30-122 — ~95-line frontmatter building one big `data: any` object; the moves section especially is dense",
+        "app/src/pages/pokemon/[name].astro:30 — `let data: any = null` pattern repeats in every dynamic page, discarding type information the API has"
+      ],
+      "rationale": "Names, file layout and helper organization are clear enough to navigate in minutes; the rough spots are pervasive `any` typing in page frontmatter and one over-long data-shaping block on the Pokémon page."
+    },
+    "review_cost": {
+      "score": 4,
+      "evidence": [
+        "app/src/pages/pokemon/[name].astro:124-129 — ask: extract a shared loadOr404 helper used by all four dynamic routes",
+        "app/src/pages/moves/[name].astro:17 — ask: replace `any` with payload interfaces",
+        "app/src/pages/index.astro:136 — ask: move /js/home.js into a bundled Astro <script> (with types)",
+        "app/public/js/home.js:31 — ask: pushState→replaceState while typing"
+      ],
+      "rationale": "Nothing structural blocks approval; the asks are a round of nits (dedupe the 404 block, type the data objects, bundle the client scripts) that could be a follow-up."
+    }
+  },
+  "overall": 4,
+  "findings": [
+    {
+      "severity": "medium",
+      "location": "app/src/pages/pokemon/[name].astro:124-129",
+      "issue": "The 'try/catch, on 404 set status and render NotFound' block is duplicated verbatim in all four dynamic routes (also moves/[name].astro:39, abilities/[name].astro:36, types/[name].astro:43), and types/[name].astro adds a second EXCLUDED_TYPES guard path.",
+      "suggestion": "Extract a shared helper (e.g. loadResourceOr404(fetchFn) returning data|null) so the not-found policy lives in one place."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/pages/pokemon/[name].astro:30",
+      "issue": "Page frontmatter uses `any` pervasively (data, abilities, tables, rows), discarding type safety while the components themselves define Props interfaces.",
+      "suggestion": "Define TypeScript interfaces for the API payloads and the derived `data` objects in a types file; Astro's Vite pipeline will check them."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/pages/index.astro:136",
+      "issue": "Client behavior ships as raw, un-bundled files in public/ loaded with is:inline (also pokemon/[name].astro:305), bypassing Astro's bundled, deduped, TypeScript-checked <script> processing.",
+      "suggestion": "Move the logic into a <script> tag in the page (or a src/scripts module imported from one), letting Vite bundle and type it."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/lib/api.js:8",
+      "issue": "Module-level cache Map has no eviction or size cap; in a long-lived server it grows with every distinct URL fetched.",
+      "suggestion": "Acceptable for this fixed snapshot, but add a comment or a simple LRU/TTL cap so the policy is explicit if the app outlives the snapshot."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/lib/api.js:18",
+      "issue": "Server-side fetches have no timeout or AbortSignal; a slow API stalls the request indefinitely.",
+      "suggestion": "Add AbortSignal.timeout(...) to fetch and map it to a 502-ish error."
+    },
+    {
+      "severity": "low",
+      "location": "app/public/js/home.js:37-39",
+      "issue": "On a failed background fetch the URL has already been pushState'd, leaving the visible results inconsistent with the address bar, silently.",
+      "suggestion": "Either revert the URL or surface a retry hint on failure."
+    },
+    {
+      "severity": "low",
+      "location": "app/public/js/home.js:31",
+      "issue": "pushState on every debounced keystroke creates one history entry per search step, making Back tedious.",
+      "suggestion": "Use replaceState for typing and pushState only for type/generation changes."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/pages/abilities/[name].astro:22-37",
+      "issue": "Re-implements a near-copy of lib/data.js pokemonRefsToSpecies because it needs the is_hidden flag.",
+      "suggestion": "Extend pokemonRefsToSpecies to optionally carry entry metadata, or split it into refs→records plus per-call shaping."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/styles/global.css:1",
+      "issue": "All styles live in one ~550-line global stylesheet, so selectors like .card-* and .stats-* couple globally to page markup.",
+      "suggestion": "Astro's scoped component styles would keep card/table styles with the components that own them."
+    },
+    {
+      "severity": "low",
+      "location": "app/astro.config.mjs:5",
+      "issue": "`server: { host: '0.0.0.0' }` is dev-server config; the standalone production binding comes from the adapter's HOST/PORT env vars, so this line can mislead.",
+      "suggestion": "Drop it (standalone already binds 0.0.0.0 by default) or document why it's set."
+    }
+  ],
+  "summary": "A tidy, current Astro 7 SSR app: framework usage matches the 7.4 docs (server output, node adapter, frontmatter data loading, 404 handling) and the support libraries are small with clear boundaries. The main repeatability costs are a copy-pasted not-found block across four routes, pervasive `any` typing in page frontmatter, and client scripts kept as un-bundled public/ files. I'd merge after one round of nits."
+}
+```

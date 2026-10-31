@@ -1,0 +1,82 @@
+## Review summary
+
+The app is built on the **current stable TanStack Start** (Vite 8 + `tanstackStart()` + `nitro()` from `nitro/vite` at `app/vite.config.ts:1-16` — matches the post-1.169 hosting docs; `.validator()` (not the removed `inputValidator()`) at `app/src/lib/server.ts:16,20,24,30`; server functions called from route loaders; `head`/meta per route; `notFound()` thrown from loaders with a root `notFoundComponent`). Routing conventions (`createFileRoute`, `__root.tsx`, `$param.tsx`, `routeTree.gen.ts`), `validateSearch`/`loaderDeps` for URL-driven filter state, and `?url` CSS import are all as documented. Data lives on the server behind server functions with a single low-level fetch layer; the client only sees serializable DTOs.
+
+The warts: a process-lifetime promise cache that permanently caches *rejections* (`pokeapi.ts:23`), a god data module that mixes server-only builders with client-shared types (docs recommend `.functions.ts`/`.server.ts` naming), pervasive `any` for API records, a `useEffect`-based `<title>` workaround for unmatched 404s, and a magic-150 ms `scrollIntoView` hack. Nothing structural blocks merge; I'd ask for the cache fix and a naming/typing pass.
+
+```json
+{
+  "dimension": "mergeability",
+  "criteria": {
+    "idiomatic": {
+      "score": 4,
+      "evidence": [
+        "app/vite.config.ts:6-14 — tanstackStart() + nitro() from nitro/vite + viteReact, exactly the current stable (1.169.x) setup",
+        "app/src/lib/server.ts:12-31 — createServerFn({method:'GET'}).validator(...).handler(...) with loader invocation, matches the current server-functions guide",
+        "app/src/routes/index.tsx:25-32 — validateSearch + loaderDeps + staleTime for URL-driven filter state, the documented pattern",
+        "app/src/routes/pokemon/$name.tsx:13-16 — throw notFound() from a loader with root notFoundComponent, per docs",
+        "app/src/routes/__root.tsx:13-20 — head() meta/links + ?url CSS import in the root route, current convention",
+        "app/src/router.tsx:4-8 — getRouter() factory instead of the docs' exported router const (minor deviation)",
+        "app/src/routes/__root.tsx:23-26 — document.title set in a useEffect for unmatched 404s, a home-grown workaround where the head system exists"
+      ],
+      "rationale": "Reads like the framework's own examples against the current stable release; only small deviations (router factory wrapper, identity validators, the useEffect title hack)."
+    },
+    "correctness_risks": {
+      "score": 3,
+      "evidence": [
+        "app/src/lib/pokeapi.ts:23 — cache.set(url, cached) stores the promise before it settles; a single transient network failure or 5xx poisons that URL for the process lifetime (rejected promise is cached, never retried)",
+        "app/src/lib/pokeapi.ts:16-21 — fetch with no AbortSignal/timeout; a slow upstream stalls SSR with no recovery",
+        "app/src/routes/index.tsx:121-123 — currentPage is clamped to totalPages but the URL keeps the stale ?page= value, so URL and rendered page disagree after filters shrink results",
+        "app/src/routes/pokemon/$name.tsx:49-53 — double scrollIntoView with a magic 150ms setTimeout to patch #moves anchoring; brittle against the router's own hash-scroll handling",
+        "app/src/routes/index.tsx:86-94 — every keystroke navigates with replace:true, no debounce (allowed by spec, but each keystroke round-trips through router state)"
+      ],
+      "rationale": "No bugs the tests catch, but the permanently-cached rejection and missing abort/timeout are real fragility under upstream flakiness, plus a couple of minor URL/scroll inconsistencies."
+    },
+    "global_abstractions": {
+      "score": 3,
+      "evidence": [
+        "app/src/lib/data.ts:1-439 — single god data module holding all six page builders plus module-level promise singletons (speciesMapPromise data.ts:20, versionGroupOrdersPromise data.ts:37)",
+        "app/src/lib/data.ts:16 vs app/src/lib/components.tsx:6 — server-only code and client-shared DTO types (CardData, MoveRow) in one file, separated only by `import type` discipline; docs recommend .functions.ts/.server.ts naming",
+        "app/src/routes/index.tsx:65-73 with app/src/lib/components.tsx:81-89 — typesByName map keyed by species name threaded into CardList, an awkward cross-module contract that exists only because HomeSpecies carries types but CardData doesn't",
+        "app/src/lib/format.ts:1-45 — pure, dependency-free client-safe helpers, a good boundary",
+        "app/src/lib/components.tsx:95-97 — dead Missing() export no one uses"
+      ],
+      "rationale": "Boundaries are mostly clean (pokeapi/format/components/server each earn their keep), but data.ts is a server/client god module and the typesByName indirection will need untangling as the app grows."
+    },
+    "readability": {
+      "score": 4,
+      "evidence": [
+        "app/src/lib/data.ts:15, 88, 130, 195, 341, 392 — banner comments section the file per page; doc comments explain intent (e.g. data.ts:73-80 alternate-form exclusion)",
+        "app/src/lib/MovesTable.tsx:9-38 — column definitions and columnValue in one small table component, easy to follow",
+        "app/src/lib/data.ts:91, 202, 215, 298, 311 — pervasive `any` for API records means the real shapes live only in the author's head",
+        "app/src/styles.css:78-204 — CSS organised by region with section comments and consistent token usage"
+      ],
+      "rationale": "A new teammate finds their way in minutes: predictable file layout, purposeful comments, small components. The main rough spot is the untyped API layer."
+    },
+    "review_cost": {
+      "score": 4,
+      "evidence": [
+        "app/src/lib/pokeapi.ts:23 — one-line fix (delete cache entry on rejection) I'd request before merge",
+        "app/src/lib/server.ts:16 — identity validators provide types but no runtime validation; fine here since inputs come from route params, but worth a comment or zod schema",
+        "app/src/lib/data.ts:1-440 — request: split server builders into *.server.ts and shared DTOs into types.ts per docs convention",
+        "app/src/routes/__root.tsx:23-26, app/src/routes/pokemon/$name.tsx:49-53 — two small hacks to replace with framework facilities"
+      ],
+      "rationale": "Approve after one light round: fix the rejection caching, drop the dead export and the scroll/title hacks; the rest is nits."
+    }
+  },
+  "overall": 4,
+  "findings": [
+    { "severity": "medium", "location": "app/src/lib/pokeapi.ts:23", "issue": "Rejected fetch promises are cached forever; one transient upstream failure permanently breaks that resource for the whole process", "suggestion": "Delete the cache entry when the promise rejects (cache.delete on .catch) so the next request retries" },
+    { "severity": "medium", "location": "app/src/lib/data.ts:16", "issue": "Server-only data builders and client-shared DTO types live in one module; the boundary is enforced only by `import type` discipline (components.tsx:6, MovesTable.tsx:4), and the module lacks the .server.ts suffix the docs recommend", "suggestion": "Move builders into pokeapi-style *.server.ts files and CardData/MoveRow/EvoNode/HomeSpecies into a client-safe types.ts" },
+    { "severity": "medium", "location": "app/src/lib/data.ts:91", "issue": "API records are handled as `any` throughout (also pokeapi.ts:14, data.ts:202,215,258,298), so field typos and shape drift fail silently", "suggestion": "Define minimal interfaces for the handful of API records used (species, pokemon, move, type, ability) and type apiFetch generically" },
+    { "severity": "low", "location": "app/src/routes/__root.tsx:23-26", "issue": "404 page title set via useEffect, so SSR HTML for unmatched URLs ships the wrong <title> until hydration", "suggestion": "Add a splat route ($) with its own head() returning the title, keeping the head system authoritative" },
+    { "severity": "low", "location": "app/src/routes/pokemon/$name.tsx:49-53", "issue": "Anchor scrolling patched with requestAnimationFrame + setTimeout(150) magic numbers, fighting the router's own hash-scroll handling", "suggestion": "Rely on TanStack's hash scrolling; if content shift is real, trigger one scroll after loader resolution, not a timed double-scroll" },
+    { "severity": "low", "location": "app/src/routes/index.tsx:121-123", "issue": "Page number is clamped for rendering but the stale ?page= stays in the URL, so URL and displayed page disagree after filters shrink results", "suggestion": "Emit the clamped page in links/pagination, or navigate to the clamped page when totalPages shrinks below the current page" },
+    { "severity": "low", "location": "app/src/lib/components.tsx:81-89", "issue": "CardList's typesByName map, keyed by species name and built in the home route (routes/index.tsx:65-73), is a leaky cross-module contract", "suggestion": "Put the type list on the card data itself (HomeSpecies already has it) and drop the map parameter" },
+    { "severity": "low", "location": "app/src/lib/components.tsx:95", "issue": "Missing() component is dead code", "suggestion": "Delete it" },
+    { "severity": "low", "location": "app/src/lib/server.ts:16", "issue": "Identity .validator() provides types but no runtime validation", "suggestion": "Fine since inputs come from route params, but either add a comment saying so or validate with a small schema" },
+    { "severity": "low", "location": ".gitignore:1-3", "issue": "Root .gitignore has no entries for app/.output/ and app/.tanstack/, so build/dev artifacts risk being committed", "suggestion": "Add app/.output/ and app/.tanstack/" }
+  ],
+  "summary": "A genuinely idiomatic TanStack Start app on the current stable release — correct server-function/loader/head/not-found patterns throughout, clean route layout, tidy CSS. The risks are operational rather than structural: a promise cache that never retries failures, a server/client god data module, and a couple of small hacks (title-by-useEffect, timed scrollIntoView). I'd merge after one light round of fixes."
+}
+```

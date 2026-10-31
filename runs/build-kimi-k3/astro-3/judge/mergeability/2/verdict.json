@@ -1,0 +1,128 @@
+{
+  "dimension": "mergeability",
+  "criteria": {
+    "idiomatic": {
+      "score": 4,
+      "evidence": [
+        "app/astro.config.mjs:4-6 — output:'server' + @astrojs/node standalone, the correct SSR setup for request-time API fetching",
+        "app/src/pages/pokemon/[name].astro:1 — file-based dynamic route with all data loading in frontmatter, the standard Astro SSR shape",
+        "app/src/pages/index.astro:16-17 — filter state read from Astro.url.searchParams, URL-as-state is exactly right",
+        "app/src/pages/pokemon/[name].astro:126 — Astro.response.status = 404 matches the current Astro 7 docs example",
+        "app/src/components/EvolutionNode.astro:23 — Astro.self recursion for the evolution tree is the idiomatic way to render nested data",
+        "app/src/pages/index.astro:136 — <script is:inline src=\"/js/home.js\"> opts out of Astro's default bundling/TS script processing; docs treat is:inline as a rarely-needed escape hatch",
+        "app/public/js/home.js:22,43 — hand-rolled partial navigation (pushState + fetch + DOMParser/innerHTML swap, popstate → location.reload()) where Astro's ClientRouter or a small island would do this"
+      ],
+      "rationale": "Routing, rendering, config, data loading and 404 handling all read like the framework's own docs; the only deviation is the home page's hand-rolled client navigation and unprocessed scripts, which reimplement a subset of what Astro's client router gives for free."
+    },
+    "correctness_risks": {
+      "score": 4,
+      "evidence": [
+        "app/src/lib/api.js:16-33 — promise cache that evicts failed entries so transient errors can be retried; race-safe",
+        "app/src/lib/api.js:37-47 — mapAll bounds fetch fan-out (concurrency 32) and preserves order",
+        "app/public/js/home.js:25-30 — seq guard correctly discards out-of-order fetch responses on fast typing",
+        "app/src/pages/pokemon/[name].astro:57-126 — one try wraps the primary species fetch AND dozens of secondary fetches (pokemon, chain, version groups, every move record); any single 404 renders the whole page as 'Not found'",
+        "app/src/pages/moves/[name].astro:41-44 — same pattern; a missing secondary pokemon record mislabels a valid move as 404",
+        "app/src/pages/pokemon/[name].astro:127-130 — non-404 upstream errors rethrow to Astro's default 500 page with no app chrome",
+        "app/public/js/home.js:31-33 — fetch failure silently leaves stale results (intentional and commented, but the user gets no signal)",
+        "app/public/js/home.js:20-22 — a history entry is pushed per debounced keystroke, polluting the back stack"
+      ],
+      "rationale": "The fragile spots are real but narrow: catch-all 404 mapping conflates 'a secondary resource is missing' with 'this page doesn't exist', and upstream 5xx surface as a bare Astro error page. With this API's consistent snapshot they won't fire in practice, and everything racy on the client is properly guarded."
+    },
+    "global_abstractions": {
+      "score": 4,
+      "evidence": [
+        "app/src/lib/api.js:1-2 — the one piece of global state (module-level promise cache) is documented and the spec explicitly permits it",
+        "app/src/lib/data.js:35-49 — getPokemonTypesMap derives per-pokemon types from the 18 type records instead of 1000+ pokemon fetches; a good local trade-off, clearly commented",
+        "app/src/lib/format.js:1-32 — small, pure, single-purpose helpers; no god module",
+        "app/src/pages/pokemon/[name].astro:123-130 — the try/catch → 404 block is duplicated verbatim in four pages (abilities/[name].astro:36-44, types/[name].astro:43-49, moves/[name].astro:39-47)",
+        "app/src/components/PokemonCard.astro:19 — card renders its own <li>, coupling it to list contexts; consistent at all call sites though"
+      ],
+      "rationale": "Abstractions are few, small and earn their keep with clear boundaries; the only untangling needed later is de-duplicating the four-page 404 loading pattern into one helper."
+    },
+    "readability": {
+      "score": 4,
+      "evidence": [
+        "app/src/lib/format.js:1-32 — humanize/dexNumber/englishName/orDash are obvious and used consistently",
+        "app/src/styles/global.css:1-551 — single token-driven stylesheet with clear section comments and no !important",
+        "app/src/lib/api.js:1-2,30 — comments explain why (cache eviction, concurrency), not what",
+        "app/src/pages/pokemon/[name].astro:44,44-123 — data is assembled into one untyped `any` object before the template; a typo'd property in the template would silently render nothing",
+        "app/src/pages/pokemon/[name].astro:1-305 — the pokemon page frontmatter is ~135 lines mixing fetching, shaping and business rules (method ordering, stat labels)"
+      ],
+      "rationale": "A new teammate finds their way quickly: predictable page structure, descriptive names, consistent components. The main rough spot is pervasive `any` across the frontmatter→template boundary, which trades compile-time safety for brevity."
+    },
+    "review_cost": {
+      "score": 4,
+      "evidence": [
+        "app/src/pages/index.astro:16-35 — filter/pagination parsing is careful (trim, NaN, clamping to last page)",
+        "app/src/components/Layout.astro:1-36 — landmarks, title and chrome are correct and centralized, so global requirements can't drift per page",
+        "app/package.json:1-15 — minimal deps (astro + node adapter only), no incidental tooling to argue about",
+        "app/.gitignore:1-3 — missing .astro/ (generated types are in the tree and Astro recommends ignoring it); no tsconfig.json despite TS-in-frontmatter"
+      ],
+      "rationale": "I'd approve after one pass of nits: scope the 404 handling to the primary fetch, share the loader helper, type the page data (and add tsconfig + astro check), and drop the raw-`any` objects. Nothing requires rework."
+    }
+  },
+  "overall": 4,
+  "findings": [
+    {
+      "severity": "medium",
+      "location": "app/src/pages/pokemon/[name].astro:57-126",
+      "issue": "A single try/catch wraps the primary resource fetch plus dozens of secondary fetches (default pokemon, evolution chain, version groups, every move record); any 404 among them sets status 404 and renders the whole page as 'Not found'. The same pattern is copied in moves, abilities and types pages.",
+      "suggestion": "Only map the primary resource's 404 to a not-found response; fetch secondary resources outside the 404-sensitive path and let them degrade (or render an app error page) instead of hijacking the page's identity."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/pages/pokemon/[name].astro:127-130",
+      "issue": "Non-404 upstream errors are rethrown, so an API hiccup produces Astro's default 500 page with no site chrome or recovery link.",
+      "suggestion": "Add a branded error page (Astro supports a custom 500) and/or catch upstream errors per-section so a failing evolution chain doesn't take down the whole pokemon page."
+    },
+    {
+      "severity": "low",
+      "location": "app/public/js/home.js:14-43",
+      "issue": "Hand-rolled partial navigation: fetch full page HTML, DOMParser, innerHTML swap of #results, plus popstate → location.reload(). It works and has a race guard, but it reimplements what Astro's ClientRouter provides (URL management, history, swap) and pushes a history entry per keystroke.",
+      "suggestion": "Either adopt Astro's client-side router for these navigations or extract the filter UI into a small island; at minimum use replaceState for incremental search refinements."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/pages/index.astro:136",
+      "issue": "<script is:inline src=\"/js/home.js\"> (and pokemon.js) opts out of Astro's default script bundling, TS support and minification; Astro documents is:inline as an opt-out that is rarely needed.",
+      "suggestion": "Move the scripts into src/ as processed <script> tags in the components they belong to, so Astro bundles and type-checks them."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/pages/pokemon/[name].astro:44",
+      "issue": "Page data is assembled into an untyped `data: any` object (with `any` threaded through the template: `t: any`, `r: any`, `s: any`), so frontmatter→template property mismatches fail silently at runtime.",
+      "suggestion": "Define interfaces for the API payloads and the shaped `data` objects (or move shaping into typed lib functions), and add tsconfig.json plus `astro check` to CI."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/pages/moves/[name].astro:39-47",
+      "issue": "The try/catch → Astro.response.status = 404 → render NotFound block is duplicated verbatim across four dynamic pages.",
+      "suggestion": "Extract a shared helper (e.g. `loadResource(path)` returning `{data}|{notFound}`) and reuse one not-found rendering path."
+    },
+    {
+      "severity": "low",
+      "location": "app/.gitignore:1-3",
+      "issue": "Only dist/ and node_modules/ are ignored; the generated .astro/ types directory (present in the tree) is committed, and Astro's own docs recommend adding .astro/ to .gitignore.",
+      "suggestion": "Add `.astro/` to .gitignore."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/components/Layout.astro:1",
+      "issue": "The site layout lives in src/components/ rather than the conventional src/layouts/ directory Astro's project-structure docs show.",
+      "suggestion": "Move it to src/layouts/Layout.astro so the layout/component distinction is visible at a glance."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/lib/api.js:12",
+      "issue": "The in-memory cache is unbounded; with per-pokemon records (~1000+, each tens of KB) and all moves/abilities reachable through the learned-by and type pages, resident memory grows to the full dataset. Fine for this fixed snapshot, but there's no bound or eviction if data volume grows.",
+      "suggestion": "Note the bound explicitly (or add a simple LRU cap) so a future data-source swap doesn't silently balloon memory."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/components/PokemonCard.astro:19",
+      "issue": "PokemonCard renders its own <li>, so the component is only usable inside a list and list semantics are split between caller and component.",
+      "suggestion": "Let the caller own list structure and have the card render only the link content."
+    }
+  ],
+  "summary": "This is clean, current Astro 7 SSR: correct adapter config, file-based routing, frontmatter data loading, documented `Astro.response.status` 404 handling, and a small well-bounded lib layer. The real issues are the catch-all 404 wrapping (a missing secondary resource would mislabel a valid page as Not found), rethrown non-404 errors surfacing as a bare 500, and a hand-rolled client navigation that duplicates what Astro's client router does. I'd merge after one round of nits."
+}

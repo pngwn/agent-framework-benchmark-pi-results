@@ -1,0 +1,149 @@
+I've explored the app fully. Before scoring, a quick check of the framework: the app targets Astro `^7.4.4`, which matches the current stable (7.4.4, released 2026-10-28), and its idioms (`Astro.params`, `Astro.response.status`, `is:inline`, `set:html`, `output: 'server'` with the Node adapter) are all current, non-deprecated APIs. Nothing framework-outdated to penalize.
+
+Key structural facts driving the scores:
+
+- **Single data seam**: every HTTP call goes through `apiFetch` in `src/lib/pokeapi.js` (base URL, cache, concurrency limiter all live there).
+- **Card assembly is triplicated**: `cardsFromPokemonRefs` (pokeapi.js:135–133) serves moves/types pages, but `abilities/[name].astro:24–45` re-implements the identical ~20-line block (plus a `hidden` flag), and `index.astro:81–95` inlines its own variant (plus `types`). This is the biggest editability hazard — the sprite-bug scenario has to be fixed three times.
+- **Abilities removal is clean**: one route dir plus one Section in the Pokémon page; nav has no abilities link.
+- **Client/server split is good but with one tangle**: the home page's inline filter script re-implements the query-string serialization (`buildUrl` vs `pageHref`) and swaps the server-rendered `#results` node, so markup/param changes need coordinated edits.
+
+```json
+{
+  "dimension": "editability",
+  "criteria": {
+    "removability": {
+      "score": 5,
+      "evidence": [
+        "app/src/pages/abilities/[name].astro — the whole feature is one self-contained route file",
+        "app/src/pages/pokemon/[name].astro:213 — the only inbound link is the 'Abilities' Section, easy to delete with its data assembly at :140",
+        "app/src/components/Layout.astro:25-27 — nav has no Abilities link, nothing else references /abilities"
+      ],
+      "rationale": "Deleting the abilities directory plus one section in the Pokémon page removes the feature completely; no scattered references or dead helpers left behind (getSpeciesIds etc. are shared, not ability-specific)."
+    },
+    "changeability": {
+      "score": 2,
+      "evidence": [
+        "app/src/lib/pokeapi.js:135-133 — cardsFromPokemonRefs builds {id,name,sprite} for moves/types lists",
+        "app/src/pages/abilities/[name].astro:24-45 — the same logic re-implemented inline (adds hidden flag)",
+        "app/src/pages/index.astro:81-95 — a third inline copy (adds types) for the home page",
+        "app/src/pages/index.astro:88-97 and :141-149 — filter URL serialization written twice (pageHref in frontmatter, buildUrl in the client script)"
+      ],
+      "rationale": "The Deoxys-style sprite fix and any card change must land in three near-identical blocks, and filter-parameter changes touch both server and client copies. Fixable places are findable, but the duplication means fixing N times."
+    },
+    "coupling": {
+      "score": 4,
+      "evidence": [
+        "app/src/lib/pokeapi.js:20-56 — all HTTP, caching and concurrency live behind one apiFetch/apiFetchRef seam",
+        "app/src/components/PokemonCard.astro:6-13 — consumes a plain props object, knows nothing about fetching",
+        "app/src/pages/pokemon/[name].astro:296-316 — client sorting script is self-contained vanilla against data-sortable/data-type attributes",
+        "app/src/pages/index.astro:139-155 — client filter script hard-couples to the '#results' DOM node produced by the server template"
+      ],
+      "rationale": "Pages assemble plain data objects and hand them to dumb components; the only real tangles are the home page's duplicated URL serialization and its dependency on a server markup id, both confined to one file."
+    },
+    "abstraction_design": {
+      "score": 3,
+      "evidence": [
+        "app/src/components/PokemonCard.astro:6-13 — optional types/hidden props stretch to the actual variation in the app without flag creep",
+        "app/src/components/Section.astro:1-13 — generic section/heading abstraction used by four pages",
+        "app/src/lib/pokeapi.js:135 — cardsFromPokemonRefs failed to stretch to the abilities case (hidden flag), so abilities/[name].astro:24-45 copied it wholesale",
+        "app/src/pages/pokemon/[name].astro:33-40 — evolution chain built via manual escapeHtml string concatenation instead of a component"
+      ],
+      "rationale": "Layout/Section/PokemonCard and the lib helpers are well sized, but the one genuinely reusable abstraction (card list assembly) split into three copies instead of growing one parameter, and the evolution chain dodges the component model."
+    }
+  },
+  "overall": 3,
+  "findings": [
+    {
+      "severity": "high",
+      "location": "app/src/pages/abilities/[name].astro:24-45",
+      "issue": "Pokémon-card assembly logic is duplicated three ways: here (with hidden), in index.astro:81-95 (with types), and in lib cardsFromPokemonRefs; any card fix (e.g. default-variety sprite for Deoxys-like species) must be applied three times.",
+      "suggestion": "Extend cardsFromPokemonRefs(refs, {includeTypes, includeHidden}) — or return per-pokemon records and let a mapper decorate them — so all four pages share one card builder."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/pages/index.astro:141-149",
+      "issue": "Filter query-string serialization is implemented twice (buildUrl in the inline script vs pageHref at index.astro:88-97); renaming a param or changing defaults requires coordinated edits and the two can drift.",
+      "suggestion": "Derive buildUrl from the current URL via URLSearchParams on the form state in one place, or emit a shared module consumed by both frontmatter and script."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/pages/index.astro:139-155",
+      "issue": "The client filter script fetches the full page HTML and swaps the element with id 'results', hard-coupling the script to a template detail; renaming that wrapper silently breaks live filtering.",
+      "suggestion": "Introduce a stable documented contract (e.g. a data attribute) or comment the coupling at both ends; better, keep the swap logic alongside the template it depends on."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/pages/moves/[name].astro:37",
+      "issue": "The type-label fallback `typeNames.get(...) ?? humanize(...)` is repeated in four files (index.astro:87, pokemon/[name].astro:75, moves/[name].astro:37, types/[name].astro:49-52).",
+      "suggestion": "Add a typeLabel(name) helper to lib/pokeapi.js next to getTypeNameMap."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/pages/pokemon/[name].astro:33-40",
+      "issue": "Evolution chain rendered via manual escapeHtml + string concatenation (chainToHtml), bypassing Astro components and set:html injection at line 179.",
+      "suggestion": "Render the chain recursively in the template (or a small EvolutionChain.astro component) so restyling or adding evolution conditions is a normal markup edit."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/pages/pokemon/[name].astro:183",
+      "issue": "Stat-bar scale magic numbers (255 at :183, 720 at :195) are inline in the template, duplicated per row type.",
+      "suggestion": "Define STAT_MAX/TOTAL_MAX constants next to STAT_LABELS in the frontmatter."
+    },
+    {
+      "severity": "low",
+      "location": "app/dist",
+      "issue": "Build output directory is present in the working tree (not covered by .gitignore), inviting stale-build confusion when editing.",
+      "suggestion": "Add /app/dist (and app/.astro) to .gitignore."
+    }
+  ],
+  "summary": "A tidy, idiomatic Astro 7 app with a single fetch/cache seam in lib/pokeapi.js and small, dumb components that make removal and data-source changes trivial. The main drag on editability is that Pokémon-card assembly is triplicated (lib helper, abilities page, home page) with minor variations, so card-level fixes and cross-cutting card changes (sorting, sprites) must be made in three places. A secondary tangle is the home page's client script duplicating URL serialization and coupling to the '#results' markup id.",
+  "scenarios": [
+    {
+      "change": "Remove the Abilities pages and every link to them",
+      "files": [
+        "app/src/pages/abilities/[name].astro",
+        "app/src/pages/pokemon/[name].astro"
+      ],
+      "difficulty": 4,
+      "notes": "Delete the abilities route directory and the one 'Abilities' Section (pokemon/[name].astro:213) plus its data assembly at :140. Nav has no abilities link. Nearly the ideal delete-and-forget case."
+    },
+    {
+      "change": "Fix wrong sprite for species whose default Pokémon differs (Deoxys)",
+      "files": [
+        "app/src/lib/pokeapi.js",
+        "app/src/pages/abilities/[name].astro",
+        "app/src/pages/index.astro"
+      ],
+      "difficulty": 2,
+      "notes": "Card {id,name,sprite} assembly is triplicated: cardsFromPokemonRefs (pokeapi.js:135), the abilities page's inline copy (:24-45), and index.astro's inline variant (:81-95). One fix does NOT cover every list; you must find and patch all three near-identical blocks."
+    },
+    {
+      "change": "Add sorting by name to every list of Pokémon cards",
+      "files": [
+        "app/src/pages/index.astro",
+        "app/src/pages/moves/[name].astro",
+        "app/src/pages/abilities/[name].astro",
+        "app/src/pages/types/[name].astro"
+      ],
+      "difficulty": 3,
+      "notes": "There is no shared card-list component; each page sorts its own data (by id) in its own assembly code, and the home page additionally paginates. Either edit four templates' map loops or three data-assembly blocks; findable but repetitive, and it would collide with consolidating the card builder."
+    },
+    {
+      "change": "Add an Items section (/items, /items/:name) shaped like Moves",
+      "files": [
+        "app/src/pages/items/[name].astro"
+      ],
+      "difficulty": 3,
+      "notes": "Layout, Section, NotFound, PokemonCard and all lib helpers (apiFetch, enName, cardsFromPokemonRefs) are reusable as-is, so the new page is a copy of moves/[name].astro (~100 lines) with different fields. Reasonable, but the detail page body itself is boilerplate to duplicate rather than a resource-page abstraction to reuse."
+    },
+    {
+      "change": "Change API base URL and caching rules",
+      "files": [
+        "app/src/lib/pokeapi.js"
+      ],
+      "difficulty": 5,
+      "notes": "BASE/API_ROOT, the cache Map, and the concurrency limiter all live in pokeapi.js:3-56, and every page fetches exclusively through apiFetch/apiFetchRef. One-file change; trivial."
+    }
+  ]
+}
+```

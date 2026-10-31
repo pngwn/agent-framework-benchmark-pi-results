@@ -1,0 +1,166 @@
+## Review summary — dimension: test quality
+
+The app contains **zero tests of its own**: no test runner, no test files, no `test` script (`app/package.json:6-9` defines only `dev`, `build`, `start`), and static analysis confirms 0 test files/cases/assertions. All verification was delegated to the acceptance suite in `tests/` (which the agent didn't write). The instruction set explicitly permits this outcome, so I score `coverage_of_risk` and `regression_power` on what would be caught — which is essentially nothing once a refactor touches any of the logic the acceptance specs don't pin down.
+
+What's notably unguarded:
+
+- **Data transformation layer** — `app/src/lib/data.ts` is 400+ lines of pure, fetch-free-in-spirit transformation logic that is ideal unit-test material but entirely untested: alternate-form exclusion and dedup (`data.ts:76-90`), species↔pokemon ID mapping, version-group ordering and default-game selection (`data.ts:225-240`), method-table grouping and ordering (`data.ts:242-296`), stat total (`data.ts:300`), evolution tree parsing (`data.ts:198-207`).
+- **Client-side sort** — the comparator in `app/src/lib/MovesTable.tsx:53-71` implements several spec-tricky rules (missing-values-last in *both* directions, mixed number/string compare, three-state toggle). A one-line "fix" to `return dir * cmp` would silently sort nulls first on descending and no test would fail.
+- **URL/search state** — `app/src/routes/index.tsx:24-41` (`validateSearch` page coercion, `page > 1` omission) and the page clamp at `index.tsx:75` (`Math.min(page, totalPages)`); `app/src/routes/pokemon/$name.tsx:8-11` game param validation. Pagination edge cases (page beyond total, `page` = 1 being stripped from the URL) are classic silent regressions.
+- **Formatting helpers** — `app/src/lib/format.ts` (`humanize:10-16`, `idFromUrl:35-39` with its NaN path, `latestEnglishFlavor:40-48` whitespace collapse) are the app's most-reused primitives; they currently look correct but nothing locks them in.
+- **API/error paths** — `app/src/lib/pokeapi.ts:16-28` caches 404s as `null` for process lifetime and throws on non-ok; the cache-hit-on-rejected-promise path (a rejected promise stays cached, poisoning the process) is untested and is a real production hazard.
+
+The `__root.tsx` not-found wiring, `notFound()` throwing in loaders (`app/src/routes/pokemon/$name.tsx:13-17`), and the head/title logic are likewise only guarded by the acceptance suite.
+
+```json
+{
+  "dimension": "tests",
+  "criteria": {
+    "coverage_of_risk": {
+      "score": 1,
+      "evidence": [
+        "app/package.json:6-9 — no test script, no test runner installed",
+        "app/src/lib/data.ts:76-90 — alt-form exclusion/dedup in cardsFromPokemonRefs: no test",
+        "app/src/lib/data.ts:242-296 — move-table grouping, method ordering, default sort: no test",
+        "app/src/lib/MovesTable.tsx:53-71 — sortable-column comparator with missing-values-last: no test",
+        "app/src/routes/index.tsx:55-77 — filter/pagination/clamp logic: no test",
+        "app/src/lib/pokeapi.ts:16-28 — 404 caching and rejected-promise caching: no test"
+      ],
+      "rationale": "The app writes no tests at all, so none of the riskiest logic — data transformation, filtering, pagination, URL state, error paths — is covered by its own suite; only the acceptance specs guard it."
+    },
+    "behaviour_not_implementation": {
+      "score": 1,
+      "evidence": [
+        "app/src — zero test files anywhere in the source tree (confirmed by ls/grep and static facts)"
+      ],
+      "rationale": "No tests exist, so there are neither behavioural nor implementation-detail tests."
+    },
+    "regression_power": {
+      "score": 1,
+      "evidence": [
+        "app/src/lib/format.ts:10-16 — humanize() untested; a naive regex/index change breaks labels and search silently",
+        "app/src/lib/MovesTable.tsx:56-60 — dropping the null checks or inverting dir would sort missing values first with no failing test",
+        "app/src/lib/pokeapi.ts:20-27 — a rejected promise stays cached forever, breaking the whole process; nothing would catch it"
+      ],
+      "rationale": "With zero tests, any refactor of the data layer, sorting, or URL-state handling can regress without a single failure."
+    },
+    "signal_to_noise": {
+      "score": 3,
+      "evidence": [
+        "app/ — no test files, so no noise either"
+      ],
+      "rationale": "No tests means no low-value tests; per the anchor this scores 3."
+    }
+  },
+  "overall": 1,
+  "findings": [
+    {
+      "severity": "high",
+      "location": "app/src/lib/data.ts:242-296",
+      "issue": "Move-table construction (grouping by learn method, METHOD_ORDER placement with alphabetical tiebreak, level-then-name sort) is untested; the comparator at data.ts:286-292 has subtle -1 handling that is easy to break",
+      "suggestion": "Extract this into pure functions taking fixtures (one Pokémon record + move records) and unit-test the resulting table shapes, including the 'others alphabetically after the four fixed methods' rule"
+    },
+    {
+      "severity": "high",
+      "location": "app/src/lib/MovesTable.tsx:53-71",
+      "issue": "Client-side sorting (missing values last in both directions, mixed number/string compare, three-state aria-sort toggle) has no coverage",
+      "suggestion": "Unit-test the comparator directly, or render MovesTable with rows containing null power/accuracy and assert row order and aria-sort for each column and direction"
+    },
+    {
+      "severity": "high",
+      "location": "app/src/routes/index.tsx:55-77",
+      "issue": "Filter matching (case-insensitive substring on humanized name), 48-per-page slicing, and the page clamp Math.min(page, totalPages) are untested; page=999 and empty-result edges can silently break",
+      "suggestion": "Unit-test the filtering/slicing helpers with a small species fixture, including page beyond total, empty filtered result, and default-param omission in buildSearch (index.tsx:41-47)"
+    },
+    {
+      "severity": "high",
+      "location": "app/src/lib/data.ts:57-90",
+      "issue": "cardsFromPokemonRefs — alternate-form exclusion (id > 10000), per-species dedup, and the hidden-ability extras map are the core of every list page and are untested",
+      "suggestion": "Test with refs including ids 10001+ and duplicate species ids; assert dex order, dedup, and the hidden flag surfacing on the ability page"
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/lib/pokeapi.ts:16-28",
+      "issue": "API layer caches rejected promises and 404-nulls for process lifetime; a transient failure permanently poisons that resource, and no test would reveal it",
+      "suggestion": "Delete the cache entry when the promise rejects, and add a test with a stubbed fetch covering 404 → null, non-ok → throw, and rejection → retry succeeds"
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/lib/format.ts:10-48",
+      "issue": "humanize, idFromUrl (NaN path), dexNumber and latestEnglishFlavor (whitespace collapse, 'latest English' semantics) are the most-reused primitives and have zero coverage",
+      "suggestion": "Add cheap table-driven unit tests for format.ts; these are the highest value-per-line tests available"
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/lib/data.ts:218-240",
+      "issue": "Game selection — validating ?game= against the Pokémon's version groups and defaulting to highest order — is untested; a refactor could default to the wrong game or drop an invalid game param",
+      "suggestion": "Test buildPokemonPage's moves block with a fixture Pokémon: valid game, invalid game, and no game"
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/routes/index.tsx:24-41",
+      "issue": "validateSearch coercion rules (empty strings stripped, page > 1 only, non-integer page) plus staleTime: Infinity on the loader are unguarded URL-state behavior",
+      "suggestion": "Test validateSearch directly: page=0, page=abc, q='' should all normalize to the same canonical search object"
+    },
+    {
+      "severity": "low",
+      "location": "app/package.json:6-9",
+      "issue": "No test script or runner; even a minimal vitest setup for the pure lib/ helpers is absent",
+      "suggestion": "Add vitest plus a `test` script in app/package.json, starting with unit tests for lib/format.ts, lib/pokeapi.ts and the sort/filter helpers"
+    },
+    {
+      "severity": "low",
+      "location": "app/src/routes/pokemon/$name.tsx:11-17",
+      "issue": "notFound() throwing from the loader for unknown species is only exercised by acceptance tests; the same pattern in moves/abilities/types routes could drift",
+      "suggestion": "A route-level render test (or a shared factory test) asserting each detail route renders 'Not found' when the builder returns null"
+    }
+  ],
+  "summary": "The app ships no tests of its own — no runner, no test script, no test files — so every risky area (data transformation, sorting, filtering, pagination, URL state, API caching) is guarded only by the acceptance suite. The untested logic includes several spec-tricky rules that a one-line refactor could silently break. Adding a small vitest suite over the pure helpers in lib/format.ts, lib/pokeapi.ts, lib/data.ts and the sort/filter logic would be the highest-leverage next step.",
+  "wroteTests": false,
+  "testCount": 0,
+  "valuableTests": [],
+  "lowValueTests": [],
+  "untested": [
+    {
+      "area": "Move-table grouping and ordering (data.ts:242-296)",
+      "risk": "high",
+      "likelyBug": "Reordering METHOD_ORDER or mishandling the -1 alphabetical fallback puts Egg before Machine, or level-up rows stop sorting by level then name"
+    },
+    {
+      "area": "MovesTable sort comparator and aria-sort (MovesTable.tsx:53-71)",
+      "risk": "high",
+      "likelyBug": "Null power/accuracy sort first on descending, or aria-sort is dropped from the sorted header, breaking the sortable-columns contract"
+    },
+    {
+      "area": "Home filtering, 48/page pagination and page clamp (index.tsx:55-77)",
+      "risk": "high",
+      "likelyBug": "Search becomes case-sensitive, PAGE_SIZE changes silently, or a page beyond the last shows an empty list instead of clamping"
+    },
+    {
+      "area": "cardsFromPokemonRefs dedup/alt-form exclusion (data.ts:57-90)",
+      "risk": "high",
+      "likelyBug": "Alternate forms (ids > 10000) leak into ability/type/move lists, or duplicate species cards appear"
+    },
+    {
+      "area": "API fetch caching incl. rejected-promise and 404 caching (pokeapi.ts:16-28)",
+      "risk": "medium",
+      "likelyBug": "A single transient network failure permanently poisons a cached resource for the process lifetime"
+    },
+    {
+      "area": "Game select validation and default highest-order game (data.ts:218-240)",
+      "risk": "medium",
+      "likelyBug": "Invalid ?game= param falls back to no selection or the first game instead of the highest-order one"
+    },
+    {
+      "area": "Formatting helpers: humanize, idFromUrl, latestEnglishFlavor (format.ts:10-48)",
+      "risk": "medium",
+      "likelyBug": "Humanization or whitespace-collapse changes break names, search matching and dex numbers across every page"
+    },
+    {
+      "area": "Search-param validation and URL state (index.tsx:24-41, pokemon/$name.tsx:8-11)",
+      "risk": "low",
+      "likelyBug": "Empty-string or default params start appearing in URLs, breaking the 'omit defaults' contract"
+    }
+  ]
+}
+```

@@ -1,0 +1,96 @@
+## Review: `app/` (Nuxt Pokédex) — forward-thinking
+
+**Framework baseline:** the app pins Nuxt `4.6.3` (`app/package.json:9`), which as of 2026-10-30 is the current stable (released 2026-10-27; Nuxt 3 EOL'd 2026-07-31). Per the Nuxt 4.6 announcement (nuxt.com/blog/v4-6), Nuxt 4.6 introduced `nuxt/server` — a portable import surface typed against a `RequestEvent` — precisely so server code survives the move to Nuxt 5 / Nitro v3 / h3 v2; the post explicitly says code importing from `h3` directly will not.
+
+### What holds up well
+
+- **Current-generation Nuxt throughout**: Nuxt 4 `app/` srcDir layout (`app/app/pages/…`), `<script setup lang="ts">`, `useAsyncData` with the documented `watch: [() => route.query.game]` re-fetch option (`app/app/pages/pokemon/[name].vue:104-107`), `useHead` with computed titles, `useState`/`useRuntimeConfig`, `NuxtLayout`/`NuxtPage`. No Options API, no Vue 2-era patterns.
+- **Data access behind exactly one module** (`app/app/lib/pokeapi.ts`) with in-flight promise dedupe, a concurrency limiter and per-`base` caches (`pokeapi.ts:48-79`, `getIndex` at `pokeapi.ts:130`). All five pages consume only that module — an API change or endpoint swap touches one file.
+- **Platform-first where it counts**: native `fetch` (`pokeapi.ts:72`) instead of axios/ofetch wrappers, zero utility libraries (debounce is a 6-line `setTimeout` at `app/app/pages/index.vue:66-71` rather than pulling in `@vueuse/core`), CSS custom properties + grid + `:focus-visible` (`app/app/assets/css/main.css`), ES modules everywhere.
+- **Dependencies**: 3 packages, no CSS framework, no lodash/vueuse/axios — very lean, and `nuxt` is the newest stable.
+
+### What will age badly
+
+- **`import { setResponseStatus } from 'h3'` in five page components** (`app/app/pages/pokemon/[name].vue:2`, `app/app/pages/moves/[name].vue:2`, `app/app/pages/abilities/[name].vue:2`, `app/app/pages/types/[name].vue:2`, `app/app/pages/[...slug].vue:2`). Nuxt already auto-imports its own `setResponseStatus` composable (visible in the project's own generated `.nuxt/types/imports.d.ts:89`, from `#app/composables/ssr`), and Nuxt 4.6 ships `nuxt/server` explicitly so apps don't import from h3. This is the single systematic pattern that ripples at the Nuxt 5 upgrade.
+- **`compatibilityDate: '2025-07-15'`** (`app/nuxt.config.ts:2`) is ~15 months stale; Nuxt's own guidance is to set it to the current date when creating a project, and it silently pins an old behavior window.
+- **`any` at the boundary**: the one well-defined module is internally untyped — `Promise<any>` cache and `api()` return (`pokeapi.ts:48`, `pokeapi.ts:67`), and page loaders cast records to `any` throughout (e.g. `pokemon/[name].vue:32-118`). The domain interfaces (`SpeciesEntry`, `PokeIndex`) are good, but the raw API shape is unguarded, so a schema change surfaces as runtime `undefined`s rather than type errors.
+- **Rejected promises are cached forever** (`pokeapi.ts:77` sets the cache before the fetch settles): one transient API error during SSR poisons the server's in-memory cache for the process lifetime. Delete the entry on rejection.
+- **Duplicated title suffix**: `– Pokédex` is hand-concatenated in six files (`pokemon/[name].vue:126`, `abilities/[name].vue:41`, `types/[name].vue:50`, `moves/[name].vue:36`, `types/index.vue:4`, `[...slug].vue:4`); a single `titleTemplate` in `nuxt.config.ts` or `app.vue` would remove the copy-paste.
+- **URL handling by string surgery**: `${base.replace(/\/$/, '')}/api/v2${path}` and `url.match(/\/(\d+)\/?$/)` (`pokeapi.ts:20`, `pokeapi.ts:70`) instead of `new URL(path, base)` / `URL.pathname` — the platform API exists and is the better choice here.
+- **Redundant direct deps**: `vue` and `vue-router` are declared in `package.json` but never imported directly (grep confirms only auto-imported `ref`/`computed`/`useRouter` usage); they're transitive deps of Nuxt anyway. Harmless, but not needed.
+
+None of this is speculative churn — the h3 coupling and the stale compatibility date are the only items that will actually cost work at the next Nuxt major.
+
+```json
+{
+  "dimension": "forward-thinking",
+  "criteria": {
+    "latest_apis": {
+      "score": 4,
+      "evidence": [
+        "app/app/pages/pokemon/[name].vue:104 — useAsyncData with the documented `watch` option, current Nuxt 4 data-loading primitive",
+        "app/app/nuxt.config.ts:1-19 — defineNuxtConfig, runtimeConfig.public, Nuxt 4 app/ srcDir structure; current",
+        "app/app/pages/[...slug].vue:2 — `import { setResponseStatus } from 'h3'` repeated in 5 page components (also moves/abilities/types [name].vue:2)",
+        "app/nuxt.config.ts:2 — compatibilityDate '2025-07-15', ~15 months stale; Nuxt sets it to the current date on project creation"
+      ],
+      "rationale": "Otherwise consistently current-generation Nuxt 4 (useAsyncData+watch, useHead, useState, script setup, app/ layout), but the one systematic miss is real: Nuxt 4.6 — the version installed — introduced nuxt/server and ships its own auto-imported setResponseStatus precisely to decouple from h3 before Nuxt 5's h3 v2 (nuxt.com/blog/v4-6), yet all 5 pages import from h3 directly."
+    },
+    "platform": {
+      "score": 4,
+      "evidence": [
+        "app/app/lib/pokeapi.ts:72 — native fetch with res.json(), no axios/ofetch wrapper",
+        "app/app/assets/css/main.css:1-60 — CSS custom properties from tokens.css, grid, :focus-visible, system font stack",
+        "app/app/lib/pokeapi.ts:20 — idFromUrl parses API URLs with a regex instead of new URL().pathname",
+        "app/app/lib/pokeapi.ts:70 — URL built by string concatenation + replace(/\\/$/) instead of new URL(path, base)"
+      ],
+      "rationale": "Reaches for the platform first (fetch, ES modules, custom properties, grid, no polyfills or utility libs), with two spots of hand-rolled URL string surgery where the URL API is the better choice; no AbortController/timeout on outbound fetches."
+    },
+    "dependencies": {
+      "score": 4,
+      "evidence": [
+        "app/package.json:8-14 — exactly 3 dependencies; nuxt 4.6.3 is the current stable (2026-10-27 release)",
+        "app/app/pages/index.vue:66-71 — hand-rolled 6-line debounce instead of adding @vueuse/core",
+        "app/package.json:12-13 — vue and vue-router declared but never imported directly (grep: no `from 'vue'`/`from 'vue-router'` in app/app); transitive via nuxt"
+      ],
+      "rationale": "Minimal and modern: no CSS framework, no axios, no lodash/vueuse, and the newest Nuxt stable. Only blemish is the redundant direct vue/vue-router deps, which are harmless version alignment but not needed."
+    },
+    "churn_resistance": {
+      "score": 4,
+      "evidence": [
+        "app/app/lib/pokeapi.ts:67-79 — all data access behind one module with in-flight dedupe and caching; every page consumes only it",
+        "app/app/composables/useApiBase.ts:1-9 — API base resolved in one place, synced server→client via useState payload",
+        "app/app/lib/pokeapi.ts:48 — Promise<any> cache and untyped API records; page loaders cast records to any throughout (e.g. app/app/pages/pokemon/[name].vue:32-118)",
+        "app/app/lib/pokeapi.ts:77 — cache.set before the fetch settles: a rejected promise is cached for the process lifetime",
+        "app/app/pages/pokemon/[name].vue:126 — '– Pokédex' title suffix duplicated across six files instead of a titleTemplate"
+      ],
+      "rationale": "Data access and configuration are each centralized behind one module, so most requirement changes touch one file — genuinely good. But the h3 import spread over five pages, any-typed API records at the boundary, and the copy-pasted title suffix are exactly the kind of thing that ripples at a framework major."
+    }
+  },
+  "overall": 4,
+  "findings": [
+    { "severity": "medium", "location": "app/app/pages/pokemon/[name].vue:2", "issue": "setResponseStatus imported from 'h3' in all five page components (also moves/[name].vue:2, abilities/[name].vue:2, types/[name].vue:2, [...slug].vue:2), coupling app code to h3 v1's event shape; Nuxt 4.6 ships nuxt/server and its own auto-imported setResponseStatus composable precisely so this code survives Nuxt 5's move to h3 v2", "suggestion": "Drop the h3 import and use the Nuxt-native (auto-imported) setResponseStatus, or import from 'nuxt/server' for portability; the Nuxt 4.6 blog documents this as the upgrade path" },
+    { "severity": "medium", "location": "app/app/lib/pokeapi.ts:67", "issue": "API responses are typed `any` at the one module that guards the boundary (Promise<any> cache at pokeapi.ts:48, `as any`/`(t: any)` casts throughout the page loaders), so API schema changes surface as runtime undefineds instead of type errors", "suggestion": "Define minimal interfaces for the API record shapes actually consumed (NamedRef already exists) and let api() return them; keep the domain view models as-is" },
+    { "severity": "low", "location": "app/app/lib/pokeapi.ts:77", "issue": "The fetch promise is stored in the cache before it settles, so a transient network error caches a rejected promise for the server process lifetime, permanently failing that resource", "suggestion": "cache.delete(url) in a .catch() on the stored promise (or store settled results) so a failure can be retried" },
+    { "severity": "low", "location": "app/nuxt.config.ts:2", "issue": "compatibilityDate '2025-07-15' pins a ~15-month-old behavior window instead of the current one; Nuxt sets it to the current date on project creation", "suggestion": "Bump compatibilityDate to the present (or the Nuxt 4.6-era date) and rely on the documented migration notes when behavior flags change" },
+    { "severity": "low", "location": "app/app/pages/pokemon/[name].vue:126", "issue": "The '– Pokédex' title suffix is hand-concatenated in six files (types/index.vue:4, [..slug].vue:4, moves/abilities/types/[name].vue), duplicating a cross-cutting convention", "suggestion": "Set titleTemplate: '%s – Pokédex' once (nuxt.config.ts app.head or app.vue) and have pages set only their title" },
+    { "severity": "low", "location": "app/package.json:12", "issue": "vue and vue-router are declared as direct dependencies but never imported directly anywhere in app/app (auto-imports only); they are transitive deps of nuxt", "suggestion": "Remove them, or keep only if deliberately pinning versions ahead of Nuxt's resolution — as-is they add nothing" },
+    { "severity": "low", "location": "app/app/lib/pokeapi.ts:70", "issue": "URLs are built by string concatenation with a manual trailing-slash strip, and parsed with a regex at pokeapi.ts:20, where the URL API is available and handles these cases natively", "suggestion": "Use new URL(path, base) for building and new URL(url).pathname for idFromUrl" }
+  ],
+  "summary": "A lean, current-generation Nuxt 4.6 app: one well-defined data-access module, native fetch, zero gratuitous dependencies, and modern Nuxt idioms everywhere except one systematic pattern — importing setResponseStatus from h3 in five page components, which Nuxt 4.6's new nuxt/server surface and own composable exist specifically to replace ahead of the h3 v2 / Nuxt 5 jump. Combined with a stale compatibilityDate, any-typed API records at the otherwise-clean boundary, and a permanently-cached rejected-promise edge case, it will age acceptably but needs a small, well-contained pass before the next framework major.",
+  "apis": [
+    { "api": "useAsyncData (with watch option)", "location": "app/app/pages/pokemon/[name].vue:104", "status": "current", "replacement": "" },
+    { "api": "useHead / computed title", "location": "app/app/pages/pokemon/[name].vue:124", "status": "current", "replacement": "" },
+    { "api": "useState / useRuntimeConfig", "location": "app/app/composables/useApiBase.ts:3", "status": "current", "replacement": "" },
+    { "api": "useRequestEvent", "location": "app/app/pages/pokemon/[name].vue:120", "status": "current", "replacement": "" },
+    { "api": "setResponseStatus (imported from 'h3')", "location": "app/app/pages/moves/[name].vue:2", "status": "legacy", "replacement": "Nuxt's own auto-imported setResponseStatus composable (#app/composables/ssr, already in the project's .nuxt/types/imports.d.ts), or 'nuxt/server' for portability across h3/Nitro majors — see nuxt.com/blog/v4-6" },
+    { "api": "router.push (vue-router 4)", "location": "app/app/pages/index.vue:73", "status": "current", "replacement": "" },
+    { "api": "NuxtLayout / NuxtPage / NuxtLink", "location": "app/app/app.vue:2", "status": "current", "replacement": "" },
+    { "api": "native fetch", "location": "app/app/lib/pokeapi.ts:72", "status": "current", "replacement": "" }
+  ],
+  "dependencies": [
+    { "name": "nuxt", "verdict": "modern", "note": "4.6.3 is the current stable release (2026-10-27), installed days after release; no stray major-lagging pin" },
+    { "name": "vue", "verdict": "established", "note": "^3.5.22 is current, but it is never imported directly (auto-imports only) so it's redundant as a direct dependency" },
+    { "name": "vue-router", "verdict": "established", "note": "^4.5.0 is the current major, but likewise never imported directly — transitive via nuxt" }
+  ]
+}
+```

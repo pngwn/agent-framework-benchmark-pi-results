@@ -1,0 +1,124 @@
+I've reviewed the full app (all 23 source files), the spec, and verified Angular-22-specific behavior against the official skill references and current docs (`withEventReplay` default-inclusion via incremental hydration in v22; `RESPONSE_INIT` status mutation pattern; `allowedHosts` guidance).
+
+```json
+{
+  "dimension": "mergeability",
+  "criteria": {
+    "idiomatic": {
+      "score": 4,
+      "evidence": [
+        "app/src/app/app.config.ts:10-19 — standalone bootstrap, provideRouter with withComponentInputBinding, hydration, provideBrowserGlobalErrorListeners: current-recommended config",
+        "app/src/app/page-data.ts:74,113 — ResolveFn resolvers feeding signal inputs, exactly the pattern the official data-resolvers guidance calls 'modern'",
+        "app/src/app/app.routes.server.ts:4-10 — RenderMode.Server via ServerRoute withRoutes, matching the hybrid-rendering docs",
+        "app/src/app/not-found.component.ts:13-16 — RESPONSE_INIT.status = 404, the documented SSR status pattern",
+        "app/src/app/pokeapi.service.ts:17-36 — API base via InjectionToken + TransferState, a clean framework-native way to share server config with the client",
+        "app/src/app/app.config.ts:18 — withEventReplay() is redundant since Angular v22 enables it by default (CLI schematic removed it); harmless but shows version drift",
+        "app/src/app/app.routes.ts:19-30 — all routes eagerly imported; no loadComponent, so every page ships in the initial bundle",
+        "app/src/app/cards.component.ts:18-22 — signals, computed, OnPush, @if/@for/@switch control flow used consistently throughout"
+      ],
+      "rationale": "Reads like current Angular 22 examples — signals, resolver+input-binding data flow, SSR/hydration setup are all by the book. Only misses are the redundant withEventReplay and no lazy-loaded routes."
+    },
+    "correctness_risks": {
+      "score": 3,
+      "evidence": [
+        "app/src/app/home.page.ts:24,60-61 — debounce timer is never cleared on destroy; navigating away within 200ms of typing fires a stray router.navigate that hijacks the new route",
+        "app/src/app/page-data.ts:161,300,338,385 — bare `catch { return null }` treats a transient network/API failure identically to a missing resource, rendering 'Not found' content instead of an error state",
+        "app/src/app/home.page.html:6 — `value=\"{{ q() }}\"` binds the attribute, not the property, so back/forward navigation to a different ?q can leave stale text in the search box",
+        "app/src/app/app.config.ts:8-14 — no withNavigationErrorHandler; a rejected home/pokemon resolver on a client-side navigation yields no user-visible error UI",
+        "app/src/app/pokeapi.service.ts:44-56 — cache deliberately does not cache failures and is bounded by the fixed API dataset; sound",
+        "app/src/app/move-table.component.ts:31-36 — missing values sort last in both directions as specified; no issues found in the trickiest logic"
+      ],
+      "rationale": "The hard parts (SSR 404s, hydration gating, sorting, filtering) are handled correctly, but there are a few real minor bugs: an uncancelled debounce timer, error/404 conflation in resolvers, and no navigation-failure handling."
+    },
+    "global_abstractions": {
+      "score": 4,
+      "evidence": [
+        "app/src/app/catalog.service.ts:55-70 — CatalogService builds the species catalog once from type+generation resources; well-documented, clear interfaces, avoids 1025 per-species fetches",
+        "app/src/app/pokeapi.service.ts:44-56 — small API wrapper with explicit, commented cache semantics (module-level, process-wide, failure-evicting)",
+        "app/src/app/page-data.ts — one 400-line module holding all resolvers, all page-data interfaces and display constants for four different pages; works, but it's the app's junk drawer and will need splitting as pages grow",
+        "app/src/app/cards.component.ts:27-52 — PokemonCardsComponent is a genuinely shared presentation component used by four pages; good reuse, not premature"
+      ],
+      "rationale": "Abstractions are few and mostly earn their keep (PokeApi, catalog, cards). The only structural smell is page-data.ts accumulating every page's data shape in one file."
+    },
+    "readability": {
+      "score": 4,
+      "evidence": [
+        "app/src/app/util.ts:1-52 — tiny, single-purpose, well-documented helpers",
+        "app/src/app/pokeapi.service.ts:40-43 — comments explain *why* (cache lifetime rationale), not what",
+        "app/src/app/server.ts:14-15 — allowedHosts choice documented with its reasoning",
+        "app/src/app/catalog.service.ts vs app/src/app/cards.component.ts vs app/src/app/home.page.ts — mixed naming styles: suffixless 'page' files (HomePage) alongside role-suffixed cards.component.ts/pokeapi.service.ts, and class PokeApi doesn't match its file pokeapi.service.ts",
+        "app/src/app/pokemon.page.ts:31-33, move.page.ts:84-86, ability.page.ts:45-47, type.page.ts:108-110 — the same title-setting effect duplicated verbatim in four components"
+      ],
+      "rationale": "A new teammate would find their way quickly: flat structure, small functions, good comments. Dings for inconsistent file/class naming conventions and the quadruplicated title effect."
+    },
+    "review_cost": {
+      "score": 4,
+      "evidence": [
+        "app/src/app/home.page.ts:60-61 — one real fix (clear the debounce timer in DestroyRef) I'd require before merge",
+        "app/src/app/app.config.ts:18 — drop redundant withEventReplay()",
+        "app/src/app/app.routes.ts:19-30 — add loadComponent for code splitting (nice-to-have at this app size)",
+        "app/src/app/page-data.ts:161 et al. — distinguish 404 from fetch failure (small refactor: check error status)"
+      ],
+      "rationale": "Approve after one short round: the timer leak and error conflation are quick fixes; the rest are nits."
+    }
+  },
+  "overall": 4,
+  "findings": [
+    {
+      "severity": "medium",
+      "location": "app/src/app/home.page.ts:60",
+      "issue": "Search debounce timer is never cancelled on component destroy; a navigation away within 200ms of typing triggers router.navigate afterwards, overwriting the user's new route",
+      "suggestion": "Register clearTimeout via DestroyRef.onDestroy, or use takeUntilDestroyed on an RxJS debounce"
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/app/page-data.ts:161",
+      "issue": "All four resolvers catch every error and return null, so a transient API/network failure renders 'Not found' (and a 200-status SSR page) instead of an error state; no withNavigationErrorHandler exists either",
+      "suggestion": "Catch and inspect HttpErrorResponse status: only 404 (and the like) should map to null; propagate other errors and add a global navigation error handler or error UI"
+    },
+    {
+      "severity": "low",
+      "location": "app/src/app/app.config.ts:18",
+      "issue": "withEventReplay() is redundant in Angular v22 — provideClientHydration() enables incremental hydration (which includes event replay) by default, and the CLI schematic no longer emits it",
+      "suggestion": "Use bare provideClientHydration()"
+    },
+    {
+      "severity": "low",
+      "location": "app/src/app/app.routes.ts:19",
+      "issue": "All routes are eagerly imported, so every page's code is in the initial bundle despite an initial-budget warning of 500kB",
+      "suggestion": "Use loadComponent per route for standard code splitting"
+    },
+    {
+      "severity": "low",
+      "location": "app/src/app/server.ts:16",
+      "issue": "allowedHosts: ['*'] disables host verification; SSR guidance says keep an explicit list unless a trusted proxy validates headers",
+      "suggestion": "If the harness's host truly varies, at least scope the wildcard to the deployment environment (e.g. via env var) instead of hardcoding '*'"
+    },
+    {
+      "severity": "low",
+      "location": "app/src/app/catalog.service.ts:1",
+      "issue": "Mixed naming conventions across the app: suffixless 'page' files (home.page.ts → HomePage) coexist with role-suffixed cards.component.ts/pokeapi.service.ts, and class PokeApi doesn't match its file name",
+      "suggestion": "Pick one convention (the v20+ intent-over-role style or classic suffixes) and apply it uniformly"
+    },
+    {
+      "severity": "low",
+      "location": "app/src/app/home.page.html:6",
+      "issue": "`value=\"{{ q() }}\"` binds the value attribute; after the user has interacted with the input, attribute updates don't change the visible property, so back/forward navigation can leave stale search text",
+      "suggestion": "Bind the property ([value]) or reconcile via an effect when q() changes without user input"
+    },
+    {
+      "severity": "low",
+      "location": "app/src/app/move-table.component.ts:42",
+      "issue": "Rows are tracked by $index, so every sort re-renders the entire table body instead of reusing row DOM nodes",
+      "suggestion": "Track by a stable key (e.g. apiName + level)"
+    },
+    {
+      "severity": "low",
+      "location": "app/src/app/pokemon.page.ts:31",
+      "issue": "The dynamic-title effect (inject(Title) + effect setTitle) is duplicated verbatim in four page components",
+      "suggestion": "Extract a shared helper (e.g. a setTitle effect factory or a reusable directive) or compute the title in a route-level title resolver"
+    }
+  ],
+  "summary": "This is a confident, current-idiom Angular 22 SSR app: signal-based components, resolver-to-input data flow, per-route RenderMode.Server, and real 404 statuses via RESPONSE_INIT, all with genuinely explanatory comments. The few real defects are small and local — an uncleared debounce timer, catch-all resolvers that misreport API failures as not-found, and no navigation-error handling. I'd merge it after one short round of fixes; everything else is polish."
+}
+```

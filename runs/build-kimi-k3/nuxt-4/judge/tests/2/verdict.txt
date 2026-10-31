@@ -1,0 +1,122 @@
+I've now read the whole app (15 source files, ~660 LOC) plus the spec and the acceptance suite. Key confirmation: `app/` contains **zero tests of its own** — no test runner in `app/package.json` (only `dev`, `build`, `start`), no devDependencies, no `*.spec.*`/`*.test.*` files anywhere under `app/` (grep only matched build artifacts in `.nuxt/`/`.output/`). The only safety net is the harness's Playwright suite in `tests/`, which the agent doesn't own. That matters because a large share of this app is pure, highly testable data logic (`app/app/lib/pokeapi.ts`) plus fiddly URL-state code, and Nuxt's current recommendation (`@nuxt/test-utils` v4 + Vitest v4, released Feb 2026) would have made covering it cheap.
+
+```json
+{
+  "dimension": "tests",
+  "criteria": {
+    "coverage_of_risk": {
+      "score": 1,
+      "evidence": [
+        "app/package.json:6-9 — only dev/build/start scripts, no test script or devDependencies",
+        "app/app/lib/pokeapi.ts:14-43 — humanize, idFromUrl, englishName, latestEnFlavor: pure functions, zero tests",
+        "app/app/lib/pokeapi.ts:119-203 — buildIndex + speciesCardsForRefs (alt-form filtering, dedupe, type-slot ordering): the riskiest code in the app, untested",
+        "app/app/pages/index.vue:48-96 — filtering, 48/page pagination, page clamping, query-default omission, debounced URL sync: all untested"
+      ],
+      "rationale": "No tests exist at all, and the untested surface is precisely the high-risk one: data transformation, filtering/pagination, URL state and 404 paths."
+    },
+    "behaviour_not_implementation": {
+      "score": 1,
+      "evidence": [
+        "app/app/pages/index.vue:1-120 — no behavioural test asserts rendered list, counts, or URL after filter changes",
+        "app/app/components/MoveTable.vue:23-63 — sort toggling, missing-values-last and aria-sort are observable behaviours nobody asserts"
+      ],
+      "rationale": "The rubric scores 'no tests' at 1; there is nothing behavioural or otherwise."
+    },
+    "regression_power": {
+      "score": 1,
+      "evidence": [
+        "app/app/lib/pokeapi.ts:75-89 — api() caches the promise, so a rejected fetch is cached forever; a refactor here would fail silently with no test to catch it",
+        "app/app/pages/pokemon/[name].vue:33-90 — version-group selection default, method ordering (METHOD_ORDER), level-up sort: a one-character change (e.g. b.order - a.order) would pass unnoticed",
+        "app/app/pages/index.vue:70-74 — dropping the 'omit defaults' rule or breaking page clamping would surface only if the acceptance suite happens to cover that combination"
+      ],
+      "rationale": "With no tests in app/, any regression outside the acceptance suite's exact assertions ships undetected; the data layer is the single point of failure for five pages."
+    },
+    "signal_to_noise": {
+      "score": 3,
+      "evidence": [
+        "app/ — 0 test files, 0 cases (confirmed by grep across app/ excluding build output)"
+      ],
+      "rationale": "No tests means no noise, which the rubric scores as 3 — but it also means zero signal."
+    }
+  },
+  "overall": 1,
+  "findings": [
+    {
+      "severity": "high",
+      "location": "app/package.json:6-14",
+      "issue": "No test infrastructure whatsoever: no test script, no devDependencies, no runner config; the app's only guard is the harness-owned acceptance suite.",
+      "suggestion": "Add @nuxt/test-utils v4 + vitest v4 (the current Nuxt-recommended stack) with a 'test' script; start with unit tests for lib/pokeapi.ts, which needs no Nuxt environment at all."
+    },
+    {
+      "severity": "high",
+      "location": "app/app/lib/pokeapi.ts:190-203",
+      "issue": "speciesCardsForRefs implements the alt-form exclusion (>10000), dedupe and dex-sort rules used by three page types; it is untested, and a subtle bug (e.g. dropping the seen-set) would double-list Pokémon on /moves, /abilities and /types.",
+      "suggestion": "Table-driven unit tests with fake refs including ID 10033 (Mega) to pin the exclusion and dedupe behaviour."
+    },
+    {
+      "severity": "high",
+      "location": "app/app/lib/pokeapi.ts:14-43",
+      "issue": "humanize, idFromUrl, latestEnFlavor and englishName encode spec-critical formatting (Mr Mime, #0025, whitespace collapsing, last-English-entry) as untested regex/loop code.",
+      "suggestion": "Pure-function unit tests: humanize('mr-mime')==='Mr Mime', idFromUrl with and without trailing slash, flavor text containing \\f\\n, empty names array."
+    },
+    {
+      "severity": "high",
+      "location": "app/app/pages/index.vue:48-96",
+      "issue": "URL state round-trip is untested and subtly fragile: the debounced watch on q pushes the same query the route-watcher just synced from, which can create spurious history entries on back/forward; page clamping (Math.min) and default-omission in buildQuery are also unguarded.",
+      "suggestion": "Tests that set /?q=&type=&page=999 and assert the resulting URL and rendered 'Page n of m'; and a back/forward navigation test to pin history behaviour."
+    },
+    {
+      "severity": "high",
+      "location": "app/app/pages/pokemon/[name].vue:33-90",
+      "issue": "The moves pipeline (default game = highest order, ?game= override, grouping by method, Level-Up by level-then-name, method order) is ~60 lines of the most intricate logic in the app with no tests.",
+      "suggestion": "Extract this into a pure function (input: pokemon + version-group records; output: games/methods) and unit-test the ordering rules and the unknown-method fallback (localeCompare branch)."
+    },
+    {
+      "severity": "medium",
+      "location": "app/app/components/MoveTable.vue:44-80",
+      "issue": "Missing-values-sort-last in both directions and aria-sort toggling are behaviour the acceptance suite only spot-checks; a refactor that flips the missing-first branch would regress unnoticed.",
+      "suggestion": "Component test via mountSuspended asserting row order after clicking Power twice, and aria-sort values on all headers."
+    },
+    {
+      "severity": "medium",
+      "location": "app/app/lib/pokeapi.ts:75-89",
+      "issue": "api() caches promises including rejections: one transient API 500 poisons that URL for the server process lifetime, and nothing tests this failure mode.",
+      "suggestion": "Cache successes only (delete from cache on rejection), and add a test that a failing fetch is retried on the next call."
+    },
+    {
+      "severity": "medium",
+      "location": "app/app/pages/pokemon/[name].vue:139-143 / app/app/pages/[...slug].vue:5-8",
+      "issue": "Not-found handling (404 status on SSR, NotFound rendering) and the non-404 error path (api() throws on 5xx, yielding Nuxt's error page without the banner/contentinfo landmarks) are untested.",
+      "suggestion": "An e2e test with a stubbed API asserting both the 404 page for /pokemon/missingno and the error page still renders the required landmarks."
+    },
+    {
+      "severity": "low",
+      "location": "app/app/composables/useApiBase.ts:3-8",
+      "issue": "SSR reads process.env.API_BASE_URL at request time while the client relies on runtimeConfig; a mismatch would break hydration, and this is untested.",
+      "suggestion": "A runtime test asserting the server-injected state matches what the client sees."
+    },
+    {
+      "severity": "low",
+      "location": "app/app/lib/pokeapi.ts:52-66",
+      "issue": "The hand-rolled concurrency limiter (waiters queue, shift on finally) is untested; a bug in waiter wakeup would deadlock all SSR fetches under load with no test to catch it.",
+      "suggestion": "Unit-test limited() with MAX_CONCURRENT exceeded, or replace with a small well-tested library util."
+    }
+  ],
+  "summary": "The app ships zero tests of its own — no runner, no script, no devDependencies — leaving ~660 LOC of data-layer and URL-state logic guarded only by the harness's acceptance specs. The riskiest code (species index building, alt-form filtering, pagination/query sync, the moves grouping pipeline) is exactly what's untested, so the first refactor of the data layer will be flying blind. Nuxt's current recommendation (@nuxt/test-utils v4 + Vitest v4) would cover the pure functions in lib/pokeapi.ts almost for free, which is the obvious first step.",
+  "wroteTests": false,
+  "testCount": 0,
+  "valuableTests": [],
+  "lowValueTests": [],
+  "untested": [
+    { "area": "Species index construction: alt-form exclusion, type-slot assembly, generation mapping, dedupe (app/app/lib/pokeapi.ts:119-178, 190-203)", "risk": "high", "likelyBug": "A dropped dedupe or slot-order bug would show duplicate or wrongly-typed Pokémon cards across /, /types, /moves and /abilities, possibly only for edge species like Deoxys or forms above ID 10000." },
+    { "area": "Name/flavor formatting: humanize, idFromUrl, latestEnFlavor, dex-number padding (app/app/lib/pokeapi.ts:14-43; app/app/pages/pokemon/[name].vue:147)", "risk": "high", "likelyBug": "A regex or padding change (e.g. padStart(3), first-English instead of last flavor entry) breaks every heading and description at once." },
+    { "area": "Home page URL state: filter→query sync, page reset on filter change, page clamping, default omission, debounce (app/app/pages/index.vue:48-96)", "risk": "high", "likelyBug": "Duplicate history entries on back/forward, 'Page 22 of 1' rendered for ?page=999, or page=1 reappearing in the URL after a filter change." },
+    { "area": "Moves pipeline: default version group by highest order, ?game= override, method grouping/ordering, level-up sort (app/app/pages/pokemon/[name].vue:33-90)", "risk": "high", "likelyBug": "Wrong default game, missing Level column, methods out of the required Level Up/Machine/Egg/Tutor order, or level rows unsorted." },
+    { "area": "Sortable move tables: missing-values-last, asc/desc toggle, aria-sort (app/app/components/MoveTable.vue:23-80)", "risk": "medium", "likelyBug": "Null power/accuracy sorting first on one direction, or aria-sort left on all headers after a refactor." },
+    { "area": "HTTP/caching layer: 404→null, non-404 throw, promise caching including rejections, concurrency limiter (app/app/lib/pokeapi.ts:52-89)", "risk": "medium", "likelyBug": "One transient API failure permanently poisons a cached URL and 500s every request for that resource until server restart; limiter wakeup bug deadlocks SSR." },
+    { "area": "Not-found and error pages: 404 status, landmark layout on API failure (app/app/pages/[...slug].vue:5-8; [name].vue:139-143)", "risk": "medium", "likelyBug": "API 5xx renders Nuxt's default error page missing the banner/contentinfo landmarks, or 404s render with status 200 after a navigation refactor." },
+    { "area": "Evolution chain rendering, including branching chains (app/app/components/EvoNode.vue:1-19)", "risk": "low", "likelyBug": "Deep or branching chains (Eevee) rendered flat or with duplicate keys after nested-list refactor." },
+    { "area": "apiBaseUrl resolution across SSR/client (app/app/composables/useApiBase.ts:3-8)", "risk": "low", "likelyBug": "Hydration mismatch or client fetches hitting the wrong origin if the env override stops being mirrored into runtime config." }
+  ]
+}
+```

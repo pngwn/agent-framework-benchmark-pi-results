@@ -1,0 +1,125 @@
+## Review summary
+
+This app rides the **current stable stack**: React Router `^8.5.1` (v8 shipped June 2026; 8.5.1 is the latest), React 19.3, Vite 7, TS 5.9. It follows v8-era guidance well — `Layout` export in `app/app/root.tsx:7`, `data()` from `react-router`, route props instead of hooks, and React 19 `<title>` hoisting in components, which the v8 route-module docs explicitly recommend over the `meta` export ("Since React 19, using the built-in `<title>` element is recommended"). All data access is centralized in one `.server` module, so framework or API changes are contained.
+
+The notable weaknesses are forward-looking: the framework generates route types (`.react-router/types` is even wired into `app/tsconfig.json:3-10` and the typegen script exists in `app/package.json`), but no route imports `./+types/*` — five route components take `loaderData: any` and loaders hand-roll arg types. And the home loader ships the entire 1,025-species catalog on every query-param change (each debounced keystroke triggers loader revalidation) when `shouldRevalidate` exists precisely to opt out.
+
+```json
+{
+  "dimension": "forward-thinking",
+  "criteria": {
+    "latest_apis": {
+      "score": 4,
+      "evidence": [
+        "app/package.json:14-16 — react-router/@react-router/dev/@react-router/serve pinned ^8.5.1, the current stable line (v8.5.1 is latest as of 2026-10)",
+        "app/app/root.tsx:7-35 — Layout export pattern with Links/Meta/Scripts, current v8 root convention",
+        "app/app/routes/home.tsx:111 — React 19 <title> hoisting in route component; v8 route-module docs explicitly recommend this over the meta export",
+        "app/app/routes/move.tsx:10 — data(..., { status: 404 }) from react-router, current API",
+        "app/app/routes.ts:1-11 — routes.ts with index()/route() helpers, current config style",
+        "app/app/routes/pokemon.tsx:34 — loader args hand-typed instead of Route.LoaderArgs from generated ./+types/* (tsconfig already includes .react-router/types and rootDirs at app/tsconfig.json:3-10)"
+      ],
+      "rationale": "Consistently on the v8 generation, including the newer React-19 title-hoisting approach the docs now prefer over meta. The one gap is unused generated route types, which the framework produces for free and the app scaffolds for but doesn't consume."
+    },
+    "platform": {
+      "score": 5,
+      "evidence": [
+        "app/app/lib/api.server.ts:36 — native fetch for all API access, no HTTP client library",
+        "app/app/routes/home.tsx:50-60 — URLSearchParams for filter state; new URLSearchParams(...) cloning instead of hand-rolled query building",
+        "app/app/routes/pokemon.tsx:56 — new URL(request.url).searchParams for loader param parsing",
+        "app/app/routes/home.tsx:115-118 — native <input type=\"search\">, <select>, <label> controls; no UI library",
+        "app/app/components/PokemonCard.tsx:18-21 — width/height/loading=\"lazy\" on imgs; native lazy loading",
+        "app/app/app.css:5-16 — CSS custom properties from design tokens, modern grid layouts; no framework CSS per spec"
+      ],
+      "rationale": "Reaches for the platform first everywhere: fetch, URL/URLSearchParams, native form controls and table semantics, CSS custom properties, Map/Set/Object.fromEntries. The only hand-rolled pieces (150ms debounce, small concurrency limiter) have no platform equivalent. Minor nit: idFromUrl (api.server.ts:67) parses URLs with a regex where new URL(...).pathname would do."
+    },
+    "dependencies": {
+      "score": 5,
+      "evidence": [
+        "app/package.json:12-20 — five runtime deps total (react, react-dom, react-router, @react-router/serve, isbot); no lodash/moment/CSS framework",
+        "app/build/server/index.js:5 — isbot is imported by the framework's generated default server entry, so the dependency is required, not gratuitous",
+        "app/package.json:24-26 — vite ^7, typescript ^5.9, @types/node ^24: all current major versions matching React Router v8 minimums (vite 7, react 19.2.7+ per the v8 upgrade guide)"
+      ],
+      "rationale": "Minimal and modern: every runtime dependency is either the framework itself or required by its default server entry, and dev tooling is at current majors. Nothing the platform or framework covers was pulled in."
+    },
+    "churn_resistance": {
+      "score": 3,
+      "evidence": [
+        "app/app/lib/api.server.ts — all API access, caching and URL mapping behind one server-only module; routes never fetch directly (good containment)",
+        "app/app/lib/format.ts:5-26 — presentation formatting centralized and shared",
+        "app/app/routes/pokemon.tsx:182 — loaderData: any (also types.tsx:12, move.tsx:39, type.tsx:50, ability.tsx:40): loader renames silently break components at runtime",
+        "app/app/routes/home.tsx:9-31 — loader returns the full species catalog; no shouldRevalidate, so every debounced keystroke re-fetches and re-serializes ~1025 entries over the wire",
+        "app/app/lib/api.server.ts:170 — PokeAPI records typed as any throughout; upstream shape changes won't surface as type errors",
+        "app/app/lib/api.server.ts:63 — dead spriteUrl() helper, never called (PokemonCard builds URLs from spriteBase)"
+      ],
+      "rationale": "Data access, formatting and config are each behind one module and no framework internals are touched, so framework upgrades would touch few files. But the boundary between loaders and components is untyped (loaderData: any, any-typed API records), and the missed shouldRevalidate on the home route means avoidable repeated work on every filter change."
+    }
+  },
+  "overall": 4,
+  "findings": [
+    {
+      "severity": "medium",
+      "location": "app/app/routes/pokemon.tsx:182",
+      "issue": "Route components use hand-rolled loader arg types and loaderData: any (also app/app/routes/types.tsx:12, move.tsx:39, type.tsx:50, ability.tsx:40) even though the app's tsconfig and typegen script already set up React Router's generated route types.",
+      "suggestion": "Import `type { Route } from \"./+types/pokemon\"` in each route module and use Route.LoaderArgs / Route.ComponentProps, per the v8 route-module-type-safety guide, so loader/component boundaries are checked."
+    },
+    {
+      "severity": "medium",
+      "location": "app/app/routes/home.tsx:9",
+      "issue": "The home loader returns the full species/type/generation catalog and, with default revalidation, re-runs on every query-param change — i.e. every debounced search keystroke triggers a server data request that re-serializes the whole catalog.",
+      "suggestion": "Export `shouldRevalidate: () => false` for this route (its output is independent of the URL), or move filtering/pagination into the loader so only the current page is transmitted."
+    },
+    {
+      "severity": "low",
+      "location": "app/app/lib/api.server.ts:67",
+      "issue": "PokeAPI response shapes are typed as `any` across the whole data layer (getJSON<T = any>, record fields accessed via any), so upstream shape drift surfaces as runtime bugs rather than type errors.",
+      "suggestion": "Define interfaces for the handful of records actually consumed (species, pokemon, move, ability, type) at the data-layer boundary; the existing SpeciesEntry/SpeciesIndex show the pattern started but wasn't carried through."
+    },
+    {
+      "severity": "low",
+      "location": "app/app/lib/api.server.ts:63",
+      "issue": "Dead code: spriteUrl() is exported but never called; PokemonCard builds sprite URLs from spriteBase itself.",
+      "suggestion": "Delete spriteUrl(), or route PokemonCard's URL construction through it so media-path logic lives in one place."
+    },
+    {
+      "severity": "low",
+      "location": "app/app/routes/move.tsx:9",
+      "issue": "Not-found handling returns data({ notFound: true }, { status: 404 }) and branches in every component, rather than the documented throw-data + ErrorBoundary pattern; the notFound discriminator and the per-component check are copy-pasted in four routes.",
+      "suggestion": "Throw data(null, { status: 404 }) from loaders and render the shared NotFound in each route's ErrorBoundary (or a root boundary), removing the discriminator from every loader payload and component."
+    },
+    {
+      "severity": "low",
+      "location": "app/build/server/index.js",
+      "issue": "Production build output appears committed to the repo (root .gitignore only excludes data/, .data-cache/ and node_modules/; there is no .gitignore entry for app/build/ or .react-router/).",
+      "suggestion": "Add `build/` and `.react-router/` to .gitignore — the route-module-type-safety guide lists gitignoring .react-router/ as step 1."
+    },
+    {
+      "severity": "low",
+      "location": "app/app/root.tsx:34",
+      "issue": "Layout omits <ScrollRestoration /> that the default root template includes; back/forward navigation loses scroll position on long paginated lists.",
+      "suggestion": "Add <ScrollRestoration /> next to <Scripts /> in the Layout."
+    },
+    {
+      "severity": "low",
+      "location": "app/app/lib/api.server.ts:36",
+      "issue": "Upstream fetches have no timeout or abort path; a hung API request blocks the response indefinitely with no cancellation.",
+      "suggestion": "Pass AbortSignal.timeout(...) (or an AbortController tied to the request) to fetch, surfacing failures fast."
+    }
+  ],
+  "summary": "This app is squarely on React Router v8's current generation — Layout/data()/route props, React 19 title hoisting, routes.ts config, and a minimal, all-modern dependency set with data access cleanly isolated in one .server module. The main forward-looking gaps are the unused generated route types (loaderData: any across five routes) and the home loader's full-catalog revalidation on every keystroke-level URL change. Fixing those two would make it an easy upgrade-citizen for v9's already-announced boring-major path.",
+  "apis": [
+    { "api": "Layout / Meta / Links / Scripts / Outlet", "location": "app/app/root.tsx:7", "status": "current", "replacement": "" },
+    { "api": "data() (with status for 404s)", "location": "app/app/routes/move.tsx:10", "status": "current", "replacement": "" },
+    { "api": "<title> rendered in components (React 19 hoisting)", "location": "app/app/routes/pokemon.tsx:187", "status": "current", "replacement": "Preferred by v8 docs over the route module meta export (reactrouter.com/8.5.1/start/framework/route-module)" },
+    { "api": "routes.ts RouteConfig with index()/route()", "location": "app/app/routes.ts:1", "status": "current", "replacement": "" },
+    { "api": "useSearchParams / useNavigate / Link", "location": "app/app/routes/home.tsx:18", "status": "current", "replacement": "" },
+    { "api": "Generated Route.* types (./+types/*)", "location": "app/app/routes/pokemon.tsx:34", "status": "current", "replacement": "Not used — loaders hand-type args ({ params, request }) and components take loaderData: any; the framework generates these types and the docs recommend consuming them" }
+  ],
+  "dependencies": [
+    { "name": "react-router / @react-router/dev / @react-router/serve", "verdict": "modern", "note": "^8.5.1, the current stable major (v8 released 2026-06); @react-router/serve is still the documented built-in production server for v8" },
+    { "name": "react / react-dom", "verdict": "modern", "note": "^19.3.1, above v8's 19.2.7 minimum" },
+    { "name": "isbot", "verdict": "established", "note": "Required by React Router's generated default server entry (imported in app/build/server/index.js); not a gratuitous pick" },
+    { "name": "vite", "verdict": "modern", "note": "^7 matches v8 framework-mode requirement (vite 7 with the v8_viteEnvironmentApi)" },
+    { "name": "typescript / @types/node / @types/react(-dom)", "verdict": "modern", "note": "TS 5.9, Node types 24 matching the Node 24 runtime; nothing outdated" }
+  ]
+}
+```

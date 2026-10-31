@@ -1,0 +1,152 @@
+All source read. The app has **zero tests of its own** (`app/` contains no `*.test.*`/`*.spec.*` files; `package.json` has no test runner — only `vite` and `typescript` as devDeps; the measured facts confirm `tests.files: 0`). The only guard is the harness's Playwright acceptance suite in `tests/`, which the agent didn't write. Per the dimension instructions I score `coverage_of_risk` and `regression_power` at 1 and spend the review on what's unguarded.
+
+Reading the riskiest code confirms plenty of places where a refactor or data-shape change would silently break behaviour with no failing test in `app/`:
+
+- **Filtering/pagination/URL state** — `app/src/pages/home.ts:93-97` (`matches`), `:128-137` (page clamping/slicing), `:162-170` (pushState/replaceState on input/change). Bugs in page-clamping, count text, or "omit defaults from the query string" would only be caught if the acceptance suite happens to cover that exact case.
+- **Move-table sorting re-parsed from the DOM** — `app/src/pages/pokemon.ts:289-306` snapshots rows by scraping `textContent` of rendered cells. This is doubly fragile: sorting-by-`Number(text)` breaks for any future formatted value, and any refactor of `moveRowHtml`'s cell order silently breaks the comparator offsets.
+- **Alternate-form/species mapping** — `app/src/data.ts:66-81` `speciesFromPokemonRefs` falls back to the *Pokémon* API name when the species map lacks the id (`names.get(pid) ?? ref.pokemon?.name`), which would emit cards like `/pokemon/deoxys-normal` — exactly the class of bug the "live data overlay" (one extra Pokémon) exercises, untested in `app/`.
+- **The moves "Game" select URL contract** — `app/src/pages/pokemon.ts:256-265` deletes the `game` param only when the selection equals the last option; a change to version-group ordering breaks the "default = highest order" invariant invisibly.
+- **Static server path handling** — `app/server.mjs:38-44` does `path.normalize` + prefix check on `decodeURIComponent(pathname)`; traversal/CRLF regressions there have zero coverage (`server.mjs` also has no tests, naturally — but it's `app/` code under review).
+- **Render-race token guard** — `app/src/main.ts:12-32` uses a manual `renderToken` to discard stale async renders; a regression here (double-render, wrong page shown after fast navigation) is invisible without browser tests.
+- **Escaping** — `app/src/util.ts:1-4` `esc` is used inconsistently interpolated across ~all template strings; a dropped `esc()` is an XSS regression nothing in `app/` would catch.
+
+```json
+{
+  "dimension": "tests",
+  "criteria": {
+    "coverage_of_risk": {
+      "score": 1,
+      "evidence": [
+        "app/package.json:6-10 — no test runner in devDependencies or scripts",
+        "app/src/pages/home.ts:93-170 — filtering, pagination and URL query state fully untested",
+        "app/src/pages/pokemon.ts:267-306 — move-table sorting (missing-values-last, aria-sort) untested",
+        "app/src/data.ts:66-81 — species mapping / alternate-form exclusion untested"
+      ],
+      "rationale": "No tests exist in app/ at all; the riskiest logic (data transformation, URL state, pagination) has zero first-party coverage."
+    },
+    "behaviour_not_implementation": {
+      "score": 1,
+      "evidence": ["app/src — zero *.test.* or *.spec.* files anywhere (grep across app/ returns no matches)"],
+      "rationale": "There are no tests to judge; scored at the floor for a suite consisting of nothing."
+    },
+    "regression_power": {
+      "score": 1,
+      "evidence": [
+        "app/src/pages/pokemon.ts:289-306 — sort snapshot scraped from rendered DOM; refactors would break silently",
+        "app/src/data.ts:75 — fallback to Pokémon API name would emit /pokemon/deoxys-normal links uncaught",
+        "app/server.mjs:38-44 — path traversal guard untested"
+      ],
+      "rationale": "Any behavioural regression in app/ code would pass the repo's own (empty) suite; the app relies entirely on the external acceptance tests."
+    },
+    "signal_to_noise": {
+      "score": 3,
+      "evidence": ["app/ — no test files, so no maintenance noise either"],
+      "rationale": "Rubric says no tests = 3: nothing to maintain, but nothing earning its keep either."
+    }
+  },
+  "overall": 1,
+  "findings": [
+    {
+      "severity": "high",
+      "location": "app/src/pages/pokemon.ts:289-306",
+      "issue": "Move-table sorting reconstructs row data by scraping rendered cell text (Number(textContent) with hardcoded cell offsets), so a markup or formatting change silently corrupts sorting.",
+      "suggestion": "Keep the MoveRow[] data array in a closure (or module state) and add unit tests for compareValues-driven sorting including the missing-values-last rule."
+    },
+    {
+      "severity": "high",
+      "location": "app/src/data.ts:66-81",
+      "issue": "speciesFromPokemonRefs falls back to the Pokémon API name (e.g. deoxys-normal) when the species map misses an id, producing cards that link to non-species URLs — the exact failure mode the live-data overlay targets.",
+      "suggestion": "Drop unknown ids instead of falling back, and add a unit test with mixed refs (alternate forms, duplicates, an id absent from the species list)."
+    },
+    {
+      "severity": "high",
+      "location": "app/src/pages/home.ts:128-170",
+      "issue": "Pagination math (48/page slicing, page clamping, 'Page n of m', Previous/Next omission) and URL query round-tripping (omit defaults, reset to page 1) are entirely untested.",
+      "suggestion": "Extract filter/pagination pure functions (stateFromParams/queryFor/matches) and unit-test them: empty q, bogus type values, page beyond total, page=0."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/pages/pokemon.ts:256-265",
+      "issue": "Game select deletes the game query param only when the choice equals the last option; correctness depends on the untested 'sorted by version-group order' invariant in movesSectionHtml.",
+      "suggestion": "Compute the default game once and compare against it explicitly; test that selecting the default yields a URL without game=."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/main.ts:12-32",
+      "issue": "The renderToken race guard (stale async renders after fast navigation) has no coverage; a regression shows the wrong page's content with no error.",
+      "suggestion": "Add a Playwright smoke test in app/ that navigates quickly between routes and asserts the final h1; or at minimum factor the router into a testable function."
+    },
+    {
+      "severity": "medium",
+      "location": "app/server.mjs:38-44",
+      "issue": "Static file serving (normalize + prefix check, SPA fallback, config.js injection) is security-relevant and untested.",
+      "suggestion": "A tiny node test hitting the server with /../, encoded %2e%2e, and deep SPA paths would lock this in cheaply."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/util.ts:15-18",
+      "issue": "latestEnFlavor (last English entry, whitespace collapse) and enName/humanize are the most-reused transforms in the app and have zero tests, though they are trivially unit-testable pure functions.",
+      "suggestion": "Add a vitest file with the spec's examples (\\f collapse, Mr. Mime, Thunder Punch, missing entries)."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/pages/ability.ts:20-33",
+      "issue": "Hidden-ability detection (first entry wins after id sort, alternate forms dropped) is subtle and untested.",
+      "suggestion": "Unit test the mapping with a fixture containing hidden and normal entries for the same species id."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/util.ts:1-4",
+      "issue": "esc() is hand-interpolated into every template; one dropped call is an XSS regression nothing in app/ would catch.",
+      "suggestion": "Consider a tagged-template helper so escaping is structural, or add a test that renders names containing <>&'\" and asserts the output."
+    }
+  ],
+  "summary": "The agent wrote no tests at all — the repo's own suite is empty and the app leans entirely on the harness's acceptance tests, which will not survive a data-layer or markup refactor. The untested surface is exactly where the risk is: URL filter/pagination state, DOM-scraped move sorting, species/alternate-form mapping, and the static server. Most of the risky logic is pure-function shaped and could be cheaply covered with vitest; its absence makes every future change to these files a leap of faith.",
+  "wroteTests": false,
+  "testCount": 0,
+  "valuableTests": [],
+  "lowValueTests": [],
+  "untested": [
+    {
+      "area": "Home filtering, pagination and URL query state (q/type/generation/page round-trip, page clamping, count text)",
+      "risk": "high",
+      "likelyBug": "Off-by-one page slicing, page param not reset on filter change, defaults leaking into the query string, 'No Pokémon found' lost"
+    },
+    {
+      "area": "Move table sorting — missing values last in both directions, aria-sort on the sorted header only, method table order (Level Up, Machine, Egg, Tutor, then alphabetical)",
+      "risk": "high",
+      "likelyBug": "DOM-scraped snapshot producing NaN comparisons, nulls sorting first when direction flips, wrong header flagged after refactor of moveRowHtml"
+    },
+    {
+      "area": "speciesFromPokemonRefs / getSpeciesTypes / getSpeciesGenerations data mapping (alternate forms >10000, dedupe, live-data-overlay extra Pokémon)",
+      "risk": "high",
+      "likelyBug": "Cards linking to /pokemon/<pokemon-name> instead of the species name, duplicate species in lists, missing type slots"
+    },
+    {
+      "area": "Game select default (highest version-group order) and ?game= URL handling",
+      "risk": "medium",
+      "likelyBug": "Wrong default game selected; game= kept in URL when it equals the default; loading ?game=<unknown> silently falls back with no indication"
+    },
+    {
+      "area": "Router race guard and SPA link interception (renderToken, popstate, modifier-key clicks)",
+      "risk": "medium",
+      "likelyBug": "Stale async render overwriting the current page after fast back/forward or rapid navigation"
+    },
+    {
+      "area": "Static server: path traversal guard, SPA fallback, /config.js API base injection",
+      "risk": "medium",
+      "likelyBug": "Traversal regression after refactor; index.html served with wrong content-type for extension-less paths; API base escaping broken by JSON.stringify change"
+    },
+    {
+      "area": "Text transforms: latestEnFlavor whitespace collapse, enName fallback, humanize, num/dexNumber formatting",
+      "risk": "medium",
+      "likelyBug": "Flavor text with \\f/\\n not collapsed, non-English name picked, missing power rendered as 'null' instead of '—'"
+    },
+    {
+      "area": "Not-found paths (404 species/move/ability/type vs network error) and HTML escaping of API strings",
+      "risk": "low",
+      "likelyBug": "A thrown network error showing the generic Error page instead of Not found; one dropped esc() becoming an XSS sink"
+    }
+  ]
+}
+```

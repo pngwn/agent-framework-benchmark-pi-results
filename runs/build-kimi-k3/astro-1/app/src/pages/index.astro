@@ -1,0 +1,194 @@
+---
+import Layout from '../components/Layout.astro';
+import PokemonCard from '../components/PokemonCard.astro';
+import {
+  apiFetch,
+  enName,
+  getGenerations,
+  getSpeciesIds,
+  getSpeciesList,
+  getTypeNameMap,
+  getTypes,
+  humanize,
+  idFromRef,
+} from '../lib/pokeapi.js';
+
+const PAGE_SIZE = 48;
+
+const url = new URL(Astro.request.url);
+const q = (url.searchParams.get('q') ?? '').trim();
+const typeParam = (url.searchParams.get('type') ?? '').trim();
+const genParam = (url.searchParams.get('generation') ?? '').trim();
+let page = Number.parseInt(url.searchParams.get('page') ?? '', 10);
+if (!Number.isFinite(page) || page < 1) page = 1;
+
+const [speciesList, speciesIds, types, generations, typeNames] = await Promise.all([
+  getSpeciesList(),
+  getSpeciesIds(),
+  getTypes(),
+  getGenerations(),
+  getTypeNameMap(),
+]);
+
+let entries = speciesList.map((s) => ({ name: s.name, id: idFromRef(s) }));
+
+if (q) {
+  const needle = q.toLowerCase();
+  entries = entries.filter((e) => humanize(e.name).toLowerCase().includes(needle));
+}
+
+if (typeParam) {
+  let ids = new Set();
+  try {
+    const type = await apiFetch(`/type/${encodeURIComponent(typeParam.toLowerCase())}/`);
+    ids = new Set(type.pokemon.map((p) => idFromRef(p.pokemon)).filter((id) => speciesIds.has(id)));
+  } catch (err) {
+    if (err.status !== 404) throw err;
+  }
+  entries = entries.filter((e) => ids.has(e.id));
+}
+
+if (genParam) {
+  let ids = new Set();
+  try {
+    const generation = await apiFetch(`/generation/${encodeURIComponent(genParam.toLowerCase())}/`);
+    ids = new Set(generation.pokemon_species.map((s) => idFromRef(s)));
+  } catch (err) {
+    if (err.status !== 404) throw err;
+  }
+  entries = entries.filter((e) => ids.has(e.id));
+}
+
+entries.sort((a, b) => a.id - b.id);
+
+const total = entries.length;
+const totalPages = Math.max(1, Math.ceil(total / PAGE_SIZE));
+if (page > totalPages) page = totalPages;
+const pageEntries = entries.slice((page - 1) * PAGE_SIZE, page * PAGE_SIZE);
+
+const cards = await Promise.all(
+  pageEntries.map(async (entry) => {
+    const pokemon = await apiFetch(`/pokemon/${entry.id}/`);
+    const cardTypes = [...pokemon.types]
+      .sort((a, b) => a.slot - b.slot)
+      .map((t) => ({ name: t.type.name, label: typeNames.get(t.type.name) ?? humanize(t.type.name) }));
+    return {
+      id: entry.id,
+      name: entry.name,
+      sprite: pokemon.sprites?.front_default ?? null,
+      types: cardTypes,
+    };
+  }),
+);
+
+function pageHref(pageNumber) {
+  const params = new URLSearchParams();
+  if (q) params.set('q', q);
+  if (typeParam) params.set('type', typeParam);
+  if (genParam) params.set('generation', genParam);
+  if (pageNumber > 1) params.set('page', String(pageNumber));
+  const query = params.toString();
+  return query ? `/?${query}` : '/';
+}
+---
+
+<Layout title="Pokédex">
+  <h1>Pokémon</h1>
+
+  <form id="filters" class="filters" action="/" method="get">
+    <div class="field field-search">
+      <label for="q">Search</label>
+      <input type="search" id="q" name="q" value={q} />
+    </div>
+    <div class="field">
+      <label for="type">Type</label>
+      <select id="type" name="type">
+        <option value="">All types</option>
+        {types.map((t) => <option value={t.name} selected={t.name === typeParam}>{enName(t)}</option>)}
+      </select>
+    </div>
+    <div class="field">
+      <label for="generation">Generation</label>
+      <select id="generation" name="generation">
+        <option value="">All generations</option>
+        {generations.map((g) => <option value={g.name} selected={g.name === genParam}>{enName(g)}</option>)}
+      </select>
+    </div>
+  </form>
+
+  <div id="results">
+    <p class="count">{total} Pokémon</p>
+    {
+      total === 0 ? (
+        <p class="empty">No Pokémon found</p>
+      ) : (
+        <>
+          <ul class="card-grid">
+            {cards.map((card) => (
+              <PokemonCard {...card} />
+            ))}
+          </ul>
+          <div class="pagination">
+            <span>
+              Page {page} of {totalPages}
+            </span>
+            {page > 1 && <a href={pageHref(page - 1)}>Previous page</a>}
+            {page < totalPages && <a href={pageHref(page + 1)}>Next page</a>}
+          </div>
+        </>
+      )
+    }
+  </div>
+
+  <script is:inline>
+    (() => {
+      const form = document.getElementById('filters');
+      if (!form) return;
+      const q = document.getElementById('q');
+      const type = document.getElementById('type');
+      const generation = document.getElementById('generation');
+      let timer = 0;
+      let seq = 0;
+
+      function buildUrl() {
+        const params = new URLSearchParams();
+        if (q.value.trim()) params.set('q', q.value.trim());
+        if (type.value) params.set('type', type.value);
+        if (generation.value) params.set('generation', generation.value);
+        const query = params.toString();
+        return query ? `/?${query}` : '/';
+      }
+
+      async function refresh(url) {
+        const mySeq = ++seq;
+        const res = await fetch(url);
+        const html = await res.text();
+        if (mySeq !== seq) return; // a newer request is on its way
+        const doc = new DOMParser().parseFromString(html, 'text/html');
+        const next = doc.getElementById('results');
+        const current = document.getElementById('results');
+        if (next && current) current.replaceWith(next);
+      }
+
+      function apply() {
+        const url = buildUrl();
+        history.pushState(null, '', url);
+        refresh(url);
+      }
+
+      q.addEventListener('input', () => {
+        clearTimeout(timer);
+        timer = setTimeout(apply, 250);
+      });
+      type.addEventListener('change', apply);
+      generation.addEventListener('change', apply);
+      form.addEventListener('submit', (event) => {
+        event.preventDefault();
+        apply();
+      });
+      window.addEventListener('popstate', () => {
+        location.reload();
+      });
+    })();
+  </script>
+</Layout>

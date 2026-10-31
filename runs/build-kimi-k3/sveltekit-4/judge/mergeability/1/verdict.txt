@@ -1,0 +1,98 @@
+## Review summary
+
+**Structure.** The app is a clean SvelteKit layout: all data fetching lives in `+page.server.js` loads backed by two server-only modules (`app/src/lib/server/api.js` — HTTP client with in-memory cache and a concurrency limiter; `app/src/lib/server/data.js` — shared data assembly), a tiny pure `lib/utils.js`, and five small components. Server/client boundary is explicit (`lib/server/` is imported only from load functions), so nothing leaks across SSR/CSR.
+
+**Idiom.** This is fully modern Svelte 5 / SvelteKit: runes throughout (`$props`, `$state`, `$derived`, `$derived.by`), `$app/state`'s `page` in `+error.svelte`, `{@render children()}` in the layout, keyed `{#each}` blocks everywhere, `onclick=`/`oninput=` attribute events, `style:--custom-prop` for theming (the pattern the official skill recommends), `import Self` recursion in `EvolutionNode.svelte`, `error(404)` from `@sveltejs/kit` for missing resources, and adapter-node with `npm start` → `node build`. Zero legacy `on:`, `$:`, `export let`, `{@html}`, or stores. URL-as-state (filters, `page`, `game`) is done the Kit way — server load reads `url.searchParams`, client does `goto()` with `reset: false`.
+
+**Risks found (all minor):** an un-cleared debounce timer that can fire `goto` after navigating away; an unbounded response cache (spec-sanctioned, but worth a size note for a long-lived process); an undocumented `{#key}` block used to reset sort state; and a small duplication between English-name lookup (`getTypes`) and `humanize()` for type labels.
+
+```json
+{
+  "dimension": "mergeability",
+  "criteria": {
+    "idiomatic": {
+      "score": 5,
+      "evidence": [
+        "app/src/routes/+layout.svelte:4-5 — $props() + {@render children()}, the current Kit layout idiom",
+        "app/src/routes/+error.svelte:2-5 — page from $app/state (not deprecated $app/stores)",
+        "app/src/lib/components/EvolutionNode.svelte:1-3 — import Self pattern per official Svelte 5 guidance",
+        "app/src/routes/+page.svelte:24-27 — server load reads url.searchParams; client mutates via goto() with reset:false — URL-driven state done the Kit way",
+        "app/src/routes/pokemon/[name]/+page.server.js:14-15 — error(404) from @sveltejs/kit for missing resources",
+        "app/src/lib/components/Section.svelte:4 — style:--custom-prop / aria-labelledby section pattern matches skill guidance"
+      ],
+      "rationale": "Runes-mode Svelte 5 throughout, current Kit APIs ($app/state, goto, afterNavigate, {@render}), no legacy constructs; reads like the framework's own examples."
+    },
+    "correctness_risks": {
+      "score": 4,
+      "evidence": [
+        "app/src/routes/+page.svelte:37-43 — debounce setTimeout never cleared on unmount; leaving the page within 250ms of typing still fires goto()",
+        "app/src/lib/server/api.js:8-9 — unbounded Map cache with no eviction; long-lived node process retains the entire dataset",
+        "app/src/lib/server/api.js:49-52 — null on 404, throws on other errors; consumers handle null correctly (e.g. +page.server.js:14)",
+        "app/src/routes/+page.svelte:8-13 — typed-override + afterNavigate keeps input responsive without SSR/CSR mismatch; debounce prevents request fan-out",
+        "app/src/routes/+page.server.js:10 — page param parsed with NaN/zero clamped to [1, totalPages]"
+      ],
+      "rationale": "No serious bugs: nulls handled, errors thrown via error(), page clamped, no unescaped HTML. But the un-cleared debounce timer is a real (if minor) leak and the cache is unbounded."
+    },
+    "global_abstractions": {
+      "score": 5,
+      "evidence": [
+        "app/src/lib/server/api.js — single server-only HTTP client; cache and concurrency limiter localized here",
+        "app/src/lib/server/data.js:44-67 — speciesFromPokemonRefs deduplicates/resolves shared card logic used by 3 routes without becoming a god module",
+        "app/src/lib/utils.js — 60 lines of pure, environment-agnostic helpers, no hidden state",
+        "app/src/lib/components/ — five small single-purpose components (Section, CardGrid, PokemonCard, MoveTable, EvolutionNode)",
+        "app/src/lib/server/data.js vs app/src/lib/utils.js — server/client boundary is explicit via directory convention"
+      ],
+      "rationale": "Abstractions are few, each earns its keep (the API client, the species resolver, one card component reused across four routes), and the server/client boundary is structurally enforced."
+    },
+    "readability": {
+      "score": 5,
+      "evidence": [
+        "app/src/lib/server/api.js:1-20 — header comment explains caching rationale and the concurrency limiter's purpose",
+        "app/src/routes/+page.svelte:8-12 — comment explains why `typed` overrides the URL value",
+        "app/src/lib/components/MoveTable.svelte:1-4, 40-42 — JSDoc on the row shape and comment on default sort semantics",
+        "app/src/routes/types/[name]/+page.server.js:7-15 — RELATIONS table makes the damage-relations mapping self-documenting",
+        "consistent naming across files — humanize/englishName/dexNumber used identically in all five load functions"
+      ],
+      "rationale": "Naming is consistent, functions are short, comments explain intent (the why, not the what); a new teammate finds their way in minutes."
+    },
+    "review_cost": {
+      "score": 4,
+      "evidence": [
+        "app/src/routes/+page.svelte:37-43 — reviewer would ask for a cleanup on the debounce timer ($effect cleanup or clearTimeout on unmount)",
+        "app/src/routes/pokemon/[name]/+page.svelte:111 — undocumented {#key data.selectedGame} whose purpose (resetting sort state) is not obvious; needs a comment",
+        "app/src/routes/pokemon/[name]/+page.server.js:37 vs app/src/lib/server/data.js:24 — type labels via humanize() in one place, fetched English names in another; a consistency nit",
+        "app/src/lib/server/api.js:9 — one-line comment noting the cache is intentionally unbounded would pre-empt the obvious review question"
+      ],
+      "rationale": "Everything structural is approve-as-is; remaining items are nits: one cleanup, two comments, one naming consistency pass."
+    }
+  },
+  "overall": 4,
+  "findings": [
+    {
+      "severity": "medium",
+      "location": "app/src/routes/+page.svelte:37-43",
+      "issue": "Debounce timer is never cleared; navigating away within 250ms of typing fires goto() for a page the user has left, and the timer leaks per visit.",
+      "suggestion": "Clear the timeout on unmount (e.g. wrap the timer in an $effect with cleanup, or clearTimeout in an onDestroy-equivalent)."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/lib/server/api.js:8-9",
+      "issue": "In-memory cache is unbounded with no eviction; a long-lived node process retains every record ever fetched (the full ~1000-pokémon dataset once browsed).",
+      "suggestion": "Spec allows this, but add a comment stating the intent, or cap the Map size / add a TTL."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/routes/pokemon/[name]/+page.svelte:111",
+      "issue": "{#key data.selectedGame} unmounts and re-creates all move tables on every game change to reset sort state — correct but expensive and unexplained.",
+      "suggestion": "Add a comment saying it resets per-table sort state, or reset the sort state explicitly inside MoveTable when rows change."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/routes/pokemon/[name]/+page.server.js:37",
+      "issue": "Type labels are built with humanize() here and in MoveTable rows, while getTypes() (data.js:24) fetches records for English names — duplicated near-identical label logic that happens to coincide for the 18 types.",
+      "suggestion": "Pick one source of truth for type labels (e.g. resolve English names once and pass them down, or rely on humanize() everywhere with a comment)."
+    }
+  ],
+  "summary": "A genuinely idiomatic, modern Svelte 5 / SvelteKit app: runes everywhere, URL-driven state via load functions and goto, a clean server-only data layer, and small purposeful components — I'd merge it after a nits pass. The only real defects are minor: an un-cleared debounce timer, an unbounded (but spec-sanctioned) cache, and two spots wanting a clarifying comment. Overall a strong example of how this app should be built in this framework."
+}
+```

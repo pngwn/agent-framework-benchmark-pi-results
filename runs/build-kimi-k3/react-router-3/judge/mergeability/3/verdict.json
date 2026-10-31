@@ -1,0 +1,121 @@
+{
+  "dimension": "mergeability",
+  "criteria": {
+    "idiomatic": {
+      "score": 4,
+      "evidence": [
+        "app/app/routes.ts:1-10 — manual RouteConfig with index/route, exactly as framework docs show",
+        "app/app/routes/pokemon.tsx:1,44 — loader with Route.LoaderArgs, data() from react-router, ./+types imports throughout",
+        "app/app/root.tsx:20-38 — Layout export, Meta/Links/Scripts/ScrollRestoration, the documented root shape",
+        "app/app/routes/home.tsx:145-155 — filter state in URL via useSearchParams, replace-history on type",
+        "app/app/routes/pokemon.tsx:47-49 — home-grown 'notFound: true as const' sentinel instead of the documented 'throw data(\"Not Found\", {status:404})' + route ErrorBoundary (skill reference framework-mode.md:136 and reactrouter.com/how-to/status)",
+        "app/app/root.tsx:57-71 — ErrorBoundary ignores error/isRouteErrorResponse; docs recommend distinguishing the three error cases"
+      ],
+      "rationale": "Textbook current framework mode — route modules, loaders, generated types, Layout, data() — with one consistent home-grown 404 sentinel pattern repeated across five routes where the framework has a documented throw-to-ErrorBoundary flow."
+    },
+    "correctness_risks": {
+      "score": 4,
+      "evidence": [
+        "app/app/lib/pokeapi.server.ts:27-33 — promise cache bounded by fixed API snapshot; rejected promises evicted so failures retry — no unbounded growth",
+        "app/app/root.tsx:57-71 — a thrown ApiError (500/5xx from API) renders the 'Not found' page; real server errors masquerade as 404s",
+        "app/app/routes/pokemon.tsx:167-170 + app/app/lib/pokeapi.server.ts:75-76 — fabricated official-artwork URL when the API returns null can yield a broken <img>",
+        "app/app/routes/home.tsx:33 — q in useState seeded from URL once; back/forward after an edit can leave input text and URL filter divergent",
+        "app/app/routes/pokemon.tsx:44 (also move.tsx:8, ability.tsx:8, type.tsx:18) — decodeURIComponent on already-decoded params; '%'-like input throws URIError",
+        "app/app/lib/pokeapi.server.ts:20-24 — fetch with no timeout/AbortController; hung upstream stalls the request"
+      ],
+      "rationale": "No races, leaks or SSR/CSR mismatches found — cache eviction, sort-nulls-last and hydration are all handled deliberately. Remaining risks are minor: an error boundary that hides 500s, a fabricated sprite URL, a decodable-input throw, and the search/URL divergence on popstate."
+    },
+    "global_abstractions": {
+      "score": 4,
+      "evidence": [
+        "app/app/lib/pokeapi.server.ts:1-4 — single server-only data module with clear boundary; client code cannot import it (.server suffix handled by the RR Vite plugin)",
+        "app/app/lib/urls.ts:1-11 — client-safe URL helpers read API origin from root loader instead of env, keeping the boundary explicit",
+        "app/app/lib/format.ts:1-50 — small, cohesive formatting module, no god-utils",
+        "app/app/routes/type.tsx:66-79 — inline reimplementation of the TypeBadge markup from app/app/components/ui.tsx:28-36 instead of reusing it",
+        "app/app/lib/pokeapi.server.ts:71-72 vs app/app/lib/urls.ts:9-11 — spriteUrl defined twice with different signatures; num() duplicated in move.tsx:25 and pokemon.tsx:254"
+      ],
+      "rationale": "Abstractions are few and each earns its keep: a server-only API layer, a client URL helper, a formatting module and a shared UI file, with clean server/client seams. The only global smell is light duplication (two spriteUrl variants, two num helpers, an inline badge clone) that will need a tiny untangle later."
+    },
+    "readability": {
+      "score": 4,
+      "evidence": [
+        "app/app/lib/pokeapi.server.ts:31-32 — comment explains cache eviction policy (the why)",
+        "app/app/routes/home.tsx:24-25 — comment explains client-side filtering and shouldRevalidate choice",
+        "app/app/components/ui.tsx:17-22 — Section component makes the spec's 'region named by its heading' rule one obvious line at every call site",
+        "app/app/routes/pokemon.tsx:150-257 — MovesTable/sort helpers are small, named, and use a typed SortKey",
+        "app/app/routes/pokemon.tsx:45,54-61 — pervasive 'any' on API responses discards the type safety the app otherwise sets up",
+        "app/app/routes/{move,ability,type,pokemon}.tsx — 'notFound' in loaderData checks duplicated in every component and every meta"
+      ],
+      "rationale": "A new teammate finds their way in minutes: consistent per-route layout, descriptive names, and comments that explain intent. The rough spots are the wall of 'any' in loaders and the repeated notFound plumbing that makes each route longer than its logic."
+    },
+    "review_cost": {
+      "score": 4,
+      "evidence": [
+        "app/app/root.tsx:57-71 — the one change I'd require: distinguish 404/error responses in the root ErrorBoundary",
+        "app/app/routes/pokemon.tsx:47-49 — second required change: adopt throw data()/ErrorBoundary for not-found instead of per-route sentinels",
+        "app/app/routes/pokemon.tsx:44 and move/ability/type equivalents — drop the redundant decodeURIComponent",
+        "app/app/routes/pokemon.tsx:167-170 — remove the fabricated artwork fallback",
+        "app/app/routes/type.tsx:66-79 — reuse TypeBadge"
+      ],
+      "rationale": "Approve after one focused round: error-boundary semantics and the 404 pattern are worth fixing before merge; everything else is nits a reviewer would mention in passing."
+    }
+  },
+  "overall": 4,
+  "findings": [
+    {
+      "severity": "medium",
+      "location": "app/app/root.tsx:57",
+      "issue": "Root ErrorBoundary renders 'Not found' for every error, including 500s from the API (thrown ApiError) and unexpected exceptions; real outages look like missing pages and no error details are ever shown.",
+      "suggestion": "Follow the documented pattern: accept Route.ErrorBoundaryProps (or useRouteError), branch on isRouteErrorResponse vs Error vs unknown, and render distinct 500/404 UIs."
+    },
+    {
+      "severity": "medium",
+      "location": "app/app/routes/pokemon.tsx:47",
+      "issue": "Not-found is handled with a per-route 'notFound: true as const' sentinel plus 'notFound' in loaderData checks in every component and meta, duplicated across pokemon/move/ability/type/routes.tsx:1-10 routes, instead of the documented throw data(\"Not Found\", {status:404}) + route ErrorBoundary flow.",
+      "suggestion": "Throw data(\"Not Found\", { status: 404 }) from loaders and render a shared NotFound in each route's ErrorBoundary (or centralise the sentinel handling), removing the boilerplate from five files."
+    },
+    {
+      "severity": "low",
+      "location": "app/app/routes/pokemon.tsx:167",
+      "issue": "Artwork falls back to a fabricated spritePatternUrl when the API returns null for official-artwork, which can produce a broken <img> for sets the API explicitly doesn't ship.",
+      "suggestion": "Render nothing (or a placeholder) when the API URL is null; the spec says null means missing."
+    },
+    {
+      "severity": "low",
+      "location": "app/app/routes/home.tsx:33",
+      "issue": "Search text lives in useState seeded from the URL once; after typing (replace) then paging (push), browser back/forward can restore an older q in the URL while the input and filters keep the newer local value.",
+      "suggestion": "Sync local q from searchParams via useEffect on popstate, or drive q entirely from useSearchParams."
+    },
+    {
+      "severity": "low",
+      "location": "app/app/routes/pokemon.tsx:44",
+      "issue": "decodeURIComponent(params.name) re-decodes params React Router already decoded; a URL containing a lone '%' throws URIError (and name normalization should not depend on decoding).",
+      "suggestion": "Use params.name as-is and just lowercase it (same in move.tsx:8, ability.tsx:8, type.tsx:18)."
+    },
+    {
+      "severity": "low",
+      "location": "app/app/lib/pokeapi.server.ts:20",
+      "issue": "apiGet has no timeout/AbortController, so a hung upstream request stalls the SSR response indefinitely with no retry path for that request.",
+      "suggestion": "Add an AbortSignal.timeout (e.g. 5-10s) to fetch and surface it as a 502-style error."
+    },
+    {
+      "severity": "low",
+      "location": "app/app/routes/type.tsx:66",
+      "issue": "Damage-relations badges inline a copy of the TypeBadge markup (span.type-badge with the var(--type-<name>) style) instead of reusing the shared component.",
+      "suggestion": "Import and render TypeBadge from app/app/components/ui.tsx:28."
+    },
+    {
+      "severity": "low",
+      "location": "app/app/lib/pokeapi.server.ts:18",
+      "issue": "API responses are typed as 'any' throughout the data layer and loaders (apiGet<any> at :100,:140,:155; move.tsx:9-22; pokemon.tsx:45-61), discarding TypeScript's help in a repo that otherwise sets up generated route types.",
+      "suggestion": "Define minimal response interfaces (Species, Pokemon, Move, Type, Ability) in the data layer and have apiGet default to them."
+    },
+    {
+      "severity": "low",
+      "location": "app/app/lib/urls.ts:9",
+      "issue": "spriteUrl exists twice with different signatures (server: (id) in pokeapi.server.ts:71, client: (apiBase, id) here), and the num() em-dash helper is duplicated in move.tsx:25 and pokemon.tsx:254.",
+      "suggestion": "Have the server layer reuse the same base+id helper (or export one function taking the base), and hoist num into lib/format.ts."
+    }
+  ],
+  "summary": "A genuinely idiomatic, current-stable React Router 8.5.1 framework-mode app: correct route modules, generated types, a well-bounded server-only data layer and clean client/server seams, with only light duplication and a pervasive use of 'any'. The two changes I'd require before merge are making the root ErrorBoundary distinguish 404s from real errors, and replacing the five-times-duplicated notFound sentinel with the framework's documented throw data()/ErrorBoundary flow. Everything else is nits — I'd merge it after one focused round."
+}

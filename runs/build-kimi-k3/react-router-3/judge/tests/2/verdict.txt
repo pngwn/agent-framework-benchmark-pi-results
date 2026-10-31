@@ -1,0 +1,180 @@
+## Review — Test quality
+
+The app is a well-factored React Router 8 framework-mode app (`app/app/routes.ts` with typed `Route` imports, server loaders in `app/app/lib/pokeapi.server.ts`), but **it shipped with zero tests of its own**: no test script in `app/package.json:6-10`, no test dependencies, no spec/test files anywhere under `app/app/` (verified with `ls`/`grep`; the only "test"-matching hits are compiled output in `app/build/` and a transitive dep name in `package-lock.json`). There is also no `typecheck`-adjacent guard beyond `npm run typecheck`, and no CI hook. Everything that protects this code today lives in `tests/`, which the harness owns and which the agent was told not to count on.
+
+That's a real problem here specifically, because the riskiest code is exactly the kind that browser-level acceptance tests probe thinly:
+
+- **The whole data layer is untested.** `pokemonRefsToCards` (`app/app/lib/pokeapi.server.ts:199-222`) does polymorphic input handling (`ref.pokemon ?? ref`), alternate-form exclusion at id ≥ 10000, dedupe, hidden-ability flag OR-merging, and id ordering — a refactor that drops the `is_hidden` merge on line 212-213 would silently unmark every "Hidden ability" card, and nothing in `app/` would fail. These functions are pure-ish and trivially unit-testable with fixture JSON.
+- **`buildIndex`** (`app/app/lib/pokeapi.server.ts:133-184`) derives per-species types by scanning all 18 type records and generation membership from generation records, with silent fallbacks (`?? ""` on line 178 for missing generation). A species missing from type lists gets empty types and vanishes from every type filter with no error. The live-overlay test catches one specific instance of staleness, but none of the derivation logic.
+- **URL-state logic on the home page** (`app/app/routes/home.tsx:29-77`): filter composition, page clamping (line 46 silently clamps a stale `page` while leaving it in the URL), and — a genuinely latent bug — `const [q, setQ] = useState(() => searchParams.get("q") ?? "")` (line 34) initializes once, so a back/forward navigation to a different `?q=` leaves the input and filtered list desynced from the URL. The acceptance suite only types into the box, so this class of bug ships silently.
+- **Moves aggregation** (`app/app/routes/pokemon.tsx:68-127`): min-level dedupe across `move|method` keys (lines 78-84), the fixed-then-alphabetical method comparator (lines 112-117), and the level-up (level, then name) sort (line 119). The acceptance suite checks one Pokémon's rendering, not the aggregation rules.
+- **Client-side column sorting** (`app/app/routes/pokemon.tsx:221-247`): the "missing values sort last in both directions" rule and the flip-to-descending behaviour are exactly the sort of thing that breaks under refactor; only two tables on one Pokémon are exercised by the harness.
+- **Error paths are untested and one is wrong**: `app/app/root.tsx:65-70` renders "Not found" for *every* thrown error, so an API 500/network failure masquerades as a 404. A loader-level or error-boundary test would catch this immediately; nothing will.
+- **`apiGet`'s promise cache** (`app/app/lib/pokeapi.server.ts:18-40`) — delete-on-failure retry semantics — and the format helpers (`app/app/lib/format.ts:33-45` `latestEnglishFlavor`'s last-English-entry + whitespace collapse; `idFromUrl` returning `NaN` for malformed URLs) are the cheapest, highest-leverage unit tests in the repo and none exist.
+
+On the positive side, the code is structured to be testable: pure helpers isolated in `app/app/lib/format.ts`, loaders separated from components, and a single `Section`/card component set in `app/app/components/ui.tsx` — so a test suite could be added with almost no restructuring. React Router 8 framework mode supports testing loaders in-memory and components with `@testing-library/react`; a day's work would cover items 1-3 above.
+
+Scores: `coverage_of_risk` 1 and `regression_power` 1 (no tests exist; nothing the team owns would fail), `behaviour_not_implementation` 1 (no tests), `signal_to_noise` 3 (no noise, per the rubric's "no tests" anchor). Overall 1: for a data-transformation-heavy app that a team will own for years, shipping no safety net behind the acceptance suite is a reject-on-the-PR condition.
+
+```json
+{
+  "dimension": "tests",
+  "criteria": {
+    "coverage_of_risk": {
+      "score": 1,
+      "evidence": [
+        "app/package.json:6-10 — scripts are build/start/dev/typecheck only; no test runner or test deps anywhere",
+        "app/app/lib/pokeapi.server.ts:199-222 — pokemonRefsToCards: alt-form exclusion, dedupe, hidden-flag OR merge, all untested",
+        "app/app/lib/pokeapi.server.ts:133-184 — buildIndex: types/generation derivation with silent ?? \"\" fallback, untested",
+        "app/app/routes/home.tsx:26-77 — filtering, 48/page pagination, URL param handling, all untested",
+        "app/app/routes/pokemon.tsx:68-127 — move/method aggregation and ordering rules, untested",
+        "app/app/lib/format.ts:33-45 — latestEnglishFlavor last-English + whitespace collapse, untested"
+      ],
+      "rationale": "No tests exist at all, and the riskiest logic (data transformation, URL state, ordering rules) is entirely uncovered by anything the team owns."
+    },
+    "behaviour_not_implementation": {
+      "score": 1,
+      "evidence": [
+        "app/app — zero test files (facts: tests.files 0; confirmed by ls/grep, only app/build/ artifacts match 'test')"
+      ],
+      "rationale": "There are no tests, so nothing asserts behaviour; the criterion anchors 'no tests' at 1."
+    },
+    "regression_power": {
+      "score": 1,
+      "evidence": [
+        "app/app/lib/pokeapi.server.ts:212-213 — dropping the is_hidden OR-merge or the id>=10000 skip would fail no app-owned test",
+        "app/app/root.tsx:65-70 — ErrorBoundary labels every error 'Not found'; a regression here (already arguably a bug) fails nothing",
+        "app/app/routes/home.tsx:34 — useState(() => searchParams.get(\"q\")) desyncs on back/forward navigation; no test would catch it"
+      ],
+      "rationale": "With zero tests, any refactor or behaviour break sails through; the acceptance suite in tests/ is the only guard and is not owned by this codebase."
+    },
+    "signal_to_noise": {
+      "score": 3,
+      "evidence": [
+        "app/package.json — no test script, so no noise, but also no signal"
+      ],
+      "rationale": "Per the rubric, no tests scores 3: no low-value padding, but nothing earning its keep either."
+    }
+  },
+  "overall": 1,
+  "findings": [
+    {
+      "severity": "high",
+      "location": "app/package.json:6",
+      "issue": "The app ships with no tests, no test runner, and no test dependencies; the only protection is the harness-owned acceptance suite.",
+      "suggestion": "Add vitest (@vitejs/plugin-react or in-memory loader tests) with a `npm test` script; start with unit tests for lib/format.ts and lib/pokeapi.server.ts against fixture JSON."
+    },
+    {
+      "severity": "high",
+      "location": "app/app/lib/pokeapi.server.ts:199",
+      "issue": "pokemonRefsToCards encodes the spec's trickiest rules (alternate-form exclusion at id>=10000, dedupe, hidden-ability OR merge, species mapping) with zero coverage; a refactor can silently unmark 'Hidden ability' or re-admit Mega forms.",
+      "suggestion": "Unit test with fixture refs covering: an alternate form, a duplicate ref with different is_hidden, an unknown species id, and ordering."
+    },
+    {
+      "severity": "high",
+      "location": "app/app/root.tsx:65",
+      "issue": "The root ErrorBoundary renders 'Not found' for every thrown error, so an API 500 or network failure presents as a 404; no test distinguishes error paths from not-found paths.",
+      "suggestion": "Add an error-boundary/loader test that stubs fetch to reject or 500 and asserts a distinct error message; fix the boundary to say something other than 'Not found' for non-404 errors."
+    },
+    {
+      "severity": "high",
+      "location": "app/app/routes/home.tsx:34",
+      "issue": "Search state is local useState initialized once, so back/forward navigation to a different ?q= leaves input and results desynced from the URL; page clamping on line 46 also silently disagrees with the URL's page param.",
+      "suggestion": "Add a test that navigates client-side to /?q=... (popstate and Link) and asserts the input value and filtered list match the URL; derive q from searchParams or sync in an effect."
+    },
+    {
+      "severity": "medium",
+      "location": "app/app/lib/pokeapi.server.ts:133",
+      "issue": "buildIndex derives per-species types and generation membership with silent fallbacks (types ?? [] on line 168, generation ?? \"\" on line 178); a species missing from the type scan silently disappears from every type filter.",
+      "suggestion": "Unit test buildIndex with a fixture where one species lacks a type record entry; assert visible behaviour (filter membership, card types) rather than internals."
+    },
+    {
+      "severity": "medium",
+      "location": "app/app/routes/pokemon.tsx:72",
+      "issue": "Move aggregation (min-level dedupe per move|method key, fixed-then-alphabetical method order, level-then-name sort) is untested; the acceptance suite only inspects one Pokémon's rendered tables.",
+      "suggestion": "Extract the aggregation into a pure function and unit test the ordering/dedupe rules with small fixtures."
+    },
+    {
+      "severity": "medium",
+      "location": "app/app/routes/pokemon.tsx:221",
+      "issue": "Client-side sortable tables implement 'missing values sort last in both directions' and aria-sort toggling with no coverage; sorting is the easiest behaviour to break in a refactor.",
+      "suggestion": "Component-test MovesTable with rows containing null power/accuracy: click headers, assert row order and aria-sort values."
+    },
+    {
+      "severity": "medium",
+      "location": "app/app/lib/pokeapi.server.ts:18",
+      "issue": "apiGet's promise cache (cache successful responses, delete-on-failure to allow retry) has no tests; a future 'fix' could cache rejections or leak unhandled rejections.",
+      "suggestion": "Unit test with a stubbed fetch: failure then success on retry, and concurrent calls sharing one fetch."
+    },
+    {
+      "severity": "low",
+      "location": "app/app/routes/pokemon.tsx:137",
+      "issue": "Artwork URL falls back to a synthesized spritePatternUrl even when the API reports null, so unshipped artwork renders a broken <img> with a non-empty alt; the null case is untested.",
+      "suggestion": "Test the loader with sprites.other['official-artwork'].front_default = null and assert no <img> is rendered (or alt handling)."
+    },
+    {
+      "severity": "low",
+      "location": "app/app/lib/format.ts:33",
+      "issue": "Pure helpers (latestEnglishFlavor's last-English-entry rule and whitespace collapse, humanize, idFromUrl returning NaN on malformed URLs) are the cheapest regression targets and have no tests.",
+      "suggestion": "A short unit file covering humanize, englishName, dexNumber, latestEnglishFlavor (including \\f and \\n runs) and idFromUrl."
+    }
+  ],
+  "summary": "The app contains no tests of its own — no runner, no test script, no cases — so every score for test quality bottoms out at the rubric's no-tests anchors. This matters more than usual because the riskiest logic (species/type derivation, ref-to-card mapping with hidden flags, URL-state filtering, move aggregation and sorting) sits behind thin browser-level acceptance tests the team doesn't own. The code is well-factored for testability (pure lib/ helpers, loader/component separation), so a focused vitest suite could close the biggest gaps in about a day; until then any data-layer refactor is flying blind.",
+  "wroteTests": false,
+  "testCount": 0,
+  "valuableTests": [],
+  "lowValueTests": [],
+  "untested": [
+    {
+      "area": "pokemonRefsToCards data mapping (app/app/lib/pokeapi.server.ts:199-222): alternate-form exclusion (id>=10000), dedupe, hidden-ability flag OR merge, species-name lookup, id ordering",
+      "risk": "high",
+      "likelyBug": "A refactor drops the is_hidden merge or the id>=10000 skip, so ability pages silently unmark 'Hidden ability' or Mega Evolutions reappear in every Pokémon list"
+    },
+    {
+      "area": "buildIndex species typing/generation (app/app/lib/pokeapi.server.ts:133-184): types derived by scanning 18 type records, generation membership with ?? \"\" fallback",
+      "risk": "high",
+      "likelyBug": "A species missing from the type scan gets empty types and disappears from every type filter and shows typeless cards, with no error anywhere"
+    },
+    {
+      "area": "Home page URL state (app/app/routes/home.tsx:26-77): filter combination, page clamping, q preservation in updateFilter, q/URL desync on back-forward navigation",
+      "risk": "high",
+      "likelyBug": "Browser-back to a different ?q= shows stale results while the URL claims otherwise; a stale ?page beyond the last page renders a clamped view that disagrees with the URL"
+    },
+    {
+      "area": "Moves aggregation and ordering (app/app/routes/pokemon.tsx:68-127): min-level dedupe per move|method, fixed-then-alphabetical method order, level-then-name sort",
+      "risk": "medium",
+      "likelyBug": "Method tables fall out of Level Up/Machine/Egg/Tutor order or level-up rows duplicate a move at two levels after a refactor"
+    },
+    {
+      "area": "Client-side sortable tables (app/app/routes/pokemon.tsx:208-260): missing-values-last in both directions, ascending→descending toggle, aria-sort on the active header only",
+      "risk": "medium",
+      "likelyBug": "Descending sort puts em-dash (null) power rows first, or aria-sort sticks on multiple headers"
+    },
+    {
+      "area": "Error paths (app/app/root.tsx:65-70 and loader 404 branches in move.tsx/ability.tsx/type.tsx): non-404 API failures are rendered as 'Not found'",
+      "risk": "high",
+      "likelyBug": "An API outage or 500 makes every page claim the resource doesn't exist, destroying debuggability in production"
+    },
+    {
+      "area": "apiGet promise cache semantics (app/app/lib/pokeapi.server.ts:18-40): delete-on-failure retry, per-process memoization",
+      "risk": "medium",
+      "likelyBug": "A change caches rejected promises, so one transient API hiccup poisons a resource for the process lifetime"
+    },
+    {
+      "area": "Format helpers (app/app/lib/format.ts): humanize, englishName fallback, latestEnglishFlavor last-English + whitespace collapse, idFromUrl NaN on malformed URLs",
+      "risk": "low",
+      "likelyBug": "Flavor text regresses to the first English entry or keeps literal \\n\\f runs; a malformed URL id becomes NaN and the entry is silently dropped"
+    },
+    {
+      "area": "Artwork/sprite null handling (app/app/routes/pokemon.tsx:137-139 falls back to a synthesized URL; app/app/components/ui.tsx:52 card sprite)",
+      "risk": "medium",
+      "likelyBug": "A species whose artwork the API reports as null renders a broken <img> with the English name as alt, violating the null-sprite contract"
+    },
+    {
+      "area": "Not-found route coverage (app/app/routes.ts:8 catch-all, excluded types in type.tsx:20-21): unknown routes and stellar/unknown/shadow type URLs",
+      "risk": "low",
+      "likelyBug": "A refactor of the catch-all or EXCLUDED_TYPES set lets an unknown URL render an empty main or a real type page for shadow"
+    }
+  ]
+}
+```

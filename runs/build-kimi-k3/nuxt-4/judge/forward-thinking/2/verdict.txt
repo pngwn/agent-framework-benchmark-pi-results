@@ -1,0 +1,120 @@
+I've reviewed the app against the spec, the Nuxt 4.6.3 docs/release notes (the current stable — released 2026-10-27, three days ago), and the h3 v2 migration guide. Here's my review.
+
+## Review
+
+**What ages well:**
+- The app is on the **latest stable Nuxt** (`^4.6.3`, `app/package.json:8`) and uses the Nuxt 4 project layout (`app/app/app.vue`, `app/app/pages/…`, `app/app/layouts/default.vue`) that matches the framework's current `srcDir` default — not the Nuxt 3-era root layout that would churn on upgrade.
+- Current data-loading primitive everywhere: `await useAsyncData(key, handler, { watch: [...] })` with param-reactive keys (`app/app/pages/pokemon/[name].vue:116`, `app/app/pages/moves/[name].vue:26`), exactly the documented pattern for reactive route params.
+- All data access is behind one module, `app/app/lib/pokeapi.ts` (fetching, caching, normalization, humanize/englishName helpers), with the API origin resolved in a single composable (`app/app/composables/useApiBase.ts`). Changing the API or its base URL touches one or two files.
+- Platform-first: native `fetch` (`app/app/lib/pokeapi.ts:112`), `Map`/`Set`/`Promise`-based caching and concurrency limiting, CSS custom properties from tokens plus logical properties (`padding-inline`, `margin-inline`, `app/app/assets/css/main.css:42`) and `grid-template-columns: repeat(auto-fill, minmax(...))` (`main.css:129`) — no CSS framework, per spec.
+- Dependency surface is 3 runtime deps, zero dev fluff.
+
+**What will churn:**
+- The 404/`setResponseStatus`/`useRequestEvent`/`useHead` block is copy-pasted across five pages (`app/app/pages/[...slug].vue:6-7`, `pokemon/[name].vue:120-128`, `moves/[name].vue:31-38`, `abilities/[name].vue:36-43`, `types/[name].vue:45-52`). One composable would make the h3 v2 change (`setResponseStatus` → `event.res.status`, per https://h3.dev/migration) and any error-page redesign a one-file change.
+- The API boundary is untyped: `api(): Promise<any>` (`app/app/lib/pokeapi.ts:112`) with `any` casts throughout the loaders (`pokemon/[name].vue:57`, `rec: any` at :68); `MoveRow` is defined only in the component (`app/app/components/MoveTable.vue:2`) while the page constructs rows untyped. If PokeAPI's shape moves, TS can't catch it.
+- The `useAsyncData` handlers ignore the `(_nuxtApp, { signal })` signature the current Nuxt 4 docs show (`https://nuxt.com/docs/4.x/api/composables/use-async-data/`) — in-flight client refetches aren't aborted.
+- `vue-router` as a direct dependency is redundant; Nuxt resolves it itself.
+- Minor: `idFromUrl` regex-parses URLs (`app/app/lib/pokeapi.ts:24`) instead of using the `URL` API.
+
+```json
+{
+  "dimension": "forward-thinking",
+  "criteria": {
+    "latest_apis": {
+      "score": 4,
+      "evidence": [
+        "app/package.json:8 — nuxt ^4.6.3, the stable release published 2026-10-27 (github.com/nuxt/nuxt/releases), three days before today",
+        "app/app/pages/pokemon/[name].vue:116 — await useAsyncData with param-derived key and { watch: [() => route.params.name, () => route.query.game] }, the documented param-reactive pattern (nuxt.com/docs/4.x/api/composables/use-async-data)",
+        "app/app/pages/pokemon/[name].vue:2 — setResponseStatus imported from 'h3' with useRequestEvent, the current documented way to set 404 in Nuxt 4.x pages",
+        "app/nuxt.config.ts:2 — compatibilityDate set, defineNuxtConfig + app.head + runtimeConfig are current",
+        "app/app/pages/index.vue:79-85 — router.push with query objects via useRouter, current vue-router 4 API",
+        "app/app/pages/pokemon/[name].vue:116 — handler ignores the (_nuxtApp, { signal }) signature shown in current Nuxt 4 docs, so AbortSignal support is unused"
+      ],
+      "rationale": "Consistently on the current Nuxt 4 generation (4.6.3, Nuxt 4 srcDir layout, useAsyncData/watch, useHead, h3 setResponseStatus). Only misses the newer AbortSignal-aware handler signature and nothing deprecated. Sources: nuxt.com/docs/4.x and github.com/nuxt/nuxt/releases (v4.6.3, 27 Oct 2026)."
+    },
+    "platform": {
+      "score": 4,
+      "evidence": [
+        "app/app/lib/pokeapi.ts:112-118 — native fetch with res.ok/res.status handling instead of an HTTP library",
+        "app/app/lib/pokeapi.ts:96-109 — Map/Set/queue-based in-memory cache and concurrency limiter, hand-rolled from platform primitives",
+        "app/app/assets/css/main.css:129 — grid auto-fill/minmax card layout; :42 logical properties (padding-inline/margin-inline)",
+        "app/app/lib/pokeapi.ts:24 — idFromUrl uses a regex on the URL string rather than the URL API"
+      ],
+      "rationale": "Reaches for the platform first (fetch, Map/Set, CSS custom properties + grid, ES modules with top-level structure). Small misses: regex URL parsing where URL would be clearer, and no AbortController/AbortSignal despite Nuxt handing one to every useAsyncData handler."
+    },
+    "dependencies": {
+      "score": 4,
+      "evidence": [
+        "app/package.json:7-11 — exactly three runtime deps (nuxt, vue, vue-router), no CSS/UI/state libraries, no dev cruft",
+        "app/package.json:10 — vue-router ^4.5.0 declared directly although Nuxt resolves it transitively"
+      ],
+      "rationale": "Minimal and current — the latest stable Nuxt plus the Vue runtime, nothing else; the spec's CSS is hand-written with tokens. The only blemish is the redundant direct vue-router dependency."
+    },
+    "churn_resistance": {
+      "score": 4,
+      "evidence": [
+        "app/app/lib/pokeapi.ts:1-230 — all API access, normalization and caching live in this one module; pages only consume typed summaries",
+        "app/app/composables/useApiBase.ts:1-9 — the API origin is resolved in a single composable backed by runtimeConfig",
+        "app/app/pages/[...slug].vue:6-7 — 404 status-setting + title block duplicated nearly verbatim in five files (also pokemon/[name].vue:120-128, moves/[name].vue:31-38, abilities/[name].vue:36-43, types/[name].vue:45-52)",
+        "app/app/lib/pokeapi.ts:112 — api() returns Promise<any>; loaders cast with any (app/app/pages/pokemon/[name].vue:57,68), so API shape changes won't be caught by types",
+        "app/app/components/MoveTable.vue:2-10 — MoveRow interface lives only in the component while app/app/pages/pokemon/[name].vue:71-82 builds rows untyped, a drift risk"
+      ],
+      "rationale": "Data access and configuration are well centralized, so most framework/API changes touch one module. But the 404-handling block is copy-pasted five times (it also sits on setResponseStatus, which h3 v2 deprecates in favour of event.res.status), and the untyped any-boundary means upstream data changes ripple silently into pages."
+    }
+  },
+  "overall": 4,
+  "findings": [
+    {
+      "severity": "medium",
+      "location": "app/app/pages/[...slug].vue:6",
+      "issue": "The 404 block (import setResponseStatus, useRequestEvent, status call, 'Not found – Pokédex' useHead title) is duplicated across five page files (pages/[...slug].vue, pokemon/[name].vue:120-128, moves/[name].vue:31-38, abilities/[name].vue:36-43, types/[name].vue:45-52), and setResponseStatus is on h3 v2's deprecation list (h3.dev/migration: event.res.status).",
+      "suggestion": "Extract a useNotFound(data) (or usePageMeta) composable that owns the status code and title; when h3 v2 lands with Nitro v3, the change is one line."
+    },
+    {
+      "severity": "medium",
+      "location": "app/app/lib/pokeapi.ts:112",
+      "issue": "api() returns Promise<any> and every loader casts raw records to any (e.g. app/app/pages/pokemon/[name].vue:57-68, app/app/pages/abilities/[name].vue:15-20), so the untyped API boundary hides shape changes; the MoveRow type is declared only in MoveTable.vue:2 while the page builds those rows untyped.",
+      "suggestion": "Type the raw PokeAPI payloads in lib/pokeapi.ts and export the row/summary interfaces the pages produce, so components share one definition and type errors surface at the boundary."
+    },
+    {
+      "severity": "low",
+      "location": "app/app/pages/pokemon/[name].vue:116",
+      "issue": "The useAsyncData handler ignores the (_nuxtApp, { signal }) signature documented in current Nuxt 4, so client-side refetches (game/route changes) can't be aborted when stale.",
+      "suggestion": "Thread the provided AbortSignal into api()'s fetch(url, { signal }) calls."
+    },
+    {
+      "severity": "low",
+      "location": "app/app/lib/pokeapi.ts:24",
+      "issue": "idFromUrl regex-parses IDs out of URL strings instead of using the platform URL API.",
+      "suggestion": "Use new URL(url).pathname and split on '/' for robust parsing of the API's absolute URLs."
+    },
+    {
+      "severity": "low",
+      "location": "app/package.json:10",
+      "issue": "vue-router is declared as a direct dependency even though Nuxt manages it transitively, adding a version that could drift from what the framework pins.",
+      "suggestion": "Drop the direct vue-router dependency (keep vue for types if desired) and let Nuxt resolve it."
+    },
+    {
+      "severity": "low",
+      "location": "app/app/pages/index.vue:73",
+      "issue": "The search debounce setTimeout is never cleared on unmount, so a late navigation could fire a router.push after the component is gone.",
+      "suggestion": "Use onScopeDispose/onBeforeUnmount to clearTimeout, or VueUse-free watch cleanup."
+    }
+  ],
+  "summary": "This is a current-generation Nuxt app: the latest stable Nuxt (4.6.3, three days old), the Nuxt 4 srcDir layout, useAsyncData with watch, and h3 setResponseStatus — no legacy-era APIs, confirmed against the Nuxt 4 docs and release notes. Data access, caching and configuration are centralized in one lib module and one composable, so framework and API moves would touch few files. The main aging risks are the five-times-duplicated 404/status/title block sitting on a util that h3 v2 deprecates, an untyped any-boundary into the API, and a redundant vue-router dependency.",
+  "apis": [
+    { "api": "useAsyncData (with watch + keyed handler)", "location": "app/app/pages/pokemon/[name].vue:116", "status": "current", "replacement": "" },
+    { "api": "useHead", "location": "app/app/pages/pokemon/[name].vue:125", "status": "current", "replacement": "" },
+    { "api": "useState", "location": "app/app/composables/useApiBase.ts:3", "status": "current", "replacement": "" },
+    { "api": "useRuntimeConfig", "location": "app/app/composables/useApiBase.ts:3", "status": "current", "replacement": "" },
+    { "api": "useRequestEvent + setResponseStatus (from h3)", "location": "app/app/pages/[...slug].vue:6", "status": "current", "replacement": "current for the h3 v1/Nitro v2 that Nuxt 4.6 ships; deprecated in h3 v2 beta in favour of event.res.status (h3.dev/migration) — single choke point recommended before that lands" },
+    { "api": "useRouter/useRoute", "location": "app/app/pages/index.vue:5", "status": "current", "replacement": "" },
+    { "api": "defineProps (script setup, TS types)", "location": "app/app/components/MoveTable.vue:10", "status": "current", "replacement": "" }
+  ],
+  "dependencies": [
+    { "name": "nuxt", "verdict": "modern", "note": "4.6.3 is the current stable (released 2026-10-27); ^4.6.3 keeps security patches (three CVEs fixed in 4.6.3)" },
+    { "name": "vue", "verdict": "modern", "note": "3.5.x line, current; reasonable explicit peer for types" },
+    { "name": "vue-router", "verdict": "unnecessary", "note": "Nuxt resolves vue-router itself; the direct dependency adds nothing and can drift from the framework's pin" }
+  ]
+}
+```

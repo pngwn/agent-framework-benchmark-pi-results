@@ -1,0 +1,267 @@
+I've reviewed the app against TanStack Start's current stable release (v1.169.4, the first 1.0-stable release, published 2026-10-22, which this app pins) and its official docs/migration guide. Here's my assessment.
+
+**Key verifications (sources):**
+- TanStack Start 1.169 stable requires Vite 8 and `nitro()` from `nitro/vite`; `.inputValidator()` was removed in favor of `.validator()` — the migrate-from-RC doc (tanstack.com/start/latest/docs/framework/react/migrate-from-release-candidate) and changelog PR #7566. The app already uses all of these.
+- `shellComponent` on `createRootRoute` is the current root-document pattern (official `examples/react/start-basic/src/routes/__root.tsx`).
+- Server-function + `notFound()` from loaders is the documented pattern (start-client-core skill: server-functions).
+
+```json
+{
+  "dimension": "forward-thinking",
+  "criteria": {
+    "latest_apis": {
+      "score": 5,
+      "evidence": [
+        "app/package.json:5-11 — pins @tanstack/react-start 1.169.4 and @tanstack/react-router 1.170.46, i.e. the exact 1.0-stable release published 2026-10-22 (vite 8, nitro/vite)",
+        "app/vite.config.ts:7-13 — tanstackStart() + viteReact() + nitro() from 'nitro/vite', exactly the RC→stable migration recommendation",
+        "app/src/lib/server.ts:20-48 — createServerFn({method:'GET'}).validator(...).handler(...): .validator() is the canonical method (inputValidator removed in 1.169)",
+        "app/src/routes/__root.tsx:18 — shellComponent: RootDocument, the current root-document API (official start-basic example)",
+        "app/src/routes/__root.tsx:8-16 — head() returning meta/links rendered via HeadContent + Scripts, the current head-management API",
+        "app/src/lib/server.ts:10-16 — notFound() thrown from server-fn handlers for 404s, the documented error-handling pattern",
+        "app/src/routes/pokemon.$name.tsx:8-14 — validateSearch + loaderDeps + loader, all current route options",
+        "app/src/router.tsx:6-9 — getRouter() + defaultNotFoundComponent, current convention"
+      ],
+      "rationale": "The app is built on the just-shipped 1.0-stable Start APIs, including post-RC renames (validator(), nitro/vite, Vite 8, shellComponent). No legacy-era patterns found anywhere."
+    },
+    "platform": {
+      "score": 4,
+      "evidence": [
+        "app/src/lib/api.ts:20-31 — native fetch with a promise-dedup in-memory cache instead of any data-fetching library",
+        "app/src/routes/index.tsx:52-100 — native <input type=search>, <select>, URL-driven state via validateSearch and navigate search functions rather than hand-rolled query parsing",
+        "app/src/styles/app.css:1-72 — CSS custom properties throughout (tokens), logical properties (margin-inline, padding-block) and grid auto-fill/minmax",
+        "app/src/lib/NotFoundPage.tsx:5 — leans on React 19's native <title> hoisting into <head>",
+        "app/src/lib/components.tsx:26-31 — width/height + loading=lazy on sprites to avoid CLS",
+        "app/src/lib/api.ts:20-24 — no AbortController/timeout on upstream fetches: a hung request leaves a never-resolving promise cached for the process lifetime"
+      ],
+      "rationale": "Platform-first choices (fetch, native form controls, CSS custom properties/logical properties, React 19 metadata hoisting). Only gap: no AbortSignal.timeout on upstream calls, which is both a resilience and a platform-feature miss."
+    },
+    "dependencies": {
+      "score": 5,
+      "evidence": [
+        "app/package.json:12-24 — four runtime deps (router, start, react, react-dom), all required by the framework; no state library, no CSS framework, no zod (plain validator functions)",
+        "app/package.json:19-25 — dev deps are the exact toolchain Start stable mandates: vite ^8, @vitejs/plugin-react ^6 (the Vite-8 major), nitro ^3 beta (the version Start's hosting guide requires)",
+        "app/package-lock.json — lockfile committed for reproducible builds"
+      ],
+      "rationale": "Minimal and current: nothing the platform or framework already covers, and every dev dependency is one the stable release mandates (plugin-react 6 and nitro 3 beta are the Vite-8-era majors)."
+    },
+    "churn_resistance": {
+      "score": 4,
+      "evidence": [
+        "app/src/lib/api.ts:17-35 — all upstream access funneled through one apiGet() with a single cache; swapping the data source touches one file",
+        "app/src/lib/data.ts:1-464 — view-model builders isolated behind server fns; routes consume only typed VM interfaces (CardVM, MoveTableVM, EvoNodeVM)",
+        "app/src/lib/server.ts:1-48 — the single server boundary between routes and data, with validators at the input edge",
+        "app/src/routeTree.gen.ts:1-9 — generated route tree, no hand-registered routes",
+        "app/src/lib/data.ts:14-16 — data layer typed as any/Promise<any> end to end; API response shapes have no compile-time boundary",
+        "app/src/routes/index.tsx:57 — defensive 'data.catalog as CatalogEntry[]' cast instead of trusting inferred loader types",
+        "app/src/lib/NotFoundPage.tsx:5 — <title> rendered inline, relying on React 19 hoisting rather than the framework's head() option",
+        "app/src/lib/api.ts:14 — unbounded Map cache with no eviction; fine for this snapshot but a habit that won't scale to live data"
+      ],
+      "rationale": "Excellent layering: data access, view models, and server boundary each live in one module, and the generated route tree plus a single vite config mean a framework bump touches few files. The main aging risk is the any-typed data layer — API shape changes would surface at runtime, not at compile time."
+    }
+  },
+  "overall": 4,
+  "findings": [
+    {
+      "severity": "medium",
+      "location": "app/src/lib/api.ts:22-30",
+      "issue": "In-flight fetch promises are cached with no timeout and no AbortController; a hung upstream request leaves a never-settling promise in the cache for the process lifetime, permanently poisoning that resource.",
+      "suggestion": "Pass AbortSignal.timeout(10_000) to fetch (and keep the existing catch-to-evict), so failures eventually clear the cache entry."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/lib/data.ts:14-16",
+      "issue": "The entire PokeAPI layer is typed any (apiGet returns Promise<any>, records cast as any throughout), so response-shape changes surface as runtime bugs with no compile-time signal.",
+      "suggestion": "Define minimal interfaces for the response shapes actually consumed (species, pokemon, type, move, ability, generation, version-group) and return those from apiGet; the typed view models already prove the shapes are stable."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/lib/NotFoundPage.tsx:5",
+      "issue": "The 404 page sets its document title by rendering an inline <title> inside <main> and relying on React 19 metadata hoisting, rather than the framework's head() option used by every other route.",
+      "suggestion": "Serve the not-found page from a splat route (routes/$.tsx) with its own head(), or add a head() override, so title management stays in one mechanism."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/lib/api.ts:1",
+      "issue": "Server-only modules are named api.ts/data.ts/server.ts rather than the .server.ts convention; exclusion from the client bundle currently depends on tree-shaking through stripped server-fn handlers.",
+      "suggestion": "Rename to api.server.ts / data.server.ts (Start's documented convention) so client exclusion is guaranteed by the compiler, not by import-graph luck."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/routes/index.tsx:57",
+      "issue": "Defensive 'as CatalogEntry[]' cast on loader data instead of relying on the inferred server-fn return type.",
+      "suggestion": "Delete the cast and fix whatever inference gap motivated it (e.g. annotate buildHomeData's return type) — casts at boundaries silently hide type drift."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/routes/index.tsx:32",
+      "issue": "loaderDeps: () => ({}) is a no-op that adds noise and implies a dependency contract that doesn't exist.",
+      "suggestion": "Remove the loaderDeps key entirely on this route."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/lib/format.ts:51",
+      "issue": "EM_DASH is exported but never imported; em-dash fallbacks are inlined as string literals at call sites instead.",
+      "suggestion": "Delete the dead export or use it in the '?? \"—\"' fallbacks."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/lib/api.ts:14",
+      "issue": "Unbounded in-memory Map cache with no size cap or TTL.",
+      "suggestion": "Acceptable for this fixed snapshot, but note the assumption in a comment or add a simple cap so the pattern isn't copied verbatim onto a larger, live API."
+    }
+  ],
+  "summary": "This is an unusually current codebase: it pins the exact 1.0-stable TanStack Start release and consistently uses its post-RC APIs (validator(), nitro/vite, Vite 8, shellComponent, head/meta titles), with a lean four-dependency runtime and clean one-module-per-concern layering that keeps framework churn contained. The main aging risks are the any-typed PokeAPI layer, an in-flight-promise cache with no abort/timeout, and a couple of clever-but-non-idiomatic touches (inline <title>, a defensive cast). Strong PR overall; I'd approve after the fetch-timeout and typing items are addressed.",
+  "apis": [
+    { "api": "createServerFn({method:'GET'}).validator().handler()", "location": "app/src/lib/server.ts:20-48", "status": "current", "replacement": "" },
+    { "api": "shellComponent (createRootRoute)", "location": "app/src/routes/__root.tsx:18", "status": "current", "replacement": "" },
+    { "api": "head() meta title + HeadContent/Scripts", "location": "app/src/routes/__root.tsx:8-16", "status": "current", "replacement": "" },
+    { "api": "notFound() thrown from server fn", "location": "app/src/lib/server.ts:9-13", "status": "current", "replacement": "" },
+    { "api": "nitro() from 'nitro/vite'", "location": "app/vite.config.ts:4", "status": "current", "replacement": "" },
+    { "api": "createFileRoute / createRootRoute / createRouter", "location": "app/src/routes/index.tsx:30-36", "status": "current", "replacement": "" },
+    { "api": "Route.useLoaderData / useSearch / useNavigate / Link(search fn)", "location": "app/src/routes/index.tsx:40-44", "status": "current", "replacement": "" },
+    { "api": "validateSearch + loaderDeps route options", "location": "app/src/routes/pokemon.$name.tsx:8-11", "status": "current", "replacement": "" },
+    { "api": "notFoundComponent / defaultNotFoundComponent", "location": "app/src/routes/__root.tsx:19", "status": "current", "replacement": "" },
+    { "api": "inline <title> relying on React 19 hoisting", "location": "app/src/lib/NotFoundPage.tsx:5", "status": "current", "replacement": "Prefer route head() / a splat not-found route for framework-managed titles" }
+  ],
+  "dependencies": [
+    { "name": "@tanstack/react-start", "verdict": "modern", "note": "Pinned to 1.169.4, the first 1.0-stable release (Oct 2026)" },
+    { "name": "@tanstack/react-router", "verdict": "modern", "note": "1.170.46 matches the latest router release required by stable Start" },
+    { "name": "react / react-dom", "verdict": "modern", "note": "19.3.x, the current stable React line" },
+    { "name": "nitro", "verdict": "modern", "note": "Nitro 3 beta is the version Start's stable hosting docs mandate; a beta, but the framework's own recommendation" },
+    { "name": "vite", "verdict": "modern", "note": "Vite 8 is required by Start stable" },
+    { "name": "@vitejs/plugin-react", "verdict": "modern", "note": "v6 is the Vite-8 major (babel-free, Oxc refresh)" },
+    { "name": "typescript / @types/node / @types/react / @types/react-dom", "verdict": "modern", "note": "Current majors, no extras" }
+  ]
+}
+```
+
+Wait — I placed the summary/JSON in reverse order. Here is the required final output:
+
+```json
+{
+  "dimension": "forward-thinking",
+  "criteria": {
+    "latest_apis": {
+      "score": 5,
+      "evidence": [
+        "app/package.json:5-11 — pins @tanstack/react-start 1.169.4 and @tanstack/react-router 1.170.46, i.e. the 1.0-stable release published 2026-10-22",
+        "app/vite.config.ts:7-13 — tanstackStart() + viteReact() + nitro() from 'nitro/vite', matching the RC→stable migration guide",
+        "app/src/lib/server.ts:20-48 — createServerFn({method:'GET'}).validator(...).handler(...): .validator() is the canonical method (inputValidator removed in 1.169)",
+        "app/src/routes/__root.tsx:18 — shellComponent: RootDocument, the current root-document API per the official start-basic example",
+        "app/src/routes/__root.tsx:8-16 — head() returning meta/links rendered via HeadContent + Scripts, the current head-management API",
+        "app/src/lib/server.ts:9-13 — notFound() thrown from server-fn handlers for 404s, the documented error-handling pattern",
+        "app/src/routes/pokemon.$name.tsx:8-14 — validateSearch + loaderDeps + loader, all current route options"
+      ],
+      "rationale": "The app is built on the just-shipped 1.0-stable Start APIs, including post-RC renames (validator(), nitro/vite, Vite 8, shellComponent). No legacy-era patterns found anywhere."
+    },
+    "platform": {
+      "score": 4,
+      "evidence": [
+        "app/src/lib/api.ts:20-31 — native fetch with promise-dedup caching instead of any data-fetching library",
+        "app/src/routes/index.tsx:52-100 — native <input type=search>/<select> with URL-driven state via validateSearch and navigate search functions, not hand-rolled query parsing",
+        "app/src/styles/app.css:1-72 — CSS custom properties (tokens), logical properties (margin-inline, padding-block), grid auto-fill/minmax",
+        "app/src/lib/NotFoundPage.tsx:5 — leans on React 19's native <title> hoisting into <head>",
+        "app/src/lib/components.tsx:26-31 — width/height + loading=lazy on sprites to avoid layout shift",
+        "app/src/lib/api.ts:20-24 — no AbortController/timeout on upstream fetches; a hung request leaves a never-resolving promise cached for the process lifetime"
+      ],
+      "rationale": "Platform-first choices (fetch, native form controls, CSS custom/logical properties, React 19 metadata hoisting). Only gap: no AbortSignal.timeout on upstream calls, which is both a resilience and a platform-feature miss."
+    },
+    "dependencies": {
+      "score": 5,
+      "evidence": [
+        "app/package.json:12-24 — four runtime deps (router, start, react, react-dom); no state library, no CSS framework, no zod (plain validator functions)",
+        "app/package.json:19-25 — dev deps are exactly what Start stable mandates: vite ^8, @vitejs/plugin-react ^6 (the Vite-8 major), nitro ^3 beta (required by Start's hosting guide)",
+        "app/package-lock.json — lockfile committed for reproducible builds"
+      ],
+      "rationale": "Minimal and current: nothing the platform or framework already covers, and every dev dependency is one the stable release mandates (plugin-react 6 and nitro 3 beta are the Vite-8-era majors)."
+    },
+    "churn_resistance": {
+      "score": 4,
+      "evidence": [
+        "app/src/lib/api.ts:17-35 — all upstream access funneled through one apiGet() with a single cache; swapping the data source touches one file",
+        "app/src/lib/data.ts:1-464 — view-model builders isolated behind server fns; routes consume only typed VM interfaces (CardVM, MoveTableVM, EvoNodeVM)",
+        "app/src/lib/server.ts:1-48 — the single server boundary between routes and data, with validators at the input edge",
+        "app/src/routeTree.gen.ts:1-9 — generated route tree, no hand-registered routes",
+        "app/src/lib/data.ts:14-16 — data layer typed as any/Promise<any> end to end; API response shapes have no compile-time boundary",
+        "app/src/routes/index.tsx:57 — defensive 'data.catalog as CatalogEntry[]' cast instead of trusting inferred loader types",
+        "app/src/lib/NotFoundPage.tsx:5 — <title> rendered inline relying on React 19 hoisting rather than the framework's head() option",
+        "app/src/lib/api.ts:14 — unbounded Map cache with no eviction; fine for this fixed snapshot but a habit that won't scale to live data"
+      ],
+      "rationale": "Excellent layering: data access, view models and the server boundary each live in one module, and the generated route tree plus a single vite config mean a framework bump touches few files. The main aging risk is the any-typed data layer — API shape changes would surface at runtime, not at compile time."
+    }
+  },
+  "overall": 4,
+  "findings": [
+    {
+      "severity": "medium",
+      "location": "app/src/lib/api.ts:22-30",
+      "issue": "In-flight fetch promises are cached with no timeout and no AbortController; a hung upstream request leaves a never-settling promise in the cache for the process lifetime, permanently poisoning that resource.",
+      "suggestion": "Pass AbortSignal.timeout(10_000) to fetch (keeping the existing catch-to-evict) so failures eventually clear the cache entry."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/lib/data.ts:14-16",
+      "issue": "The entire PokeAPI layer is typed any (apiGet returns Promise<any>, records cast as any throughout), so response-shape changes surface as runtime bugs with no compile-time signal.",
+      "suggestion": "Define minimal interfaces for the response shapes actually consumed (species, pokemon, type, move, ability, generation, version-group) and return those from apiGet; the typed view models already prove the shapes are stable."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/lib/NotFoundPage.tsx:5",
+      "issue": "The 404 page sets its document title by rendering an inline <title> inside <main> and relying on React 19 metadata hoisting, rather than the framework's head() option used by every other route.",
+      "suggestion": "Serve the not-found page from a splat route (routes/$.tsx) with its own head(), or add a head() override, so title management stays in one mechanism."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/lib/api.ts:1",
+      "issue": "Server-only modules are named api.ts/data.ts/server.ts rather than the .server.ts convention; exclusion from the client bundle currently depends on tree-shaking through stripped server-fn handlers.",
+      "suggestion": "Rename to api.server.ts / data.server.ts (Start's documented convention) so client exclusion is guaranteed by the compiler, not import-graph luck."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/routes/index.tsx:57",
+      "issue": "Defensive 'as CatalogEntry[]' cast on loader data instead of relying on the inferred server-fn return type.",
+      "suggestion": "Delete the cast and fix the inference gap (e.g. annotate buildHomeData's return type) — casts at boundaries silently hide type drift."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/routes/index.tsx:32",
+      "issue": "loaderDeps: () => ({}) is a no-op that adds noise and implies a dependency contract that doesn't exist.",
+      "suggestion": "Remove the loaderDeps key entirely on this route."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/lib/format.ts:51",
+      "issue": "EM_DASH is exported but never imported; em-dash fallbacks are inlined as string literals at call sites instead.",
+      "suggestion": "Delete the dead export or use it in the '?? \"—\"' fallbacks."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/lib/api.ts:14",
+      "issue": "Unbounded in-memory Map cache with no size cap or TTL.",
+      "suggestion": "Acceptable for this fixed snapshot, but note the assumption in a comment or add a simple cap so the pattern isn't copied verbatim onto a larger, live API."
+    }
+  ],
+  "summary": "An unusually current codebase: it pins the exact 1.0-stable TanStack Start release and consistently uses its post-RC APIs (validator(), nitro/vite, Vite 8, shellComponent, head/meta titles), with a lean four-dependency runtime and clean one-module-per-concern layering that keeps framework churn contained. The main aging risks are the any-typed PokeAPI layer, an in-flight-promise cache with no abort/timeout, and a few clever-but-non-idiomatic touches (inline <title>, a defensive cast). Strong PR overall; approve after the fetch-timeout and typing items are addressed.",
+  "apis": [
+    { "api": "createServerFn({method:'GET'}).validator().handler()", "location": "app/src/lib/server.ts:20-48", "status": "current", "replacement": "" },
+    { "api": "shellComponent (createRootRoute)", "location": "app/src/routes/__root.tsx:18", "status": "current", "replacement": "" },
+    { "api": "head() meta title + HeadContent/Scripts", "location": "app/src/routes/__root.tsx:8-16", "status": "current", "replacement": "" },
+    { "api": "notFound() thrown from server fn", "location": "app/src/lib/server.ts:9-13", "status": "current", "replacement": "" },
+    { "api": "nitro() from 'nitro/vite'", "location": "app/vite.config.ts:4", "status": "current", "replacement": "" },
+    { "api": "createFileRoute / createRootRoute / createRouter", "location": "app/src/routes/index.tsx:30-36", "status": "current", "replacement": "" },
+    { "api": "Route.useLoaderData / useSearch / useNavigate / Link(search fn)", "location": "app/src/routes/index.tsx:40-44", "status": "current", "replacement": "" },
+    { "api": "validateSearch + loaderDeps route options", "location": "app/src/routes/pokemon.$name.tsx:8-11", "status": "current", "replacement": "" },
+    { "api": "notFoundComponent / defaultNotFoundComponent", "location": "app/src/routes/__root.tsx:19", "status": "current", "replacement": "" },
+    { "api": "inline <title> relying on React 19 hoisting", "location": "app/src/lib/NotFoundPage.tsx:5", "status": "current", "replacement": "Prefer route head() / a splat not-found route for framework-managed titles" }
+  ],
+  "dependencies": [
+    { "name": "@tanstack/react-start", "verdict": "modern", "note": "Pinned to 1.169.4, the first 1.0-stable release (Oct 2026)" },
+    { "name": "@tanstack/react-router", "verdict": "modern", "note": "1.170.46 matches the latest router release required by stable Start" },
+    { "name": "react / react-dom", "verdict": "modern", "note": "19.3.x, the current stable React line" },
+    { "name": "nitro", "verdict": "modern", "note": "Nitro 3 beta is the version Start's stable hosting docs mandate; a beta, but the framework's own recommendation" },
+    { "name": "vite", "verdict": "modern", "note": "Vite 8 is required by Start stable" },
+    { "name": "@vitejs/plugin-react", "verdict": "modern", "note": "v6 is the Vite-8 major (babel-free, Oxc refresh)" },
+    { "name": "typescript / @types/node / @types/react / @types/react-dom", "verdict": "modern", "note": "Current majors, no extras" }
+  ]
+}
+```

@@ -1,0 +1,342 @@
+---
+import Layout from '../../components/Layout.astro';
+import Section from '../../components/Section.astro';
+import NotFound from '../../components/NotFound.astro';
+import {
+  apiFetch,
+  apiFetchRef,
+  dexNumber,
+  enGenus,
+  enName,
+  getTypeNameMap,
+  humanize,
+  latestEnglishFlavor,
+} from '../../lib/pokeapi.js';
+
+const { name } = Astro.params;
+
+let species = null;
+try {
+  species = await apiFetch(`/pokemon-species/${encodeURIComponent(name.toLowerCase())}/`);
+} catch (err) {
+  if (err.status !== 404) throw err;
+}
+
+const STAT_LABELS = {
+  hp: 'HP',
+  attack: 'Attack',
+  defense: 'Defense',
+  'special-attack': 'Sp. Atk',
+  'special-defense': 'Sp. Def',
+  speed: 'Speed',
+};
+
+const METHOD_ORDER = ['level-up', 'machine', 'egg', 'tutor'];
+
+const escapeHtml = (s) =>
+  String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+
+function chainToHtml(node) {
+  let html = `<li><a href="/pokemon/${escapeHtml(node.species.name)}">${escapeHtml(humanize(node.species.name))}</a>`;
+  if (node.evolves_to?.length) {
+    html += `<ul>${node.evolves_to.map(chainToHtml).join('')}</ul>`;
+  }
+  return `${html}</li>`;
+}
+
+let data = null;
+if (species) {
+  const variety = species.varieties.find((v) => v.is_default) ?? species.varieties[0];
+  const [pokemon, chain, typeNames] = await Promise.all([
+    apiFetchRef(variety.pokemon),
+    apiFetchRef(species.evolution_chain),
+    getTypeNameMap(),
+  ]);
+
+  // Version groups in which this Pokémon learns moves, ordered by `order`.
+  const vgNames = new Set();
+  for (const move of pokemon.moves) {
+    for (const detail of move.version_group_details) vgNames.add(detail.version_group.name);
+  }
+  const versionGroups = await Promise.all(
+    [...vgNames].map((n) => apiFetch(`/version-group/${encodeURIComponent(n)}/`)),
+  );
+  versionGroups.sort((a, b) => a.order - b.order || a.name.localeCompare(b.name));
+
+  const gameParam = new URL(Astro.request.url).searchParams.get('game');
+  const selectedGame =
+    versionGroups.find((v) => v.name === gameParam) ?? versionGroups[versionGroups.length - 1] ?? null;
+
+  // One table per learn method for the selected version group.
+  let tables = [];
+  if (selectedGame) {
+    const rows = [];
+    const seen = new Set();
+    for (const move of pokemon.moves) {
+      for (const detail of move.version_group_details) {
+        if (detail.version_group.name !== selectedGame.name) continue;
+        const key = `${move.move.name}|${detail.move_learn_method.name}|${detail.level_learned_at}`;
+        if (seen.has(key)) continue;
+        seen.add(key);
+        rows.push({
+          ref: move.move,
+          method: detail.move_learn_method.name,
+          level: detail.level_learned_at,
+        });
+      }
+    }
+    const moveRecords = await Promise.all(rows.map((r) => apiFetchRef(r.ref)));
+    const byMethod = new Map();
+    rows.forEach((row, i) => {
+      const record = moveRecords[i];
+      const entry = {
+        level: row.level,
+        moveName: record.name,
+        moveLabel: enName(record),
+        typeName: record.type.name,
+        typeLabel: typeNames.get(record.type.name) ?? humanize(record.type.name),
+        category: record.damage_class ? humanize(record.damage_class.name) : '—',
+        power: record.power ?? '—',
+        accuracy: record.accuracy ?? '—',
+        pp: record.pp ?? '—',
+      };
+      if (!byMethod.has(row.method)) byMethod.set(row.method, []);
+      byMethod.get(row.method).push(entry);
+    });
+    const methods = [...byMethod.keys()].sort((a, b) => {
+      const ia = METHOD_ORDER.indexOf(a);
+      const ib = METHOD_ORDER.indexOf(b);
+      if (ia !== -1 || ib !== -1) return (ia === -1 ? METHOD_ORDER.length : ia) - (ib === -1 ? METHOD_ORDER.length : ib);
+      return humanize(a).localeCompare(humanize(b));
+    });
+    tables = methods.map((method) => {
+      const methodRows = byMethod.get(method);
+      if (method === 'level-up') {
+        methodRows.sort((a, b) => a.level - b.level || a.moveLabel.localeCompare(b.moveLabel));
+      } else {
+        methodRows.sort((a, b) => a.moveLabel.localeCompare(b.moveLabel));
+      }
+      return { method, title: humanize(method), rows: methodRows };
+    });
+  }
+
+  const stats = pokemon.stats.map((s) => ({
+    label: STAT_LABELS[s.stat.name] ?? humanize(s.stat.name),
+    value: s.base_stat,
+  }));
+
+  data = {
+    pokemon,
+    h1: enName(species),
+    genus: enGenus(species),
+    flavor: latestEnglishFlavor(species.flavor_text_entries),
+    types: [...pokemon.types]
+      .sort((a, b) => a.slot - b.slot)
+      .map((t) => ({ name: t.type.name, label: typeNames.get(t.type.name) ?? humanize(t.type.name) })),
+    artwork:
+      pokemon.sprites?.other?.['official-artwork']?.front_default ?? pokemon.sprites?.front_default ?? null,
+    stats,
+    totalStat: stats.reduce((sum, s) => sum + s.value, 0),
+    abilities: [...pokemon.abilities]
+      .sort((a, b) => a.slot - b.slot)
+      .map((a) => ({ name: a.ability.name, hidden: a.is_hidden })),
+    evolutionHtml: `<ul>${chainToHtml(chain.chain)}</ul>`,
+    versionGroups,
+    selectedGame,
+    tables,
+  };
+} else {
+  Astro.response.status = 404;
+}
+---
+
+{
+  !data ? (
+    <Layout title="Not found – Pokédex">
+      <NotFound />
+    </Layout>
+  ) : (
+    <Layout title={`${data.h1} – Pokédex`}>
+      <div class="panel hero">
+        {data.artwork && (
+          <img class="artwork" src={data.artwork} alt={data.h1} width="475" height="475" />
+        )}
+        <div class="hero-info">
+          <p class="dex">{dexNumber(species.id)}</p>
+          <h1>{data.h1}</h1>
+          {data.genus && <p class="genus">{data.genus}</p>}
+          <p class="badges">
+            {data.types.map((t) => (
+              <a class={`type-badge type-${t.name}`} href={`/types/${t.name}`}>
+                {t.label}
+              </a>
+            ))}
+          </p>
+          <dl class="facts">
+            <div>
+              <dt>Height</dt>
+              <dd>{(data.pokemon.height / 10).toFixed(1)} m</dd>
+            </div>
+            <div>
+              <dt>Weight</dt>
+              <dd>{(data.pokemon.weight / 10).toFixed(1)} kg</dd>
+            </div>
+          </dl>
+          {data.flavor && <p class="flavor">{data.flavor}</p>}
+        </div>
+      </div>
+
+      <Section title="Base stats">
+        <table class="stats-table">
+          <tbody>
+            {data.stats.map((s) => (
+              <tr>
+                <th scope="row">{s.label}</th>
+                <td class="num">{s.value}</td>
+                <td class="bar-cell">
+                  <span class="stat-track">
+                    <span class="stat-bar" style={`width: ${Math.min(100, (s.value / 255) * 100)}%`} />
+                  </span>
+                </td>
+              </tr>
+            ))}
+            <tr class="total-row">
+              <th scope="row">Total</th>
+              <td class="num">{data.totalStat}</td>
+              <td class="bar-cell">
+                <span class="stat-track">
+                  <span class="stat-bar" style={`width: ${Math.min(100, (data.totalStat / 720) * 100)}%`} />
+                </span>
+              </td>
+            </tr>
+          </tbody>
+        </table>
+      </Section>
+
+      <Section title="Abilities">
+        <ul class="plain-list">
+          {data.abilities.map((a) => (
+            <li>
+              <a href={`/abilities/${a.name}`}>{humanize(a.name)}</a>
+              {a.hidden && ' (hidden)'}
+            </li>
+          ))}
+        </ul>
+      </Section>
+
+      <Section title="Evolution">
+        <div class="evolution" set:html={data.evolutionHtml} />
+      </Section>
+
+      <Section id="moves" title="Moves">
+        {data.versionGroups.length > 0 && (
+          <p class="game-picker">
+            <label for="game">Game</label>
+            <select id="game" name="game">
+              {data.versionGroups.map((v) => (
+                <option value={v.name} selected={v.name === data.selectedGame.name}>
+                  {humanize(v.name)}
+                </option>
+              ))}
+            </select>
+          </p>
+        )}
+        {data.tables.map((table) => (
+          <div class="table-wrap">
+            <table class="moves-table" data-sortable>
+              <caption>{table.title}</caption>
+              <thead>
+                <tr>
+                  {table.method === 'level-up' && (
+                    <th scope="col" data-type="number">
+                      <button type="button">Level</button>
+                    </th>
+                  )}
+                  <th scope="col" data-type="text">
+                    <button type="button">Move</button>
+                  </th>
+                  <th scope="col" data-type="text">
+                    <button type="button">Type</button>
+                  </th>
+                  <th scope="col" data-type="text">
+                    <button type="button">Category</button>
+                  </th>
+                  <th scope="col" data-type="number">
+                    <button type="button">Power</button>
+                  </th>
+                  <th scope="col" data-type="number">
+                    <button type="button">Accuracy</button>
+                  </th>
+                  <th scope="col" data-type="number">
+                    <button type="button">PP</button>
+                  </th>
+                </tr>
+              </thead>
+              <tbody>
+                {table.rows.map((row) => (
+                  <tr>
+                    {table.method === 'level-up' && <td>{row.level}</td>}
+                    <td>
+                      <a href={`/moves/${row.moveName}`}>{row.moveLabel}</a>
+                    </td>
+                    <td>
+                      <a class={`type-badge type-${row.typeName}`} href={`/types/${row.typeName}`}>
+                        {row.typeLabel}
+                      </a>
+                    </td>
+                    <td>{row.category}</td>
+                    <td>{row.power}</td>
+                    <td>{row.accuracy}</td>
+                    <td>{row.pp}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        ))}
+      </Section>
+
+      <script is:inline>
+        (() => {
+          const select = document.getElementById('game');
+          if (select) {
+            select.addEventListener('change', () => {
+              const url = new URL(location.href);
+              url.searchParams.set('game', select.value);
+              url.hash = 'moves';
+              location.assign(url);
+            });
+          }
+
+          document.querySelectorAll('table[data-sortable]').forEach((table) => {
+            const headers = [...table.querySelectorAll('thead th')];
+            headers.forEach((th, col) => {
+              const button = th.querySelector('button');
+              (button ?? th).addEventListener('click', () => {
+                const direction = th.getAttribute('aria-sort') === 'ascending' ? 'descending' : 'ascending';
+                headers.forEach((h) => h.removeAttribute('aria-sort'));
+                th.setAttribute('aria-sort', direction);
+                const type = th.dataset.type || 'text';
+                const tbody = table.tBodies[0];
+                const rows = [...tbody.rows];
+                const mult = direction === 'ascending' ? 1 : -1;
+                rows.sort((a, b) => {
+                  const av = (a.cells[col]?.textContent ?? '').trim();
+                  const bv = (b.cells[col]?.textContent ?? '').trim();
+                  const aMissing = av === '' || av === '—';
+                  const bMissing = bv === '' || bv === '—';
+                  if (aMissing && bMissing) return 0;
+                  if (aMissing) return 1; // missing values sort last in both directions
+                  if (bMissing) return -1;
+                  if (type === 'number') return (Number(av) - Number(bv)) * mult;
+                  return av.localeCompare(bv) * mult;
+                });
+                rows.forEach((row) => tbody.appendChild(row));
+              });
+            });
+          });
+        })();
+      </script>
+    </Layout>
+  )
+}

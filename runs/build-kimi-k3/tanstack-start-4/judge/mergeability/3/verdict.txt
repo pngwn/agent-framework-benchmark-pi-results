@@ -1,0 +1,130 @@
+I've reviewed the app against the current stable TanStack Start (verified: `@tanstack/react-start@1.169.4` / `@tanstack/react-router@1.170.46` are the latest stable releases from Oct 2026, and the app pins exactly those; `.validator()` is the current non-deprecated server-fn API; `shellComponent`, `HeadContent`/`Scripts`, the `nitro()` Vite plugin config, and throwing `notFound()` from a server-fn handler all match the official `start-basic` example and current docs, which even has e2e coverage for the notFound-from-server-fn pattern).
+
+```json
+{
+  "dimension": "mergeability",
+  "criteria": {
+    "idiomatic": {
+      "score": 5,
+      "evidence": [
+        "app/src/routes/__root.tsx:17 — createRootRoute with head/links, notFoundComponent and shellComponent rendering <html><HeadContent/><Scripts/>: identical shape to the official start-basic example",
+        "app/src/lib/server.ts:20 — createServerFn({method:'GET'}).validator(...).handler(...): current (non-deprecated) server-fn builder API, wrapped so 404s become notFound()",
+        "app/src/routes/pokemon.$name.tsx:9-14 — validateSearch + loaderDeps for ?game= + server-fn loader: exactly the recommended data-loading flow",
+        "app/src/routes/index.tsx:44-49 — functional search updates via navigate({search: prev => ...}, replace) keeping filter state in the URL query, as docs recommend",
+        "app/vite.config.ts:8-15 — tanstackStart({srcDirectory:'src'}) + viteReact() + nitro() and package.json start script node .output/server/index.mjs: verbatim current docs/hosting recipe",
+        "app/src/router.tsx:4 — createRouter with generated routeTree via getRouter(): current Start convention",
+        "app/src/lib/NotFoundPage.tsx:6 — only real deviation: a raw <title> in the body relying on React 19 hoisting instead of the route head() API"
+      ],
+      "rationale": "Routing, loading, head management and the build config read like the framework's own current examples, with versions pinned to the exact latest stable release; the only workaround (body <title> for the 404 page, where route head isn't reliably invoked) is small and pragmatic."
+    },
+    "correctness_risks": {
+      "score": 4,
+      "evidence": [
+        "app/src/lib/api.ts:27 — 'Don't cache failures' p.catch(() => cache.delete(path)): rejected promises are evicted so no poisoned cache",
+        "app/src/lib/server.ts:13 — withNotFound maps ApiError 404 to notFound(); all detail loaders go through it",
+        "app/src/lib/components.tsx:29-32 — sprite onError hides broken <img>; null-sprite fallbacks elsewhere (data.ts:357-359)",
+        "app/src/routes/__root.tsx:23 — no errorComponent anywhere in the tree: a non-404 API failure renders the router's default error UI in production",
+        "app/src/lib/data.ts:243-244 — varieties?.find(...) ?? varieties?.[0] then .pokemon.name without a guard: empty varieties would throw TypeError (500, not a graceful page)",
+        "app/src/lib/data.ts:285 — Promise.all over every move of the selected game (~100-200 fetches) on first Pokémon-page load: bounded and cached, but a first-paint latency spike",
+        "app/src/lib/MovesTable.tsx:97 — row key includes array index (${row.moveName}-${i})"
+      ],
+      "rationale": "Defensive, failure-aware code throughout (cache eviction on error, null-coalescing on every optional API field, 404 plumbing); only minor risks remain — no error boundary for non-404 API failures and one unguarded data assumption."
+    },
+    "global_abstractions": {
+      "score": 4,
+      "evidence": [
+        "app/src/lib/data.ts:20-27,45-51,56-62,66-73 — module-level cached promises (hidden global state) for types/generations/version-groups/species; documented and failure-invalidated, but singletons a future refactor must untangle",
+        "app/src/lib/data.ts:78-112 — cardsForPokemonRefs shared by move/ability/type pages: one well-typed VM boundary (CardVM) instead of duplicated near-identical helpers",
+        "app/src/lib/components.tsx:3 — client code imports only types from data.ts (import type CardVM), keeping the server-only data layer off the client bundle",
+        "app/src/lib/format.ts — small, pure, isomorphic helpers with a single job; server.ts is a thin, uniform wrapper over data.ts per route"
+      ],
+      "rationale": "Abstractions earn their keep: one shared card/VM layer, pure formatters, and a clean server/client boundary. The single 460-line data.ts with module-level caches is the one thing that will need splitting as pages grow, but it's sectioned, typed at the VM boundary and clearly documented as server-only."
+    },
+    "readability": {
+      "score": 4,
+      "evidence": [
+        "app/src/lib/data.ts:15-17 — 'Pokémon ids above this are alternate forms and out of scope' comment explains the constant, and data.ts:38-40 explains the refs→species mapping rule",
+        "app/src/lib/format.ts:3-8 — every helper has a one-line contract doc comment",
+        "app/src/routes/moves.$name.tsx:2 — unused `import * as React` (also in types.$name.tsx:2, abilities.$name.tsx:2, types.index.tsx:2, pokemon.$name.tsx:2)",
+        "app/src/lib/format.ts:51 — dead export EM_DASH; '—' literals are used inline everywhere instead",
+        "app/src/lib/data.ts:25,107,333 — pervasive `any` for API records makes the data shapes opaque despite strict: true in tsconfig.json:4"
+      ],
+      "rationale": "Consistent naming, sectioned files, and comments that explain why; a new teammate finds their way quickly. Rough spots are mechanical: five unused React imports, one dead export, and an untyped API layer that hides data shapes behind `any`."
+    },
+    "review_cost": {
+      "score": 4,
+      "evidence": [
+        "app/src/routes/index.tsx:32 — no-op loaderDeps: () => ({}) is pure noise",
+        "app/src/lib/NotFoundPage.tsx:6 — <title> in body plus duplicate not-found registration in router.tsx:10 and __root.tsx:23: minor consistency cleanup",
+        "app/src/routes/__root.tsx:23 — missing errorComponent: the one substantive ask before approve",
+        "app/src/lib/data.ts:285 — move fan-out is acceptable but worth a question about first-load latency"
+      ],
+      "rationale": "Approve after one round of nits: remove unused imports/dead code, add a root error boundary, and optionally type the few API records actually read. Nothing needs structural rework."
+    }
+  },
+  "overall": 4,
+  "findings": [
+    {
+      "severity": "medium",
+      "location": "app/src/lib/api.ts:17",
+      "issue": "The entire data layer is typed `any` (apiGet returns Promise<any>, ~20 `any` casts in data.ts) in a project with strict TypeScript, so API shape changes fail silently at runtime instead of at compile time.",
+      "suggestion": "Add minimal response interfaces for the endpoints actually read (species, pokemon, move, ability, type, generation, version-group) and have apiGet return them; keep the VM interfaces as the client-facing contract."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/routes/__root.tsx:23",
+      "issue": "No errorComponent anywhere: a non-404 API failure (500, timeout, malformed response) bubbles to the router's default error rendering in production.",
+      "suggestion": "Add an errorComponent (or DefaultCatchBoundary-style component) on the root route, mirroring the official start-basic example."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/lib/NotFoundPage.tsx:6",
+      "issue": "Renders a raw <title> element in the body, relying on React 19 hoisting; route head fallbacks (`loaderData?.title ?? 'Not found'`) already produce the same title, so the document title can be set twice.",
+      "suggestion": "Rely on the route head fallback (or a root-level head) and drop the in-body <title>."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/router.tsx:10",
+      "issue": "The not-found component is registered twice: defaultNotFoundComponent on the router and notFoundComponent on the root route (__root.tsx:23).",
+      "suggestion": "Keep one registration (root route) and delete the other."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/lib/data.ts:243",
+      "issue": "buildPokemonPageData dereferences variety.pokemon.name without guarding an empty varieties list; malformed species data would throw a TypeError (500) instead of rendering a graceful page.",
+      "suggestion": "Guard and fall back to fetching `pokemon/{name}` by the species name, or throw notFound() when no default variety exists."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/lib/data.ts:285",
+      "issue": "First load of a Pokémon page fans out one fetch per move of the selected game (100+ parallel requests), plus ~30 version-group fetches; cached afterwards but a first-paint latency spike.",
+      "suggestion": "Fine for a local snapshot API; if latency matters, batch by limiting concurrency or lazy-load move details per method table."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/routes/moves.$name.tsx:2",
+      "issue": "Unused `import * as React from 'react'` in five route files (moves.$name.tsx, types.$name.tsx, abilities.$name.tsx, types.index.tsx, pokemon.$name.tsx).",
+      "suggestion": "Delete the unused imports (a linter would flag these)."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/lib/format.ts:51",
+      "issue": "Dead export EM_DASH; em-dash literals are used inline throughout the components instead.",
+      "suggestion": "Either use EM_DASH where '—' is rendered or remove the export."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/routes/index.tsx:32",
+      "issue": "No-op `loaderDeps: () => ({})` adds noise without effect.",
+      "suggestion": "Remove the option."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/lib/MovesTable.tsx:97",
+      "issue": "Row keys append the array index (`${row.moveName}-${i}`); a duplicate move in the same table could confuse reconciliation on sort.",
+      "suggestion": "Key by method+moveName+level, or add a stable unique id when building rows."
+    }
+  ],
+  "summary": "A clean, current, textbook TanStack Start implementation: file-based routes with validateSearch/loaderDeps, .validator() server functions, notFound plumbing, and a build config that matches the official examples at the latest stable versions. The data layer is well-bounded (server-only, failure-invalidated caches, typed view models) but is a single `any`-typed 460-line module that will need splitting and response typing as it grows. I'd merge after one round of small changes: add a root error boundary, delete dead/unused code, and type the API responses."
+}
+```

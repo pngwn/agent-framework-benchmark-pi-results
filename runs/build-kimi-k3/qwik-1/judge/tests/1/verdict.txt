@@ -1,0 +1,169 @@
+I have enough to score. Verified that Qwik 1.20.3 is the current stable line (v2 is still in RC), so the framework choice itself is current — but that doesn't matter for this dimension: the app contains **zero tests of its own**.
+
+## Review: test quality
+
+**What exists:** `app/` has no test files, no test runner dependency (`app/package.json:6-24` has only build/start/dev scripts; devDeps are typescript, undici, vite, vite-tsconfig-paths — no vitest, no playwright). Confirmed by grep for `test|describe|expect` across `app/` (no matches) and the measured facts (`testLoc: 0`, `tests.cases: 0`). The app was built purely against the acceptance suite in `tests/`.
+
+**What that means long-term:** the acceptance suite is broad but lives outside `app/`, is not runnable from `app/package.json`, and will stop being the guard the moment the repo is handed over. Meanwhile the app contains a substantial amount of non-trivial, easily-unit-testable logic that would regress silently:
+
+- **Pokémon→species mapping** (`app/src/lib/data.ts:52` `cardsForPokemonRefs`) — the alternate-form exclusion (`pokemonId >= 10000`), the defensive fallback fetch, dedup by species id, and the hidden-ability flag keyed by Pokémon URL (`app/src/routes/abilities/[name]/index.tsx:27-31`). A refactor here breaks move/ability/type card lists, species linking, and hidden-ability markers — the exact thing the live-data-overlay acceptance tests check, but nothing in `app/` would catch.
+- **Filter + pagination pipeline** (`app/src/routes/index.tsx:86-115`) — humanized-name substring search, type-slot matching, generation mapping, `page` clamping (`Math.min(Math.max(1, ...), totalPages)`), and the 48-per-page slice. Off-by-one pagination and slot-matching bugs are the classic regressions here.
+- **URL state builder** (`app/src/lib/urls.ts:13` `homeUrl`) — the "omit empty/default params" rule and the implicit page-1 reset when filters change (callers at `app/src/routes/index.tsx:110,116,124` deliberately drop `page`). If someone "helpfully" propagates the current page into filter changes, the reset-to-page-1 requirement breaks with no failing test in `app/`.
+- **Moves grouping/dedup** (`app/src/routes/pokemon/[name]/index.tsx:46-82`) — the dedup key `${m.move.name}|${level}` can merge or duplicate rows for moves learned at multiple levels; the method ordering (`METHOD_ORDER` then alphabetical fallback); the default game = `vgRecords[vgRecords.length - 1]` which silently assumes sort-by-`order` ascending. All untested.
+- **Client-side sortable table** (`app/src/components/moves-table.tsx:35` `compareValues`) — the "missing values sort last in both directions" rule and the stability tiebreak (`a.i - b.i`) plus `aria-sort` toggling are pure functions/behavior that one acceptance test only lightly probes (one column, one table).
+- **Fetch layer** (`app/src/lib/api.ts:15-33`) — a hand-rolled concurrency limiter (waiter queue, `active` accounting) and promise-caching with rejected-promise eviction. This is the most concurrency-subtle code in the app and has zero coverage; a limiter refactor could deadlock fan-outs that `getTypes`/`getGenerations`/`getSpecies` depend on (`app/src/lib/data.ts:18,30`).
+- **Error/exception paths** — `apiFetch` throws on any non-404 failure (`app/src/lib/api.ts:39`); no test verifies what the user sees when the API is down mid-request (unhandled loader throw → framework error page), and 404 handling per route (`status(404)` at `app/src/routes/pokemon/[name]/index.tsx:22`) is only exercised by acceptance tests.
+
+**What's cheap to do in Qwik 1.x:** all of `app/src/lib/*.ts` (`format.ts`, `urls.ts`, `api.ts`) and the loader-level transformations are plain functions, directly unit-testable with Vitest (Qwik's documented unit-test story); `routeLoader$` bodies can be extracted into plain functions for testability, and the acceptance Playwright setup in `tests/` is a template for keeping a couple of route-level e2e tests inside `app/`.
+
+Scores per the rubric: no tests ⇒ `coverage_of_risk` 1, `regression_power` 1, `behaviour_not_implementation` 1, and `signal_to_noise` 3 (the rubric's stated default for "no tests").
+
+```json
+{
+  "dimension": "tests",
+  "criteria": {
+    "coverage_of_risk": {
+      "score": 1,
+      "evidence": [
+        "app/package.json:6-24 — no test script, no test runner dependency",
+        "app/src/lib/data.ts:52 — Pokémon→species mapping (alternate-form exclusion, dedup, hidden flag) has no tests",
+        "app/src/routes/index.tsx:86-115 — filter/search/pagination pipeline has no tests",
+        "app/src/lib/api.ts:15-33 — hand-rolled concurrency limiter and promise cache have no tests"
+      ],
+      "rationale": "The app's riskiest logic — data transformation, filtering, pagination, URL state, caching — is entirely untested; the only guard is the external acceptance suite."
+    },
+    "behaviour_not_implementation": {
+      "score": 1,
+      "evidence": [
+        "app/ — zero test files (measured testLoc 0; grep for test|describe|expect finds nothing)"
+      ],
+      "rationale": "No tests at all, so nothing asserts observable behaviour either; per the rubric, 'no tests' scores 1."
+    },
+    "regression_power": {
+      "score": 1,
+      "evidence": [
+        "app/src/lib/urls.ts:13 — homeUrl's omit-defaults and page-1-reset semantics unguarded",
+        "app/src/components/moves-table.tsx:35 — missing-values-sort-last and aria-sort toggle unguarded",
+        "app/src/routes/pokemon/[name]/index.tsx:78 — default-game selection assumes version groups sorted ascending by order, unguarded"
+      ],
+      "rationale": "With no tests inside app/, a refactor of the data layer or filter logic would pass every check the repo itself owns; only the external, non-run-in-app acceptance suite would notice."
+    },
+    "signal_to_noise": {
+      "score": 3,
+      "evidence": [
+        "app/ — no tests, hence no noise"
+      ],
+      "rationale": "Rubric default for no tests: 3. There is no padding to criticize, but nothing earning its keep either."
+    }
+  },
+  "overall": 1,
+  "findings": [
+    {
+      "severity": "high",
+      "location": "app/package.json:6-24",
+      "issue": "No test infrastructure at all: no test script, no vitest/playwright dependency, no spec files anywhere in app/.",
+      "suggestion": "Add Vitest (Qwik 1.x's documented unit-test runner) plus a `test` script, and unit-test app/src/lib/format.ts, urls.ts and api.ts — they are plain functions with the highest logic density."
+    },
+    {
+      "severity": "high",
+      "location": "app/src/lib/data.ts:52",
+      "issue": "cardsForPokemonRefs implements the trickiest business rule (Pokémon→species mapping, alternate-form exclusion at pokemonId >= 10000, dedup, hidden-ability flag) with no tests; a refactor silently breaks move/ability/type card lists.",
+      "suggestion": "Unit tests with fixture refs covering: default Pokémon, ID ≥ 10000 exclusion, duplicate species, fallback fetch path, and hidden-flag propagation."
+    },
+    {
+      "severity": "high",
+      "location": "app/src/routes/index.tsx:86-115",
+      "issue": "Search/type/generation filtering, page clamping and the 48-per-page slice are unguarded; off-by-one pagination or slot-matching regressions would slip through.",
+      "suggestion": "Extract the loader's filter/slice logic into a pure function in app/src/lib/ and test edge cases (empty q, page > totalPages, page=abc, type in slot 2 only)."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/lib/urls.ts:13",
+      "issue": "homeUrl's omit-empty/default parameter rule and the implicit reset-to-page-1 when a filter changes (callers at app/src/routes/index.tsx:110-124 drop `page`) are untested.",
+      "suggestion": "Property-style unit tests: page 1 omitted, empty q omitted, combined filters preserved in order."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/routes/pokemon/[name]/index.tsx:46-82",
+      "issue": "Moves grouping (dedup key `${move}|${level}` may merge distinct learn entries), method ordering, default game = last-by-order, and per-method row sorting are all untested.",
+      "suggestion": "Extract the version-group selection and table-building into pure functions and test with a small moves fixture, including a move learned at two levels."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/components/moves-table.tsx:35",
+      "issue": "Client-side sort comparator (missing values last in both directions, stability tiebreak, aria-sort toggling) has only light acceptance coverage.",
+      "suggestion": "Test compareValues directly (null vs number/string, both directions) plus a Playwright interaction test for second-click descending."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/lib/api.ts:15-33",
+      "issue": "Hand-rolled concurrency limiter (waiter queue/active accounting) and promise cache with rejected-promise eviction can deadlock or cache failures if refactored; fan-outs in getTypes/getGenerations depend on it (app/src/lib/data.ts:18,30).",
+      "suggestion": "Unit tests that push > MAX_CONCURRENT requests, force a rejection, and assert all resolve and the entry is retried."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/lib/api.ts:39",
+      "issue": "Non-404 API failures throw out of loaders; the user-facing behaviour of an API outage is undefined and untested.",
+      "suggestion": "Decide and test an error path (retry or a friendly error page) so a 500/timeout doesn't surface as a framework stack trace."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/routes/[...all]/index.tsx:5",
+      "issue": "Not-found behavior, including per-route 404s and lowercase name normalization (app/src/routes/moves/[name]/index.tsx:20), is only covered by external acceptance tests.",
+      "suggestion": "Keep one route-level Playwright test inside app/ for the 404 path and a case-variant URL so casing regressions are caught."
+    }
+  ],
+  "summary": "The app ships zero tests of its own — no test script, no runner, not even a placeholder — and relies entirely on the external acceptance suite for correctness. The unguarded surface includes the highest-risk logic in the codebase: Pokémon→species mapping, the filter/pagination pipeline, URL-state construction, moves grouping, client-side sorting, and a hand-rolled fetch limiter/cache. Extracting that logic into pure functions and covering it with Vitest would be a small, high-leverage addition before this codebase is handed to a team.",
+  "wroteTests": false,
+  "testCount": 0,
+  "valuableTests": [],
+  "lowValueTests": [],
+  "untested": [
+    {
+      "area": "Pokémon→species mapping and alternate-form exclusion (app/src/lib/data.ts:52 cardsForPokemonRefs)",
+      "risk": "high",
+      "likelyBug": "A refactor that drops the >= 10000 filter or breaks the species-id lookup would show Mega Evolutions in every list and link cards to wrong/nonexistent species pages."
+    },
+    {
+      "area": "Home filtering, search-by-humanized-name, and 48-per-page pagination (app/src/routes/index.tsx:86-115)",
+      "risk": "high",
+      "likelyBug": "Off-by-one in the slice/clamp (e.g. showing species 49 twice or not at all), slot-2 type matches dropped, or `page=abc`/page > total rendering an empty list."
+    },
+    {
+      "area": "URL query construction and filter-change page reset (app/src/lib/urls.ts:13; callers at app/src/routes/index.tsx:110-124)",
+      "risk": "high",
+      "likelyBug": "Propagating the current page when a filter changes (spec requires reset to page 1) or emitting `page=1&q=` noise that breaks deep links like `/?type=fire&generation=generation-i`."
+    },
+    {
+      "area": "Moves tables: dedup key, method ordering, default-game selection, per-method row order (app/src/routes/pokemon/[name]/index.tsx:46-82)",
+      "risk": "medium",
+      "likelyBug": "A move learned at two levels in one version group collapsing to one row (or duplicating), or default game picking the wrong version group if the order assumption changes."
+    },
+    {
+      "area": "Client-side column sorting: nulls-last in both directions, stability, aria-sort (app/src/components/moves-table.tsx:35-95)",
+      "risk": "medium",
+      "likelyBug": "Null power/accuracy sorting first on descending click, or aria-sort stuck on 'ascending' after the second click."
+    },
+    {
+      "area": "Fetch concurrency limiter and in-memory promise cache (app/src/lib/api.ts:15-47)",
+      "risk": "medium",
+      "likelyBug": "A limiter refactor that leaks waiters hangs every page (getTypes does 18 parallel fetches); caching a rejected promise would make one API hiccup permanent for the process."
+    },
+    {
+      "area": "API failure handling beyond 404 (app/src/lib/api.ts:38-39 throws; no error boundary or retry)",
+      "risk": "medium",
+      "likelyBug": "A 500 or timeout from the API surfacing as a raw framework error page instead of anything graceful."
+    },
+    {
+      "area": "404 paths and case-insensitive name normalization (app/src/routes/[...all]/index.tsx:5; params.name.toLowerCase() in each detail loader)",
+      "risk": "low",
+      "likelyBug": "Removing the lowercase normalization makes /pokemon/Pikachu a 404; removing status(404) makes not-found URLs return 200 with wrong titles."
+    },
+    {
+      "area": "Pure formatters: humanize, collapseWhitespace, dexNumber padding, English-name lookup (app/src/lib/format.ts)",
+      "risk": "low",
+      "likelyBug": "A padStart width change turning #0025 into #25, or collapseWhitespace dropping the trim and leaving leading spaces in flavor text."
+    }
+  ]
+}
+```

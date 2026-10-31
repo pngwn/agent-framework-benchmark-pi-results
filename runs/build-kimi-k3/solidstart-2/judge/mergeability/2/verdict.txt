@@ -1,0 +1,90 @@
+## Review
+
+**Framework fit (verified against current docs).** This is SolidStart v2 done the way `docs.solidjs.com/solid-start/v2` prescribes: `vite.config.ts` with `solidStart()` + `nitro()` (`app/vite.config.ts:5-7`), `query` with `"use server"` *inside* the inner function — exactly the placement the `"use server"` reference page warns about — plus `createAsync` in routes and `export const route = { preload }` (`app/src/lib/data.js:81`, `app/src/routes/index.jsx:15-17`, `app/src/routes/moves/[name].jsx:14-16`). 404 uses `HttpStatusCode` + a `[...404].jsx` catch-all (`app/src/components/NotFound.jsx:9`, `app/src/routes/[...404].jsx:2`), the documented pattern. No hand-rolled routing, no fighting reactivity; `A`/`For`/`Show`/`createMemo` used where they should be.
+
+**What I'd ask you to change before approving** — all small, none structural:
+
+1. **Failed fetches are cached forever as `null`** (`app/src/lib/data.js:22-28`). The module-level promise cache stores a resolved-to-`null` promise on any non-OK response or network error; one blip (e.g. API restarting) makes a real Pokémon render `Not found` for the life of the process. That's the worst thing in the diff, but it's a five-line fix.
+2. **Debounce timer is never cleaned up** (`app/src/routes/index.jsx:26-30`): a `setTimeout` from the search box can fire after the user has navigated to a Pokémon page and `navigate()` them back to `/`. Needs `onCleanup(clearTimeout)`.
+3. **Controlled search input fed from server state** (`app/src/routes/index.jsx:54`): `value={d().q}` can clobber keystrokes typed while the debounced fetch is in flight. Should be uncontrolled (or only sync when unfocused).
+4. Minor spec deviation: `Level Up` default order has no move-name tiebreak (`app/src/lib/data.js:313`) though the spec says "by level, then move name".
+5. Small nits: unused `extra` callback in `cardsFromPokemonRefs` (`app/src/lib/data.js:90`) that the ability page bypasses anyway; the moves section inlines `Section.jsx`'s markup to get a `ref` (`app/src/routes/pokemon/[name].jsx:74`); per-`<option>` `selected` instead of `value` on the selects, which also leaves the control blank for a bogus `?type=` value; no `ErrorBoundary` anywhere, so a server-function transport error yields a silently empty page.
+
+The data layer is one 450-line module, but it's a genuinely coherent boundary: one API client, all queries shaped as view models, cache confined to the server, env read at request time (`app/src/lib/data.js:11-13`). The repeated `Content`/`Show data() === null` pattern across four routes is mild duplication I'd tolerate.
+
+I'd approve after a round of the fixes above; nothing needs rework.
+
+```json
+{
+  "dimension": "mergeability",
+  "criteria": {
+    "idiomatic": {
+      "score": 5,
+      "evidence": [
+        "app/src/lib/data.js:81-82 — query() with \"use server\" placed inside the inner function, exactly as the SolidStart v2 \"use server\" reference requires",
+        "app/src/routes/index.jsx:15-17 — export const route = { preload } plus createAsync(() => query(...)) is the documented preload/data-fetching pattern",
+        "app/vite.config.ts:5-7 — solidStart() + nitro() matches the v2 vite.config.ts reference (Vite 8 + Nitro v3)",
+        "app/src/routes/[...404].jsx:1-5 — catch-all route rendering HttpStatusCode 404, the documented not-found pattern",
+        "app/src/routes/index.jsx:38-40 — <Show when={data()}>{(d) => ...} keyed form; filters drive the URL via navigate() instead of local state"
+      ],
+      "rationale": "Reads like the framework docs' own examples: data loading, preloading, routing, error status and meta are all done with the current recommended primitives. Only soft spots are per-option `selected` instead of `value` on selects and a hand-rolled hash-scroll in onMount, both small."
+    },
+    "correctness_risks": {
+      "score": 3,
+      "evidence": [
+        "app/src/lib/data.js:22-28 — cache stores a resolved-null promise on !res.ok or fetch error; one transient API failure permanently renders real resources as Not found until process restart",
+        "app/src/routes/index.jsx:26-30 — debounce timer is never cleared; typing then navigating within 250ms makes the pending timeout navigate the user back to /?q=... after unmount",
+        "app/src/routes/index.jsx:54 — value={d().q} binds the input to server-derived state; keystrokes made while the debounced fetch is in flight can be clobbered",
+        "app/src/lib/data.js:313 — Level Up default sort compares level only, no move-name tiebreak (spec says 'by level, then move name')",
+        "app/src/lib/data.js:162 — page is clamped for display but ?page=999 stays in the URL, so UI and address bar disagree"
+      ],
+      "rationale": "Several minor-but-real issues: a poisoned failure cache, a leaked timer that navigates after route exit, and a controlled-input keystroke race. None are catastrophic, but the first two would bite in production and a reviewer should ask for fixes."
+    },
+    "global_abstractions": {
+      "score": 4,
+      "evidence": [
+        "app/src/lib/data.js:16-28 — single module-level in-memory cache, explicitly commented and confined to server-only query bodies; spec-sanctioned",
+        "app/src/lib/data.js:90-109 — cardsFromPokemonRefs takes an `extra` callback no caller uses (the ability page attaches `hidden` separately at data.js:398-405); speculative generality",
+        "app/src/lib/util.js:1-35 — small, pure, clearly marked safe-for-both-sides helpers; no god-utils smell",
+        "app/src/components/Card.jsx:18-41 — one card component reused across move/ability/type pages with a clean props boundary"
+      ],
+      "rationale": "The one-file data layer is a defensible boundary (one API client, view-model-shaped queries, env read at request time) rather than a god module. Only the unused `extra` hook and a slightly leaky hidden-flag attachment are dead weight."
+    },
+    "readability": {
+      "score": 4,
+      "evidence": [
+        "app/src/lib/data.js:1-6 — header comment explains the server/RPC boundary and cache strategy",
+        "app/src/routes/pokemon/[name].jsx:18-40 — EvoNode/PokemonContent split keeps the route file scannable; d() accessor pattern is consistent",
+        "app/src/routes/[name].jsx:33-44 — identical Content-wrapper + Show(data() === null) structure across pokemon/moves/abilities/types routes",
+        "app/src/routes/pokemon/[name].jsx:74-77 — moves section inlines Section.jsx's markup to attach a ref, duplicating app/src/components/Section.jsx:2-9",
+        "app/src/app.css:78-100 — CSS grouped by feature with token-only values, no magic numbers"
+      ],
+      "rationale": "Consistent structure, purposeful comments explaining why, small files. The duplicated not-found wrapper in four routes and the one inline section are rough edges, not blockers."
+    },
+    "review_cost": {
+      "score": 4,
+      "evidence": [
+        "app/src/lib/data.js:22-28 — small fix: evict the cache entry when a fetch fails instead of caching null",
+        "app/src/routes/index.jsx:26-30 — small fix: onCleanup for the debounce timer",
+        "app/src/routes/index.jsx:54 — small fix: uncontrolled input (or skip sync while focused)",
+        "app/src/lib/data.js:313 — one-line comparator tiebreak"
+      ],
+      "rationale": "All requested changes are local and mechanical; no rework of structure, queries or styling is needed. Approve after one round of nits and small fixes."
+    }
+  },
+  "overall": 4,
+  "findings": [
+    { "severity": "medium", "location": "app/src/lib/data.js:22-28", "issue": "apiFetch caches the promise forever; a non-OK response or network error resolves to null and is cached, so a transient API failure permanently renders a real resource as Not found until the process restarts.", "suggestion": "Cache only successful responses — on failure, delete the key so the next call retries (or add a short TTL for failures)." },
+    { "severity": "medium", "location": "app/src/routes/index.jsx:26-30", "issue": "The 250 ms debounce timer is never cleaned up; if the user types and navigates to a Pokémon card within the window, the pending setTimeout calls navigate() after the Home component unmounted, yanking them back to /?q=….", "suggestion": "Add onCleanup(() => clearTimeout(searchTimer)) in the Home component." },
+    { "severity": "medium", "location": "app/src/routes/index.jsx:54", "issue": "The search input is bound to the server-derived value d().q; keystrokes typed while the debounced fetch is in flight can be overwritten when the response lands.", "suggestion": "Make the input uncontrolled (defaultValue) or only write the value when the element is not focused." },
+    { "severity": "low", "location": "app/src/lib/data.js:313", "issue": "The Level Up table's default sort compares level only, so moves sharing a level fall back to API order instead of name order, contrary to the spec ('by level, then move name').", "suggestion": "Add a secondary compare on moveEn (a.moveEn.localeCompare(b.moveEn)) after the level compare." },
+    { "severity": "low", "location": "app/src/routes/index.jsx:65-80", "issue": "Selects use per-<option> selected attributes instead of a value prop; a bogus query value (e.g. ?type=xyz) leaves the control showing nothing while the filter silently doesn't apply, so the UI disagrees with the URL.", "suggestion": "Bind value on the <select> and render a disabled/selected placeholder when the URL value isn't in the list." },
+    { "severity": "low", "location": "app/src/app.jsx:37-40", "issue": "There is no ErrorBoundary anywhere; a server-function transport error or serialization failure leaves the Suspense area blank with no user-facing fallback.", "suggestion": "Wrap the root (or route content) in an ErrorBoundary with a simple fallback page." },
+    { "severity": "low", "location": "app/src/lib/data.js:90-109", "issue": "cardsFromPokemonRefs accepts an `extra` callback that no caller uses — the ability page attaches the hidden flag separately at data.js:398-405 — leaving speculative generality and a confusing dangling comment.", "suggestion": "Drop the `extra` parameter and let callers decorate the returned cards, as the ability page already does." },
+    { "severity": "low", "location": "app/src/routes/pokemon/[name].jsx:26-30", "issue": "Hash anchoring is handled only in onMount; changing the Game select navigates to ?game=…#moves but nothing scrolls, and the section markup duplicates Section.jsx to attach the ref.", "suggestion": "Extend Section with a ref/anchor forwarding option and re-scroll on game change (e.g. an effect on selectedGame) instead of duplicating the markup." },
+    { "severity": "low", "location": "app/src/lib/data.js:162", "issue": "Out-of-range page numbers are clamped for display ('Page 22 of 22') while the URL keeps ?page=999, so the address bar and results disagree.", "suggestion": "Redirect/replace the URL to the clamped page, or leave the page param out when it's clamped to the default." },
+    { "severity": "low", "location": "app/src/routes/index.jsx:61-71", "issue": "pageHref is a near-duplicate of updateParams's URLSearchParams merging logic, so the two can drift if a filter is ever added to only one of them.", "suggestion": "Extract one buildSearch(current, patch) helper used by both the links and the filter handlers." }
+  ],
+  "summary": "A genuinely idiomatic SolidStart v2 app — query + \"use server\", createAsync, preload and HttpStatusCode all match the current docs, with a clean data-layer boundary and tidy components. The blocking items are small but real: failure responses are cached as null forever, the search debounce timer survives unmount and can navigate the user away from the page they just clicked, and the controlled input can swallow in-flight keystrokes. I'd ask for that round of fixes, then merge."
+}
+```

@@ -1,0 +1,160 @@
+## Review — test quality
+
+**Facts on the ground.** The app contains **no tests of its own**. `app/package.json:6-9` defines only `build` and `start` — no `test` script. `find` over `app/` surfaces no test files (only `src/*.js`, `src/views/*.js`, `public/app.js`, `scripts/build.mjs`), and the measured facts confirm: 0 test files, 0 cases, 0 assertions, no runner, `testLoc: 0`. The pure-function helpers in `app/src/format.js`, the whole data-assembly layer in `app/src/api.js`, the route/filter logic in `app/src/app.js`, and the client-side sort in `app/public/app.js` are all guarded only by the harness's acceptance suite, which the agent didn't write.
+
+**Where the risk actually lives** (all verified by reading the code):
+
+- **Home filtering/pagination** — `app/src/app.js:58-68`: three-way conjunction filter, `parseInt` page parsing, clamp-to-totalPages, `(page-1)*48` slicing. Off-by-one errors, a broken page clamp (`page=0`, `page=99999`), or a search that stops matching humanized names would silently pass review.
+- **Species index assembly** — `app/src/api.js:94-121`: types reconstructed from per-type `pokemon` lists (not from `/pokemon/`), sorted by slot, generation mapped by species *name*. A refactor that mixes up slot order, drops the `id > 10000` exclusion, or keys the generation map by id instead of name would degrade cards and type filtering with no error.
+- **Moves table assembly** — `app/src/app.js:101-157`: version-group ordering from a separate `order` map, default = highest order (`games[games.length-1]`), `METHOD_ORDER` tiered sort with a fiddly `-1 → 99` fallback, level-up sort by level-then-name. Wrong default game or method order would look plausible and slip through.
+- **Client-side column sorting** — `app/public/app.js:14-46`: DOM `indexOf(th)` column math, missing-last in both directions, numeric vs `localeCompare`. Any markup change (extra column, reordered cells) silently breaks sorting; nothing in `app/` could catch it.
+- **Card mapping** — `app/src/app.js:208-228`: dedup, alternate-form exclusion, pokemon-id→species-name resolution, `is_hidden` propagation. A dropped card undercounts `<count> Pokémon` without any visible failure.
+- **URL state** — `app/src/views/home.js:8-16` (`pageUrl` omitting defaults) plus `app/public/app.js:6-10` (stripping empty htmx params). Regressions here pollute the canonical URLs the tests assert.
+- **Error paths** — `app/src/app.js:303-308`: `notFound` fallback and `onError` returning a bare `c.text(...)` that abandons the page layout contract; a species whose API record errors mid-chain (`app/src/app.js:172-197`) renders partially.
+
+Given the framework, nearly all of this is cheaply testable: `humanize`/`latestEnglishFlavor`/`dexNumber` are pure (`app/src/format.js:5-38`), and the routes are testable headlessly via `app.request()` from `hono` with a stubbed `API_BASE` or a `fetch` mock — no browser needed. That the agent wrote zero tests while shipping ~590 significant LOC of transformation logic is the headline finding.
+
+```json
+{
+  "dimension": "tests",
+  "criteria": {
+    "coverage_of_risk": {
+      "score": 1,
+      "evidence": [
+        "app/package.json:6-9 — no test script at all; only build and start defined",
+        "app/src/app.js:58-68 — home filter/pagination clamp logic, the app's riskiest URL-state code, entirely untested",
+        "app/src/api.js:94-121 — speciesIndex reconstruction (slot-ordered types, generation-by-name map, id>10000 exclusion) untested",
+        "app/src/app.js:101-157 — moves version-group ordering, default-game selection, METHOD_ORDER tiered sort, untested"
+      ],
+      "rationale": "No tests exist in app/, so none of the risky logic — filtering, pagination, data assembly, sorting, not-found paths — is covered by the app's own suite."
+    },
+    "behaviour_not_implementation": {
+      "score": 1,
+      "evidence": [
+        "app/ — zero test files anywhere in the app directory (confirmed by find and the measured testLoc: 0)"
+      ],
+      "rationale": "There are no tests to classify; per the anchor, 'no tests' scores 1."
+    },
+    "regression_power": {
+      "score": 1,
+      "evidence": [
+        "app/src/format.js:5-38 — pure helpers (humanize, dexNumber, latestEnglishFlavor, statLabel) trivially unit-testable but unguarded",
+        "app/public/app.js:14-46 — client sort's column-index math and missing-last rule would survive any markup refactor unnoticed",
+        "app/src/app.js:208-228 — speciesCardsFor dedup/exclusion/hidden-flag logic has no safety net"
+      ],
+      "rationale": "With zero tests, any refactor of the data layer, filters, or sort code can break behaviour without a single local failure; only the external acceptance suite would notice."
+    },
+    "signal_to_noise": {
+      "score": 3,
+      "evidence": [
+        "app/ — no tests, hence no noise; the scale anchors 'no tests' at 3"
+      ],
+      "rationale": "There is no padding because there is nothing at all; neutral score per the anchor, though absence itself is the problem."
+    }
+  },
+  "overall": 1,
+  "findings": [
+    {
+      "severity": "high",
+      "location": "app/package.json:6-9",
+      "issue": "The app ships zero tests — no test script, no runner, no test files — despite containing ~590 significant LOC of data transformation and URL-state logic.",
+      "suggestion": "Add a test script (node:test or vitest) and start with unit tests for format.js helpers and route tests via Hono's app.request() with a stubbed API base."
+    },
+    {
+      "severity": "high",
+      "location": "app/src/app.js:58-68",
+      "issue": "Home filtering and pagination (page parse, clamp to totalPages, 48-per-page slice) are untested; off-by-one and clamp bugs would slip through.",
+      "suggestion": "Route-level tests over a small speciesIndex fixture asserting counts, slice boundaries, and page clamping for page=0/1/last/overflow."
+    },
+    {
+      "severity": "high",
+      "location": "app/src/api.js:94-121",
+      "issue": "speciesIndex reconstruction (types per pokemon id from type records, slot sort, generation keyed by species name, id>10000 exclusion) is untested; a refactor could silently drop type badges or misattribute generations.",
+      "suggestion": "Unit-test speciesIndex against a minimal fake API payload including an alternate form and a dual-type species."
+    },
+    {
+      "severity": "high",
+      "location": "app/src/app.js:101-157",
+      "issue": "pokemonMovesData's version-group ordering, default-game selection (highest order), METHOD_ORDER tiered sort and level-up sort are untested — wrong ordering looks plausible and passes review.",
+      "suggestion": "Unit-test with a fixture covering level-up/machine/egg/tutor plus an unknown method, and assert default game and row order."
+    },
+    {
+      "severity": "high",
+      "location": "app/public/app.js:14-46",
+      "issue": "Client-side table sorting (column index via indexOf(th), missing-last in both directions, numeric vs localeCompare, aria-sort toggling) has no test; any markup change silently breaks it.",
+      "suggestion": "Add a Playwright (or jsdom) test that clicks headers and asserts row order, aria-sort, and that em-dash values stay last in both directions."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/app.js:208-228",
+      "issue": "speciesCardsFor's dedup, alternate-form exclusion, id→species-name mapping and hidden-ability flag are untested; a dropped card undercounts '<count> Pokémon' with no visible error.",
+      "suggestion": "Unit-test with entries including a duplicate, an id>10000 form, and a hidden-ability reference."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/views/home.js:8-16",
+      "issue": "URL-state construction (pageUrl omitting empty/default params, page only when >1) and the htmx param-stripping at app/public/app.js:6-10 are untested; regressions pollute canonical URLs.",
+      "suggestion": "Unit-test pageUrl permutations and an integration test that filtering with empty values leaves the URL clean."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/app.js:303-308",
+      "issue": "Error and not-found paths are untested; app.onError returns bare text (abandoning the page/landmark contract) and a failed evolution-chain fetch (app/src/app.js:172-197) degrades the page silently.",
+      "suggestion": "Route tests asserting 404 status and rendered 'Not found' h1 for unknown names/routes, plus a mocked API failure to pin down the error-path behaviour you intend."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/format.js:5-38",
+      "issue": "Pure display helpers (humanize edge cases, dexNumber padding, latestEnglishFlavor 'last English entry' rule, stat labels) are untested despite being the cheapest possible tests to write.",
+      "suggestion": "A handful of table-driven unit tests would lock the spec's definitions (humanized name, em-dash, flavor text) in place."
+    }
+  ],
+  "summary": "The app contains no tests of its own: no test script in package.json and no test files anywhere under app/. Yet it carries substantial, refactor-fragile logic — home filtering/pagination, species-index assembly, moves-table ordering, and DOM-based column sorting — all of which would be cheap to test via node:test and Hono's app.request(). Until someone adds that suite, the acceptance tests are the only guard, and data-layer refactors can break the UI silently.",
+  "wroteTests": false,
+  "testCount": 0,
+  "valuableTests": [],
+  "lowValueTests": [],
+  "untested": [
+    {
+      "area": "Home filtering, search matching and pagination (app/src/app.js:58-68)",
+      "risk": "high",
+      "likelyBug": "Off-by-one in the 48-per-page slice, page clamp ignoring page=0 or NaN, or search no longer matching humanized names — counts and paging silently wrong."
+    },
+    {
+      "area": "Species index assembly: types by slot, generation mapping, alternate-form exclusion (app/src/api.js:94-121)",
+      "risk": "high",
+      "likelyBug": "Type badges shuffled across slots, species losing their generation filter, or Mega forms reappearing in lists after a refactor."
+    },
+    {
+      "area": "Moves tables: version-group ordering, default game selection, method ordering and row sorting (app/src/app.js:101-157)",
+      "risk": "high",
+      "likelyBug": "Wrong default game (not the highest order), methods out of Level Up/Machine/Egg/Tutor order, or level-up rows not sorted by level-then-name."
+    },
+    {
+      "area": "Client-side sortable headers and aria-sort state (app/public/app.js:14-46)",
+      "risk": "high",
+      "likelyBug": "Column-index math off after a markup change, missing values no longer sorting last, or numeric columns sorted as strings."
+    },
+    {
+      "area": "Pokémon card mapping for moves/abilities/types: dedup, id>10000 exclusion, hidden-ability flag (app/src/app.js:208-228)",
+      "risk": "medium",
+      "likelyBug": "Duplicate or missing cards and a '<count> Pokémon' that no longer matches the list, or the '(hidden)'/'Hidden ability' marker lost."
+    },
+    {
+      "area": "URL query-state construction and htmx param stripping (app/src/views/home.js:8-16, app/public/app.js:6-10)",
+      "risk": "medium",
+      "likelyBug": "Default parameters (type=, page=1) leaking into pushed URLs, breaking deep links and back/forward behaviour."
+    },
+    {
+      "area": "Not-found and API-failure paths (app/src/app.js:162-163, 303-308)",
+      "risk": "medium",
+      "likelyBug": "Unknown resource names rendering an empty 500 or the plain-text onError page that drops the banner/main/contentinfo contract."
+    },
+    {
+      "area": "Pure formatting helpers (app/src/format.js:5-38)",
+      "risk": "low",
+      "likelyBug": "humanize or dexNumber regressions (e.g. '#0025' padding, 'Mr Mime' casing) introduced by an 'innocent' cleanup."
+    }
+  ]
+}
+```

@@ -1,0 +1,190 @@
+# Review: `app/` — Editability
+
+Vanilla TypeScript + Vite 8, no UI framework. The app is a string-template SPA: `api.ts` (fetch + in-memory cache) → `data.ts` (memoized aggregates) → `components.ts` (HTML atoms) → `pages/*` (one file per route) → `main.ts` (if/else router) with `nav.ts` as a tiny navigation bus. That layering is the code's best property; the weaknesses are a forked data helper and a sorting layer that re-parses its own rendered DOM.
+
+## Scenario walkthroughs
+
+1. **Remove Abilities** — delete `app/src/pages/ability.ts`, drop the import/branch at `app/src/main.ts:5,22`, remove the Abilities section at `app/src/pages/pokemon.ts:118-125` (and its use at `:139`). Nav never links abilities (`app/index.html:17-19`), so no dead links; only `.card-note` CSS (`app/src/style.css:201`) is orphaned, and it's generic. Clean: **difficulty 4**.
+2. **Sprite bug (default Pokémon ≠ species name, e.g. Deoxys)** — the URL formula lives in exactly one place, `spriteUrl` (`app/src/api.ts:39`) consumed by `pokemonCard` (`app/src/components.ts:23`), which every list uses (`home.ts:130`, `move.ts:34`, `ability.ts:46`, `types.ts:57`), so a formula fix covers all lists. But `SpeciesRef.id` is produced inconsistently: species-id in `getSpeciesList` (`app/src/data.ts:30`) vs Pokémon-id in `speciesFromPokemonRefs` (`:105`) and the forked mapping in `app/src/pages/ability.ts:26-35`; they only coincide because the spec says default Pokémon ID == species ID. If the fix needs real Pokémon data, it lands in three producers. **difficulty 3**.
+3. **Sort cards by name everywhere** — four call sites (`home.ts:118`, `move.ts:34`, `ability.ts:36-38`, `types.ts:37-38`) each hold the array before rendering, so sorting is easy per page, but `speciesFromPokemonRefs` hard-codes the dex sort *inside* the shared helper (`app/src/data.ts:110-112`), so three pages either re-sort after the call or the helper grows a flag. **difficulty 3**.
+4. **Add Items shaped like Moves** — the plumbing (`apiJson`, `memo`, `section`, `typeBadge`, `humanize/enName/num`) is fully reusable; the page skeleton (fetch → `isNotFound` → `renderNotFound`, title, h1+sections) is *not* factored — `move.ts:10-16,31-35` duplicates the same boilerplate as `types.ts:26-33` and `ability.ts:8-16`, so a new section copies ~40 lines, plus a route branch in `main.ts:23` and optionally a nav link in `index.html`. **difficulty 4**.
+5. **API base URL / caching change** — base URL: `app/src/api.ts:5` is the only consumer, injected via `/config.js` from `app/server.mjs:8,37-40` (and `vite.config.ts:13` for dev); but the default `http://localhost:9000` is written out in three files. Caching: two mechanisms — the promise cache (`api.ts:21-34`) and per-helper `memo` (`data.ts:15-18`) — so changing cache policy (e.g. TTL) touches both, and `memo` is replicated per helper rather than centralized. **difficulty 4**.
+
+## Criteria
+
+- **removability: 4** — features are one-page-plus-route-branch; nav is static and only links `/` and `/types` (`app/index.html:16-20`), so nothing dangles. Not 5 because section content is inlined in page templates and `section()`'s counter ids (`app/src/components.ts:35-42`) mean hand-built duplicates exist (see findings).
+- **changeability: 3** — the card/sprite fix point is genuinely singular, but the Pokémon→species mapping exists twice (`app/src/data.ts:98-113` vs `app/src/pages/ability.ts:20-38`), and moves-table sorting re-derives `MoveRow` from rendered DOM text (`app/src/pages/pokemon.ts:279-305`) instead of keeping the data already computed in `movesSectionHtml` — markup changes silently break sorting.
+- **coupling: 4** — clean one-way layering with narrow seams: pages never import each other, `nav.ts:9-14` decouples pages from history/router, `server.mjs` is fully separate from client code, and `window.__API_BASE_URL__` is an explicit config seam. Deductions: API records flow as untyped `any` everywhere (no narrow interfaces at the `data.ts` boundary), and `sectionCounter` is module-global mutable state (`app/src/components.ts:25`).
+- **abstraction_design: 3** — `memo`, `speciesFromPokemonRefs`, `pokemonCard(opts)`, `section(title, inner, attrs)` are the right abstractions and stretch reasonably; but the helper hard-codes its sort (forcing the ability page to fork it), `section()` can't express the `id="moves"` anchor so the empty case is hand-built with a *different* heading-id scheme (`app/src/pages/pokemon.ts:153-154`), and per-resource page boilerplate is copy-pasted across four pages.
+
+## Findings
+
+1. **medium** — `app/src/pages/pokemon.ts:279-305`: sorting reconstructs `MoveRow` by scraping `textContent`/`href` of the just-rendered table, duplicating column-offset knowledge with `moveRowHtml` (`:225-236`). Suggestion: return the parsed `rows` from `movesSectionHtml` (module-level WeakMap keyed by `<table>`, or attach via a dataset/closure) and sort that.
+2. **medium** — `app/src/pages/ability.ts:20-38` duplicates the Pokémon-ref→species mapping that `speciesFromPokemonRefs` (`app/src/data.ts:98-113`) already implements, differing only in carrying `is_hidden`. Suggestion: generalize the shared helper (e.g. return the raw entry alongside `SpeciesRef`) instead of forking it.
+3. **medium** — `app/src/data.ts:6-9` / `app/src/data.ts:105`: `SpeciesRef.id` conflates species id and Pokémon id across producers; sprite/dex rendering relies on the spec's "default Pokémon ID == species ID" coincidence. Suggestion: make the distinction explicit (carry both ids, or fetch the default variety's Pokémon id where needed).
+4. **low** — `app/src/api.ts:5`, `app/server.mjs:8`, `app/vite.config.ts:13`: default API URL duplicated in three files. Centralize (e.g. a shared constant or read it only from `__API_BASE_URL__` with a single fallback).
+5. **low** — `app/src/data.ts:15-18` + `app/src/api.ts:21-34`: two independent caching mechanisms with no TTL/eviction seam. If "caching rules change", both must be edited; consider one cache layer with configurable policy.
+6. **low** — `app/src/pages/pokemon.ts:153-154`: hand-built "empty moves" section with `moves-heading` id, diverging from `section()`'s counter ids (`app/src/components.ts:36-42`). Use `section('Moves', ..., 'id="moves"')` which already accepts attrs.
+7. **low** — `app/src/pages/move.ts:10-16` (same in `types.ts`, `ability.ts`, `pokemon.ts`): fetch → `isNotFound` → `renderNotFound` → `document.title` boilerplate copy-pasted per page; factor a `loadResourceOr404` helper to make a future Items section cheap.
+8. **low** — pervasive `any` for API records (`app/src/data.ts:29`, all of `pages/*.ts`): no compiler help when the API shape shifts, and refactors rely on grep. Declare the handful of record shapes actually consumed at the `data.ts` boundary.
+
+```json
+{
+  "dimension": "editability",
+  "criteria": {
+    "removability": {
+      "score": 4,
+      "evidence": [
+        "app/src/pages/ability.ts:7 — whole feature is one page file",
+        "app/src/main.ts:5,22 — one import and one route branch to delete",
+        "app/src/pages/pokemon.ts:118-125 — only other reference is the Pokémon page's own Abilities section",
+        "app/index.html:16-20 — nav never links abilities, so no dead nav",
+        "app/src/style.css:201 — .card-note is generic, no ability-specific CSS to orphan"
+      ],
+      "rationale": "Features are one page file plus a route branch; deleting Abilities touches three files and leaves no dead links or dead code. Not 5 because section markup is inlined in page templates rather than composed from named pieces."
+    },
+    "changeability": {
+      "score": 3,
+      "evidence": [
+        "app/src/components.ts:23 — every card list renders through pokemonCard/spriteUrl, so a sprite-URL fix covers all lists",
+        "app/src/data.ts:98-113 vs app/src/pages/ability.ts:20-38 — Pokémon→species mapping implemented twice; mapping bugs get fixed twice",
+        "app/src/pages/pokemon.ts:279-305 — sort data reconstructed by scraping rendered DOM text/hrefs, duplicating column layout of moveRowHtml (:225-236)",
+        "app/src/util.ts:2-5 — manual esc() at every interpolation; new fields can silently skip escaping"
+      ],
+      "rationale": "The most likely fixes (card sprite, formatting, names) each land in one obvious place, but the ref→species mapping and the moves-table row model are each implemented twice, in ways that can drift apart."
+    },
+    "coupling": {
+      "score": 4,
+      "evidence": [
+        "app/src/api.ts:21-39 — single fetch/cache module; pages never touch fetch or URLs directly",
+        "app/src/nav.ts:9-14 — tiny bus so pages trigger navigation without importing the router",
+        "app/server.mjs:8,37-40 — server-side code fully separate; API base injected as explicit window config seam",
+        "app/src/components.ts:25 — module-global mutable sectionCounter is hidden shared state",
+        "app/src/data.ts:29 — API records cross the boundary as untyped any, weakening the seam"
+      ],
+      "rationale": "Clear one-way layering (api → data → components → pages → router) with narrow, explicit seams; deductions for untyped any records and one piece of global mutable state."
+    },
+    "abstraction_design": {
+      "score": 3,
+      "evidence": [
+        "app/src/data.ts:15-18 — memo helper cleanly reused across seven loaders",
+        "app/src/data.ts:110-112 — speciesFromPokemonRefs hard-codes the dex sort, forcing callers wanting a different order to re-sort or fork (ability.ts did fork)",
+        "app/src/pages/pokemon.ts:153-154 — section() can't take an id, so the empty-moves case hand-builds a section with a different heading-id scheme",
+        "app/src/pages/move.ts:10-16 — page skeleton (fetch/404/title) copy-pasted in types.ts, ability.ts, pokemon.ts",
+        "app/src/components.ts:18-21 — pokemonCard opts object stretches to types/note without boolean-flag creep"
+      ],
+      "rationale": "The abstractions are the right ones and stretch to most variation, but two real cases (ability's hidden flag, the moves anchor id) required forking or hand-building, and the per-resource page boilerplate is duplicated rather than generalized."
+    }
+  },
+  "overall": 4,
+  "findings": [
+    {
+      "severity": "medium",
+      "location": "app/src/pages/pokemon.ts:279",
+      "issue": "Moves-table sorting reconstructs MoveRow data by scraping the rendered DOM (textContent, hrefs, column offsets) instead of keeping the rows already computed in movesSectionHtml; markup changes silently break sorting.",
+      "suggestion": "Hand the parsed rows from movesSectionHtml to wireMovesSection (closure, WeakMap keyed by the table, or dataset) and sort that data directly."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/pages/ability.ts:20",
+      "issue": "Duplicates the Pokémon-ref→species mapping that speciesFromPokemonRefs (app/src/data.ts:98) already provides, differing only in tracking is_hidden; the two implementations can drift.",
+      "suggestion": "Generalize speciesFromPokemonRefs to also return the raw entry (or accept an extractor) and have the ability page use it."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/data.ts:6",
+      "issue": "SpeciesRef.id means species id in getSpeciesList (:30) but Pokémon id in speciesFromPokemonRefs (:105) and ability.ts; sprite/dex rendering only works because the spec guarantees default Pokémon ID == species ID.",
+      "suggestion": "Make the distinction explicit — carry species and Pokémon ids separately, or document and validate the invariant at the data boundary."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/api.ts:5",
+      "issue": "Default API base URL 'http://localhost:9000' is duplicated in api.ts, server.mjs:8 and vite.config.ts:13.",
+      "suggestion": "Define the fallback in one place (e.g. a shared constant imported by server.mjs and vite.config.ts)."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/data.ts:15",
+      "issue": "Two independent caching mechanisms (api.ts promise cache and per-helper memo) with no TTL/eviction policy seam; changing caching rules means editing both.",
+      "suggestion": "Fold memo into a single cache layer with a configurable policy."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/pages/pokemon.ts:153",
+      "issue": "Empty-moves case hand-builds a section with id 'moves-heading' while section() generates counter-based ids, creating two heading-id schemes for the same section.",
+      "suggestion": "Use section('Moves', ..., 'id=\"moves\"') which already accepts extra attrs."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/pages/move.ts:10",
+      "issue": "Fetch → isNotFound → renderNotFound → document.title boilerplate is copy-pasted in all four resource pages, raising the cost of the next Items-shaped section.",
+      "suggestion": "Factor a loadResourceOr404(path, root) helper returning the record or null."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/data.ts:29",
+      "issue": "API records flow through the app as untyped any, so data-shape changes get no compiler help and refactors rely on grep.",
+      "suggestion": "Declare the record shapes actually consumed (species, pokemon, type, move, ability, generation) at the data.ts boundary."
+    }
+  ],
+  "summary": "A small, well-layered vanilla TS app where every scenario lands in a small, findable set of files: features are one page file plus a route branch, and card/sprite rendering has a single shared implementation. The real risks are duplicated logic (the ref→species mapping exists in two places, the moves-table row model in two places, one of which scrapes the DOM) and the untyped any records flowing across the data boundary. It's a comfortable 4: I'd merge it after fixing the DOM-reparse and the forked helper.",
+  "scenarios": [
+    {
+      "change": "Remove the Abilities pages and every link to them",
+      "files": [
+        "app/src/pages/ability.ts",
+        "app/src/main.ts",
+        "app/src/pages/pokemon.ts",
+        "app/src/style.css"
+      ],
+      "difficulty": 4,
+      "notes": "Delete one page file, one import/branch in main.ts, and the Abilities section in pokemon.ts; nav never links abilities so no dead links. Only generic CSS (.card-note) is left behind."
+    },
+    {
+      "change": "Fix wrong sprite for species whose default Pokémon has a different name (e.g. Deoxys)",
+      "files": [
+        "app/src/components.ts",
+        "app/src/api.ts",
+        "app/src/data.ts",
+        "app/src/pages/ability.ts"
+      ],
+      "difficulty": 3,
+      "notes": "The URL formula is one place (spriteUrl/pokemonCard) used by every list, so a formula fix covers all lists. But SpeciesRef.id is produced three ways (species list, speciesFromPokemonRefs, ability.ts's fork), so a fix that needs real Pokémon data touches all three producers."
+    },
+    {
+      "change": "Add sorting by name to every list of Pokémon cards",
+      "files": [
+        "app/src/pages/home.ts",
+        "app/src/pages/move.ts",
+        "app/src/pages/ability.ts",
+        "app/src/pages/types.ts",
+        "app/src/data.ts"
+      ],
+      "difficulty": 3,
+      "notes": "Each page holds the array before rendering so per-page sorts are trivial, but speciesFromPokemonRefs hard-codes its dex sort inside the shared helper, so three pages either re-sort after the call or the helper grows a flag; home must also re-sort before pagination slicing."
+    },
+    {
+      "change": "Add an Items section (/items, /items/:name) shaped like Moves",
+      "files": [
+        "app/src/pages/item.ts",
+        "app/src/main.ts",
+        "app/index.html",
+        "app/src/data.ts"
+      ],
+      "difficulty": 4,
+      "notes": "api.ts, util.ts and components.ts are fully reusable, and adding a route is one branch in main.ts. The ~40-line page skeleton (fetch/404/title/h1+sections) is copy-pasted per page rather than factored, so that part is duplicated."
+    },
+    {
+      "change": "Change the API base URL and caching rules",
+      "files": [
+        "app/src/api.ts",
+        "app/src/data.ts",
+        "app/server.mjs",
+        "app/vite.config.ts"
+      ],
+      "difficulty": 4,
+      "notes": "Base URL is consumed in exactly one module and injected via /config.js, a clean seam — but the default URL literal appears in three files, and caching policy spans two mechanisms (api.ts cache and data.ts memo) with no TTL/policy hook."
+    }
+  ]
+}
+```

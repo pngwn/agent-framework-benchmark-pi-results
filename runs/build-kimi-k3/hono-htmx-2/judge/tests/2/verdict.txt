@@ -1,0 +1,188 @@
+## Review: test quality
+
+**The app contains zero tests of its own.** `app/package.json` has no `test` script and an empty `devDependencies` block; `app/src/` contains only `api.js`, `app.js`, `server.js`, `views.js` plus static assets. There is no test runner, no fixture, nothing. Everything that follows is about what the acceptance suite in `tests/` will *not* catch once someone starts refactoring this code.
+
+### What's most at risk
+
+The codebase is actually well-factored for testing — almost all of its risky logic is pure or nearly-pure — which makes the total absence of tests more painful:
+
+- **Sorting** (`app/src/app.js:151-162`): `sortedRows` implements "missing values sort last in both directions" via early returns that bypass the `sign` multiplier. A refactor that "simplifies" this to `sign * cmp` uniformly would silently put null Power/Accuracy at the *top* of descending tables. Nothing would fail.
+- **Moves-table assembly** (`app/src/app.js:65-143`): the default-game selection (highest `order`, `app.js:76-78`), the per-move dedup key `${method}:${level}` (`app.js:100`), and the method-ordering comparator with its `99` sentinel (`app.js:114-118`) are all subtle invariants. `Level Up`-by-level-then-name ordering lives at `app.js:135-138`.
+- **Index building** (`app/src/api.js:72-126`): the entire data layer — species list, type/generation association, alternate-form exclusion (which works only implicitly, via `byId.get(pid)` missing IDs >1025) — is built once per process. If the API ever ignored `?limit=100000` and the `next` cursor were dropped, the dex would silently truncate to the first page.
+- **URL construction** (`app/src/api.js:16`): the template appends a trailing `/` *after* the query string — `?limit=100000/` — which only works because the local API server uses lenient `parseInt` on the limit. This is a latent bug a one-line unit test on `apiFetch` would have caught.
+- **Duplicated flavor-text logic**: `app/src/api.js:46-51` exports `latestEnglishFlavor`, but `app/src/views.js:182-183` re-implements it inline on the Pokémon page. Two implementations can diverge; no test pins either.
+- **Ability dedup** (`app/src/app.js:228`): the "non-hidden entry wins" rule is encoded as the boolean pun `existing.hidden && entry.is_hidden`. Clever, correct, and completely untested.
+- **URL state and pagination** (`app/src/views.js:145-152`, `app/src/app.js:73-76`): page clamping and "omit parameters at default" are spec'd behaviours with no guard.
+- **htmx behaviour**: the fragment endpoints (`app/src/app.js:84-85`) and the `htmx:configRequest` empty-param stripping (`app/public/app.js:1-8`) — which is the only reason pushed URLs omit default filters — are only exercised end-to-end by the acceptance suite.
+
+### Scores
+
+- **coverage_of_risk: 1** — no tests exist; the riskiest logic (sorting, index building, moves assembly, URL state) is entirely unguarded.
+- **behaviour_not_implementation: 1** — no tests at all.
+- **regression_power: 1** — nothing would fail; only the borrowed acceptance suite catches anything.
+- **signal_to_noise: 3** — vacuously lean; nothing to maintain, nothing padding.
+
+The one mitigation I'll note: the code is unusually easy to retrofit tests onto — pure helpers in `api.js` and a plain `app.request()`-able Hono instance in `app.js` mean a `node:test` suite could cover `sortedRows`, `humanize`, `latestEnglishFlavor`, `toSpeciesList`, `buildIndex` and the `?limit=` URL building in an afternoon. `hono ^4.13.14` is the current stable release (v5 is still RC), so no framework-version excuse applies.
+
+```json
+{
+  "dimension": "tests",
+  "criteria": {
+    "coverage_of_risk": {
+      "score": 1,
+      "evidence": [
+        "app/package.json:6-10 — no test script, no devDependencies, no runner",
+        "app/src/app.js:151-162 — sortedRows: null-last-in-both-directions invariant, untested",
+        "app/src/api.js:72-126 — buildIndex: whole data layer, untested",
+        "app/src/app.js:65-143 — buildMovesData: game default, dedup, method ordering, untested",
+        "app/src/api.js:16 — apiFetch URL building appends trailing slash after query string (latent ?limit=100000/ bug), untested"
+      ],
+      "rationale": "No tests exist at all, and the riskiest logic — sorting, filtering, index building, URL state, error paths — is exactly where a refactor would silently break."
+    },
+    "behaviour_not_implementation": {
+      "score": 1,
+      "evidence": [
+        "app/src — zero test files anywhere in app/",
+        "app/package.json:10 — dependencies only; nothing test-related installed"
+      ],
+      "rationale": "There are no tests, behavioural or otherwise."
+    },
+    "regression_power": {
+      "score": 1,
+      "evidence": [
+        "app/src/app.js:151-162 — flipping the sign handling would break null-last ordering with nothing failing",
+        "app/src/views.js:182-183 — inline duplicate of latestEnglishFlavor (api.js:46-51) can diverge unnoticed",
+        "app/public/app.js:1-8 — htmx empty-param stripping only guarded by the acceptance suite"
+      ],
+      "rationale": "Any behaviour not covered by the borrowed acceptance tests (sorting details, dedup, URL building, error paths) would regress silently."
+    },
+    "signal_to_noise": {
+      "score": 3,
+      "evidence": [
+        "app/ — no test files, so no noise either"
+      ],
+      "rationale": "Per the rubric, no tests scores 3: nothing to maintain, but nothing earned either."
+    }
+  },
+  "overall": 1,
+  "findings": [
+    {
+      "severity": "high",
+      "location": "app/package.json:6-10",
+      "issue": "No test suite of any kind: no test script, no devDependencies, no test files.",
+      "suggestion": "Add node:test (zero new deps) covering api.js helpers, sortedRows, buildMovesData ordering and the Hono app via app.request(); wire it to a 'test' script."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/api.js:16",
+      "issue": "URL template appends a trailing slash after the query string, producing '?limit=100000/'; it works only because the local API's parseInt is lenient.",
+      "suggestion": "Build URLs with new URL()/URLSearchParams and add a unit test asserting apiFetch('pokemon-species/?limit=100000') yields a well-formed query."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/app.js:151-162",
+      "issue": "Missing-values-sort-last is enforced by early returns that bypass the direction sign; a refactor applying the sign uniformly would put nulls first when descending.",
+      "suggestion": "Unit-test ascending and descending sorts over rows containing null power/accuracy, asserting nulls last in both."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/views.js:182-183",
+      "issue": "Latest-English-flavor-text logic is duplicated inline here and exported from api.js:46-51; the two can diverge.",
+      "suggestion": "Delete the inline IIFE and use latestEnglishFlavor from api.js; add a unit test with \\n/\\f whitespace and mixed languages."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/app.js:114-118",
+      "issue": "Method-ordering comparator relies on a 99 sentinel and a compound condition; subtle and untested.",
+      "suggestion": "Extract a pure methodOrder(list) helper and unit-test Level Up/Machine/Egg/Tutor first, others alphabetical."
+    },
+    {
+      "severity": "medium",
+      "location": "app/src/app.js:228",
+      "issue": "Ability 'non-hidden entry wins' dedup encoded as the boolean pun existing.hidden && entry.is_hidden; fragile under refactor.",
+      "suggestion": "Write it explicitly (skip if existing && !existing.hidden) and cover with a unit test using hidden+normal duplicates."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/api.js:72-126",
+      "issue": "buildIndex trusts ?limit=100000 and ignores the list's 'next' cursor; alternate-form exclusion works only implicitly via byId misses.",
+      "suggestion": "Follow pagination cursors and add a test asserting species count matches the API total and IDs stay <=1025."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/app.js:255-258",
+      "issue": "onError renders the Not-found page markup with HTTP 500; the error path is untested and conflates errors with 404s.",
+      "suggestion": "Render a distinct error page (or 500 with retry copy) and add a test forcing an upstream failure."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/views.js:194",
+      "issue": "Artwork falls back to a hardcoded URL pattern even when the API explicitly returned null, hiding missing-data signals.",
+      "suggestion": "Respect the API value and render a placeholder when null; unit-test the fallback."
+    },
+    {
+      "severity": "low",
+      "location": "app/public/app.js:1-8",
+      "issue": "htmx empty-param stripping (the only thing keeping pushed URLs clean of default filters) is verified only by the acceptance suite.",
+      "suggestion": "Cover the '/' fragment endpoint via app.request() with an HX-Request header asserting query params are omitted, and a small DOM test for the configRequest hook."
+    }
+  ],
+  "summary": "The app ships with no tests of its own: no test script, no runner, no test files anywhere in app/. That's a real cost here because the code is otherwise clean and pure-function-shaped — sorting invariants, moves-table assembly, index building and URL construction would all be cheap to pin down and are exactly where a refactor would silently break. At minimum, add a node:test suite for api.js helpers, sortedRows and the Hono routes via app.request().",
+  "wroteTests": false,
+  "testCount": 0,
+  "valuableTests": [],
+  "lowValueTests": [],
+  "untested": [
+    {
+      "area": "Moves-table sorting (app/src/app.js:151-162) — null-last in both directions, direction flip, numeric vs localeCompare",
+      "risk": "high",
+      "likelyBug": "Refactor applies the sign to null comparisons, putting missing Power/Accuracy at the top of descending tables; tie-breaking and aria-sort state drift unnoticed"
+    },
+    {
+      "area": "Moves data assembly (app/src/app.js:65-143) — default game = highest order, dedup key, method ordering, Level-Up row order",
+      "risk": "high",
+      "likelyBug": "Default game selection or method order breaks (Level Up/Machine/Egg/Tutor then alphabetical); duplicate move rows reappear; dedup key change drops legitimate entries"
+    },
+    {
+      "area": "Global index building (app/src/api.js:72-126) — species/type/generation association, alternate-form exclusion, ?limit=100000 pagination",
+      "risk": "high",
+      "likelyBug": "API caps or ignores the limit and the code ignores 'next', silently truncating the dex to the first page; a species loses or gains a type slot silently"
+    },
+    {
+      "area": "apiFetch URL construction (app/src/api.js:16) — trailing slash appended after query strings",
+      "risk": "medium",
+      "likelyBug": "A stricter API gateway parses '?limit=100000/' as a bad or default limit, shrinking all lists; only currently saved by the local server's lenient parseInt"
+    },
+    {
+      "area": "Home filtering and search match (app/src/app.js:55-61, api.js:31-37) — case-insensitive humanized substring, type/generation predicates",
+      "risk": "medium",
+      "likelyBug": "humanize or lowercase handling breaks accented names (Flabébé) or empty hyphen segments; a filter predicate inverts with no failing test"
+    },
+    {
+      "area": "URL state and pagination (app/src/app.js:73-76, views.js:145-152) — page clamping, omitting default params",
+      "risk": "medium",
+      "likelyBug": "Page out-of-range renders empty lists or pushes URLs with 'type=&page=1' noise; a refactor of pageUrl drops active filters from pagination links"
+    },
+    {
+      "area": "Ability hidden-dedup (app/src/app.js:222-229) — non-hidden wins across duplicate entries",
+      "risk": "medium",
+      "likelyBug": "Boolean pun flips so species with both a normal and hidden entry get flagged 'Hidden ability', or hidden flags lost entirely"
+    },
+    {
+      "area": "Duplicate flavor-text implementations (api.js:46-51 vs views.js:182-183)",
+      "risk": "medium",
+      "likelyBug": "One copy changes (e.g. picks first instead of last en entry) while the other stays correct; Pokémon page and move page disagree"
+    },
+    {
+      "area": "Error paths (app/src/app.js:255-258, api.js:19-29) — non-404 API failures, onError 500 response",
+      "risk": "low",
+      "likelyBug": "Upstream 500s render a 'Not found' page with status 500, and no test would catch a change that swallows or mislabels the error"
+    },
+    {
+      "area": "htmx fragment endpoints and client hook (app/src/app.js:84-85, public/app.js:1-8) — HX-Request fragments and empty-param stripping",
+      "risk": "low",
+      "likelyBug": "A tweak to the configRequest hook or fragment rendering pushes ugly default params into history URLs or breaks live filtering, caught only by the acceptance suite"
+    }
+  ]
+}
+```

@@ -1,0 +1,145 @@
+## Review: Pokédex app (`app/`), dimension — editability
+
+The app is small (20 source files, ~660 significant LOC), but it's structured with real discipline. First, a framework-currency check, since the style is unusual enough to warrant it: the app targets **SvelteKit 3** (`@sveltejs/kit ^3.1.1`, config in `vite.config.js` with the `sveltekit()` plugin — app/vite.config.js:8), and every unusual choice is the *current* recommendation, not a legacy habit:
+
+- `#lib` alias via package.json `imports` — the SvelteKit 3 replacement for `$lib` (app/package.json:8, confirmed against the SvelteKit 3 migration notes).
+- `defineEnvVars` in `src/env.js` + `$app/env/private` (app/src/env.js:3, app/src/lib/server/api.js:3) — the stable explicit-env-vars feature; `$env/*` is deprecated. The env var is declared `static: false`, correctly read at runtime, not inlined at build.
+- Shallow routing via `goto(..., { shallow: true, replace: true })` and `page.shallow?.url ?? page.url` (app/src/routes/+page.svelte:12,45) — the SvelteKit 3 pattern that replaced `pushState`/`replaceState`, with an accurate comment explaining the `page.shallow` subtlety. This is exactly how the docs say to do URL-state-without-reload.
+- Svelte 5 runes throughout (`$props`, `$derived`, `$derived.by`, `{#snippet}`/`{@render}`, `onclick`), keyed `{#each}` blocks, no `$:` or `on:` anywhere.
+
+### Scenario walkthroughs
+
+1. **Remove Abilities** — delete `app/src/routes/abilities/` (its load is self-contained, greps show no other importer), then remove the one section that links to it (app/src/routes/pokemon/[name]/+page.svelte:82-89) and the `abilities` field in its load (app/src/routes/pokemon/[name]/+page.server.js:137-140). No nav links, no shared helpers used only by abilities, no dead CSS. Trivial.
+
+2. **Sprite bug (Deoxys)** — sprite URLs are derived in one helper, `spriteUrl` (app/src/lib/server/api.js:35), fed from the Pokémon id, and every list renders through one component (app/src/lib/components/PokemonCardList.svelte:10). So a URL-derivation fix lands once and covers all lists. The caveat: the *card-construction* logic (id → species mapping, `human`, sprite) exists twice — `getSpeciesMeta` (api.js:144) and `speciesCardsFromRefs` (api.js:173) — so a fix at the mapping level (e.g. resolving the default variety like the detail page does at app/src/routes/pokemon/[name]/+page.server.js:22-24) must be made twice or requires first extracting a shared builder. Notable: the app as written is actually correct here (default Pokémon id == species id), but the duplication is the editability risk.
+
+3. **Name sorting on every card list** — all four lists (home, move, ability, type) render through `PokemonCardList`; adding a sort there (or a `sortBy` prop) is one file. Alternatively the three ref-based lists are built in one function (`speciesCardsFromRefs`, api.js:159-175) and home sorts in `+page.svelte:48-54` — two places. Either way easy.
+
+4. **Items section like Moves** — copy the `moves/[name]` pattern: new `items/[name]/+page.server.js` reuses `api`, `error(404)`, `englishName`, `latestEnglishFlavor` (app/src/routes/moves/[name]/+page.server.js:1-10); the `surface`/`dl.facts` CSS classes are global and reusable (app/src/app.css). There's no moves *index* to clone, so `/items` is a small new build; no generic "detail page" abstraction exists, but the repetition is thin and consistent. Moderate.
+
+5. **Data source / caching change** — base URL is declared in `app/src/env.js` and consumed in exactly one module (`lib/server/api.js:3-6`), which also owns the cache (api.js:8-27) and the media-URL prefix (api.js:35). All fetches funnel through `api()`/`listAll` (api.js:28-31). Changing TTLs, headers, or origins touches one file. Excellent.
+
+### Criteria assessment
+
+**removability — 5.** Routes are self-contained directories; the only cross-route coupling for abilities is the (spec-mandated) section on the Pokémon page. CSS is global but organized by concern, so nothing abilities-specific dangles.
+
+**changeability — 4.** Most fixes are one obvious place (`spriteUrl`, `PokemonCardList`, the cache, the load functions), and the home page's URL-driven filter state is genuinely the clean way to change filter behavior. Held back from 5 by the duplicated card builder and by `MovesTable`, which describes each column three times (columns array MovesTable:20-27, `value()` :29-42, hardcoded `<td>` cells :83-95) — adding a column means three synchronized edits in one file.
+
+**coupling — 5.** Server and client are cleanly separated: all PokeAPI knowledge lives in a server-only module (`lib/server/api.js`, and importing it client-side would fail because of `$app/env/private`), loads return plain serializable data, and the three components take narrow props. Shared pure helpers live in `app/src/lib/utils.js` and are imported from both sides without server leakage. The home page's only "global" dependency is SvelteKit's own `page` state, used idiomatically.
+
+**abstraction_design — 4.** `speciesCardsFromRefs` (api.js:159) is a genuinely well-shaped seam — one function turned three spec pages into near-copies of each other (compare moves/[name]/+page.svelte and abilities/[name]/+page.svelte). `PokemonCardList`'s `showTypes` and `MovesTable`'s `showLevel` flags are small and match real variation. Two dings: the card shape is constructed independently in two builders instead of one `toCard` helper, and `TypeBadge` is only half-adopted — the linked-badge variant is inlined as `class="type-badge type-{x}"` anchors in four templates (pokemon hero +page.svelte:33, MovesTable:96, moves/[name]/+page.svelte:24, types/[name]/+page.svelte:31). A markup-level badge change (not a CSS one — that's centralized in app.css) touches five files.
+
+Minor extras: the search debounce timer is never cleared on unmount (app/src/routes/+page.svelte:48-53), and `MovesTable` keys rows by object identity (`{#each sorted as row (row)}`, MovesTable:81), which churns DOM nodes on re-sort.
+
+```json
+{
+  "dimension": "editability",
+  "criteria": {
+    "removability": {
+      "score": 5,
+      "evidence": [
+        "app/src/routes/abilities/[name]/+page.server.js:1-19 — self-contained route, no shared helpers used only by abilities",
+        "app/src/routes/pokemon/[name]/+page.svelte:82-89 — the only inbound link to /abilities; one section to delete",
+        "app/src/routes/+layout.svelte:10-12 — nav links only to / and /types, no abilities reference to clean up"
+      ],
+      "rationale": "Deleting abilities means removing one route directory plus the one spec-mandated section that links to it (and its load field); nothing else in the app knows abilities exist."
+    },
+    "changeability": {
+      "score": 4,
+      "evidence": [
+        "app/src/lib/server/api.js:35 — sprite URL derivation is a single helper feeding every card list",
+        "app/src/lib/server/api.js:144 — card construction duplicated in getSpeciesMeta (sprite: spriteUrl(s.id))",
+        "app/src/lib/server/api.js:173 — same construction again in speciesCardsFromRefs; a mapping-level sprite fix must be made twice",
+        "app/src/lib/components/MovesTable.svelte:20-42 — column knowledge repeated in columns array, value() switch, and hardcoded template cells (:83-95)"
+      ],
+      "rationale": "Most fixes (sprite URL, caching, filters) land in one obvious, well-commented place, but the two parallel card builders and the triple-described MovesTable columns mean some fixes are two-to-three synchronized edits."
+    },
+    "coupling": {
+      "score": 5,
+      "evidence": [
+        "app/src/lib/server/api.js:3 — server-only data module gated by $app/env/private; cannot leak into client code",
+        "app/src/lib/utils.js:1-45 — pure helpers shared by both sides with no server state",
+        "app/src/lib/components/PokemonCardList.svelte:8 — narrow props (items, showTypes) and no knowledge of how data was fetched",
+        "app/src/routes/+page.svelte:12 — filter state lives in the URL via page.shallow?.url ?? page.url, no shared store or event bus"
+      ],
+      "rationale": "Clear seams everywhere: one server data module, dumb presentational components, plain serializable load data, and shared state (filter state) expressed through the framework's URL primitives."
+    },
+    "abstraction_design": {
+      "score": 4,
+      "evidence": [
+        "app/src/lib/server/api.js:159-175 — speciesCardsFromRefs turns the moves/abilities/types Pokémon lists into one reusable seam",
+        "app/src/lib/components/MovesTable.svelte:9 — showLevel flag matches real variation (level-up table) without bloat",
+        "app/src/lib/components/TypeBadge.svelte:6 — component exists but the linked-badge variant is inlined as anchors in app/src/routes/pokemon/[name]/+page.svelte:33, MovesTable.svelte:96, moves/[name]/+page.svelte:24 and types/[name]/+page.svelte:31",
+        "app/src/lib/server/api.js:104-175 — two independent card-shape builders (getSpeciesMeta, speciesCardsFromRefs) instead of a shared toCard helper"
+      ],
+      "rationale": "Abstractions track the app's real variation well and enabled three near-identical detail pages, but the badge markup is half-migrated to its component and the card shape is constructed in two places, inviting drift."
+    }
+  },
+  "overall": 4,
+  "findings": [
+    {
+      "severity": "medium",
+      "location": "app/src/lib/server/api.js:144",
+      "issue": "Pokémon-card construction (id→species mapping, humanized name, sprite) is duplicated between getSpeciesMeta (:144) and speciesCardsFromRefs (:173), so a sprite/mapping bug fix must be applied twice.",
+      "suggestion": "Extract a shared toCard(id, extra) helper (or have getSpeciesMeta reuse speciesCardsFromRefs-style construction) so the species↔Pokémon assumption lives in one place."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/lib/components/TypeBadge.svelte:6",
+      "issue": "TypeBadge is only used inside PokemonCardList; the anchor variant of the badge is copy-pasted as class=\"type-badge type-{name}\" links in four templates (pokemon hero, MovesTable, move page, type relations).",
+      "suggestion": "Give TypeBadge an optional href prop (or render a snippet) and use it in all six sites, so badge markup changes once."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/lib/components/MovesTable.svelte:20-95",
+      "issue": "Each column is described three times: the columns array, the value() switch, and the hardcoded <td> cells; adding a column requires three synchronized edits.",
+      "suggestion": "Drive the tbody cells from the same column descriptors (key, label, accessor, optional href/type) that drive the thead."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/routes/+page.svelte:48-53",
+      "issue": "The 150 ms search debounce timer is never cleared when the component unmounts, so a pending timeout can fire a goto() after navigation away.",
+      "suggestion": "Clear it in an $effect cleanup or on destroy."
+    },
+    {
+      "severity": "low",
+      "location": "app/src/lib/components/MovesTable.svelte:81",
+      "issue": "{#each sorted as row (row)} keys rows by object identity, so re-sorting remounts every row.",
+      "suggestion": "Key by stable fields, e.g. (row.moveName + ':' + row.level)."
+    }
+  ],
+  "summary": "This is a clean, current-idiom SvelteKit 3 / Svelte 5 app: server data access is isolated in one server-only module, all card lists funnel through one component and one shared builder, and the only shared state (filters) lives in the URL using the documented shallow-routing API. Editability is very good overall; the main risks are a duplicated card-construction path, half-adopted TypeBadge abstraction, and MovesTable's triple-described columns.",
+  "scenarios": [
+    {
+      "change": "Remove the Abilities pages and every link to them",
+      "files": ["app/src/routes/abilities/", "app/src/routes/pokemon/[name]/+page.svelte", "app/src/routes/pokemon/[name]/+page.server.js"],
+      "difficulty": 5,
+      "notes": "Delete one route directory plus the spec-mandated Abilities section on the Pokémon page (and its load field). No nav links, no dead helpers, no abilities-only CSS."
+    },
+    {
+      "change": "Fix wrong sprite for species whose default Pokémon differs (e.g. Deoxys)",
+      "files": ["app/src/lib/server/api.js", "app/src/lib/components/PokemonCardList.svelte"],
+      "difficulty": 4,
+      "notes": "Sprite URL derivation is centralized in spriteUrl (api.js:35) and all lists render via PokemonCardList, so a URL-level fix is one edit. But the id→species card mapping is built in two places (getSpeciesMeta :144, speciesCardsFromRefs :173), so a mapping-level fix must be duplicated or preceded by a refactor; the detail page already models the correct approach via varieties/is_default (pokemon/[name]/+page.server.js:22-24)."
+    },
+    {
+      "change": "Add sorting by name to every list of Pokémon cards",
+      "files": ["app/src/lib/components/PokemonCardList.svelte"],
+      "difficulty": 5,
+      "notes": "All four card lists (home, move, ability, type) render through PokemonCardList, so a sort (or sortBy prop) there covers everything; alternatively one edit in speciesCardsFromRefs plus the home page's derived filtered list."
+    },
+    {
+      "change": "Add an Items section (/items, /items/:name) shaped like Moves",
+      "files": ["app/src/routes/items/[name]/+page.server.js", "app/src/routes/items/[name]/+page.svelte", "app/src/routes/items/+page.server.js", "app/src/routes/items/+page.svelte"],
+      "difficulty": 3,
+      "notes": "The data layer (api, error, englishName, latestEnglishFlavor) and the surface/facts CSS classes are directly reusable, and the moves/[name] pattern is a thin template to follow. But /moves has no index route to clone, so the /items list page is a small new build, and there's no generic detail-page abstraction — a modest amount of copying is inevitable."
+    },
+    {
+      "change": "Change the API base URL and caching rules",
+      "files": ["app/src/env.js", "app/src/lib/server/api.js"],
+      "difficulty": 5,
+      "notes": "API_BASE_URL is declared once in src/env.js (static:false, read at runtime) and consumed only in lib/server/api.js, which also owns the cache Map (:8-27), the fetch wrapper (:28), and the media-URL prefix (:35). One file plus one config declaration."
+    }
+  ]
+}
+```
